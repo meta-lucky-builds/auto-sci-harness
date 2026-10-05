@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS claims (id TEXT PRIMARY KEY, body TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS claim_status (claim_id TEXT, status TEXT, detail TEXT, at REAL);
 CREATE TABLE IF NOT EXISTS harness_versions (hash TEXT PRIMARY KEY, harness_id TEXT,
                                              parent_hash TEXT, spec_ref TEXT, at REAL);
+CREATE TABLE IF NOT EXISTS records (kind TEXT, body TEXT NOT NULL, at REAL);
+CREATE INDEX IF NOT EXISTS records_kind ON records(kind);
 """
 
 
@@ -133,6 +135,16 @@ class EvidenceStore:
 
     def harness_spec(self, spec_hash: str) -> dict:
         return json.loads(self.blobs.get(spec_hash))
+
+    # --- generic append-only records (lineage, ledger, calibration, memory) -----
+    def append_record(self, kind: str, body: dict) -> None:
+        self._exec("INSERT INTO records VALUES (?, ?, ?)", (kind, json.dumps(body, default=str), time.time()))
+
+    def records(self, kind: str, limit: int | None = None) -> list[dict]:
+        sql = "SELECT body FROM records WHERE kind=? ORDER BY rowid"
+        rows = self._rows(sql, (kind,))
+        out = [json.loads(r[0]) for r in rows]
+        return out[-limit:] if limit else out
 
     def close(self) -> None:
         self._db.close()

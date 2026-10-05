@@ -78,6 +78,14 @@ def test_conditional_loop_and_step_limit(store):
     assert res.status == RunStatus.STEP_LIMIT
 
 
+def test_no_matching_edge_is_failure_not_success(store):
+    spec = HarnessSpec(id="dead", entry="inc",
+                       nodes={"inc": ModuleNode(module="test.counter", params={"step": 1})},
+                       edges=[Edge(source="inc", target=END, when=Condition(key="n", op="gt", value=99))])
+    res = Engine(spec, backends={}, store=store).run("t", {})
+    assert res.status == RunStatus.FAILED and "no outgoing edge matched" in res.detail
+
+
 def test_budget_exceeded_stops_run(store):
     spec = HarnessSpec(id="b", entry="a",
                        nodes={"a": LLMNode(prompt="hello world", output_key="x")},

@@ -178,6 +178,8 @@ class Engine:
             if next_node is None:
                 if error is not None:
                     status, detail = RunStatus.FAILED, f"unhandled error at '{node_id}': {error}"
+                else:  # outgoing edges exist but no condition matched: a harness bug, never success
+                    status, detail = RunStatus.FAILED, f"no outgoing edge matched at '{node_id}'"
                 break
             if next_node == END:
                 break
