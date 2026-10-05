@@ -78,6 +78,19 @@ def test_conditional_loop_and_step_limit(store):
     assert res.status == RunStatus.STEP_LIMIT
 
 
+def test_unexpected_exception_marks_run_failed(store):
+    class Exploding(MockBackend):
+        def complete(self, req):
+            raise ZeroDivisionError("backend bug")
+    spec = HarnessSpec(id="x", entry="a", nodes={"a": LLMNode(prompt="p", output_key="o")})
+    eng = Engine(spec, backends={"executor": Exploding(["x"])}, store=store)
+    with pytest.raises(ZeroDivisionError):
+        eng.run("t", {})
+    run = store.list_runs(1)[0]
+    status, detail = store.run_status(run.id)
+    assert status == RunStatus.FAILED and "engine crash" in detail
+
+
 def test_no_matching_edge_is_failure_not_success(store):
     spec = HarnessSpec(id="dead", entry="inc",
                        nodes={"inc": ModuleNode(module="test.counter", params={"step": 1})},

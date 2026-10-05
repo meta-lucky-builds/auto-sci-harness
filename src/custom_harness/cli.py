@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -46,13 +47,44 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
     for kv in a.input:
         k, _, v = kv.partition("=")
         inputs[k] = v
+    import custom_harness.research  # noqa: F401  registers research.* modules
     sandbox = None
-    if a.dev_sandbox:
-        sandbox = LocalSandbox(data_dir() / "sandboxes" / spec.id, i_understand_no_isolation=True)
+    ws = data_dir() / "sandboxes" / f"{spec.id}-{a.task}-{int(time.time())}"
+    if a.docker:
+        from .sandbox.docker import DockerSandbox
+        sandbox = DockerSandbox(ws)
+    elif a.dev_sandbox:
+        sandbox = LocalSandbox(ws, i_understand_no_isolation=True)
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox).run(a.task, inputs, seed=a.seed)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
     return 0 if res.status == "completed" else 1
+
+
+def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
+    import custom_harness.research  # noqa: F401
+    from .evolve.driver import evolve, load_suite
+    from .evolve.loop import EvolveConfig
+    spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
+    backends = {}
+    for binding in a.role:
+        role, _, kind = binding.partition("=")
+        backends[role] = _backend(kind)
+    proposer = _backend(a.proposer)
+    run_tag = f"evolve-{spec.id}-{int(time.time())}"
+
+    def factory(key: str):
+        ws = data_dir() / "sandboxes" / run_tag / key
+        if a.docker:
+            from .sandbox.docker import DockerSandbox
+            return DockerSandbox(ws)
+        return LocalSandbox(ws, i_understand_no_isolation=True)
+
+    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
+    evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
+           store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag)
+    print(f"outputs: {data_dir() / 'evolve' / run_tag}")
+    return 0
 
 
 def cmd_runs(a: argparse.Namespace, store: EvidenceStore) -> int:
@@ -82,6 +114,17 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--task", default="adhoc")
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
+    r.add_argument("--docker", action="store_true", help="Docker sandbox (required for agent-written code)")
+    ev = sub.add_parser("evolve", help="evolve a harness spec on a task suite (never touches the sealed split)")
+    ev.add_argument("spec")
+    ev.add_argument("--suite", required=True)
+    ev.add_argument("--role", action="append", default=[], help="role=backend for harness runs")
+    ev.add_argument("--proposer", required=True, help="backend for the edit proposer")
+    ev.add_argument("--generations", type=int, default=1)
+    ev.add_argument("--seeds", type=int, nargs="+", default=[0])
+    ev.add_argument("--n-edits", type=int, default=3)
+    ev.add_argument("--race-rounds", type=int, default=2)
+    ev.add_argument("--docker", action="store_true")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
     t = sub.add_parser("trace")
@@ -90,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "runs": cmd_runs, "trace": cmd_trace}[a.cmd](a, store)
+        return {"run": cmd_run, "evolve": cmd_evolve, "runs": cmd_runs, "trace": cmd_trace}[a.cmd](a, store)
     finally:
         store.close()
 

@@ -118,6 +118,14 @@ class Engine:
 
     # ----------------------------------------------------------------- internals
     def _loop(self, run_id: str, state: dict[str, Any], node_id: str, start_index: int) -> RunResult:
+        """Never leaves a run in RUNNING: any escaping exception marks it FAILED, then re-raises."""
+        try:
+            return self._loop_inner(run_id, state, node_id, start_index)
+        except BaseException as e:
+            self.store.set_run_status(run_id, RunStatus.FAILED, f"engine crash: {type(e).__name__}: {e}")
+            raise
+
+    def _loop_inner(self, run_id: str, state: dict[str, Any], node_id: str, start_index: int) -> RunResult:
         index = start_index
         total = Cost()
         status, detail = RunStatus.COMPLETED, ""
