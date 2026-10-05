@@ -33,8 +33,16 @@ def truncate(text: str, max_chars: int, head_fraction: float = 0.5) -> str:
     return f"{text[:head]}\n...[{omitted} chars omitted]...\n{text[-tail:] if tail else ''}"
 
 
+class PrivateDataAccess(KeyError):
+    pass
+
+
 def render(template: str, state: dict[str, Any], max_chars: int = 20_000, head_fraction: float = 0.5) -> str:
+    """Render {{path}} references. Paths starting with `_private` can never reach a prompt:
+    hidden labels / held-out data must not leak through an evolved prompt (PLAN P2, L6 leakage)."""
     def sub(m: re.Match) -> str:
+        if m.group(1).split(".")[0].startswith("_private"):
+            raise PrivateDataAccess(f"template referenced private state '{m.group(1)}'")
         value = lookup(state, m.group(1))
         text = value if isinstance(value, str) else json.dumps(value, default=str, indent=1)
         return truncate(text, max_chars, head_fraction)

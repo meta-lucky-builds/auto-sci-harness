@@ -1,0 +1,118 @@
+# research_v0: seed research harness for fixed-dataset ML tasks (PLAN L4, Phase 1).
+# Everything here (prompts, contracts, routing, budgets) is an edit surface for the evolver (L6).
+id: research_v0
+description: profile -> baseline -> hypotheses -> K-way tournament -> implement/fix loop -> hidden-test T2 verify -> report -> audit
+entry: setup
+max_steps: 60
+nodes:
+  setup: {kind: module, module: research.setup}
+  profile: {kind: module, module: research.profile_data}
+  baseline: {kind: module, module: research.baseline_dev}
+
+  hypothesize:
+    kind: llm
+    role: proposer
+    system: You are an expert ML researcher. Be concrete and feasible; prefer ideas you can implement in under 150 lines.
+    prompt: |
+      Task: {{task.description}}
+      Metric: {{task.metric}} (target column: {{task.target_column}})
+      Baseline dev score: {{baseline_dev}}
+      Data profile (computed by code, trustworthy): {{profile}}
+      Allowed libraries: {{task.allowed_libraries}}
+
+      Propose 5 DISTINCT hypotheses for beating the baseline on held-out data. Cover different
+      mechanisms (model family, feature engineering, regularisation, ensembling, data handling).
+      Return JSON {"hypotheses": [{"id": "h1", "idea": "...", "rationale": "..."}]}.
+    output_key: hypotheses
+    output_schema:
+      type: object
+      properties:
+        hypotheses:
+          type: array
+          minItems: 2
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              idea: {type: string}
+              rationale: {type: string}
+            required: [id, idea, rationale]
+      required: [hypotheses]
+    retries: 1
+
+  tournament: {kind: module, module: research.tournament, params: {rounds: 3}}
+  next: {kind: module, module: research.next_hypothesis}
+
+  implement:
+    kind: llm
+    role: executor
+    system: You write correct, self-contained Python ML scripts. Output only JSON.
+    prompt: |
+      Implement this hypothesis as a complete Python script.
+      Hypothesis: {{current}}
+      Task: {{task.description}}  Target column: {{task.target_column}}  Metric: {{task.metric}}
+      Data profile: {{profile}}
+      Allowed libraries ONLY: {{task.allowed_libraries}} (no internet, no other packages).
+
+      CLI contract (mandatory):
+        python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N
+      - TRAIN_CSV includes the target column; TEST_X_CSV has the same columns minus the target.
+      - Write PREDS_CSV with exactly one column named `prediction`, one row per test row, same order.
+      - Use --seed for every source of randomness. Finish within a few minutes on 2 CPUs.
+      Return JSON {"code": "<full script>", "notes": "<one line>"}.
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+
+  fix:
+    kind: llm
+    role: executor
+    system: You debug Python ML scripts. Output only JSON.
+    prompt: |
+      This script failed. Fix it while keeping the same hypothesis and CLI contract
+      (--train --test --out --seed; output column `prediction`).
+      Hypothesis: {{current}}
+      Error / output tail:
+      {{run_error}}
+      Script:
+      {{impl.code}}
+      Return JSON {"code": "<full fixed script>", "notes": "<what you changed>"}.
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+
+  run: {kind: module, module: research.run_candidate, params: {max_attempts: 6, max_fixes: 2}}
+  verify: {kind: module, module: research.verify, params: {seeds: [0, 1, 2], min_seeds: 3}}
+  report: {kind: module, module: research.report}
+  audit: {kind: module, module: research.audit}
+
+edges:
+  - {source: setup, target: profile}
+  - {source: profile, target: baseline}
+  - {source: baseline, target: hypothesize}
+  - {source: hypothesize, target: tournament}
+  - {source: tournament, target: next}
+  - {source: next, target: implement, when: {key: route, op: eq, value: implement}}
+  - {source: next, target: verify, when: {key: route, op: eq, value: verify}}
+  - {source: next, target: report}
+  # contract failure while implementing/fixing: move on to the next hypothesis
+  - {source: implement, target: next, when: {key: _last_error, op: truthy}}
+  - {source: implement, target: run}
+  - {source: fix, target: next, when: {key: _last_error, op: truthy}}
+  - {source: fix, target: run}
+  - {source: run, target: fix, when: {key: route, op: eq, value: fix}}
+  - {source: run, target: next, when: {key: route, op: eq, value: next}}
+  - {source: run, target: verify, when: {key: route, op: eq, value: verify}}
+  - {source: run, target: report}
+  - {source: verify, target: report}
+  - {source: report, target: audit}

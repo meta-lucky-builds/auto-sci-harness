@@ -35,6 +35,13 @@ class ContractError(ValueError):
         self.attempts = attempts
 
 
+class ModuleError(RuntimeError):
+    def __init__(self, msg: str, cost: Cost, llm_calls: list):
+        super().__init__(msg)
+        self.cost = cost
+        self.llm_calls = llm_calls
+
+
 @dataclass
 class RunResult:
     run_id: str
@@ -136,6 +143,10 @@ class Engine:
                 error = f"ContractError: {e}"
                 cost = e.cost  # failed attempts still cost money and must appear in the trace
                 out = {"attempts": e.attempts}
+            except ModuleError as e:
+                error = f"ModuleError: {e}"
+                cost = e.cost
+                out = {"llm_calls": e.llm_calls}
             except (BackendError, KeyError, ValueError, OSError) as e:
                 error = f"{type(e).__name__}: {e}"
             state["_last_error"] = error
@@ -201,7 +212,13 @@ class Engine:
             fn = get_module(node.module)
             mctx = ModuleContext(run_id=run_id, store=self.store, backends=self.backends,
                                  budget=self.budget, sandbox=self.sandbox)
-            return fn(state, node.params, mctx), Cost(), None
+            try:
+                updates = fn(state, node.params, mctx)
+            except Exception as e:
+                raise ModuleError(f"{type(e).__name__}: {e}", mctx.spent, mctx.llm_calls) from e
+            if mctx.llm_calls:
+                updates = {**updates, "_module_llm_calls": mctx.llm_calls}
+            return updates, mctx.spent, None
         raise ValueError(f"unknown node type {type(node)}")
 
     def _execute_llm(self, node: LLMNode, state, max_chars, head_fraction):

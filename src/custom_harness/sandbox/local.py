@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -26,6 +27,7 @@ class LocalSandbox(Sandbox):
             raise PermissionError("LocalSandbox provides no isolation; pass i_understand_no_isolation=True")
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.python = sys.executable
 
     def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
         base_env = {k: os.environ[k] for k in _PASSTHROUGH if k in os.environ}

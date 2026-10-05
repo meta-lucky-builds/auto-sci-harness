@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from ..budget import Budget
-    from ..gateway import Backend
+    from ..gateway import Backend, ChatRequest, ChatResponse
+    from ..records import Cost
     from ..sandbox import Sandbox
     from ..store import EvidenceStore
 
@@ -19,6 +20,25 @@ class ModuleContext:
     backends: dict[str, "Backend"]
     budget: "Budget"
     sandbox: "Sandbox | None"
+    spent: "Cost" = field(default_factory=lambda: _cost())
+    llm_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def llm(self, role: str, request: "ChatRequest", fallback_role: str | None = "executor") -> "ChatResponse":
+        """LLM call from inside a module: budget-checked, cost-accounted, logged into the step trace."""
+        backend = self.backends.get(role) or (self.backends.get(fallback_role) if fallback_role else None)
+        if backend is None:
+            raise ValueError(f"no backend bound to role '{role}'")
+        self.budget.check()
+        resp = backend.complete(request)
+        self.spent = self.spent + resp.cost
+        self.llm_calls.append({"role": role, "provenance": resp.provenance.model_dump(mode="json"),
+                               "response": resp.text})
+        return resp
+
+
+def _cost():
+    from ..records import Cost
+    return Cost()
 
 
 ModuleFn = Callable[[dict[str, Any], dict[str, Any], ModuleContext], dict[str, Any]]
