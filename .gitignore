@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+# runtime data never lives in the repo (it lives in CHH_DATA_DIR, outside OneDrive)
+.chh-data/
+*.sqlite
+*.db
+# secrets
+.env

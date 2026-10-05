@@ -1,0 +1,77 @@
+# Provider registry (PLAN §14.2). Remote-updatable in production; local override file:
+#   $CHH_DATA_DIR/providers.override.yaml  (same shape; entries replace by key)
+#
+# byos_status:
+#   allowed   -> subscription use permitted via the listed official auth flow
+#   needs_partner_approval -> permitted only for apps the provider approved; disabled until we hold credentials
+#   prohibited -> option hidden; use API or OW mode
+#   unknown   -> disabled until a human verifies
+# training_on_outputs: allowed | forbidden | unknown   (drives the L8 filter, §14.3)
+#
+# Every entry must be re-verified before each release. "verified_by" must be a human.
+
+openai-api:
+  provider: openai
+  mode: api
+  byos_status: n/a
+  training_on_outputs: forbidden   # usage policies restrict using outputs to develop competing models; re-verify
+  source_url: https://openai.com/policies/
+  verified_on: null
+  verified_by: null
+
+openai-codex-cli:
+  provider: openai
+  mode: byos
+  byos_status: allowed
+  auth_flow: "Official OpenAI Codex CLI, signed in by the user themselves (`codex login`). We invoke `codex exec` as a subprocess; we never read, copy or reuse its tokens."
+  training_on_outputs: forbidden
+  source_url: https://help.openai.com/en/articles/20001410-sign-in-with-chatgpt
+  notes: "Usage counts toward the user's ChatGPT plan limits. Re-verify Codex/ChatGPT terms on automated use before release."
+  verified_on: 2026-10-06
+  verified_by: null   # AI-assisted web check only; needs human sign-off
+
+openai-siwc:
+  provider: openai
+  mode: byos
+  byos_status: needs_partner_approval
+  auth_flow: "Sign in with ChatGPT (OAuth 2.0 + PKCE, client id oaiapp_...). Limited trial for approved partners (2026-10)."
+  training_on_outputs: forbidden
+  source_url: https://developers.openai.com/siwc/quickstart
+  verified_on: 2026-10-06
+  verified_by: null
+
+anthropic-api:
+  provider: anthropic
+  mode: api
+  byos_status: n/a
+  training_on_outputs: forbidden   # commercial terms restrict training competing models; re-verify
+  source_url: https://www.anthropic.com/legal/commercial-terms
+  verified_on: null
+  verified_by: null
+
+anthropic-subscription:
+  provider: anthropic
+  mode: byos
+  byos_status: prohibited
+  training_on_outputs: forbidden
+  source_url: https://www.anthropic.com/legal/consumer-terms
+  notes: "Belief at design time: Claude subscription use in third-party tools is not permitted. Re-verify."
+  verified_on: null
+  verified_by: null
+
+google-subscription:
+  provider: google
+  mode: byos
+  byos_status: unknown
+  training_on_outputs: unknown
+  verified_on: null
+  verified_by: null
+
+local-openai-compatible:
+  provider: local
+  mode: ow
+  byos_status: n/a
+  training_on_outputs: unknown   # depends on the model's license; set per model in config
+  notes: "Ollama / vLLM / llama.cpp server exposing an OpenAI-compatible endpoint."
+  verified_on: null
+  verified_by: null
