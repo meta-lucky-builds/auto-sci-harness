@@ -36,6 +36,17 @@ Living checklist against `PLAN.md`. Updated 2026-10-06.
 - I3 (citation check) is n/a until the literature module exists.
 - SQLite only; Postgres before scorecard campaigns.
 
+## Code review of existing systems (2026-10-06)
+27 public repos read (28 reports) → `code_review/00_CODE_REVIEW_SYNTHESIS.md`. It contains the ranked adoption
+backlog (P0 fixes to our own code, P1 self-improvement + research-loop gaps, P2 verifiers/memory/literature/branching,
+P3 weights). That backlog supersedes the "Next" list below where they overlap.
+
+## Live verification (2026-10-06)
+- First live research run in Docker (rings-v1, Codex BYOS): 5 hypotheses, 5 working solutions, verified 0.956 vs
+  0.351 baseline accuracy (test-example 95% CI [+0.57, +0.64]), audit passed; 9 Codex calls, ~158k input tokens, ~6 min.
+  Easy synthetic task: proves the pipeline, not research ability.
+- Docker Desktop's engine stopped once mid-session; restart it if `DockerUnavailable` appears.
+
 ## Next (in order)
 1. Live research run in Docker once installed (build `docker/sandbox.Dockerfile`).
 2. Multi-generation evolution driver + CLI (`chh evolve`), task-suite builder (more ML tasks, splits).
