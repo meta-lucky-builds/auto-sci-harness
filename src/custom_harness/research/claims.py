@@ -50,7 +50,7 @@ from ..runtime.modules import ModuleContext
 from ..verify import metrics as M
 from ..verify.leak import label_windows, leak_audit
 from ..verify.stats import paired_example_interval
-from .modules import _require_isolation, _sb, _task
+from .modules import _dev_labels, _require_isolation, _sb, _task
 from .task import TaskSpec
 
 _NORMAL = statistics.NormalDist()
@@ -100,7 +100,7 @@ def forecast(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, floor: f
     Dev picked the best of several candidates, so this forecast is optimistic by construction; the prediction
     ledger measures exactly that (calibration). It is not corrected here."""
     best = state[candidate_key]
-    labels = ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
+    labels = _dev_labels(state, ctx)
     ref_s, ref_b = best.get("dev_preds_ref"), state.get("baseline_dev_preds_ref")
     if not ref_s or not ref_b:
         return (fixed_delta if fixed_delta is not None else floor), 0.5, 0.0, 0.0
@@ -305,7 +305,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
                                  "error": f"not independent: {similarity:.0%} of lines shared with the original"},
                 "route": "report"}
     _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
-    labels = ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
+    labels = _dev_labels(state, ctx)
     preds, info = _run_solution(ctx, "replica.py", "dev/train.csv", "dev/valid_X.csv", 0, task.solution_timeout_s)
     s = _score(task, labels, preds)
     cand = {"hypothesis_id": f"replication-of-{(state.get('best') or {}).get('hypothesis_id')}", "dev_score": s,

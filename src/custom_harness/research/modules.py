@@ -54,6 +54,16 @@ def _task(state: dict[str, Any]) -> TaskSpec:
     return TaskSpec.model_validate(state["task"])
 
 
+# The private dev labels are stored wrapped, so their blob ref can never equal the ref of a predictions list:
+# perfect dev predictions would otherwise share the labels' content hash and be scrubbed (and audited) as a
+# leaked private value (live run run_cd99288e65ba4a4f).
+_DEV_LABELS_KEY = "private_dev_labels"
+
+
+def _dev_labels(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
+    return ctx.store.blobs.get_json(state["_private_dev_labels_ref"])[_DEV_LABELS_KEY]
+
+
 def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: int,
                   timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
     out_rel = f"out/preds_{uuid.uuid4().hex[:8]}.csv"
@@ -115,7 +125,7 @@ def setup(state, params, ctx: ModuleContext):
             # per-run canary: lives only in private state; if it ever shows up in a prompt, a response,
             # the trace or the workspace, private state leaked (checked by the audit, I5)
             "_private_canary": new_canary(),
-            "_private_dev_labels_ref": ctx.store.blobs.put_json(labels),
+            "_private_dev_labels_ref": ctx.store.blobs.put_json({_DEV_LABELS_KEY: labels}),
             "attempts": [], "n_attempts": 0, "best": None, "route": None}
 
 
@@ -128,7 +138,7 @@ def profile_data(state, params, ctx):
 def baseline_dev(state, params, ctx):
     _require_isolation(ctx)
     task = _task(state)
-    labels = ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
+    labels = _dev_labels(state, ctx)
     preds, info = _run_solution(ctx, "baseline.py", "dev/train.csv", "dev/valid_X.csv", 0,
                                 task.solution_timeout_s)
     s = _score(task, labels, preds)
@@ -242,7 +252,7 @@ def run_candidate(state, params, ctx):
     task = _task(state)
     code = (state.get("impl") or {}).get("code", "")
     _ws(ctx, "solution.py").write_text(code, encoding="utf-8")
-    labels = ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
+    labels = _dev_labels(state, ctx)
     preds, info = _run_solution(ctx, "solution.py", "dev/train.csv", "dev/valid_X.csv", 0,
                                 task.solution_timeout_s)
     s = _score(task, labels, preds)

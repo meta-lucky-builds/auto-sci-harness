@@ -157,6 +157,60 @@ def test_research_loop_end_to_end(store, tmp_path, rings_task, monkeypatch):
             assert "test_y" not in m.content and "_private" not in m.content
 
 
+# A rule that is EXACTLY right on the relabelled training data below (label = 1 iff x1 > 0).
+SIGN_RULE = '''
+import argparse, csv
+p = argparse.ArgumentParser()
+for k in ("--train", "--test", "--out"): p.add_argument(k)
+p.add_argument("--seed", type=int)
+a = p.parse_args()
+with open(a.test, newline="") as f:
+    r = list(csv.reader(f))
+h, rows = r[0], r[1:]
+with open(a.out, "w", newline="") as f:
+    w = csv.writer(f); w.writerow(["prediction"])
+    for row in rows: w.writerow(["1" if float(row[h.index("x1")]) > 0 else "0"])
+'''
+
+
+def test_perfect_dev_predictions_are_not_a_leak(store, tmp_path, rings_task, monkeypatch):
+    """Live run run_cd99288e65ba4a4f (wine): every candidate was perfect on dev, so its predictions blob had the same
+    content hash as the private dev-labels blob; the trace scrubber redacted that "private value", and the claim
+    was REJECTED by K9 and the audit failed I5. Knowing the hash of its own perfect predictions tells nothing that
+    dev_score == 1.0 does not: a perfect candidate must not be flagged."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    train = rings_task / "public" / "train.csv"
+    lines = train.read_text().splitlines()
+    head = lines[0].split(",")
+    xi, yi = head.index("x1"), head.index("label")
+    rows = [line.split(",") for line in lines[1:]]
+    for r in rows:
+        r[yi] = "1" if float(r[xi]) > 0 else "0"
+    train.write_text("\n".join([lines[0], *(",".join(r) for r in rows)]) + "\n", newline="")
+    # a weak baseline (always "0"), so the perfect candidate beats it, a claim is made and K9 is actually checked
+    (rings_task / "baseline.py").write_text(SIGN_RULE.replace('"1" if float(row[h.index("x1")]) > 0 else "0"', '"0"'),
+                                           newline="")
+
+    def llm_fn(req):
+        text = req.messages[-1].content
+        if "Implement this hypothesis" in text and "h_radius" in text:
+            return json.dumps({"code": SIGN_RULE, "notes": "sign of x1"})
+        return scripted_llm(req)
+
+    llm = MockBackend(llm_fn)
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+                 sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(rings_task)})
+    assert res.status == RunStatus.COMPLETED, res.detail
+    assert any(a["dev_score"] == 1.0 for a in res.state["attempts"])  # the scenario really happened
+    redacted = [s.index for s in store.trace(res.run_id) if s.output.get("_redacted_private_values")]
+    assert redacted == [], f"perfect predictions redacted as private at steps {redacted}"
+    assert res.state["audit"]["I5"] is True, res.state["audit"]
+    assert "K9" not in res.state["certificate"]["failed"], res.state["certificate"]
+
+
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):
     monkeypatch.delenv("CHH_ALLOW_UNISOLATED", raising=False)
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))

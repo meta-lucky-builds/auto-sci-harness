@@ -150,6 +150,24 @@ deterministic in outcome).
   hypotheses produced working code (dev 0.927–0.953 vs baseline 0.367); verified 0.958 vs 0.351, test-example 95% CI
   [+0.576, +0.639]; audit I1, I2, I4, I5 passed; all 6 LLM steps have rendered prompts in the trace; canary absent from
   the trace; no infra retries, no redactions. 9 Codex calls, 154k input + 16k output tokens, 498 s wall.
+- **First live run of research_v1** (2026-10-06, `run_cd99288e65ba4a4f`, task `wine_knn_unscaled`, Codex BYOS in all
+  roles, Docker). **Invariant 5 not met** (one model family judges its own proposals; see Known limitations).
+  Completed, 33 steps, 12 Codex calls, 224,159 input + 29,939 output tokens, 848 s wall. Every LLM node returned
+  schema-valid JSON (0 contract failures; the replicate node was never reached). Held-out (54 rows, 3 seeds): subject
+  mean accuracy 0.957, comparator 0.704, effect +0.253; two-sided 90% intervals (lower bounds = one-sided 95%
+  bounds, Bonferroni family of 1): BCa bootstrap over examples [+0.167, +0.358], paired Student-t over seeds
+  [+0.235, +0.271] (not degenerate). Certificate **REJECTED**:
+  K0–K6, K8 pass; **K7 fail** (claimed minimum effect 0.02 = the task floor; success probability without an effect
+  0.365 > 0.25, 1.45 bits < 2.0); **K9 fail** (false positive, below). Audit: I1, I2, I4 pass, I5 fail (same false
+  positive). `chh reproduce` of its bundle in Docker on a clean store: reproduced, REJECTED → REJECTED, 0 problems.
+  - K9/I5 false positive: all 7 candidates were perfect on the 24-row dev split, so their predictions blob had the
+    same content hash as the private dev-labels blob, and the trace scrubber redacted it as a private value
+    (redaction counts per step = perfect attempts + 1, verified). Fixed: the private dev labels are stored wrapped
+    (`research/modules.py` `_dev_labels`), so no predictions blob can share their ref. Test
+    `test_perfect_dev_predictions_are_not_a_leak` fails without the fix (verified by stashing it) and passes with it.
+  - K7 rejection is correct: the claim rule (δ = max(floor, ½ × dev 90% lower bound)) had almost no dev information
+    (baseline 22/24, every candidate 24/24), so it fell back to the 0.02 floor. Changing the dev estimate (e.g.
+    cross-validation) is a claim-policy decision pending with the user.
 - Finding for M1 (K4): the seed CI was [+0.607, +0.607]. The generated solution ignores the seed, so the seed check
   was degenerate and the evidence rested on the test-example bootstrap alone. K4 must detect zero seed variance
   and say so instead of counting it as a passed check.
@@ -167,6 +185,15 @@ deterministic in outcome).
   "invariant 5 not met".
 - **Invariant 9 incomplete:** Reproducibility Bundles are built only by `research.certify` (and `chh bundle`), so a
   run that stops before certifying has no bundle. Every run does have a cost record.
+- **Held-out examples shared across suite tasks (found 2026-10-06, verified on public files):** each real-data task
+  and its repair variant are re-splits of the same base dataset. Every test example of `wine-real` (54/54),
+  `breast_cancer-real` (171/171), `digits-real` (540/540) and `diabetes-real` (133/133) appears in the paired repair
+  task's public test or TRAIN file (e.g. 38 of wine-real's 54 hidden test labels are public in
+  `wine_knn_unscaled/public/train.csv`). Today each pair sits in the same split, but only by luck of the cyclic split
+  assignment (`research/suite.py`), which does not group tasks by base dataset. The Kernel identifies held-out sets
+  by dataset id and exact bytes, so K6 ("never used") and the Bonferroni family cannot see overlapping examples under
+  different ids. Single runs are unaffected (a run sees only its own task); cross-task paths (evolution, future
+  memory) are not. Fix options pending with the user.
 - **Invariant 10 not implemented:** runs and loops carry no MECHANICAL / VALIDATED label (GOAL §6.1).
 - Kernel v1 deviations from GOAL §4: untested assumptions are listed, not yet tier-lowering; label SUPPORTED is
   never issued (no judge/retrospective evidence yet); kinds scaling_law/rediscovery are typed but rejected (K1);
