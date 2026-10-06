@@ -19,6 +19,7 @@ from typing import Any
 import jsonschema
 
 from ..budget import Budget, BudgetExceeded
+from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, Message
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
@@ -40,6 +41,20 @@ class ModuleError(RuntimeError):
         super().__init__(msg)
         self.cost = cost
         self.llm_calls = llm_calls
+
+
+@dataclass(frozen=True)
+class RetryPolicy:
+    """Retries TRANSIENT infrastructure failures only (timeouts, 429/5xx, sandbox daemon hiccups).
+    Policy failures (contract violations, crashing agent code) are never retried here: that is the
+    harness's own business (its fix loops and error edges). Every attempt's cost is charged."""
+
+    max_attempts: int = 3
+    backoff_s: float = 2.0
+    backoff_factor: float = 2.0
+
+    def delay(self, attempt: int) -> float:
+        return self.backoff_s * self.backoff_factor ** (attempt - 1)
 
 
 @dataclass
@@ -78,8 +93,11 @@ def _holds(cond: Condition, state: dict[str, Any]) -> bool:
 
 class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
-                 budget: Budget | None = None, sandbox: Sandbox | None = None):
+                 budget: Budget | None = None, sandbox: Sandbox | None = None,
+                 retry: RetryPolicy = RetryPolicy(), sleep=time.sleep):
         self.spec = spec
+        self.retry = retry
+        self._sleep = sleep
         self.backends = backends
         self.store = store
         self.sandbox = sandbox
@@ -141,31 +159,19 @@ class Engine:
 
             node = self.spec.nodes[node_id]
             t0 = time.time()
-            error = None
-            out: dict[str, Any] = {}
-            cost = Cost()
-            prov = None
-            try:
-                out, cost, prov = self._execute(node, state, run_id)
-            except ContractError as e:
-                error = f"ContractError: {e}"
-                cost = e.cost  # failed attempts still cost money and must appear in the trace
-                out = {"attempts": e.attempts}
-            except ModuleError as e:
-                error = f"ModuleError: {e}"
-                cost = e.cost
-                out = {"llm_calls": e.llm_calls}
-            except (BackendError, KeyError, ValueError, OSError) as e:
-                error = f"{type(e).__name__}: {e}"
-            state["_last_error"] = error
-            if error is None:
-                key = getattr(node, "output_key", None)
-                if key is not None:
-                    state[key] = out.get("value")
-                else:
-                    state.update(out)  # module nodes return a dict of state updates
+            out, cost, prov, error, infra = self._attempt(node, state, run_id)
+            if infra is None:
+                state["_last_error"] = error
+                if error is None:
+                    key = getattr(node, "output_key", None)
+                    if key is not None:
+                        state[key] = out.get("value")
+                    else:
+                        state.update(out)  # module nodes return a dict of state updates
 
-            next_node = self._next(node_id, state)
+            # An infra failure is not the harness's doing: never route it through the harness's error
+            # edges. Stop, and checkpoint so that a resume retries this same node.
+            next_node = node_id if infra is not None else self._next(node_id, state)
             workspace_ref = None
             if self.sandbox is not None and isinstance(node, ToolNode) and node.snapshot_after:
                 workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs)
@@ -183,6 +189,9 @@ class Engine:
                 status, detail = RunStatus.BUDGET_EXCEEDED, str(e)
                 break
 
+            if infra is not None:
+                status, detail = RunStatus.INFRA_FAILED, f"infrastructure failure at '{node_id}': {error}"
+                break
             if next_node is None:
                 if error is not None:
                     status, detail = RunStatus.FAILED, f"unhandled error at '{node_id}': {error}"
@@ -195,6 +204,34 @@ class Engine:
 
         self.store.set_run_status(run_id, status, detail)
         return RunResult(run_id, status, state, detail, steps=index - start_index, cost=total)
+
+    def _attempt(self, node, state: dict[str, Any], run_id: str):
+        """Execute a node with the transient-infra retry policy.
+        Returns (output, cost incl. failed attempts, provenance, error string | None, infra cause | None)."""
+        failed = Cost()
+        notes: list[str] = []
+        for attempt in range(1, self.retry.max_attempts + 1):
+            try:
+                out, cost, prov = self._execute(node, state, run_id)
+                if notes:
+                    out = {**out, "_infra_retries": notes}
+                return out, failed + cost, prov, None, None
+            except ContractError as e:
+                # failed attempts still cost money and must appear in the trace
+                return {"attempts": e.attempts}, failed + e.cost, None, f"ContractError: {e}", None
+            except (ModuleError, BackendError, InfraError, KeyError, ValueError, OSError) as e:
+                partial = e.cost if isinstance(e, ModuleError) else Cost()
+                detail: dict[str, Any] = {"llm_calls": e.llm_calls} if isinstance(e, ModuleError) else {}
+                cause = infra_cause(e)
+                failed = failed + partial
+                if cause is not None and is_transient(e) and attempt < self.retry.max_attempts:
+                    notes.append(f"attempt {attempt}: {type(cause).__name__}: {cause}"[:500])
+                    self._sleep(self.retry.delay(attempt))
+                    continue
+                if notes:
+                    detail["_infra_retries"] = notes
+                return detail, failed, None, f"{type(e).__name__}: {e}", cause
+        raise AssertionError("unreachable")
 
     def _next(self, node_id: str, state: dict[str, Any]) -> str | None:
         """First matching outgoing edge. Errors only follow edges that explicitly test _last_error."""

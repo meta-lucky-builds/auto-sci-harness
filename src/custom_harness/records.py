@@ -96,6 +96,9 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     BUDGET_EXCEEDED = "budget_exceeded"
     STEP_LIMIT = "step_limit"
+    # The environment failed (sandbox daemon, provider outage) after retries: the run says nothing about
+    # the harness, so evaluation excludes it instead of scoring it (errors.py, CR P0-1).
+    INFRA_FAILED = "infra_failed"
 
 
 class Run(Frozen):

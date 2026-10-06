@@ -18,7 +18,11 @@ from .evaluate import RunOutcome
 
 def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int = 2,
              excerpt_chars: int = 1500) -> dict[str, Any]:
-    """Cluster failure signatures across runs and attach raw trace excerpts (full traces > scalars, P1)."""
+    """Cluster failure signatures across runs and attach raw trace excerpts (full traces > scalars, P1).
+    Infra-failed runs are left out: the environment breaking is not something a harness edit can fix,
+    and showing it would invite edits that 'fix' Docker outages."""
+    n_infra = sum(o.infra_failed for o in outcomes)
+    outcomes = [o for o in outcomes if not o.infra_failed]
     clusters: Counter[str] = Counter()
     examples: dict[str, list[dict]] = {}
     for o in outcomes:
@@ -35,6 +39,7 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
     named = {f"C{i}": sig for i, (sig, _) in enumerate(clusters.most_common())}
     return {
         "n_runs": len(outcomes),
+        "n_excluded_infra": n_infra,
         "mean_score": sum(o.score for o in outcomes) / max(1, len(outcomes)),
         "verified_rate": sum(o.verified for o in outcomes) / max(1, len(outcomes)),
         "clusters": [{"id": cid, "signature": sig, "count": clusters[sig], "examples": examples[sig]}

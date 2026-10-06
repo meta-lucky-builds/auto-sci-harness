@@ -48,10 +48,14 @@ class OpenAICompatBackend(Backend):
         try:
             r = self._client.post(f"{self.base_url}/chat/completions", json=body, headers=self._headers)
         except httpx.HTTPError as e:
-            raise BackendError(redact(f"{self.name}: {e}")) from e
+            raise BackendError(redact(f"{self.name}: {e}"), transient=True) from e
         wall = time.time() - t0
         if r.status_code != 200:
-            raise BackendError(redact(f"{self.name}: HTTP {r.status_code}: {r.text[:2000]}"))
+            transient = r.status_code in (408, 409, 429) or r.status_code >= 500
+            # 400/422: the request (e.g. a harness-authored schema) was rejected -> the harness's fault
+            infra = r.status_code not in (400, 422)
+            raise BackendError(redact(f"{self.name}: HTTP {r.status_code}: {r.text[:2000]}"),
+                               transient=transient, infra=infra)
         data = r.json()
         try:
             text = data["choices"][0]["message"]["content"] or ""

@@ -12,6 +12,7 @@ Honest limits:
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -82,7 +83,7 @@ class CodexCLIBackend(Backend):
                 proc = subprocess.run(cmd, input=_flatten(req), capture_output=True, text=True,
                                       encoding="utf-8", timeout=self.timeout_s)
             except subprocess.TimeoutExpired as e:
-                raise BackendError(f"codex exec timed out after {self.timeout_s}s") from e
+                raise BackendError(f"codex exec timed out after {self.timeout_s}s", transient=True) from e
             wall = time.time() - t0
 
             usage: dict = {}
@@ -100,14 +101,24 @@ class CodexCLIBackend(Backend):
                 elif ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "agent_message":
                     text_from_events = ev["item"].get("text")
                 elif ev.get("type") in ("turn.failed", "error"):
-                    raise BackendError(redact(f"codex error event: {line[:2000]}"))
+                    raise BackendError(redact(f"codex error event: {line[:2000]}"), transient=_transient(line))
 
             text = out_file.read_text(encoding="utf-8") if out_file.exists() else text_from_events
             if proc.returncode != 0 or text is None:
-                raise BackendError(redact(f"codex exec failed (rc={proc.returncode}): {proc.stderr[-2000:]}"))
+                raise BackendError(redact(f"codex exec failed (rc={proc.returncode}): {proc.stderr[-2000:]}"),
+                                   transient=_transient(proc.stderr))
 
         cost = Cost(prompt_tokens=int(usage.get("input_tokens", 0)),
                     completion_tokens=int(usage.get("output_tokens", 0))
                     + int(usage.get("reasoning_output_tokens", 0)),
                     quota_units=1.0, wall_s=wall, estimated=True)
         return ChatResponse(text=text.strip(), cost=cost, provenance=self.provenance(model or "codex-default"))
+
+
+_TRANSIENT = re.compile(r"rate.?limit|\b(429|50[0234])\b|timed out|timeout|connection (reset|refused)|"
+                        r"temporarily unavailable|overloaded", re.IGNORECASE)
+
+
+def _transient(text: str) -> bool:
+    """Heuristic: Codex reports provider failures only as text. Unknown -> not transient (no retry storm)."""
+    return _TRANSIENT.search(text) is not None

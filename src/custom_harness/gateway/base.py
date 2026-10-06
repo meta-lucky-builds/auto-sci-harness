@@ -32,7 +32,14 @@ class ChatResponse(BaseModel):
 
 
 class BackendError(RuntimeError):
-    pass
+    """A model call produced no usable response. By default this is an infrastructure failure
+    (provider outage, auth, quota); pass infra=False when the request itself was malformed (the
+    harness's fault). `transient` marks failures worth retrying (timeouts, 429, 5xx)."""
+
+    def __init__(self, msg: str, *, transient: bool = False, infra: bool = True):
+        super().__init__(msg)
+        self.transient = transient
+        self.infra = infra
 
 
 class Backend(ABC):

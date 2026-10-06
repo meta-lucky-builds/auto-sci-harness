@@ -14,12 +14,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..gateway import Backend
+from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, run_harness
 from .propose import diagnose, propose_edits
-from .selection import Unit, gate, race
+from .selection import Unit, gate, paired_sample, race
 
 
 @dataclass
@@ -29,6 +30,8 @@ class EvolveConfig:
     race_rounds: int = 2
     non_regression_eps: float = 0.0
     require_evolve_ci: bool = True
+    max_excluded_frac: float = 0.25  # gate fails closed above this share of infra-excluded units
+    infra_retries: int = 1  # fresh re-runs of a unit whose run failed for infrastructure reasons
     protected_nodes: tuple[str, ...] = DEFAULT_PROTECTED_NODES
     budget_per_run: dict[str, float] | None = None
 
@@ -48,23 +51,34 @@ class Evaluator:
     """Runs (spec, task, seed) and caches outcomes so parent results are reused across stages."""
 
     def __init__(self, backends: dict[str, Backend], store: EvidenceStore, sandbox_factory: SandboxFactory,
-                 tasks: list[SuiteTask], budget_per_run: dict[str, float] | None = None):
+                 tasks: list[SuiteTask], budget_per_run: dict[str, float] | None = None,
+                 infra_retries: int = 1, retry: RetryPolicy | None = None):
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
         self.tasks = {t.task_id: t for t in tasks}
         self.budget_per_run = budget_per_run
+        self.infra_retries = infra_retries
+        self.retry = retry
         self.cache: dict[tuple[str, str, int], RunOutcome] = {}
-        self.calls = 0  # actual harness runs executed (cache misses)
+        self.calls = 0  # actual harness runs executed (cache misses, incl. infra re-runs)
+        self.infra_failures = 0  # runs that ended INFRA_FAILED (each one excluded, never scored)
 
     def outcome(self, spec: HarnessSpec, unit: Unit) -> RunOutcome:
+        """A unit whose run failed for infrastructure reasons is re-run (fresh run, same seed) up to
+        `infra_retries` times; if it still fails it stays excluded (score None)."""
         key = (spec.spec_hash(), unit[0], unit[1])
         if key not in self.cache:
-            self.calls += 1
-            self.cache[key] = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
-                                          store=self.store, sandbox_factory=self.sandbox_factory,
-                                          budget_limits=self.budget_per_run)
+            for _ in range(1 + self.infra_retries):
+                self.calls += 1
+                out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
+                                  store=self.store, sandbox_factory=self.sandbox_factory,
+                                  budget_limits=self.budget_per_run, retry=self.retry)
+                if not out.infra_failed:
+                    break
+                self.infra_failures += 1
+            self.cache[key] = out
         return self.cache[key]
 
-    def score(self, spec: HarnessSpec, unit: Unit) -> float:
+    def score(self, spec: HarnessSpec, unit: Unit) -> float | None:
         return self.outcome(spec, unit).score
 
 
@@ -75,6 +89,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     gate_units = [(t.task_id, s) for t in tasks if t.split == "gate" for s in cfg.seeds]
     if not evolve_units or not gate_units:
         raise ValueError("need at least one evolve task and one gate task")
+    if {u[0] for u in evolve_units} & {u[0] for u in gate_units}:
+        raise ValueError("a task id appears in both the evolve and the gate split")
     parent_hash = parent.spec_hash()
     calls_before = evaluator.calls
 
@@ -113,10 +129,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if rr.survivors:
             best = rr.survivors[0]
             edit, spec = candidates[best]
-            evolve_diffs = [evaluator.score(spec, u) - parent_scores[u] for u in evolve_units]
-            gate_diffs = [evaluator.score(spec, u) - evaluator.score(parent, u) for u in gate_units]
-            d = gate(evolve_diffs, gate_diffs, non_regression_eps=cfg.non_regression_eps,
-                     require_evolve_ci=cfg.require_evolve_ci)
+            evolve_s = paired_sample(evolve_units, lambda u: evaluator.score(spec, u), parent_scores.get)
+            gate_s = paired_sample(gate_units, lambda u: evaluator.score(spec, u),
+                                   lambda u: evaluator.score(parent, u))
+            d = gate(evolve_s, gate_s, non_regression_eps=cfg.non_regression_eps,
+                     require_evolve_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
             decision = d.reason
             records.append({"status": "accepted" if d.accepted else "rejected_gate", "candidate": best,
                             "edit": edit.model_dump(), "evolve": d.evolve, "gate": d.gate})

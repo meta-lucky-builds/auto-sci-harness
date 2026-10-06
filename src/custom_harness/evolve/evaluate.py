@@ -1,6 +1,7 @@
 """Evaluating a harness on a task suite (PLAN §6.2, §10 splits).
 
 Objective per research run (M1 version, documented so it can be audited and changed by humans):
+  None (EXCLUDED)           if the environment failed (status INFRA_FAILED): it says nothing about the harness
   0                         if the run did not complete or the integrity audit failed (hard constraint)
   1.0 * verified + 0.5 * clip(relative test improvement, -1, 1)   otherwise
 Relative improvement comes from the hidden-test means inside the task's verify step.
@@ -15,9 +16,11 @@ from pathlib import Path
 from typing import Callable, Literal
 
 from ..budget import Budget
+from ..errors import InfraError
 from ..gateway import Backend
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
+from ..runtime.engine import RetryPolicy
 from ..sandbox import Sandbox
 from ..store import EvidenceStore
 
@@ -36,11 +39,15 @@ class RunOutcome:
     task_id: str
     run_id: str
     seed: int
-    score: float
+    score: float | None  # None = excluded (infrastructure failure), never treated as 0
     verified: bool
     status: str
     cost: Cost
     failure_signatures: list[str] = field(default_factory=list)
+
+    @property
+    def infra_failed(self) -> bool:
+        return self.status == RunStatus.INFRA_FAILED.value
 
 
 SandboxFactory = Callable[[str], Sandbox]
@@ -71,7 +78,9 @@ def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
     return sigs
 
 
-def score_state(state: dict, status: RunStatus) -> tuple[float, bool]:
+def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
+    if status == RunStatus.INFRA_FAILED:
+        return None, False
     if status != RunStatus.COMPLETED:
         return 0.0, False
     audit = state.get("audit")
@@ -89,10 +98,14 @@ def score_state(state: dict, status: RunStatus) -> tuple[float, bool]:
 
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
-                budget_limits: dict[str, float] | None = None) -> RunOutcome:
-    sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
+                budget_limits: dict[str, float] | None = None, retry: RetryPolicy | None = None) -> RunOutcome:
+    try:
+        sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
+    except InfraError as e:  # e.g. Docker daemon down before the run even started
+        return RunOutcome(task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
+                          [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"])
     eng = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 budget=Budget(limits=budget_limits) if budget_limits else None)
+                 budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
     score, verified = score_state(res.state, res.status)
     return RunOutcome(task.task_id, res.run_id, seed, score, verified, res.status.value, res.cost,
