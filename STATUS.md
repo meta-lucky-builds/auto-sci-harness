@@ -3,6 +3,7 @@
 Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11). Updated 2026-10-06.
 
 ## ⏸ STOPPING POINT (2026-10-06, halted at the user's request)
+- **New chat: read `HANDOFF.md` first** (operating knowledge, traps, exact next steps).
 - **Where the build stands:** M0 done (+2nd pass), M1 Evidence Kernel done (v1.1 after red-teaming), M2 research
   loop v1 BUILT (Kernel-integrated loop, improve operator, Socratic critic, replication agent, profiling,
   ObservationPack context, 21-task suite) but its **exit test has not been run** (needs a live-run budget).
