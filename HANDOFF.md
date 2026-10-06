@@ -223,6 +223,6 @@ src/custom_harness/
   gateway/     codex_cli.py (BYOS), openai_compat.py (API/OW), mock.py, registry + providers.yaml
   store/       evidence.py (SQLite: runs, steps, evidence, records, ledger), blobs.py (CAS)
   errors.py (infra vs policy), budget.py (persistent budgets), records.py, tiers.py, cli.py, config.py
-tests/         ~190 tests; kernel_world.py = the Kernel test world; test_kernel_suite.py = the 50(+1)-claim exit suite
+tests/         142 test functions (more cases with parametrization); kernel_world.py = the Kernel test world; test_kernel_suite.py = the 50(+1)-claim exit suite
 code_review/   28 per-repo reviews + 00_CODE_REVIEW_SYNTHESIS.md
 ```
