@@ -35,7 +35,10 @@ class AccessMode(StrEnum):
 
 
 class Cost(Frozen):
-    """Provider-neutral cost units (PLAN §14.4)."""
+    """Provider-neutral cost units (PLAN §14.4).
+
+    On a TraceStep, wall_s is the measured elapsed time of the step's successful (or final policy-failed)
+    attempt; time lost to infrastructure failures is not charged (GOAL L1)."""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -108,6 +111,10 @@ class Run(Frozen):
     task_id: str
     seed: int = 0
     started_at: float = Field(default_factory=time.time)
+    # what `resume` needs to continue a run in a new process (None on runs recorded before M0)
+    inputs_ref: str | None = None  # blob of the initial state
+    workspace: str | None = None  # sandbox workspace path on this host
+    forked_from: tuple[str, int] | None = None
 
 
 class EvidenceKind(StrEnum):

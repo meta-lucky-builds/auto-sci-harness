@@ -1,4 +1,4 @@
-"""`chh` command line: run a harness spec, inspect runs and traces."""
+"""`chh` command line: run / resume a harness spec, evolve it, inspect runs and traces."""
 
 from __future__ import annotations
 
@@ -61,6 +61,27 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0 if res.status == "completed" else 1
 
 
+def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Resume an interrupted run with the exact spec it started with (loaded from the store)."""
+    import custom_harness.research  # noqa: F401
+    run = store.get_run(a.run_id)
+    spec = HarnessSpec.model_validate(store.harness_spec(run.harness_hash))
+    backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
+    sandbox = None
+    if run.workspace is not None:
+        if a.docker:
+            from .sandbox.docker import DockerSandbox
+            sandbox = DockerSandbox(Path(run.workspace))
+        elif a.dev_sandbox:
+            sandbox = LocalSandbox(Path(run.workspace), i_understand_no_isolation=True)
+        else:
+            raise SystemExit("this run used a sandbox: pass --docker (or --dev-sandbox for trusted test code)")
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox).resume(a.run_id, force=a.force)
+    print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
+                      "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
+    return 0 if res.status == "completed" else 1
+
+
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
     from .evolve.driver import evolve, load_suite
@@ -78,7 +99,9 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
         if a.docker:
             from .sandbox.docker import DockerSandbox
             return DockerSandbox(ws)
-        return LocalSandbox(ws, i_understand_no_isolation=True)
+        if a.dev_sandbox:
+            return LocalSandbox(ws, i_understand_no_isolation=True)
+        raise SystemExit("pass --docker (or --dev-sandbox for trusted test code only)")
 
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
@@ -125,6 +148,13 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--n-edits", type=int, default=3)
     ev.add_argument("--race-rounds", type=int, default=2)
     ev.add_argument("--docker", action="store_true")
+    ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
+    rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure)")
+    rr.add_argument("run_id")
+    rr.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
+    rr.add_argument("--docker", action="store_true")
+    rr.add_argument("--dev-sandbox", action="store_true")
+    rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
     t = sub.add_parser("trace")
@@ -133,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "evolve": cmd_evolve, "runs": cmd_runs, "trace": cmd_trace}[a.cmd](a, store)
+        return {"run": cmd_run, "resume": cmd_resume, "evolve": cmd_evolve, "runs": cmd_runs,
+                "trace": cmd_trace}[a.cmd](a, store)
     finally:
         store.close()
 
