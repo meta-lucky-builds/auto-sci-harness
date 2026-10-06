@@ -7,15 +7,14 @@ Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11
 - **Where the build stands:** M0 done (+2nd pass), M1 Evidence Kernel done (v1.1 after red-teaming), M2 research
   loop v1 BUILT (Kernel-integrated loop, improve operator, Socratic critic, replication agent, profiling,
   ObservationPack context, 21-task suite) but its **exit test has not been run** (needs a live-run budget).
-- **Verification state of the final code (honest):** the last quality-gate run was STOPPED by request during its
-  final "all tests" step. Completed steps of that run, on the final code: ruff ✅, mypy on src/ ✅,
-  `mypy --strict` on the Kernel ✅, Kernel tests 95 passed with **100% line+branch coverage** ✅. The full suite
-  was NOT completed on the final code. After the last code changes these were run individually and passed:
-  `test_research.py` (12), `test_evolve.py` (5), `test_leak.py` + `test_fail_closed.py` (non-fuzz part, 10),
-  `test_context.py` + `test_engine.py` (17), `test_profile.py` (2), `test_suite_builder.py` (2). Not re-run after
-  the last changes: `test_infra.py`, `test_resume.py`, `test_snapshot.py`, `test_stats.py`,
-  `test_winners_curse.py`, the Hypothesis fuzz tests. **First action on resume: `python scripts/check.py`.**
-- **Last complete full-suite run:** 172 passed, 1 skipped (end of M1, commit 6438201).
+- **Verification state (resumed 2026-10-06):** full gate on the M2 code: ruff ✅, mypy ✅, `mypy --strict` Kernel ✅,
+  Kernel 95 passed at 100% line+branch coverage ✅, **all tests 199 passed, 1 skipped** ✅ (13.5 min).
+  The first gate run on resume failed 1 test: `test_injected_fake_number_is_blocked[...certify-I1]`. Cause: a
+  TEST bug, not a product bug. M2 added a conditional `certify → replicate` edge before `certify → report`; the
+  test helper rewired only the first edge, the engine follows the first matching edge, so the planted
+  state-edit node never ran. The helper now splices the planted node before ALL outgoing edges and asserts it ran
+  exactly once (the other two variants had the same blind spot in principle).
+- **Previous complete full-suite run:** 172 passed, 1 skipped (end of M1, commit 6438201).
 - **State bundle:** see "State bundle" just below (code + 21-task suite + environment, frozen at a commit).
 - **Next on resume:** (1) run the full gate; (2) one live Docker + Codex run on a suite task to validate M2 end to
   end; (3) user decision on the M2 exit-test budget (≈300 Codex calls, ≈5M tokens); (4) M3 evolution v1.
@@ -157,8 +156,18 @@ deterministic in outcome).
 
 ## Known limitations (honest)
 - Evolution only tested with scripted LLMs; no evidence yet that a real proposer finds good edits (M3).
-- The Kernel is not yet wired into the research loop or the evolution objective: `research.verify` still uses the
-  M0 statistics, and `evolve/evaluate.py` still scores a placeholder. Kernel-integrated loop + VDS objective = M2/M3.
+- The evolution objective is not yet VDS: `evolve/evaluate.py` scores 0.5·certified + 0.5·replicated +
+  0.5·clip(relative held-out improvement) from Kernel certificates (M2). VDS as the objective = M3, once enough
+  predictions resolve.
+- **Invariant 5 (critic ≠ proposer family) is NOT met.** With Codex as the only backend, three places in the M2 loop
+  judge the proposer's work with the same model family: the Socratic `critic` node, the hypothesis `tournament`
+  (`research/modules.py`, `ctx.llm("judge", …)`), and the replication agent (same family as the original author).
+  No code checks model family anywhere: the gateway's "same-family detection" (GOAL §5 L0) does not exist. Fixing it
+  needs a second model family (API key or open-weights model; user decision). Until then live results are labelled
+  "invariant 5 not met".
+- **Invariant 9 incomplete:** Reproducibility Bundles are built only by `research.certify` (and `chh bundle`), so a
+  run that stops before certifying has no bundle. Every run does have a cost record.
+- **Invariant 10 not implemented:** runs and loops carry no MECHANICAL / VALIDATED label (GOAL §6.1).
 - Kernel v1 deviations from GOAL §4: untested assumptions are listed, not yet tier-lowering; label SUPPORTED is
   never issued (no judge/retrospective evidence yet); kinds scaling_law/rediscovery are typed but rejected (K1);
   Bonferroni (conservative) rather than Holm; bundles are per certified claim, not yet per run; a ledger excerpt in a

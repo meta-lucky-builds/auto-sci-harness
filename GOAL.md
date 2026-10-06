@@ -225,7 +225,8 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
 
 **Model gateway** (✅ core) — three access modes (OW / API / BYOS allowlist), provenance on every output, strict
 schemas, redaction. Add: per-host pacing; cost tables; the provider registry verified each release; same-family detection
-(needed for the "critic ≠ proposer family" rule).
+(❌ not built; needed for the "critic ≠ proposer family" rule, invariant 5, which the M2 loop currently violates when
+one family fills every role, see STATUS "Known limitations").
 
 ### L1 Control plane (🟡)
 - Must: budgets in neutral units **persisted across crash and fork** plus a wall-clock unit (✅ per run; campaign-level

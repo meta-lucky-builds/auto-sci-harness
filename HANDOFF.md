@@ -174,6 +174,11 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
   across same-named tasks; replicator able to see code; profiler calling features "IDs"; reproduce crashing on a
   missing blob; `config.data_dir()` needing a home dir; agent-faked infra failures via Docker exit codes; symlink host
   escapes; private values written into traces; prompts not recorded in traces.
+- **Invariant gaps in the M2 loop itself (found 2026-10-06 after the handoff; also in STATUS):** invariant 5 is
+  violated with Codex as the only backend by the Socratic critic, the hypothesis tournament (`research/modules.py`,
+  `ctx.llm("judge", …)`) and the replicator, and no code checks model family at all; invariant 9 is incomplete
+  (bundles only from `certify`, not per run); invariant 10 (MECHANICAL/VALIDATED labels) is not implemented. A live
+  run on Codex alone must be reported as "invariant 5 not met".
 - **Weak spots still open** (also in STATUS): replication shares the author's model family (Codex only); near-copy
   check is line overlap only; ledger not signed; dataset roles self-declared (external/future should become a
   human-approved action); K9 catches verbatim leaks only; a backend raising an unexpected exception type aborts a
@@ -194,7 +199,8 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
    propose a value from the first runs, do not invent one.
 4. **M3 Evolution v1** (GOAL §5 L6, §11; CR backlog P1 #7–13): read-only evidence export (exclude bundles and
    private blobs!), agentic proposer in a sandbox, structured diagnosis, critic from a DIFFERENT model family
-   (needs an API key or open-weights model — ask the user; Codex-only cannot satisfy invariant 5), smoke run,
+   (needs an API key or open-weights model — ask the user; Codex-only cannot satisfy invariant 5, which already
+   affects the M2 loop's critic, tournament and replicator, not just M3), smoke run,
    ledger upgrades, cost term in the gate, VDS objective once enough predictions resolve. Real campaigns need an API
    budget or rented GPU (user said they will rent cloud GPU when experiments need it).
 5. Update `STATUS.md` (and GOAL markers) at every milestone step; keep the stopping-point style when stopping.

@@ -160,14 +160,20 @@ def _report_edit(state, params, ctx):
 
 def _planted_run(store, tmp_path, task, module, after):
     doc = yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text())
-    nxt = next(e["target"] for e in doc["edges"] if e["source"] == after)
     doc["nodes"]["planted"] = {"kind": "module", "module": module}
-    doc["edges"] = [e for e in doc["edges"] if not (e["source"] == after and e["target"] == nxt)]
-    doc["edges"] += [{"source": after, "target": "planted"}, {"source": "planted", "target": nxt}]
+    # Splice the planted node in front of ALL of `after`'s outgoing edges, keeping their order and conditions:
+    # the engine follows the first matching edge, so rewiring only one edge can leave the planted node unreachable.
+    for e in doc["edges"]:
+        if e["source"] == after:
+            e["source"] = "planted"
+    doc["edges"].append({"source": after, "target": "planted"})
     llm = MockBackend(scripted_llm)
-    return Engine(HarnessSpec.model_validate(doc), backends={"proposer": llm, "executor": llm, "judge": llm},
-                  store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+    res = Engine(HarnessSpec.model_validate(doc), backends={"proposer": llm, "executor": llm, "judge": llm},
+                 store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(task)})
+    # the attack must actually have been executed, or a pass/fail below says nothing about the defence
+    assert [s.node_id for s in store.trace(res.run_id)].count("planted") == 1
+    return res
 
 
 @pytest.mark.parametrize(("module", "after", "check"), [
