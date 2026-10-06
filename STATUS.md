@@ -56,7 +56,14 @@ differences; a container-made symlink (WSL reparse point on Windows) would have 
 - Codex BYOS smoke (`examples/smoke.yaml`): ~16k input tokens of Codex overhead per call, ~13–15 s per call.
 - First live research run in Docker (rings-v1, Codex BYOS), before M0: verified 0.956 vs 0.351 baseline accuracy
   (test-example 95% CI [+0.57, +0.64]), audit passed; 9 Codex calls, ~158k input tokens, ~6 min. Easy synthetic task:
-  proves the pipeline, not research ability. Not yet re-run after M0.
+  proves the pipeline, not research ability.
+- Re-run after M0 (run_e305a0283a074fbb, Docker create/start/inspect path, Codex BYOS): completed, 23 steps; 5/5
+  hypotheses produced working code (dev 0.927–0.953 vs baseline 0.367); verified 0.958 vs 0.351, test-example 95% CI
+  [+0.576, +0.639]; audit I1, I2, I4, I5 passed; all 6 LLM steps have rendered prompts in the trace; canary absent from
+  the trace; no infra retries, no redactions. 9 Codex calls, 154k input + 16k output tokens, 498 s wall.
+- Finding for M1 (K4): the seed CI was [+0.607, +0.607]. The generated solution ignores the seed, so the seed check
+  was degenerate and the evidence rested on the test-example bootstrap alone. K4 must detect zero seed variance
+  and say so instead of counting it as a passed check.
 
 ## Known limitations (honest)
 - Evolution only tested with scripted LLMs; no evidence yet that a real proposer finds good edits (M3).
@@ -79,4 +86,4 @@ differences; a container-made symlink (WSL reparse point on Windows) would have 
 1. **M1 Kernel v1**: Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data);
    certificates; Reproducibility Bundle + `chh reproduce`; reporting checklist; prediction ledger. Exit: seeded
    50-claim suite classified correctly; `chh reproduce` works.
-2. Re-run the live rings task in Docker after M0 to confirm nothing regressed live.
+2. (done) Live rings re-run after M0 passed; see "Verified live".
