@@ -20,7 +20,15 @@ Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11
   end; (3) user decision on the M2 exit-test budget (≈300 Codex calls, ≈5M tokens); (4) M3 evolution v1.
 
 ### State bundle
-BUNDLE_PLACEHOLDER
+- File: `C:\Users\mykids\custom-harness-data\bundles\state-f15c3d4fd53f.zip` (1.1 MB, 132 members; NOT in git:
+  it contains the suite's hidden test labels). Manifest committed: `snapshots/state-f15c3d4fd53f.manifest.json`,
+  manifest sha256 `f724ae6aa625e464cfb580ac6b680757a5a56f37a04e7b878ef3d65f0560fbc9`.
+- Contents: `code.tar` = `git archive` of commit `f15c3d4` (139 files); `suites/m2/` = all 21 tasks incl. private
+  labels and canaries + `suite.yaml`; `env/` = pip freeze, Python 3.12.10 / Windows platform, Docker 29.8.1 +
+  sandbox image id `sha256:187a5f90…dbaa7`, codex-cli 0.160.0. Integrity re-checked after writing: 0 hash mismatches.
+- Rebuild without the zip: `chh build-suite OUT --docker` regenerates the same task data (deterministic seeds);
+  only the random canary tokens differ.
+- Tool: `python scripts/snapshot_state.py OUT SUITE... --note "..."` (refuses to run on a dirty tree).
 
 ## Environment
 - Code: this folder (git repo → github.com/meta-lucky-builds/auto-sci-harness, private). Runtime data + venv:
