@@ -180,7 +180,7 @@ class EvidenceStore:
             rows = self._rows("SELECT seq, kind, body, prev, hash, at FROM ledger ORDER BY seq")
         else:
             rows = self._rows("SELECT seq, kind, body, prev, hash, at FROM ledger WHERE kind=? ORDER BY seq", (kind,))
-        return [tuple(r) for r in rows]  # type: ignore[misc]
+        return [tuple(r) for r in rows]
 
     def close(self) -> None:
         self._db.close()

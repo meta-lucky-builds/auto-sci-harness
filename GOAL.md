@@ -136,7 +136,7 @@ Lean analogy, kept deliberately:
 | Theorem statement | **Typed Claim** (Claim Language) |
 | Proof | **Evidence Bundle** (pre-registration + code + data hashes + runs + statistics) |
 | Small trusted kernel | Small, deterministic Kernel code (target < 3k LoC, 100% test coverage, no LLM inside) |
-| `sorry` / axioms audit | **Assumption audit**: every untested assumption is listed explicitly and lowers the tier |
+| `sorry` / axioms audit | **Assumption audit**: every untested assumption is listed explicitly and lowers the tier (v1: listed and marked tested/untested; tier lowering not yet defined) |
 | Proof checks or fails | Certificate issued at tier T*, or rejected with machine-readable reasons |
 
 ### 4.2 Claim Language (ML/DL first)
@@ -234,14 +234,17 @@ schemas, redaction. Add: per-host pacing; cost tables; the provider registry ver
 
 ### L2 Evidence store & reporting (🟡)
 - Must: append-only, content-addressed ✅; claims only from evidence ✅; **Reproducibility Bundle** per run and per claim
-  (VG); **reporting checklist** auto-filled (seeds, traces, selection policy, human-in-the-loop points, cost); Postgres
+  (VG) (✅ per certified claim; per-run bundles to do); **reporting checklist** auto-filled (seeds, traces, selection
+  policy, human-in-the-loop points, cost) ✅ (Kernel `checklist.py`; wiring into reports is M2); Postgres
   backend for campaigns; read-only **evidence filesystem export** for the proposer (L6).
-- Done when: `chh reproduce <bundle>` on a clean machine reproduces a headline claim.
+- Done when: `chh reproduce <bundle>` on a clean machine reproduces a headline claim. ✅ (tested with the original
+  store deleted; a real headline claim from the research loop comes with M2)
 
-### Evidence Kernel (❌ — §4). The highest-priority novel component.
+### Evidence Kernel (✅ v1, 2026-10-06 — §4; `src/custom_harness/kernel/`, 1.3k LoC). The highest-priority novel component.
 - Done when: (a) on a seeded set of 50 ML claims (true, p-hacked, leaked, irreproducible, strawman-baseline, trivial),
   the Kernel accepts the true ones and rejects each failure type with the correct reason; (b) Kernel code has 100% branch
-  coverage and contains no LLM call.
+  coverage and contains no LLM call. ✅ both (`tests/test_kernel_suite.py`, `scripts/check.py` coverage gate,
+  `tests/test_kernel_quality.py` import-closure test). v1 deviations are listed in STATUS.md.
 
 ### L3 Verifier ladder (🟡)
 - Must:
@@ -483,7 +486,7 @@ Principle: always keep one end-to-end path working. Build the Kernel early so ev
 | Milestone | Builds | Exit test |
 |---|---|---|
 | **M0 Hardening** (P0) ✅ 2026-10-06 | infra/policy split; winner re-measure; safe snapshot restore; resume; gate unit-alignment; persisted budget; canary + leak audit | all §7 tests that apply to existing code pass |
-| **M1 Kernel v1** | Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data); certificates; Reproducibility Bundle; reporting checklist; prediction ledger | seeded 50-claim suite classified correctly; `chh reproduce` works |
+| **M1 Kernel v1** ✅ 2026-10-06 | Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data); certificates; Reproducibility Bundle; reporting checklist; prediction ledger | seeded 50-claim suite classified correctly; `chh reproduce` works |
 | **M2 Research loop v1** | Kernel-integrated loop; experiment tree; improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ML task suite ≥ 20 tasks (rings-style + real datasets + ML-repair family) | ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures |
 | **M3 Evolution v1** | evidence export; agentic proposer; structured diagnosis; family-separated critic; smoke; ledger upgrades; cost term | first real campaign: certified improvement holding on sealed split |
 | **M4 Memory, verifiers, branching** | L5 store API; exploit quarantine; red team; judge panel validated; fault-injection verifiers; branching/routing | planted-exploit suite caught; router beats single best on sealed |

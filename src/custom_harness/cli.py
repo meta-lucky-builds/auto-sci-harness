@@ -115,6 +115,61 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def _sandbox_factory(a: argparse.Namespace, root: Path):
+    if a.docker:
+        from .sandbox.docker import DockerSandbox
+        return lambda key: DockerSandbox(root / key)
+    if a.dev_sandbox:
+        return lambda key: LocalSandbox(root / key, i_understand_no_isolation=True)
+    raise SystemExit("pass --docker (or --dev-sandbox for trusted code only)")
+
+
+def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Re-check a Reproducibility Bundle from its bytes alone (GOAL L2 done-when)."""
+    from .kernel import SandboxReplayer
+    from .kernel.bundle import reproduce_bundle
+    factory = _sandbox_factory(a, data_dir() / "sandboxes" / f"reproduce-{int(time.time())}")
+    report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
+    print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
+                      "original_label": report.original_label, "reproduced_label": report.reproduced_label,
+                      "problems": report.problems}, indent=1))
+    return 0 if report.reproduced else 1
+
+
+def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .kernel import Kernel
+    from .kernel.bundle import build_bundle
+    out = Path(a.out or (data_dir() / "bundles" / f"{a.cert_hash[:16]}.zip"))
+    print(json.dumps({"bundle": str(out), "bundle_hash": build_bundle(Kernel(store), a.cert_hash, out)}))
+    return 0
+
+
+def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .kernel import Kernel
+    k = Kernel(store)
+    for e in k.ledger.entries("certificate"):
+        cert = k.certificate(e.body["cert_hash"])
+        print(f"{e.body['cert_hash'][:16]}  {cert.label.value:<20} {k.status(e.body['cert_hash']):<9} "
+              f"failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")
+    return 0
+
+
+def cmd_ledger_verify(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .kernel import Ledger
+    problems = Ledger(store).verify()
+    print(json.dumps({"entries": len(store.ledger_rows()), "intact": not problems, "problems": problems}, indent=1))
+    return 0 if not problems else 1
+
+
+def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .kernel import Ledger
+    from .kernel.predictions import calibration, score_predictions, vds
+    scores = score_predictions(Ledger(store), time.time())
+    print(json.dumps({"predictions": len(scores), "vds_bits": vds(scores), "calibration": calibration(scores)},
+                     indent=1))
+    return 0
+
+
 def cmd_runs(a: argparse.Namespace, store: EvidenceStore) -> int:
     for r in store.list_runs(a.limit):
         status, detail = store.run_status(r.id)
@@ -165,6 +220,16 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
+    rp.add_argument("bundle")
+    rp.add_argument("--docker", action="store_true")
+    rp.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; trusted code only)")
+    bd = sub.add_parser("bundle", help="write the Reproducibility Bundle of a certificate")
+    bd.add_argument("cert_hash")
+    bd.add_argument("-o", "--out")
+    sub.add_parser("certificates", help="list Kernel certificates")
+    sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain")
+    sub.add_parser("predictions", help="prediction ledger: VDS and calibration")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
     t = sub.add_parser("trace")
@@ -174,7 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     store = EvidenceStore(data_dir() / "store")
     try:
         return {"run": cmd_run, "resume": cmd_resume, "evolve": cmd_evolve, "runs": cmd_runs,
-                "trace": cmd_trace}[a.cmd](a, store)
+                "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
+                "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
+                "predictions": cmd_predictions}[a.cmd](a, store)
     finally:
         store.close()
 
