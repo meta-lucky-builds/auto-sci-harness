@@ -32,7 +32,7 @@ class ModuleContext:
         resp = backend.complete(request)
         self.spent = self.spent + resp.cost
         self.llm_calls.append({"role": role, "provenance": resp.provenance.model_dump(mode="json"),
-                               "response": resp.text})
+                               "request": [m.model_dump() for m in request.messages], "response": resp.text})
         return resp
 
 

@@ -25,6 +25,7 @@ from ..runtime.modules import ModuleContext
 from ..sandbox.base import WorkspaceEscape, safe_path
 from ..tiers import Action, Tier, decide
 from ..verify import metrics as M
+from ..verify.leak import ESCAPE_MARKER, leak_audit, new_canary, private_fingerprints
 from ..verify.ranking import bradley_terry, rankings_to_wins
 from ..verify.stats import paired_bootstrap_metric, t2_verdict
 from .data import dev_split, profile, read_csv, read_predictions
@@ -62,7 +63,7 @@ def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: 
     except WorkspaceEscape as e:
         # the agent's code planted a link where its output should be: a failed attempt by the agent,
         # recorded (and later flagged by the leak audit), never followed
-        info["stderr_tail"] += f"\n[harness] refused to read output: {e}"
+        info["stderr_tail"] += f"\n{ESCAPE_MARKER}: {e}"
         info["escape_attempt"] = str(e)
         return None, info
     if res.returncode != 0 or not out.exists():
@@ -105,6 +106,9 @@ def setup(state, params, ctx: ModuleContext):
                        seed=params.get("split_seed", 0), out_dir=_ws(ctx, "dev"))
     return {"task": task.model_dump(),
             "_private_task_dir": str(task_dir),
+            # per-run canary: lives only in private state; if it ever shows up in a prompt, a response,
+            # the trace or the workspace, private state leaked (checked by the audit, I5)
+            "_private_canary": new_canary(),
             "_private_dev_labels_ref": ctx.store.blobs.put_json(labels),
             "attempts": [], "n_attempts": 0, "best": None, "route": None}
 
@@ -333,9 +337,10 @@ def report(state, params, ctx):
 def audit(state, params, ctx):
     """Integrity audit (ScientistOne-style, PLAN L2).
     I1 claims resolve to stored evidence; I2 baseline used the same contract/data/seeds;
-    I3 citations (n/a until the literature module exists); I4 metrics recomputed from raw predictions."""
+    I3 citations (n/a until the literature module exists); I4 metrics recomputed from raw predictions;
+    I5 leak + canary audit over everything agent-visible (verify/leak.py; K9 precursor)."""
     task = _task(state)
-    results: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "problems": []}
+    results: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "I5": True, "problems": []}
     _, label_rows = read_csv(Path(state["_private_task_dir"]) / "private" / task.test_labels_file)
     y_test = [r[0] for r in label_rows]
     for cid in state.get("claims") or []:
@@ -365,5 +370,11 @@ def audit(state, params, ctx):
             if not same:
                 results["I2"] = False
                 results["problems"].append(f"{cid}: baseline not run under identical conditions")
-    results["passed"] = all(results[k] is True for k in ("I1", "I2", "I4"))
+    fp = private_fingerprints(Path(state["_private_task_dir"]) / "private", labels=y_test)
+    leak = leak_audit(ctx.store.trace(ctx.run_id), ctx.sandbox.workspace if ctx.sandbox else None, fp,
+                      canaries=fp["canaries"] + [state.get("_private_canary", "")],
+                      extra_texts={"report": state.get("report", "")})
+    results["I5"] = leak["passed"]
+    results["problems"] += leak["problems"]
+    results["passed"] = all(results[k] is True for k in ("I1", "I2", "I4", "I5"))
     return {"audit": results}

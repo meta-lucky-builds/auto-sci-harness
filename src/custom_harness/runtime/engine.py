@@ -263,9 +263,11 @@ class Engine:
             # failure for completion; spent = cumulative cost after this step (persisted budget)
             cp_ref = self.store.blobs.put_json({"state": state, "next": next_node, "workspace": workspace_ref,
                                                 "spent": (self.budget.spent + cost).model_dump()})
+            # the trace is agent-visible (the harness proposer reads it): private values never enter it
+            trace_out, trace_err = _scrub_step(out, error, _private_values(state))
             self.store.add_step(TraceStep(
                 run_id=run_id, index=index, node_id=node_id, kind=_kind(node),
-                input={"node": node.model_dump(mode="json")}, output=out, error=error,
+                input={"node": node.model_dump(mode="json")}, output=trace_out, error=trace_err,
                 provenance=prov, cost=cost, started_at=t0, ended_at=time.time(), checkpoint_ref=cp_ref))
             total = total + cost
             index += 1
@@ -305,8 +307,8 @@ class Engine:
                 return out, failed + _walled(cost, time.monotonic() - t0), prov, None, None
             except ContractError as e:
                 # failed attempts still cost money and must appear in the trace
-                return ({"attempts": e.attempts}, failed + _walled(e.cost, time.monotonic() - t0), None,
-                        f"ContractError: {e}", None)
+                return ({"attempts": e.attempts, "messages": getattr(e, "messages", [])},
+                        failed + _walled(e.cost, time.monotonic() - t0), None, f"ContractError: {e}", None)
             except (ModuleError, BackendError, InfraError, KeyError, ValueError, OSError) as e:
                 elapsed = time.monotonic() - t0
                 partial = e.cost if isinstance(e, ModuleError) else Cost()
@@ -374,11 +376,13 @@ class Engine:
                                                 temperature=node.temperature, max_tokens=node.max_tokens))
             total = total + resp.cost
             if node.output_schema is None:
-                return {"value": resp.text, "attempts": attempts + [resp.text]}, total, resp.provenance
+                return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages)},
+                        total, resp.provenance)
             try:
                 value = parse_json_output(resp.text)
                 jsonschema.validate(value, node.output_schema)
-                return {"value": value, "attempts": attempts + [resp.text]}, total, resp.provenance
+                return ({"value": value, "attempts": attempts + [resp.text], "messages": _dump(messages)},
+                        total, resp.provenance)
             except (json.JSONDecodeError, jsonschema.ValidationError) as e:
                 msg = e.msg if isinstance(e, json.JSONDecodeError) else e.message
                 attempts.append(resp.text)
@@ -387,7 +391,48 @@ class Engine:
                     Message(role="user", content=f"Your output violated the required JSON contract: {msg}. "
                                                  f"Reply with only valid JSON matching the schema."),
                 ]
-        raise ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts)
+        err = ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts)
+        err.messages = _dump(messages)
+        raise err
+
+
+def _dump(messages: list[Message]) -> list[dict]:
+    """Rendered prompts as the model saw them: recorded so the leak audit can check them."""
+    return [m.model_dump() for m in messages]
+
+
+def _private_values(state: dict[str, Any]) -> list[str]:
+    vals = [str(v) for k, v in state.items() if k.startswith("_private") and v is not None]
+    return sorted((v for v in vals if len(v) >= 8), key=len, reverse=True)
+
+
+def _scrub(obj: Any, secrets: list[str], hits: list[int] | None = None) -> Any:
+    """Drop `_private*` keys and replace private values inside strings (e.g. a private path quoted in
+    an exception message) before anything is written to the trace. `hits` counts string replacements:
+    a private VALUE inside a non-private field means it reached agent-visible output, and the step is
+    marked so the leak audit fails closed (scrubbing hides it from readers, never from the audit)."""
+    hits = hits if hits is not None else [0]
+    if isinstance(obj, dict):
+        return {k: ("<private>" if str(k).startswith("_private") else _scrub(v, secrets, hits))
+                for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_scrub(v, secrets, hits) for v in obj]
+    if isinstance(obj, str):
+        for s in secrets:
+            if s in obj:
+                hits[0] += obj.count(s)
+                obj = obj.replace(s, "<private>")
+        return obj
+    return obj
+
+
+def _scrub_step(out: dict[str, Any], error: str | None, secrets: list[str]) -> tuple[dict[str, Any], str | None]:
+    hits = [0]
+    clean_out = _scrub(out, secrets, hits)
+    clean_err = _scrub(error, secrets, hits) if error is not None else None
+    if hits[0]:
+        clean_out = {**clean_out, "_redacted_private_values": hits[0]}
+    return clean_out, clean_err
 
 
 def _walled(cost: Cost, wall_s: float) -> Cost:

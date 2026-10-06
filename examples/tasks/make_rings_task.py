@@ -10,6 +10,7 @@ import argparse
 import csv
 import math
 import random
+import secrets
 from pathlib import Path
 
 BASELINE = '''"""Baseline: nearest class centroid on numeric columns (stdlib only)."""
@@ -97,6 +98,10 @@ def main() -> None:
         csv.writer(f).writerows([header[:-1]] + [r[:-1] for r in test])
     with open(out / "private" / "test_y.csv", "w", newline="") as f:
         csv.writer(f).writerows([["label"]] + [[r[-1]] for r in test])
+    # Canary: a random token that exists only in the private directory. If it ever appears in a prompt,
+    # a trace or the agent workspace, private data leaked (research.audit I5). Random, not seeded: the
+    # task data stay deterministic, the canary must not be guessable from the seed.
+    (out / "private" / "canary.txt").write_text("CHH-CANARY-" + secrets.token_hex(16) + "\n")
     (out / "baseline.py").write_text(BASELINE)
     (out / "task.yaml").write_text(TASK_YAML)
     print(f"wrote task to {out}")
