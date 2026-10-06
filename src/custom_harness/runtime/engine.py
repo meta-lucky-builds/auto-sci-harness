@@ -3,7 +3,9 @@
 Executes a HarnessSpec as a graph. Guarantees:
 - every step is written to the Evidence store as a TraceStep (full traces, PLAN P1);
 - every step is checkpointed (state + next node + workspace snapshot) so any run can be
-  forked from any step (exact backtracking, ScienceFlow);
+  forked from any step (exact backtracking, ScienceFlow). The workspace is snapshotted after every
+  module/tool step (unchanged files are reused by fingerprint); LLM steps cannot touch it and reuse
+  the previous snapshot;
 - budgets are enforced by deterministic code before and after every step (PLAN P7);
 - LLM contracts (output JSON schemas) are validated in code, with bounded retries.
 """
@@ -106,12 +108,14 @@ class Engine:
             budget = Budget(limits=limits)
         self.budget = budget
         self.spec_hash = store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=None)
+        self._ws_ref: str | None = None  # latest workspace snapshot of the current run
 
     # ------------------------------------------------------------------ public
     def run(self, task_id: str, inputs: dict[str, Any], seed: int = 0) -> RunResult:
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash, task_id=task_id, seed=seed)
         self.store.add_run(run)
         state = {"input": inputs, "_seed": seed}
+        self._ws_ref = None
         return self._loop(run.id, state, self.spec.entry, start_index=0)
 
     def fork(self, run_id: str, step_index: int, task_id: str | None = None) -> RunResult:
@@ -123,6 +127,7 @@ class Engine:
         cp = self.store.blobs.get_json(step.checkpoint_ref)
         if cp.get("workspace") and self.sandbox is not None:
             restore_snapshot(cp["workspace"], self.sandbox.workspace, self.store.blobs)
+        self._ws_ref = cp.get("workspace")
         parent = self.store.get_run(run_id)
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash,
                   task_id=task_id or parent.task_id, seed=parent.seed)
@@ -173,8 +178,12 @@ class Engine:
             # edges. Stop, and checkpoint so that a resume retries this same node.
             next_node = node_id if infra is not None else self._next(node_id, state)
             workspace_ref = None
-            if self.sandbox is not None and isinstance(node, ToolNode) and node.snapshot_after:
-                workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs)
+            if self.sandbox is not None:
+                if isinstance(node, LLMNode):
+                    workspace_ref = self._ws_ref  # LLM steps cannot touch the workspace
+                elif not (isinstance(node, ToolNode) and not node.snapshot_after):
+                    workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
+                self._ws_ref = workspace_ref
             cp_ref = self.store.blobs.put_json({"state": state, "next": next_node or END,
                                                 "workspace": workspace_ref})
             self.store.add_step(TraceStep(

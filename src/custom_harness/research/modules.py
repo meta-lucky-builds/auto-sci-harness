@@ -22,6 +22,7 @@ from ..records import Claim, Evidence, EvidenceKind
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
+from ..sandbox.base import WorkspaceEscape, safe_path
 from ..tiers import Action, Tier, decide
 from ..verify import metrics as M
 from ..verify.ranking import bradley_terry, rankings_to_wins
@@ -39,6 +40,11 @@ def _require_isolation(ctx: ModuleContext) -> None:
                               "(or set CHH_ALLOW_UNISOLATED=1 for trusted test code only)")
 
 
+def _ws(ctx: ModuleContext, rel: str) -> Path:
+    """Host-side access to a workspace path; refuses links planted by agent code (see safe_path)."""
+    return safe_path(ctx.sandbox.workspace, rel)
+
+
 def _task(state: dict[str, Any]) -> TaskSpec:
     return TaskSpec.model_validate(state["task"])
 
@@ -46,12 +52,19 @@ def _task(state: dict[str, Any]) -> TaskSpec:
 def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: int,
                   timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
     out_rel = f"out/preds_{uuid.uuid4().hex[:8]}.csv"
-    (ctx.sandbox.workspace / "out").mkdir(exist_ok=True)
+    _ws(ctx, "out").mkdir(exist_ok=True)
     res = ctx.sandbox.exec([ctx.sandbox.python, script, "--train", train, "--test", test,
                             "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
     info = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
             "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:]}
-    out = ctx.sandbox.workspace / out_rel
+    try:
+        out = _ws(ctx, out_rel)
+    except WorkspaceEscape as e:
+        # the agent's code planted a link where its output should be: a failed attempt by the agent,
+        # recorded (and later flagged by the leak audit), never followed
+        info["stderr_tail"] += f"\n[harness] refused to read output: {e}"
+        info["escape_attempt"] = str(e)
+        return None, info
     if res.returncode != 0 or not out.exists():
         return None, info
     try:
@@ -84,13 +97,12 @@ def setup(state, params, ctx: ModuleContext):
     _require_isolation(ctx)
     task_dir = Path(state["input"]["task_dir"]).resolve()
     task = load_task(task_dir)
-    ws = ctx.sandbox.workspace
-    (ws / "data").mkdir(parents=True, exist_ok=True)
+    _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
     for name in (task.train_file, task.test_features_file):
-        shutil.copy2(task_dir / "public" / name, ws / "data" / name)
-    shutil.copy2(task_dir / task.baseline_file, ws / "baseline.py")
-    labels = dev_split(ws / "data" / task.train_file, task.target_column, task.dev_fraction,
-                       seed=params.get("split_seed", 0), out_dir=ws / "dev")
+        shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
+    shutil.copy2(task_dir / task.baseline_file, _ws(ctx, "baseline.py"))
+    labels = dev_split(_ws(ctx, f"data/{task.train_file}"), task.target_column, task.dev_fraction,
+                       seed=params.get("split_seed", 0), out_dir=_ws(ctx, "dev"))
     return {"task": task.model_dump(),
             "_private_task_dir": str(task_dir),
             "_private_dev_labels_ref": ctx.store.blobs.put_json(labels),
@@ -99,7 +111,7 @@ def setup(state, params, ctx: ModuleContext):
 
 @register("research.profile_data")
 def profile_data(state, params, ctx):
-    return {"profile": profile(ctx.sandbox.workspace / "dev" / "train.csv", _task(state).target_column)}
+    return {"profile": profile(_ws(ctx, "dev/train.csv"), _task(state).target_column)}
 
 
 @register("research.baseline_dev")
@@ -179,7 +191,7 @@ def run_candidate(state, params, ctx):
     _require_isolation(ctx)
     task = _task(state)
     code = (state.get("impl") or {}).get("code", "")
-    (ctx.sandbox.workspace / "solution.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "solution.py").write_text(code, encoding="utf-8")
     labels = ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
     preds, info = _run_solution(ctx, "solution.py", "dev/train.csv", "dev/valid_X.csv", 0,
                                 task.solution_timeout_s)
@@ -226,7 +238,7 @@ def verify(state, params, ctx):
     task_dir = Path(state["_private_task_dir"])
     _, label_rows = read_csv(task_dir / "private" / task.test_labels_file)
     y_test = [r[0] for r in label_rows]
-    (ctx.sandbox.workspace / "solution.py").write_bytes(ctx.store.blobs.get(best["code_ref"]))
+    _ws(ctx, "solution.py").write_bytes(ctx.store.blobs.get(best["code_ref"]))
     train, test = f"data/{task.train_file}", f"data/{task.test_features_file}"
 
     scores: dict[str, list[float]] = {"solution": [], "baseline": []}
@@ -244,7 +256,7 @@ def verify(state, params, ctx):
             payload = {"arm": arm, "seed": seed, "metric": task.metric, "score": s,
                        "preds_ref": ctx.store.blobs.put_json(preds), "code_ref":
                        best["code_ref"] if arm == "solution" else ctx.store.blobs.put(
-                           (ctx.sandbox.workspace / "baseline.py").read_bytes()),
+                           _ws(ctx, "baseline.py").read_bytes()),
                        "contract": "solution CLI v1", "train": train, "test": test}
             ev = Evidence(kind=EvidenceKind.METRIC, tier=Tier.T1_EXECUTABLE, verifier_id=f"metric:{task.metric}",
                           produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(payload),
