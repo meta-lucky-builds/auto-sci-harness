@@ -10,6 +10,7 @@ Splits are over TASKS: evolve (proposer sees traces), gate (accept/reject only),
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,14 +84,22 @@ def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
         return None, False
     if status != RunStatus.COMPLETED:
         return 0.0, False
+    try:
+        return _score_completed(state)
+    except (AttributeError, TypeError, ValueError, KeyError):  # malformed state: no credit (fail closed)
+        return 0.0, False
+
+
+def _score_completed(state: dict) -> tuple[float, bool]:
     audit = state.get("audit")
-    if audit is None or not audit.get("passed", False):  # no audit = no credit (hard constraint)
+    if not isinstance(audit, dict) or audit.get("passed") is not True:  # no audit = no credit (hard constraint)
         return 0.0, False
     verdict = state.get("verdict") or {}
-    verified = bool(verdict.get("verified"))
+    verified = verdict.get("verified") is True  # strictly True: "false", 1, [] never count
     sol, base = verdict.get("solution_mean"), verdict.get("baseline_mean")
     rel = 0.0
-    if sol is not None and base is not None and base != 0:
+    if (isinstance(sol, (int, float)) and isinstance(base, (int, float)) and not isinstance(sol, bool)
+            and not isinstance(base, bool) and math.isfinite(sol) and math.isfinite(base) and base != 0):
         hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
         rel = ((sol - base) if hib else (base - sol)) / abs(base)
     return 1.0 * verified + 0.5 * max(-1.0, min(1.0, rel)), verified

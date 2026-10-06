@@ -109,6 +109,8 @@ def propose_edits(backend: Backend, spec: HarnessSpec, digest: dict, ledger: lis
         raw = parse_json_output(resp.text)
     except json.JSONDecodeError as e:
         return [], [f"proposer output not JSON: {e}"], resp
+    if not isinstance(raw, dict) or not isinstance(raw.get("edits", []), list):
+        return [], [f"proposer output is not an object with an 'edits' list: {type(raw).__name__}"], resp
     for i, item in enumerate(raw.get("edits", [])[:n_edits]):
         try:
             ops = [{"op": o["op"], "path": o["path"],
@@ -120,6 +122,6 @@ def propose_edits(backend: Backend, spec: HarnessSpec, digest: dict, ledger: lis
                 "predicted": {"failure_clusters_fixed": item.get("failure_clusters_fixed", []),
                               "expected_delta": item.get("expected_delta", 0.0),
                               "tasks_at_risk": item.get("tasks_at_risk", [])}}))
-        except (KeyError, TypeError, json.JSONDecodeError, ValidationError) as e:
+        except (KeyError, TypeError, AttributeError, json.JSONDecodeError, ValidationError) as e:
             problems.append(f"edit {i} malformed: {type(e).__name__}: {str(e)[:200]}")
     return edits, problems, resp

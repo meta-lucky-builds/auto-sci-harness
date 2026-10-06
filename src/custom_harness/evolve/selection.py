@@ -58,11 +58,14 @@ def paired_ci(diffs: list[float], *, n_boot: int = 4000, alpha: float = 0.05, se
     """Mean and percentile-bootstrap CI of paired differences. One unit -> CI is (-inf, inf)."""
     if not diffs:
         return 0.0, -math.inf, math.inf
-    mean = statistics.fmean(diffs)
-    if len(diffs) == 1:
-        return mean, -math.inf, math.inf
-    rng = random.Random(seed)
-    boots = sorted(statistics.fmean(rng.choice(diffs) for _ in diffs) for _ in range(n_boot))
+    try:
+        mean = statistics.fmean(diffs)
+        if len(diffs) == 1:
+            return mean, -math.inf, math.inf
+        rng = random.Random(seed)
+        boots = sorted(statistics.fmean(rng.choice(diffs) for _ in diffs) for _ in range(n_boot))
+    except OverflowError:  # absurd magnitudes: an uninformative CI, so nothing can be accepted on it
+        return math.nan, -math.inf, math.inf
     return mean, boots[int(alpha / 2 * n_boot)], boots[min(n_boot - 1, int((1 - alpha / 2) * n_boot))]
 
 
@@ -150,6 +153,9 @@ def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], 
       2. gate split (never shown to the proposer): mean diff > 0 and CI lower bound >= -eps — no regression.
     With few tasks these CIs are wide, so the gate is conservative by construction."""
     ev_s, gt_s = _as_sample(evolve), _as_sample(gate_)
+    for name, smp in (("evolve", ev_s), ("gate", gt_s)):
+        if not all(math.isfinite(d) for d in smp.diffs):
+            return GateDecision(False, f"{name}: non-finite score difference (fail closed)", {}, {})
     em, elo, ehi = paired_ci(ev_s.diffs, seed=1, n_boot=n_boot)
     gm, glo, ghi = paired_ci(gt_s.diffs, seed=2, n_boot=n_boot)
     ev = {"mean_diff": em, "lo": elo, "hi": ehi, "n": len(ev_s.diffs), "excluded": len(ev_s.excluded)}

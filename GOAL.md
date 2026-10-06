@@ -108,7 +108,7 @@ matching their reported numbers wherever we can test the same thing.
   L5 Memory & Skills ── ONE store API: evidence + tier floor + quarantine + derivation graph + read audit
   L4 Research Loop ── formulate → profile → literature → hypotheses → PRE-REGISTER → experiment tree → critic → replicate → claims → report
   ┌──────────────────────────────── EVIDENCE KERNEL (trusted core) ────────────────────────────────┐
-  │ Claim Language · Pre-registration commits · checks K1–K9 · Certificates (tier) · Prediction Ledger │
+  │ Claim Language · Pre-registration commits · checks K0–K9 · Certificates (tier) · Prediction Ledger │
   └────────────────────────────────────────────────────────────────────────────────────────────────┘
   L3 Verifier Ladder ── T0 formal · T1 executable · T2 statistical · T3 physical · T4 time-split · T5 judge panel · T6 none
                          + fault-injection validation · calibrated tolerances · exploit quarantine · red team · verifier synthesis
@@ -175,7 +175,7 @@ Plus **K0 Provenance (always)**: every number and citation resolves to an artifa
 ### 4.4 Certificates and tiers
 The Kernel issues `Certificate{claim, tier, checks_passed, checks_failed, assumptions, bundle_hash, verifier_ids}`.
 - Tier = the weakest link of the strongest verifier chain that passed (T0 … T6, mapped to VG's ladder in reports).
-- Labels: **CERTIFIED-VALIDATED** (K1–K9 including K6 on external or future data), **CERTIFIED-INTERNAL** (K6 on
+- Labels: **CERTIFIED-VALIDATED** (K0–K9 including K6 on external or future data), **CERTIFIED-INTERNAL** (K6 on
   sealed internal data only), **SUPPORTED** (judge or retrospective only), **REJECTED** (with reasons).
 - Certificates are immutable. New contrary evidence creates a **retraction** that cascades through the derivation graph
   (claims, skills and memory built on it).
@@ -200,36 +200,37 @@ measurement instruments. It certifies inference, not reality. Soft qualities sta
 ## 5. Component specifications
 
 Each component lists **Must** (requirements), **Never** (invariants), **Done when** (acceptance test), and the sources
-it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as of 2026-10-06.)
+it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as of 2026-10-06, after M0; proofs in STATUS.md.)
 
 ### L0 Substrate
 **Runtime** (🟡) — typed `HarnessSpec` (JSON Schema) interpreted as a graph.
-- Must: full trace per step; checkpoint per step; `fork(step, state_patch)`; **`resume(run_id)` after crash** (CR P0-4);
+- Must: full trace per step; checkpoint per step; `fork(step, state_patch)`; **`resume(run_id)` after crash** (CR P0-4) ✅;
   **MapNode fan-out** with per-branch persisted outputs, deterministic ids and declared reducers (LangGraph); **Approval
-  node** (PAUSED → human); transient-only retry policy that charges every attempt; unmatched edge = FAILED ✅; any
+  node** (PAUSED → human); transient-only retry policy that charges every attempt ✅; unmatched edge = FAILED ✅; any
   crash leaves FAILED, never RUNNING ✅.
 - Never: pickle or arbitrary deserialisation of untrusted data; silent defaults.
-- Done when: kill -9 mid-run, then resume, completes with an identical trace prefix and no double-charged cost.
+- Done when: kill -9 mid-run, then resume, completes with an identical trace prefix and no double-charged cost. ✅
 - Absorbs: LangGraph (resume, fan-out, interrupts) without its heuristic resume detection or async-durability loss;
   PARNESS DAG kernel (minus the dead DSL); ScienceFlow's single-writer state.
 
 **Sandbox & snapshots** (🟡)
 - Must: Docker, gVisor when available, network off plus allowlist, caps dropped, non-root, read-only root, no secrets ✅.
   Snapshots: content-addressed, **preflight all blobs → archive live workspace → restore → rollback on failure**; keep
-  modes and symlinks; fingerprint-skip unchanged files (ScienceFlow, CR P0-3); per-campaign cloud-GPU backend.
+  modes and symlinks; fingerprint-skip unchanged files (ScienceFlow, CR P0-3) ✅; host-side workspace access refuses
+  links/escapes ✅; per-campaign cloud-GPU backend.
 - Never: run agent code on the host; mount hidden data into an agent container.
-- Done when: a corrupted blob mid-restore leaves the original workspace intact; a planted host-escape test fails.
+- Done when: a corrupted blob mid-restore leaves the original workspace intact; a planted host-escape test fails. ✅
 
 **Model gateway** (✅ core) — three access modes (OW / API / BYOS allowlist), provenance on every output, strict
 schemas, redaction. Add: per-host pacing; cost tables; the provider registry verified each release; same-family detection
 (needed for the "critic ≠ proposer family" rule).
 
 ### L1 Control plane (🟡)
-- Must: budgets in neutral units **persisted across crash and fork** plus a wall-clock unit; provider outages uncharged
-  (ScienceFlow); **infrastructure failure vs policy failure** classification, with infra-failed units excluded from paired
-  comparisons and retried (AutoSaddler, ScienceIDE; CR P0-1); evaluation allocator (racing, successive halving, value of
+- Must: budgets in neutral units **persisted across crash and fork** plus a wall-clock unit (✅ per run; campaign-level
+  to do); provider outages uncharged ✅ (ScienceFlow); **infrastructure failure vs policy failure** classification, with
+  infra-failed units excluded from paired comparisons and retried ✅ (AutoSaddler, ScienceIDE; CR P0-1); evaluation allocator (racing, successive halving, value of
   information); LLM controllers may only downgrade (deny, shrink, kill-with-code-checked-evidence).
-- Done when: a Docker outage mid-campaign changes no accept/reject decision.
+- Done when: a Docker outage mid-campaign changes no accept/reject decision. ✅
 
 ### L2 Evidence store & reporting (🟡)
 - Must: append-only, content-addressed ✅; claims only from evidence ✅; **Reproducibility Bundle** per run and per claim
@@ -361,7 +362,7 @@ claim "self-improving research harness" refers only to VALIDATED loops.
 - **Agent harness objective** = pinned benchmark pass rate, gated identically.
 - No objective ever uses an LLM judge as its only signal.
 
-### 6.4 The headline experiment (M2)
+### 6.4 The headline experiment (M5; needs the literature module and dated snapshots)
 Freeze literature and data at date T (after all executor models' cutoffs). Evolve the research harness on tasks whose
 answers resolve in window (T, T1]. Then, with no further changes, run it on window (T1, T2]. **Success = the evolved
 harness has higher VDS and calibration on (T1, T2] than the seed harness, with CIs.** This makes the self-improvement
@@ -481,7 +482,7 @@ Principle: always keep one end-to-end path working. Build the Kernel early so ev
 
 | Milestone | Builds | Exit test |
 |---|---|---|
-| **M0 Hardening** (P0) | infra/policy split; winner re-measure; safe snapshot restore; resume; gate unit-alignment; persisted budget; canary + leak audit | all §7 tests that apply to existing code pass |
+| **M0 Hardening** (P0) ✅ 2026-10-06 | infra/policy split; winner re-measure; safe snapshot restore; resume; gate unit-alignment; persisted budget; canary + leak audit | all §7 tests that apply to existing code pass |
 | **M1 Kernel v1** | Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data); certificates; Reproducibility Bundle; reporting checklist; prediction ledger | seeded 50-claim suite classified correctly; `chh reproduce` works |
 | **M2 Research loop v1** | Kernel-integrated loop; experiment tree; improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ML task suite ≥ 20 tasks (rings-style + real datasets + ML-repair family) | ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures |
 | **M3 Evolution v1** | evidence export; agentic proposer; structured diagnosis; family-separated critic; smoke; ledger upgrades; cost term | first real campaign: certified improvement holding on sealed split |
