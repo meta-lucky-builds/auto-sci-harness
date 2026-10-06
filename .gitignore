@@ -10,3 +10,4 @@ dist/
 *.db
 # secrets
 .env
+github repo/
