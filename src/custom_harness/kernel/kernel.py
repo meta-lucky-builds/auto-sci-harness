@@ -71,14 +71,20 @@ class Kernel:
 
     # ------------------------------------------------------------------ certification
     def certify(self, claim: Claim, evidence_ids: list[str] | tuple[str, ...], *,
-                full_chain: bool = True) -> Certificate:
+                full_chain: bool = True, record: bool = True) -> Certificate:
         """Run K0-K9 and issue an immutable certificate (recorded in the ledger). A check that raises is a
         FAILED check. full_chain=False is only for reproducing from a bundle (a ledger excerpt)."""
         ctx = Context(claim=claim, claim_hash=claim.claim_hash(), store=self.store, vault=self.vault,
                       ledger=self.ledger, config=self.config, replayer=self.replayer,
                       evidence_ids=tuple(evidence_ids), full_chain=full_chain)
         results: dict[str, CheckResult] = {}
+        registered = self.vault.registered(ctx.claim_hash)
         for kid in CHECK_IDS:
+            if not registered and kid not in ("K0", "K1", "K2"):
+                # never touch held-out data for an unregistered claim: certify must not be a free look
+                results[kid] = CheckResult(status="fail", reasons=(
+                    "not evaluated: the claim was never pre-registered (held-out data are not read for it)",))
+                continue
             try:
                 results[kid] = ALL_CHECKS[kid](ctx)
             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
@@ -102,6 +108,8 @@ class Kernel:
                           "stats:paired-t-seeds", "stats:bca-examples"),
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),
             vg_ladder=VG_LADDER.get(label.value, VG_LADDER["REJECTED"]), config=asdict(self.config))
+        if not record:
+            return cert
         blob = self.store.blobs.put_json(cert.model_dump(mode="json"))
         self.ledger.append("certificate", {"cert_hash": cert.cert_hash(), "claim_hash": ctx.claim_hash,
                                            "label": label.value, "blob": blob, "resolution": resolution})
@@ -109,10 +117,27 @@ class Kernel:
 
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:
+        """Look up a certificate. Its content must hash to the id it is filed under (catches a mis-filed or
+        edited blob). A forger with write access could still file a self-consistent fake: use verify()."""
         for e in self.ledger.entries("certificate"):
             if e.body["cert_hash"] == cert_hash:
-                return Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
+                cert = Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
+                if cert.cert_hash() != cert_hash or cert.claim_hash != e.body.get("claim_hash"):
+                    raise KernelError(f"certificate {cert_hash[:12]}: content does not match its ledger entry")
+                return cert
         raise KernelError(f"no certificate {cert_hash[:12]}")
+
+    def verify(self, cert_hash: str) -> list[str]:
+        """Re-derive a certificate from the evidence (re-running every check, including re-execution) and
+        report every difference. Empty list = the certificate is what the Kernel issues today. This, not the
+        ledger entry, is what makes a certificate trustworthy: the ledger is tamper-evident, not authenticated."""
+        cert = self.certificate(cert_hash)
+        again = self.certify(Claim.model_validate(cert.claim), list(cert.evidence_ids), record=False)
+        problems = [f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived"
+                    for k in CHECK_IDS if cert.checks[k].status != again.checks[k].status]
+        if again.label != cert.label:
+            problems.append(f"label {cert.label.value} recorded, {again.label.value} re-derived")
+        return problems
 
     def retract(self, cert_hash: str, reason: str) -> Entry:
         self.certificate(cert_hash)  # must exist

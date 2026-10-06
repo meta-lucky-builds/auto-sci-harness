@@ -62,7 +62,9 @@ class AnalysisPlan(_Model):
     n_comparisons: int = 1  # claims tested on the same targets in this family (Bonferroni)
     stopping_rule: Literal["fixed_n"] = "fixed_n"
     n_boot: int = 2000
-    reproduce: Literal["first_seed", "all"] = "first_seed"
+    # "sampled_seed": the Kernel re-executes one seed per arm and target, chosen from a hash of the evidence
+    # AFTER it is fixed (a program that is deterministic only for a predictable seed is caught); "all": every seed
+    reproduce: Literal["sampled_seed", "all"] = "sampled_seed"
     reproduce_tolerance: float = 0.0  # max |metric difference| on re-execution; 0 = identical predictions
 
 

@@ -128,7 +128,7 @@ def _edited_after_registration(w, delta):
     registered = w.claim(good, base, delta=0.2)
     w.kernel.preregister(registered)
     edited = w.claim(good, base, delta=delta)  # the claim certified is not the claim registered
-    return edited, w.evaluate_all(edited)
+    return edited, w.evaluate_all(edited, log_read=False)  # the vault refuses evaluate reads for it
 
 
 @scenario("p-hacked", "K2")

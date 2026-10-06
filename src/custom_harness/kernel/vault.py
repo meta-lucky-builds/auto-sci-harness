@@ -34,7 +34,15 @@ class DatasetRole(StrEnum):
 HELD_OUT_ROLES = frozenset({DatasetRole.TEST, DatasetRole.SEALED, DatasetRole.EXTERNAL, DatasetRole.FUTURE})
 EXTERNAL_ROLES = frozenset({DatasetRole.EXTERNAL, DatasetRole.FUTURE})
 
-Purpose = Literal["develop", "evaluate", "audit", "kernel", "reproduce"]
+# Declared by TRUSTED host code (never by agents, which have no vault access). The log provides accountability;
+# it cannot enforce, inside one process, that a declared purpose is the true one.
+#   develop   development use (peeking if before a claim's registration; never allowed on a claim's targets)
+#   evaluate  scoring one arm/seed of a REGISTERED claim
+#   audit     human/inspection read (peeking for any claim registered later)
+#   kernel    the Kernel or the integrity audit re-checking a REGISTERED claim
+#   leakscan  building leak fingerprints (canary/label-window scan); never used to score or model
+#   reproduce re-checking a bundle
+Purpose = Literal["develop", "evaluate", "audit", "kernel", "leakscan", "reproduce"]
 
 
 class _Model(BaseModel):
@@ -84,11 +92,19 @@ class Vault:
         files = {name: FileRef(blob=self.store.blobs.put(data), private=False) for name, data in public.items()}
         files |= {name: FileRef(blob=self.store.blobs.put(data), private=True) for name, data in private.items()}
         h = dataset_hash(files)
-        existing = self.datasets().get(dataset_id)
+        known = self.datasets()
+        existing = known.get(dataset_id)
         if existing is not None:
             if existing.hash != h or existing.role != role:
                 raise VaultError(f"dataset {dataset_id!r} already registered with different content or role")
             return existing
+        # laundering: private bytes of one dataset must never become a public file of another (or vice versa)
+        for other in known.values():
+            for oname, oref in other.files.items():
+                for name, ref in files.items():
+                    if ref.blob == oref.blob and ref.private != oref.private:
+                        raise VaultError(f"{dataset_id}/{name} has the same bytes as {other.dataset_id}/{oname}, which "
+                                         f"is {'private' if oref.private else 'public'} there")
         rec = DatasetRecord(dataset_id=dataset_id, role=role, files=files, hash=h,
                             canary_ref=self.store.blobs.put(canary.encode()) if canary else None)
         entry = self.ledger.append("register_dataset", rec.model_dump(mode="json", exclude={"seq"}))
@@ -140,11 +156,18 @@ class Vault:
         ref = self._file(dataset_id, name)
         if purpose == "evaluate" and (claim_hash is None or arm is None or seed is None):
             raise VaultError("an 'evaluate' read must name the claim, the arm and the seed")
+        if purpose in ("evaluate", "kernel") and not self.registered(claim_hash):
+            raise VaultError(f"claim {str(claim_hash)[:12]} is not pre-registered: held-out data are only read for "
+                             f"registered claims")
         rec = self.dataset(dataset_id)
         self.ledger.append("data_access", {"dataset_id": dataset_id, "dataset_hash": rec.hash, "file": name,
                                            "private": ref.private, "purpose": purpose, "run_id": run_id,
                                            "claim_hash": claim_hash, "arm": arm, "seed": seed})
         return self.store.blobs.get(ref.blob)
+
+    def registered(self, claim_hash: str | None) -> bool:
+        return claim_hash is not None and any(e.body.get("claim_hash") == claim_hash
+                                              for e in self.ledger.entries("prereg"))
 
     def accesses(self, dataset_id: str | None = None) -> list[Entry]:
         es = self.ledger.entries("data_access")

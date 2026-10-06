@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 KERNEL_TESTS = ["tests/test_kernel_units.py", "tests/test_kernel_bundle.py", "tests/test_kernel_suite.py",
-                "tests/test_kernel_quality.py"]
+                "tests/test_kernel_quality.py", "tests/test_kernel_exploits.py"]
 
 
 def run(name: str, cmd: list[str]) -> bool:

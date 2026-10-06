@@ -190,15 +190,17 @@ def test_k3_paths(base):
     assert "no replayer configured" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=None)))
     assert "failed: boom" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(ExecutionError("boom")))))
     assert "produced no predictions" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(None))))
-    tol = variant(c, analysis_plan__reproduce_tolerance=0.05)
+    tol = variant(c, analysis_plan__reproduce_tolerance=0.02)
+    w.kernel.preregister(tol)
     tol_ids = [add(w, record(w, e).model_copy(update={"claim_hash": tol.claim_hash()})) for e in ids]
     stored = {e: w.store.blobs.get_json(record(w, e).preds_ref) for e in tol_ids}
     same = FixedReplayer(lambda rec: next(p for e, p in stored.items() if record(w, e) == rec))
     assert K.k3_reproduced(ctx(w, tol, tol_ids, replayer=same)).status == "pass"
     assert "not scorable" in reasons(K.k3_reproduced(ctx(w, tol, tol_ids, replayer=FixedReplayer(["0"]))))
     flipped = FixedReplayer(lambda rec: ["9"] * 120)
-    assert "tolerance 0.05" in reasons(K.k3_reproduced(ctx(w, tol, tol_ids, replayer=flipped)))
+    assert "tolerance 0.02" in reasons(K.k3_reproduced(ctx(w, tol, tol_ids, replayer=flipped)))
     odd = variant(c, analysis_plan__seeds=[7, 8, 9])
+    w.kernel.preregister(odd)
     odd_ids = [add(w, record(w, ids[0]).model_copy(update={"claim_hash": odd.claim_hash()}))]
     assert "no record selected" in reasons(K.k3_reproduced(ctx(w, odd, odd_ids)))
 
@@ -289,6 +291,7 @@ def test_k9_paths(base):
     w.vault.register_artifact("labels_as_code", w.store.blobs.get(label_blob), "method")
     sneaky = variant(c, subject={"artifact_id": "labels_as_code", "hash": label_blob},
                      generalization_targets=["test", "ghost"])
+    w.kernel.preregister(sneaky)
     bad_argv = [add(w, record(w, ids[0]).model_copy(update={"argv": ("{python}", "/etc/passwd"),
                                                              "claim_hash": sneaky.claim_hash()}))]
     text = reasons(K.k9_leaks(ctx(w, sneaky, bad_argv)))

@@ -7,6 +7,7 @@ exception inside a check is a failure of that check, never a pass (see kernel.Ke
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import math
@@ -46,6 +47,7 @@ class KernelConfig:
     max_alpha: float = 0.2
     min_boot: int = 1000
     min_risk_bits: float = 2.0  # K7: success must have been at most 2^-2 = 25% likely under the null
+    max_reproduce_tolerance: float = 0.02  # K1: a looser declared re-execution tolerance makes K3 meaningless
 
 
 @dataclass
@@ -173,8 +175,8 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(f"alpha must be in (0, {cfg.max_alpha}]")
     if plan.n_comparisons < 1 or plan.n_boot < cfg.min_boot:
         reasons.append(f"n_comparisons must be >= 1 and n_boot >= {cfg.min_boot}")
-    if not plan.reproduce_tolerance >= 0:
-        reasons.append("reproduce_tolerance must be finite and >= 0")
+    if not 0 <= plan.reproduce_tolerance <= cfg.max_reproduce_tolerance:
+        reasons.append(f"reproduce_tolerance must be in [0, {cfg.max_reproduce_tolerance}]")
     e = c.effect
     if not e.predicted_lo <= e.predicted_hi:
         reasons.append("predicted effect interval must be finite with lo <= hi")
@@ -204,9 +206,13 @@ def k2_preregistered(ctx: Context) -> CheckResult:
         # Peeking = a development or inspection read, or evaluating THIS claim, before it was registered.
         # Earlier reads made to evaluate or certify OTHER registered claims are test-set reuse, which K4
         # charges as multiplicity (Bonferroni over every claim registered on the target), not a K2 failure.
+        # Reads made for a claim that was NOT registered at the time of the read are peeking too (a throwaway
+        # "claim" must not become a free look at the labels).
+        registered_at = {e.body.get("claim_hash"): e.seq for e in reversed(ctx.ledger.entries("prereg"))}
         early = [a for a in ctx.vault.accesses(target)
                  if a.body.get("private") and a.seq < prereg.seq
-                 and (a.body.get("purpose") in PEEKING_PURPOSES or a.body.get("claim_hash") == ctx.claim_hash)]
+                 and (a.body.get("purpose") in PEEKING_PURPOSES or a.body.get("claim_hash") == ctx.claim_hash
+                      or registered_at.get(a.body.get("claim_hash"), a.seq + 1) > a.seq)]
         if early:
             reasons.append(f"private data of target {target!r} was read {len(early)} time(s) before "
                            f"pre-registration (first at ledger seq {early[0].seq}, purpose "
@@ -233,7 +239,7 @@ def k3_reproduced(ctx: Context) -> CheckResult:
     if ctx.replayer is None:
         return _result([*reasons, "no replayer configured: re-execution was not performed"], obs)
     plan = ctx.claim.analysis_plan
-    chosen = [(e, r) for e, r in ctx.records if plan.reproduce == "all" or r.seed == plan.seeds[0]]
+    chosen = [(e, r) for e, r in ctx.records if plan.reproduce == "all" or r.seed == replay_seed(ctx, r)]
     if not chosen:
         reasons.append("no record selected for re-execution")
     for eid, rec in chosen:
@@ -259,6 +265,16 @@ def k3_reproduced(ctx: Context) -> CheckResult:
                                f"(tolerance {plan.reproduce_tolerance})")
     obs.append(f"re-executed {len(chosen)} record(s) ({plan.reproduce})")
     return _result(reasons, obs)
+
+
+def replay_seed(ctx: Context, rec: ExecRecord) -> int:
+    """The seed re-executed for (arm, target) under 'sampled_seed': derived from a hash of ALL evidence after it
+    is fixed, so a claimant cannot know in advance which seed will be checked. (Re-running evaluations to
+    steer it would leave unreported held-out reads, which K4 rejects.)"""
+    material = "|".join(sorted(r.preds_ref for _, r in ctx.records))
+    digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
+    seeds = sorted(ctx.claim.analysis_plan.seeds)
+    return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
 
 
 # ------------------------------------------------------------------ K4 statistically valid procedure
@@ -454,6 +470,10 @@ def k8_background(ctx: Context) -> CheckResult:
             reasons.append(f"{eid}: label file {rec.label_file!r} is not a private file of {rec.target!r}")
         for role, ref in rec.inputs.items():
             reg = datasets[ref.dataset_id].files.get(ref.file)
+            owners = sorted(f"{d}/{n}" for d, drec in datasets.items() for n, f in drec.files.items()
+                            if f.private and f.blob == ref.blob)
+            if owners:
+                reasons.append(f"{eid}: input {role} has the bytes of private file(s) {owners}")
             if reg is None or reg.blob != ref.blob:
                 reasons.append(f"{eid}: input {role} is not the registered bytes of {ref.dataset_id}/{ref.file}")
             elif reg.private:
@@ -484,6 +504,11 @@ def k9_leaks(ctx: Context) -> CheckResult:
         except OSError:
             continue  # K0 reports unresolvable artifacts
         reasons += leak.scan_text(text, f"{role} code", canaries, windows)
+    # program inputs: hidden labels must not reach a program even as a renamed or re-headed copy (records here
+    # passed K0, so every input blob resolves; a read error would fail this check via certify, never pass it)
+    for blob in sorted({ref.blob for _, r in ctx.records for ref in r.inputs.values()}):
+        text = ctx.store.blobs.get(blob).decode("utf-8", errors="ignore")
+        reasons += leak.scan_text(text, f"program input {blob[:12]}", canaries, windows)
     fp = {"hashes": private_blobs, "canaries": canaries, "label_windows": windows}
     for run_id in sorted({r.run_id for _, r in ctx.records}):
         result = leak.leak_audit(ctx.store.trace(run_id), None, fp, canaries)
