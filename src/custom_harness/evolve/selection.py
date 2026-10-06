@@ -75,7 +75,7 @@ class RaceResult:
 
 
 def race(candidates: list[Hashable], units: list[Unit], evaluate: Callable[[Hashable, Unit], Score],
-         parent_scores: dict[Unit, Score], *, rounds: int = 3, keep: int = 1) -> RaceResult:
+         parent_scores: dict[Unit, Score], *, rounds: int = 3, keep: int = 1, n_boot: int = 4000) -> RaceResult:
     """Successive halving with a paired-CI elimination rule.
 
     After each round (a chunk of units), a candidate is dropped if its paired-difference CI upper
@@ -103,7 +103,7 @@ def race(candidates: list[Hashable], units: list[Unit], evaluate: Callable[[Hash
                 diffs[c].append(score - parent_scores[u])
         ranked = []
         for c in alive:
-            mean, lo, hi = paired_ci(diffs[c], seed=r)
+            mean, lo, hi = paired_ci(diffs[c], seed=r, n_boot=n_boot)
             stats[c] = {"mean_diff": mean, "lo": lo, "hi": hi, "n_units": len(diffs[c]),
                         "excluded": excluded[c], "eliminated_round": None}
             ranked.append((mean, c))
@@ -140,17 +140,18 @@ def _as_sample(x: PairedSample | list[float]) -> PairedSample:
 
 def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], *,
          non_regression_eps: float = 0.0, require_evolve_ci: bool = True, max_excluded_frac: float = 0.25,
-         min_units: int = 2) -> GateDecision:
+         min_units: int = 2, n_boot: int = 4000) -> GateDecision:
     """Accept only if:
       0. alignment: each split has >= min_units valid paired units, and at most max_excluded_frac of
          its units were excluded for infrastructure failures (else the decision is not trustworthy:
          reject, fail closed; this also stops a candidate that breaks the environment from winning);
-      1. evolve evidence: paired CI lower bound > 0 (if require_evolve_ci) — a real improvement;
+      1. evolve evidence: paired CI lower bound > 0 (if require_evolve_ci) — a real improvement. Pass a
+         FRESH re-measurement here, never the race data the winner was selected on (winner's curse);
       2. gate split (never shown to the proposer): mean diff > 0 and CI lower bound >= -eps — no regression.
     With few tasks these CIs are wide, so the gate is conservative by construction."""
     ev_s, gt_s = _as_sample(evolve), _as_sample(gate_)
-    em, elo, ehi = paired_ci(ev_s.diffs, seed=1)
-    gm, glo, ghi = paired_ci(gt_s.diffs, seed=2)
+    em, elo, ehi = paired_ci(ev_s.diffs, seed=1, n_boot=n_boot)
+    gm, glo, ghi = paired_ci(gt_s.diffs, seed=2, n_boot=n_boot)
     ev = {"mean_diff": em, "lo": elo, "hi": ehi, "n": len(ev_s.diffs), "excluded": len(ev_s.excluded)}
     gt = {"mean_diff": gm, "lo": glo, "hi": ghi, "n": len(gt_s.diffs), "excluded": len(gt_s.excluded)}
     for name, smp in (("evolve", ev_s), ("gate", gt_s)):

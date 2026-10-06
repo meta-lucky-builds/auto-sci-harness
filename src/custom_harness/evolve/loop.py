@@ -1,8 +1,13 @@
 """One harness-evolution generation (PLAN L6 pipeline):
 
 parent evaluated on evolve split -> diagnose -> propose typed edits -> static checks ->
-race candidates on evolve split -> gate best survivor on gate split -> record lineage (incl. rejects),
+race candidates on evolve split -> RE-MEASURE the race winner and the parent on fresh runs (fresh seeds,
+same evolve tasks) -> gate on (fresh evolve evidence, gate split) -> record lineage (incl. rejects),
 harness-science ledger and proposer calibration.
+
+Why re-measure (CR P0-2, winner's curse): the race picks the candidate with the best observed mean, so
+its race data are biased upward; reusing them as acceptance evidence inflates false accepts. The gate
+only ever sees evolve evidence the selection step did not look at.
 
 The sealed split is never touched here (PLAN E3).
 """
@@ -26,6 +31,9 @@ from .selection import Unit, gate, paired_sample, race
 @dataclass
 class EvolveConfig:
     seeds: tuple[int, ...] = (0,)
+    # seeds for the fresh re-measurement of the race winner; default = seeds shifted by 1000.
+    # Must be disjoint from `seeds`.
+    remeasure_seeds: tuple[int, ...] | None = None
     n_edits: int = 3
     race_rounds: int = 2
     non_regression_eps: float = 0.0
@@ -91,6 +99,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         raise ValueError("need at least one evolve task and one gate task")
     if {u[0] for u in evolve_units} & {u[0] for u in gate_units}:
         raise ValueError("a task id appears in both the evolve and the gate split")
+    fresh_seeds = cfg.remeasure_seeds if cfg.remeasure_seeds is not None else tuple(s + 1000 for s in cfg.seeds)
+    if not fresh_seeds or set(fresh_seeds) & set(cfg.seeds):
+        raise ValueError("remeasure_seeds must be non-empty and disjoint from seeds")
+    fresh_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in fresh_seeds]
     parent_hash = parent.spec_hash()
     calls_before = evaluator.calls
 
@@ -129,19 +141,23 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if rr.survivors:
             best = rr.survivors[0]
             edit, spec = candidates[best]
-            evolve_s = paired_sample(evolve_units, lambda u: evaluator.score(spec, u), parent_scores.get)
+            # fresh runs for BOTH arms: the race data that selected this winner are never acceptance evidence
+            evolve_s = paired_sample(fresh_units, lambda u: evaluator.score(spec, u),
+                                     lambda u: evaluator.score(parent, u))
             gate_s = paired_sample(gate_units, lambda u: evaluator.score(spec, u),
                                    lambda u: evaluator.score(parent, u))
             d = gate(evolve_s, gate_s, non_regression_eps=cfg.non_regression_eps,
                      require_evolve_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
             decision = d.reason
             records.append({"status": "accepted" if d.accepted else "rejected_gate", "candidate": best,
-                            "edit": edit.model_dump(), "evolve": d.evolve, "gate": d.gate})
+                            "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
+                            "gate": d.gate})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
             store.append_record("harness_edit", {
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
                 "rationale": edit.rationale, "accepted": d.accepted, "decision": d.reason,
                 "predicted_delta": edit.predicted.expected_delta, "actual_evolve_delta": d.evolve["mean_diff"],
+                "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"],
                 "clusters_claimed": edit.predicted.failure_clusters_fixed})
             if d.accepted:
