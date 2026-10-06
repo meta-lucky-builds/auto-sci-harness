@@ -1,4 +1,5 @@
 # custom-harness — Master Design Plan
+n> Superseded for WHAT/WHEN by `GOAL.md` (2026-10-06). This file is kept as design history and rationale.
 
 Date: 2026-10-05. Source of truth for the survey: `../autoresearch_survey/00_SYNTHESIS.md` (cited below as **S§n**).
 Status: **design only**. No code exists. Every number below that comes from a source is "as reported by a Haiku summary" and must be re-checked in the paper before we rely on it (S§0).
