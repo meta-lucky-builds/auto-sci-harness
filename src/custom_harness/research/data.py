@@ -60,24 +60,81 @@ def _as_float(v: str) -> float | None:
         return None
 
 
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    if len(xs) < 3:
+        return 0.0
+    mx, my = statistics.fmean(xs), statistics.fmean(ys)
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+    sxx = sum((x - mx) ** 2 for x in xs)
+    syy = sum((y - my) ** 2 for y in ys)
+    return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
+
+
+def _eta_squared(xs: list[float], labels: list[str]) -> float:
+    """Correlation ratio: share of a numeric feature's variance explained by the class (0..1)."""
+    if len(xs) < 3:
+        return 0.0
+    m = statistics.fmean(xs)
+    total = sum((x - m) ** 2 for x in xs)
+    if total == 0:
+        return 0.0
+    groups: dict[str, list[float]] = {}
+    for x, y in zip(xs, labels, strict=True):
+        groups.setdefault(y, []).append(x)
+    between = sum(len(g) * (statistics.fmean(g) - m) ** 2 for g in groups.values())
+    return between / total
+
+
+def _role(info: dict[str, Any], n_rows: int, nums: list[float]) -> str:
+    """Unique-per-row alone does NOT mean an id: continuous measurements are unique per row too. Id-like =
+    a categorical value unique per row, or integers forming one consecutive run (0..n-1, 1..n, ...)."""
+    u = info.get("n_unique", 0)
+    if u <= 1:
+        return "constant"
+    if u == 2:
+        return "binary"
+    if u >= 0.98 * n_rows and n_rows > 20:  # tolerant: a duplicated row also duplicates its id
+        if info["type"] == "categorical":
+            return "id-like"
+        if all(v == int(v) for v in nums) and max(nums) - min(nums) == u - 1:
+            return "id-like"
+    if info["type"] == "numeric" and u <= 10:
+        return "coded-categorical"
+    return "continuous" if info["type"] == "numeric" else "categorical"
+
+
 def profile(train_csv: Path, target: str, max_columns: int = 60) -> dict[str, Any]:
-    """Compact, LLM-readable profile: shape, per-column type/missing/stats, target distribution,
-    simple leakage flags. Deterministic."""
+    """Compact, LLM-readable profile (GOAL L4.2): shape; per-column type, role, missing, stats, outliers;
+    target distribution; feature-target association ranking (|Pearson r| for regression, correlation ratio
+    eta^2 for classification); redundant feature pairs; leakage / duplicate / imbalance flags. Deterministic,
+    computed by code on the DEV training split only."""
     header, rows = read_csv(train_csv)
     cols: list[dict[str, Any]] = []
+    numeric: dict[str, list[float | None]] = {}
     for j, name in enumerate(header[:max_columns]):
         values = [r[j] for r in rows if j < len(r)]
         missing = sum(1 for v in values if v.strip() == "")
-        nums = [f for f in (_as_float(v) for v in values) if f is not None]
+        parsed = [_as_float(v) for v in values]
+        nums = [f for f in parsed if f is not None]
         info: dict[str, Any] = {"name": name, "missing": missing}
         if len(nums) >= 0.95 * max(1, len(values) - missing):
             info["type"] = "numeric"
             if nums:
                 info.update(min=min(nums), max=max(nums), mean=round(statistics.fmean(nums), 4),
                             std=round(statistics.pstdev(nums), 4), n_unique=len(set(nums)))
+                if len(nums) >= 8:
+                    q = statistics.quantiles(nums, n=4)
+                    iqr = q[2] - q[0]
+                    sd = statistics.pstdev(nums)
+                    info["outliers_iqr"] = sum(1 for v in nums if v < q[0] - 1.5 * iqr or v > q[2] + 1.5 * iqr)
+                    info["outliers_z4"] = sum(1 for v in nums if sd > 0 and abs(v - info["mean"]) > 4 * sd)
+                    info["skew"] = round(sum((v - statistics.fmean(nums)) ** 3 for v in nums)
+                                         / (len(nums) * sd ** 3), 3) if sd > 0 else 0.0
+                numeric[name] = parsed
         else:
             counts = Counter(values)
             info.update(type="categorical", n_unique=len(counts), top=counts.most_common(5))
+        info["role"] = _role(info, len(rows), nums)
         cols.append(info)
     ti = header.index(target)
     tvals = [r[ti] for r in rows]
@@ -91,12 +148,53 @@ def profile(train_csv: Path, target: str, max_columns: int = 60) -> dict[str, An
         target_info.update(mean=statistics.fmean(tnums), std=statistics.pstdev(tnums))
     flags = []
     for c in cols:
-        if c["name"] != target and c.get("n_unique") == len(rows) and c["type"] == "categorical":
+        if c["name"] != target and c["role"] == "id-like":
             flags.append(f"column '{c['name']}' is unique per row (likely an ID; do not use as a feature)")
+        if c["name"] != target and c["role"] == "constant":
+            flags.append(f"column '{c['name']}' is constant (no information)")
         if c["missing"] > 0.3 * len(rows):
             flags.append(f"column '{c['name']}' is {c['missing'] / len(rows):.0%} missing")
+    # feature-target association (complete rows only), ranked
+    assoc = []
+    features = [n for n in numeric if n != target]
+    for name in features:
+        labelled = [(x, t) for x, t in zip(numeric[name], tvals, strict=True) if x is not None]
+        xs = [p[0] for p in labelled]
+        if is_classification:
+            score = _eta_squared(xs, [p[1] for p in labelled])
+        else:
+            keep: list[tuple[float, float]] = []
+            for x, t in labelled:
+                y = _as_float(t)
+                if y is not None:
+                    keep.append((x, y))
+            score = abs(_pearson([k[0] for k in keep], [k[1] for k in keep]))
+        assoc.append((round(score, 4), name))
+        if score > 0.98:
+            flags.append(f"column '{name}' almost determines the target (association {score:.3f}): possible leak")
+    assoc.sort(reverse=True)
+    target_info["association_measure"] = "eta_squared" if is_classification else "abs_pearson"
+    target_info["top_features"] = [{"name": n, "association": s} for s, n in assoc[:12]]
+    # redundant numeric feature pairs (bounded work: first 40 numeric features)
+    redundant = []
+    sample = features[:40]
+    for i, a in enumerate(sample):
+        for b in sample[i + 1:]:
+            pairs = [(x, y) for x, y in zip(numeric[a], numeric[b], strict=True) if x is not None and y is not None]
+            r = _pearson([p[0] for p in pairs], [p[1] for p in pairs])
+            if abs(r) > 0.95:
+                redundant.append({"a": a, "b": b, "r": round(r, 4)})
+    duplicates = len(rows) - len({tuple(r) for r in rows})
+    if duplicates:
+        flags.append(f"{duplicates} duplicate rows")
+    if is_classification:
+        counts = Counter(tvals)
+        minority = min(counts.values()) / len(tvals)
+        if minority < 0.1:
+            flags.append(f"class imbalance: smallest class is {minority:.1%} of rows")
     return {"n_rows": len(rows), "n_columns": len(header), "columns": cols,
-            "columns_truncated": len(header) > max_columns, "target": target_info, "flags": flags}
+            "columns_truncated": len(header) > max_columns, "target": target_info,
+            "redundant_pairs": redundant[:10], "flags": flags}
 
 
 def csv_text(header: list[str], rows: list[list[str]]) -> str:

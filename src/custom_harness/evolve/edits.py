@@ -59,7 +59,20 @@ class EditRejected(ValueError):
     pass
 
 
-DEFAULT_PROTECTED_NODES = ("setup", "verify", "audit")
+# Task setup, the Kernel-integrated end of the loop and the integrity audit are human-only surfaces.
+DEFAULT_PROTECTED_NODES = ("setup", "claim", "confirm", "certify", "replicate", "replica_dev", "replica_claim",
+                           "replica_confirm", "replica_certify", "report", "audit")
+# State keys that only trusted code may write: an added node writing one could fake a claim, a candidate,
+# a certificate or an audit result (state that scoring and reporting depend on).
+RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "claim", "claim_hash", "prereg_seq", "evidence_ids",
+                                  "confirm_failures",
+                                  "certificate", "checklist", "publishable", "publish_blockers", "report",
+                                  "report_ref", "audit", "best", "attempts", "n_attempts", "baseline_dev",
+                                  "baseline_dev_preds_ref", "dev_score", "route", "input", "best_code",
+                                  "n_improves", "critique", "replication_brief", "replica_impl", "replica_best",
+                                  "replica_claim", "replica_claim_hash", "replica_prereg_seq",
+                                  "replica_evidence_ids", "replica_confirm_failures", "replica_certificate",
+                                  "replica_checklist", "replica_publishable", "replica_publish_blockers"})
 _LEAK_PATTERNS = [re.compile(p, re.I) for p in (r"_private", r"test_y", r"/private/", r"\bprivate[/\\]")]
 
 
@@ -143,6 +156,15 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
                 raise EditRejected(f"protected node '{nid}' became unreachable")
     if spec.entry in protected_nodes and new.entry != spec.entry:
         raise EditRejected("entry must remain the protected setup node")
+    protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
+    for nid, node in new.nodes.items():
+        if nid in spec.nodes and node == spec.nodes[nid]:
+            continue  # unchanged nodes were already accepted
+        key = getattr(node, "output_key", None)
+        if key is not None and (key in RESERVED_OUTPUT_KEYS or key.startswith("_")):
+            raise EditRejected(f"node '{nid}' would write reserved state key '{key}'")
+        if getattr(node, "module", None) in protected_modules:
+            raise EditRejected(f"node '{nid}' reuses a protected module outside its protected node")
     for nid in terminal_required:
         if nid in spec.nodes:
             enders = terminal_nodes(new)

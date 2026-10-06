@@ -54,6 +54,22 @@ class DockerSandbox(Sandbox):
         self.runtime = "runsc" if prefer_gvisor and _has_runtime(exe, "runsc") else None
         self.isolation = (f"docker{'+gvisor' if self.runtime else ''}; network={'on' if network else 'off'}; "
                           f"mem={memory}; cpus={cpus}; non-root; read-only rootfs")
+        self._settings = {"image": image, "network": network, "memory": memory, "cpus": cpus, "pids": pids,
+                          "gpus": gpus, "prefer_gvisor": prefer_gvisor, "create_attempts": create_attempts,
+                          "create_backoff_s": create_backoff_s}
+        self._image_id: str | None = None
+
+    def spawn(self, workspace: Path) -> DockerSandbox:
+        return DockerSandbox(workspace, **self._settings)  # type: ignore[arg-type]
+
+    def environment(self) -> dict[str, str]:
+        """Image content id (not just the tag): a re-run on a different image is a different environment."""
+        if self._image_id is None:
+            p = self._docker([self.exe, "image", "inspect", "--format", "{{.Id}}", self.image], timeout_s=60)
+            if p.returncode != 0:
+                raise InfraError(f"cannot inspect image {self.image}: {p.stderr[-300:]}", transient=True)
+            self._image_id = p.stdout.strip()
+        return {"sandbox": self.isolation, "image": self.image, "image_id": self._image_id}
 
     def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
         """create -> start -a -> inspect -> rm. Splitting the steps is what lets us tell an

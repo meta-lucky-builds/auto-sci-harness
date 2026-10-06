@@ -99,6 +99,10 @@ class EvidenceStore:
         self._exec("INSERT INTO evidence VALUES (?, ?, ?, ?)",
                    (ev.id, ev.produced_by_run, int(ev.tier), ev.model_dump_json()))
 
+    def evidence_for_run(self, run_id: str) -> list[Evidence]:
+        rows = self._rows("SELECT body FROM evidence WHERE run_id=? ORDER BY rowid", (run_id,))
+        return [Evidence.model_validate_json(r[0]) for r in rows]
+
     def get_evidence(self, ev_id: str) -> Evidence:
         rows = self._rows("SELECT body FROM evidence WHERE id=?", (ev_id,))
         if not rows:

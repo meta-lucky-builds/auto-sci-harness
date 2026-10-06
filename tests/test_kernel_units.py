@@ -466,13 +466,17 @@ def test_bundle_edge_paths(tmp_path, base):
     fresh = lambda: SandboxReplayer(lambda key: LocalSandbox(tmp_path / "rp" / key, i_understand_no_isolation=True))  # noqa: E731
     rep = reproduce_bundle(bundle, fresh)
     assert rep.reproduced_label == "REJECTED"
-    with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / "holed.zip", "w") as zout:
+    with zipfile.ZipFile(bundle) as zin:
         m = json.loads(zin.read("manifest.json"))
-        drop = m["blobs"][0]
-        for n in zin.namelist():
-            if n != f"blobs/{drop}":
-                zout.writestr(n, zin.read(n))
-    assert any("missing from the bundle" in p for p in reproduce_bundle(tmp_path / "holed.zip", fresh).problems)
+    cert_blob = next(row for row in m["ledger"] if row[1] == "certificate")[2]
+    cert_blob = json.loads(cert_blob)["blob"]
+    for name, drop in (("holed.zip", next(b for b in m["blobs"] if b != cert_blob)), ("nocertblob.zip", cert_blob)):
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / name, "w") as zout:
+            for n in zin.namelist():
+                if n != f"blobs/{drop}":
+                    zout.writestr(n, zin.read(n))
+        rep = reproduce_bundle(tmp_path / name, fresh)  # must report, never crash, whichever blob is missing
+        assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems), rep.problems
     with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / "nocert.zip", "w") as zout:
         m = json.loads(zin.read("manifest.json"))
         m["ledger"] = [row for row in m["ledger"] if row[1] != "certificate"]

@@ -172,11 +172,16 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                 store.add_evidence(Evidence.model_validate(ev))
             except ValueError as e:  # its payload blob is missing: K0 will fail that record
                 problems.append(f"evidence {ev.get('id')} not importable: {e}")
-        original = next((Certificate.model_validate(store.blobs.get_json(e.body["blob"])) for e in entries
-                         if e.kind == "certificate" and e.body["cert_hash"] == manifest["cert_hash"]), None)
-        if original is None:
+        entry = next((e for e in entries if e.kind == "certificate" and e.body["cert_hash"] == manifest["cert_hash"]),
+                     None)
+        if entry is None:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
                                    [*problems, "certificate entry missing from the bundle"])
+        try:
+            original = Certificate.model_validate(store.blobs.get_json(entry.body["blob"]))
+        except OSError:
+            return ReproduceReport(False, bundle_hash, manifest["label"], None,
+                                   [*problems, "certificate content missing from the bundle"])
         kernel = Kernel(store, config=KernelConfig(**manifest["kernel_config"]), replayer=replayer_factory())
         again = kernel.certify(Claim.model_validate(original.claim), list(original.evidence_ids), full_chain=False)
         for kid in CHECK_IDS:

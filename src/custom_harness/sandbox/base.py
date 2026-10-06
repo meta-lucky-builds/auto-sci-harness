@@ -71,3 +71,12 @@ class Sandbox(ABC):
     @abstractmethod
     def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
         ...
+
+    @abstractmethod
+    def spawn(self, workspace: Path) -> Sandbox:
+        """A FRESH sandbox with the same isolation settings and a new, empty workspace (confirmation runs and
+        Kernel re-executions never share a workspace with development runs)."""
+
+    @abstractmethod
+    def environment(self) -> dict[str, str]:
+        """What a re-run must reproduce (recorded in every Kernel evaluation record)."""

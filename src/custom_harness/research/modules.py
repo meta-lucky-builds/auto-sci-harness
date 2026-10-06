@@ -18,17 +18,15 @@ from pathlib import Path
 from typing import Any
 
 from ..gateway import ChatRequest, Message
-from ..records import Claim, Evidence, EvidenceKind
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
 from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
-from ..tiers import Action, Tier, decide
 from ..verify import metrics as M
-from ..verify.leak import ESCAPE_MARKER, leak_audit, new_canary, private_fingerprints
+from ..verify.leak import ESCAPE_MARKER, new_canary
 from ..verify.ranking import bradley_terry, rankings_to_wins
-from ..verify.stats import paired_example_interval, t2_verdict
-from .data import dev_split, profile, read_csv, read_predictions
+from ..verify.stats import paired_example_interval
+from .data import dev_split, profile, read_predictions
 from .task import TaskSpec, load_task
 
 
@@ -111,8 +109,9 @@ def setup(state, params, ctx: ModuleContext):
     shutil.copy2(task_dir / task.baseline_file, _ws(ctx, "baseline.py"))
     labels = dev_split(_ws(ctx, f"data/{task.train_file}"), task.target_column, task.dev_fraction,
                        seed=params.get("split_seed", 0), out_dir=_ws(ctx, "dev"))
-    return {"task": task.model_dump(),
-            "_private_task_dir": str(task_dir),
+    from .claims import register_task  # local import: claims.py builds on the helpers in this module
+    datasets = register_task(ctx, task, task_dir)
+    return {"task": task.model_dump(), "datasets": datasets,
             # per-run canary: lives only in private state; if it ever shows up in a prompt, a response,
             # the trace or the workspace, private state leaked (checked by the audit, I5)
             "_private_canary": new_canary(),
@@ -135,7 +134,7 @@ def baseline_dev(state, params, ctx):
     s = _score(task, labels, preds)
     if s is None:
         raise RuntimeError(f"baseline failed on dev split: {info['stderr_tail'][-500:]}")
-    return {"baseline_dev": s}
+    return {"baseline_dev": s, "baseline_dev_preds_ref": ctx.store.blobs.put_json(preds)}
 
 
 @register("research.tournament")
@@ -179,20 +178,60 @@ def tournament(state, params, ctx):
             "queue": [by_id[i] for i in ordered], "current": None}
 
 
+_CODEISH = ("```", "def ", "import ", "lambda", "==", "()")
+_DIRECTIVE_STARTS = ("use ", "try ", "consider ", "you should", "instead", "add ", "remove ", "replace ", "switch ")
+
+
+@register("research.socratic_filter")
+def socratic_filter(state, params, ctx):
+    """Question-only critic (AHOIS, GOAL L4.8): enforced in CODE, not by the prompt. A kept item is a single
+    question (ends with '?', one '?', bounded length) and contains no code or directive phrasing; everything
+    else is dropped and counted, so a critic cannot smuggle answers or instructions into later prompts."""
+    raw = (state.get("critique_raw") or {}).get("questions", []) or []
+    kept, dropped = [], 0
+    for q in raw:
+        text = str(q).strip()
+        low = text.lower()
+        if (text.endswith("?") and text.count("?") == 1 and 10 <= len(text) <= 300
+                and not any(c in low for c in _CODEISH) and not low.startswith(_DIRECTIVE_STARTS)
+                and "the answer is" not in low):
+            kept.append(text)
+        else:
+            dropped += 1
+    return {"critique": {"questions": kept[: params.get("max_questions", 5)], "dropped": dropped}}
+
+
 @register("research.next_hypothesis")
 def next_hypothesis(state, params, ctx):
-    """Pop the next ranked hypothesis; when exhausted, route to verify (if something beat the
-    baseline on dev) or give up honestly."""
+    """Pop the next ranked hypothesis. When the queue is exhausted and a candidate beats the baseline on dev:
+    refine it (improve operator, up to max_improves times), then route to the claim; otherwise give up
+    honestly. (Experiment tree, GOAL L4.7: draft -> debug -> improve.)"""
     queue = list(state.get("queue") or [])
     current = queue.pop(0) if queue else None
+    updates: dict[str, Any] = {}
+    best = state.get("best")
+    beats = best is not None and _better(_task(state), best["dev_score"], state["baseline_dev"])
     if current is not None:
         route = "implement"
+    elif beats and state.get("n_improves", 0) < params.get("max_improves", 0):
+        k = state.get("n_improves", 0) + 1
+        current = {"id": f"improve-{k}", "idea": "refine the current best solution", "parent": best["hypothesis_id"],
+                   "root": best.get("root_hypothesis") or best["hypothesis_id"]}
+        updates["best_code"] = ctx.store.blobs.get(best["code_ref"]).decode("utf-8", errors="replace")
+        route = "improve"
     else:
-        best = state.get("best")
-        route = ("verify" if best is not None and _better(_task(state), best["dev_score"], state["baseline_dev"])
-                 else "give_up")
+        route = "verify" if beats else "give_up"
     return {"queue": queue, "current": current, "fixes_for_current": 0, "run_error": None, "impl": None,
-            "route": route}
+            "route": route, **updates}
+
+
+def _dev_better(task: TaskSpec, labels: list[str], new_preds: list[str], best_preds: list[str]) -> bool:
+    """Dev racing: a refinement replaces the incumbent only if a paired dev interval says it is better
+    (one-sided 90%), not merely because its dev score is higher (repeated selection on one dev split
+    overfits it)."""
+    iv = paired_example_interval(M.METRICS[task.metric], labels, [new_preds], [best_preds],
+                                 higher_is_better=task.higher_is_better, alpha=0.2, n_boot=1000)
+    return not iv.degenerate and iv.lo > 0
 
 
 @register("research.run_candidate")
@@ -215,177 +254,33 @@ def run_candidate(state, params, ctx):
     hyp = state.get("current") or {}
     n_attempts = state.get("n_attempts", 0) + 1
     attempt = {"n": n_attempts, "hypothesis_id": hyp.get("id"), "dev_score": s, "error": error,
+               # the hypothesis an improvement refines (improve-k inherits its root), for the replication brief
+               "root_hypothesis": hyp.get("root") or hyp.get("parent") or hyp.get("id"),
+               "dev_preds_ref": ctx.store.blobs.put_json(preds) if s is not None else None,
                "code_ref": ctx.store.blobs.put(code.encode()), "wall_s": info["wall_s"]}
-    attempts = list(state.get("attempts") or []) + [attempt]
     best = state.get("best")
-    if _better(task, s, best["dev_score"] if best else None):
+    is_improve = str(hyp.get("id", "")).startswith("improve-")
+    if is_improve and s is not None and best is not None:
+        attempt["accepted_improvement"] = _dev_better(task, labels, preds, ctx.store.blobs.get_json(
+            best["dev_preds_ref"]))
+        if attempt["accepted_improvement"]:
+            best = attempt
+    elif _better(task, s, best["dev_score"] if best else None):
         best = attempt
+    attempts = list(state.get("attempts") or []) + [attempt]
 
     max_attempts = params.get("max_attempts", 6)
     max_fixes = params.get("max_fixes", 2)
     fixes = state.get("fixes_for_current", 0)
+    improves_left = state.get("n_improves", 0) + (1 if is_improve else 0) < params.get("max_improves", 0)
     if error and fixes < max_fixes and n_attempts < max_attempts:
         route = "fix"
-    elif n_attempts < max_attempts and state.get("queue"):
+    elif n_attempts < max_attempts and (state.get("queue") or (improves_left and best is not None)):
         route = "next"
     elif best is not None and _better(task, best["dev_score"], state["baseline_dev"]):
         route = "verify"
     else:
         route = "give_up"
     return {"dev_score": s, "run_error": error, "attempts": attempts, "n_attempts": n_attempts,
-            "best": best, "route": route, "fixes_for_current": fixes + (1 if route == "fix" else 0)}
-
-
-@register("research.verify")
-def verify(state, params, ctx):
-    """Hidden-test verification (PLAN D3). Produces T1 metric evidence per seed and a T2 statistical
-    verdict, then a claim. Negative / inconclusive results become claims too."""
-    _require_isolation(ctx)
-    task = _task(state)
-    best = state.get("best")
-    if best is None:
-        return {"verdict": {"verified": False, "reason": "no working candidate"}}
-    seeds = params.get("seeds", [0, 1, 2])
-    task_dir = Path(state["_private_task_dir"])
-    _, label_rows = read_csv(task_dir / "private" / task.test_labels_file)
-    y_test = [r[0] for r in label_rows]
-    _ws(ctx, "solution.py").write_bytes(ctx.store.blobs.get(best["code_ref"]))
-    train, test = f"data/{task.train_file}", f"data/{task.test_features_file}"
-
-    scores: dict[str, list[float]] = {"solution": [], "baseline": []}
-    preds_by_seed: dict[str, list[list[str]]] = {"solution": [], "baseline": []}
-    evidence_ids: list[str] = []
-    for arm, script in (("solution", "solution.py"), ("baseline", "baseline.py")):
-        for seed in seeds:
-            preds, info = _run_solution(ctx, script, train, test, seed, task.solution_timeout_s)
-            s = _score(task, y_test, preds)
-            if s is None:
-                raise RuntimeError(f"{arm} failed on test (seed {seed}): {info['stderr_tail'][-500:]}")
-            scores[arm].append(s)
-            preds_by_seed[arm].append(preds)
-            payload = {"arm": arm, "seed": seed, "metric": task.metric, "score": s,
-                       "preds_ref": ctx.store.blobs.put_json(preds), "code_ref":
-                       best["code_ref"] if arm == "solution" else ctx.store.blobs.put(
-                           _ws(ctx, "baseline.py").read_bytes()),
-                       "contract": "solution CLI v1", "train": train, "test": test}
-            ev = Evidence(kind=EvidenceKind.METRIC, tier=Tier.T1_EXECUTABLE, verifier_id=f"metric:{task.metric}",
-                          produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(payload),
-                          summary=f"{arm} seed={seed} {task.metric}={s:.5g}")
-            ctx.store.add_evidence(ev)
-            evidence_ids.append(ev.id)
-
-    seed_v = t2_verdict(scores["solution"], scores["baseline"], higher_is_better=task.higher_is_better,
-                        min_seeds=params.get("min_seeds", 3))
-    ex_ci = paired_example_interval(M.METRICS[task.metric], y_test, preds_by_seed["solution"],
-                                    preds_by_seed["baseline"], higher_is_better=task.higher_is_better)
-    # A degenerate seed check (identical difference on every seed: the method ignores the seed) carries no
-    # information: it is reported as such, and the evidence then rests on test-example resampling alone.
-    seed_ok = seed_v.verified or seed_v.degenerate
-    verified = seed_ok and not ex_ci.degenerate and ex_ci.lo > 0
-    stat_payload = {"seed_verdict": seed_v.reason, "seed_ci": seed_v.ci.__dict__ if seed_v.ci else None,
-                    "seed_check_degenerate": seed_v.degenerate,
-                    "example_ci": ex_ci.__dict__, "verified": verified, "scores": scores,
-                    "rule": "paired-seed t CI excludes 0 (or is degenerate and reported so) AND BCa test-example "
-                            "CI averaged over seeds excludes 0"}
-    stat_ev = Evidence(kind=EvidenceKind.STAT, tier=Tier.T2_STATISTICAL, verifier_id="t2:seed+example-bootstrap",
-                       produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(stat_payload),
-                       summary=("verified" if verified else "not verified") + f": {seed_v.reason}")
-    ctx.store.add_evidence(stat_ev)
-    evidence_ids.append(stat_ev.id)
-
-    mean = lambda xs: sum(xs) / len(xs)  # noqa: E731
-    hyp = next((a for a in state["attempts"] if a["code_ref"] == best["code_ref"]), best)
-    if verified:
-        text = (f"On task '{task.id}', the solution for hypothesis {hyp.get('hypothesis_id')} improves "
-                f"{task.metric} over the baseline: {mean(scores['solution']):.4g} vs "
-                f"{mean(scores['baseline']):.4g} (mean over seeds {seeds}); {seed_v.reason}; test-example "
-                f"95% CI [{ex_ci.lo:.4g}, {ex_ci.hi:.4g}].")
-    else:
-        text = (f"On task '{task.id}', the best solution (hypothesis {hyp.get('hypothesis_id')}) did NOT show a "
-                f"verified improvement over the baseline on {task.metric}: {mean(scores['solution']):.4g} vs "
-                f"{mean(scores['baseline']):.4g}. {seed_v.reason}; test-example CI "
-                f"[{ex_ci.lo:.4g}, {ex_ci.hi:.4g}].")
-    claim = Claim(text=text, evidence_ids=tuple(evidence_ids))
-    ctx.store.add_claim(claim)
-    return {"verdict": {"verified": verified, "claim_id": claim.id, "reason": seed_v.reason,
-                        "solution_mean": mean(scores["solution"]), "baseline_mean": mean(scores["baseline"]),
-                        "example_ci": [ex_ci.lo, ex_ci.hi]},
-            "claims": list(state.get("claims") or []) + [claim.id]}
-
-
-@register("research.report")
-def report(state, params, ctx):
-    """Report generated from the claim graph only; every number cites evidence (Chain-of-Evidence)."""
-    task = _task(state)
-    lines = [f"# Research report: {task.title}", "",
-             f"Task `{task.id}` · metric `{task.metric}` "
-             f"({'higher' if task.higher_is_better else 'lower'} is better)", ""]
-    lines += ["## Claims", ""]
-    for cid in state.get("claims") or []:
-        claim = ctx.store.get_claim(cid)
-        tier = ctx.store.claim_tier(cid)
-        verdict = state.get("verdict", {})
-        action = Action.PUBLISH_VERIFIED if verdict.get("verified") else Action.PUBLISH_SUPPORTED
-        lines.append(f"- **[{tier.name}]** {claim.text}")
-        lines.append(f"  - publication policy: `{decide(action, tier).value}` for `{action.value}`")
-        for eid in claim.evidence_ids:
-            ev = ctx.store.get_evidence(eid)
-            lines.append(f"  - evidence `{eid}` ({ev.tier.name}, {ev.verifier_id}): {ev.summary}")
-    lines += ["", "## Exploration log (dev split; NOT evidence for claims)", "",
-              f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
-    for a in state.get("attempts") or []:
-        lines.append(f"- attempt {a['n']} hypothesis={a['hypothesis_id']} dev={a['dev_score']} "
-                     f"error={'yes' if a['error'] else 'no'}")
-    lines += ["", "## Hypotheses considered (ranked)", ""]
-    for h in state.get("hypotheses", {}).get("hypotheses", []):
-        bt = state.get("ranking", {}).get("bt", {}).get(h["id"])
-        lines.append(f"- `{h['id']}` (BT={bt:.3f}): {h['idea']}" if bt is not None else f"- `{h['id']}`: {h['idea']}")
-    text = "\n".join(lines) + "\n"
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode())}
-
-
-@register("research.audit")
-def audit(state, params, ctx):
-    """Integrity audit (ScientistOne-style, PLAN L2).
-    I1 claims resolve to stored evidence; I2 baseline used the same contract/data/seeds;
-    I3 citations (n/a until the literature module exists); I4 metrics recomputed from raw predictions;
-    I5 leak + canary audit over everything agent-visible (verify/leak.py; K9 precursor)."""
-    task = _task(state)
-    results: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "I5": True, "problems": []}
-    _, label_rows = read_csv(Path(state["_private_task_dir"]) / "private" / task.test_labels_file)
-    y_test = [r[0] for r in label_rows]
-    for cid in state.get("claims") or []:
-        claim = ctx.store.get_claim(cid)
-        metric_payloads = []
-        for eid in claim.evidence_ids:
-            try:
-                ev = ctx.store.get_evidence(eid)
-                payload = ctx.store.blobs.get_json(ev.payload_ref)
-            except (KeyError, OSError) as e:
-                results["I1"] = False
-                results["problems"].append(f"{cid}: evidence {eid} unresolvable ({e})")
-                continue
-            if ev.kind == EvidenceKind.METRIC:
-                metric_payloads.append(payload)
-                recomputed = M.score(payload["metric"], y_test, ctx.store.blobs.get_json(payload["preds_ref"]))
-                if abs(recomputed - payload["score"]) > 1e-12:
-                    results["I4"] = False
-                    results["problems"].append(f"{eid}: reported {payload['score']} != recomputed {recomputed}")
-        arms = {p["arm"]: p for p in metric_payloads}
-        if {"solution", "baseline"} <= set(arms):
-            sol = sorted(p["seed"] for p in metric_payloads if p["arm"] == "solution")
-            base = sorted(p["seed"] for p in metric_payloads if p["arm"] == "baseline")
-            same = (sol == base and arms["solution"]["test"] == arms["baseline"]["test"]
-                    and arms["solution"]["train"] == arms["baseline"]["train"]
-                    and arms["solution"]["contract"] == arms["baseline"]["contract"])
-            if not same:
-                results["I2"] = False
-                results["problems"].append(f"{cid}: baseline not run under identical conditions")
-    fp = private_fingerprints(Path(state["_private_task_dir"]) / "private", labels=y_test)
-    leak = leak_audit(ctx.store.trace(ctx.run_id), ctx.sandbox.workspace if ctx.sandbox else None, fp,
-                      canaries=fp["canaries"] + [state.get("_private_canary", "")],
-                      extra_texts={"report": state.get("report", "")})
-    results["I5"] = leak["passed"]
-    results["problems"] += leak["problems"]
-    results["passed"] = all(results[k] is True for k in ("I1", "I2", "I4", "I5"))
-    return {"audit": results}
+            "best": best, "route": route, "fixes_for_current": fixes + (1 if route == "fix" else 0),
+            "n_improves": state.get("n_improves", 0) + (1 if is_improve and route != "fix" else 0)}

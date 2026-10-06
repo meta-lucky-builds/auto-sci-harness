@@ -1,6 +1,10 @@
 # custom-harness — Master Design Plan
 
 > Superseded for WHAT/WHEN by `GOAL.md` (2026-10-06). This file is kept as design history and rationale.
+>
+> **Stopping point 2026-10-06:** M0, M1 (Evidence Kernel) done; M2 research loop built, exit test pending. The
+> "Status: design only" line below is historical. Current state, verification status and the state bundle are in
+> `STATUS.md` ("STOPPING POINT"); what to build remains defined by `GOAL.md`.
 
 Date: 2026-10-05. Source of truth for the survey: `../autoresearch_survey/00_SYNTHESIS.md` (cited below as **S§n**).
 Status: **design only**. No code exists. Every number below that comes from a source is "as reported by a Haiku summary" and must be re-checked in the paper before we rely on it (S§0).

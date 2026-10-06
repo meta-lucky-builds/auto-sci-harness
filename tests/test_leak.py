@@ -19,7 +19,7 @@ from test_research import KNN_RADIUS, ROOT, rings_task, scripted_llm  # noqa: F4
 
 
 def research_spec(extra_before_audit: str | None = None) -> HarnessSpec:
-    doc = yaml.safe_load((ROOT / "examples/research_v0.yaml").read_text())
+    doc = yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text())
     if extra_before_audit:
         doc["nodes"]["planted"] = {"kind": "module", "module": extra_before_audit}
         doc["edges"] = [e for e in doc["edges"] if not (e["source"] == "report" and e["target"] == "audit")]
@@ -35,6 +35,7 @@ def run(store, tmp_path, task, llm, spec=None):
 
 def test_clean_run_passes_and_trace_holds_prompts_but_no_private_values(store, tmp_path, rings_task, monkeypatch):  # noqa: F811
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     res = run(store, tmp_path, rings_task, MockBackend(scripted_llm))
     assert res.status == RunStatus.COMPLETED, res.detail
     assert res.state["audit"]["I5"] is True and res.state["audit"]["passed"], res.state["audit"]
@@ -50,9 +51,9 @@ def test_clean_run_passes_and_trace_holds_prompts_but_no_private_values(store, t
 
 @register("test.planted_copy_labels")
 def _copy_labels(state, params, ctx):  # a harness bug: hidden labels copied into the agent workspace
-    from pathlib import Path
-    src = Path(state["_private_task_dir"]) / "private" / "test_y.csv"
-    (ctx.sandbox.workspace / "data" / "maybe_useful.csv").write_bytes(src.read_bytes())
+    from custom_harness.kernel import Kernel
+    labels = Kernel(ctx.store).vault.read(state["datasets"]["test"], "test_y.csv", purpose="leakscan")
+    (ctx.sandbox.workspace / "data" / "maybe_useful.csv").write_bytes(labels)
     return {}
 
 
@@ -69,7 +70,7 @@ def test_private_file_copied_into_workspace_is_caught(store, tmp_path, rings_tas
               research_spec("test.planted_copy_labels"))
     audit = res.state["audit"]
     assert audit["I5"] is False and not audit["passed"]
-    assert any("copy of private file test_y.csv" in p for p in audit["problems"])
+    assert any("copy of private file" in p and p.endswith("/test/test_y.csv") for p in audit["problems"]), audit
 
 
 def test_private_value_sent_to_a_model_is_caught_even_though_trace_is_scrubbed(store, tmp_path, rings_task,  # noqa: F811

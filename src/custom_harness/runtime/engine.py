@@ -432,10 +432,18 @@ class Engine:
         backend = self.backends.get(node.role)
         if backend is None:
             raise ValueError(f"no backend bound to role '{node.role}'")
+        archived: list[str] = []  # handles of values truncated in the prompt (full text kept as blobs)
+
+        def archive(text: str) -> str:
+            digest = self.store.blobs.put(text.encode())
+            archived.append(digest)
+            return digest
+
         messages = []
         if node.system:
-            messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction)))
-        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction)))
+            messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction,
+                                                                  archive)))
+        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive)))
         total = Cost()
         attempts: list[str] = []
         for _ in range(node.retries + 1):
@@ -443,13 +451,13 @@ class Engine:
                                                 temperature=node.temperature, max_tokens=node.max_tokens))
             total = total + resp.cost
             if node.output_schema is None:
-                return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages)},
-                        total, resp.provenance)
+                return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages),
+                         "archived": archived}, total, resp.provenance)
             try:
                 value = parse_json_output(resp.text)
                 jsonschema.validate(value, node.output_schema)
-                return ({"value": value, "attempts": attempts + [resp.text], "messages": _dump(messages)},
-                        total, resp.provenance)
+                return ({"value": value, "attempts": attempts + [resp.text], "messages": _dump(messages),
+                         "archived": archived}, total, resp.provenance)
             except (json.JSONDecodeError, jsonschema.ValidationError) as e:
                 msg = e.msg if isinstance(e, json.JSONDecodeError) else e.message
                 attempts.append(resp.text)

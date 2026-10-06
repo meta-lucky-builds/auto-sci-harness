@@ -1,10 +1,14 @@
 """Evaluating a harness on a task suite (PLAN §6.2, §10 splits).
 
-Objective per research run (M1 version, documented so it can be audited and changed by humans):
+Objective per research run (M2 version, documented so it can be audited and changed by humans):
   None (EXCLUDED)           if the environment failed (status INFRA_FAILED): it says nothing about the harness
   0                         if the run did not complete or the integrity audit failed (hard constraint)
-  1.0 * verified + 0.5 * clip(relative test improvement, -1, 1)   otherwise
-Relative improvement comes from the hidden-test means inside the task's verify step.
+  0.5 * certified + 0.5 * replicated + 0.5 * clip(relative held-out improvement, -1, 1)   otherwise
+"certified" = the run's claim holds a Kernel certificate (CERTIFIED-INTERNAL/VALIDATED); "replicated" = an
+independent re-implementation written from the claim text (not the code) was ALSO certified at the same
+minimum effect (GOAL L4.9 headline rule). The relative improvement comes from the held-out evaluation records.
+The VDS-centred objective (GOAL §6.3)
+replaces this once the prediction ledger has enough resolved predictions per campaign (M3).
 Splits are over TASKS: evolve (proposer sees traces), gate (accept/reject only), sealed (humans only).
 """
 
@@ -95,15 +99,18 @@ def _score_completed(state: dict) -> tuple[float, bool]:
     audit = state.get("audit")
     if not isinstance(audit, dict) or audit.get("passed") is not True:  # no audit = no credit (hard constraint)
         return 0.0, False
-    verdict = state.get("verdict") or {}
-    verified = verdict.get("verified") is True  # strictly True: "false", 1, [] never count
-    sol, base = verdict.get("solution_mean"), verdict.get("baseline_mean")
+    cert = state.get("certificate") or {}
+    # Credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger.
+    verified = cert.get("label") in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
+    replicated = verified and (state.get("replica_certificate") or {}).get("label") in ("CERTIFIED-INTERNAL",
+                                                                                     "CERTIFIED-VALIDATED")
+    sol, base = cert.get("subject_mean"), cert.get("comparator_mean")
     rel = 0.0
     if (isinstance(sol, (int, float)) and isinstance(base, (int, float)) and not isinstance(sol, bool)
             and not isinstance(base, bool) and math.isfinite(sol) and math.isfinite(base) and base != 0):
         hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
         rel = ((sol - base) if hib else (base - sol)) / abs(base)
-    return 1.0 * verified + 0.5 * max(-1.0, min(1.0, rel)), verified
+    return 0.5 * verified + 0.5 * replicated + 0.5 * max(-1.0, min(1.0, rel)), verified
 
 
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],

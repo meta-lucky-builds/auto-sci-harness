@@ -170,6 +170,18 @@ def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Write the M2 task suite (synthetic families on the host; real + repair tasks inside the sandbox)."""
+    from .research.suite import build_suite, export_real
+    real = None
+    if a.docker:
+        from .sandbox.docker import DockerSandbox
+        real = export_real(lambda ws: DockerSandbox(ws), Path(a.out) / "_export")
+    path = build_suite(Path(a.out), real_data=real)
+    print(json.dumps({"suite": str(path), "real_data": real is not None}))
+    return 0
+
+
 def cmd_runs(a: argparse.Namespace, store: EvidenceStore) -> int:
     for r in store.list_runs(a.limit):
         status, detail = store.run_status(r.id)
@@ -227,6 +239,9 @@ def main(argv: list[str] | None = None) -> int:
     bd = sub.add_parser("bundle", help="write the Reproducibility Bundle of a certificate")
     bd.add_argument("cert_hash")
     bd.add_argument("-o", "--out")
+    bs = sub.add_parser("build-suite", help="write the ML task suite (>= 20 tasks with --docker)")
+    bs.add_argument("out")
+    bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
     sub.add_parser("certificates", help="list Kernel certificates")
     sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain")
     sub.add_parser("predictions", help="prediction ledger: VDS and calibration")
@@ -241,7 +256,7 @@ def main(argv: list[str] | None = None) -> int:
         return {"run": cmd_run, "resume": cmd_resume, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
-                "predictions": cmd_predictions}[a.cmd](a, store)
+                "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)
     finally:
         store.close()
 

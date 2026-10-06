@@ -43,6 +43,48 @@ with open(a.out, "w", newline="") as f:
     for r in trows: w.writerow([knn(rad(r, th))])
 '''
 
+
+# An independently WRITTEN implementation of the same idea (what a replicator without the code would produce).
+KNN_REPLICA = '''
+import argparse
+import csv
+import math
+
+
+def read(path):
+    with open(path, newline="") as handle:
+        data = list(csv.reader(handle))
+    return data[0], data[1:]
+
+
+def radius(row, cols):
+    return math.sqrt(float(row[cols.index("x1")]) ** 2 + float(row[cols.index("x2")]) ** 2)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--train")
+parser.add_argument("--test")
+parser.add_argument("--out")
+parser.add_argument("--seed", type=int)
+args = parser.parse_args()
+train_cols, train_rows = read(args.train)
+test_cols, test_rows = read(args.test)
+labelled = [(radius(r, train_cols), r[train_cols.index("label")]) for r in train_rows]
+results = []
+for r in test_rows:
+    rr = radius(r, test_cols)
+    neighbours = sorted(labelled, key=lambda item: abs(item[0] - rr))[:21]
+    tally = {}
+    for _, lab in neighbours:
+        tally[lab] = tally.get(lab, 0) + 1
+    results.append(sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))[0][0])
+with open(args.out, "w", newline="") as handle:
+    writer = csv.writer(handle)
+    writer.writerow(["prediction"])
+    for value in results:
+        writer.writerow([value])
+'''
+
 BROKEN = "import sys; sys.exit('boom: ModuleNotFoundError: no module named sklearnx')"
 
 
@@ -62,6 +104,13 @@ def scripted_llm(req):
             {"id": "h_noise", "idea": "drop noise columns", "rationale": "n1..n4 are noise"}]})
     if "Rank ALL of these hypotheses" in text:
         return json.dumps({"ranking": ["h_noise", "h_radius"]})  # judge prefers the weaker idea
+    if "Re-implement the method described below from scratch" in text:
+        return json.dumps({"code": KNN_REPLICA, "notes": "replica from the description"})
+    if "Ask at most 5 short questions" in text:
+        return json.dumps({"questions": ["What would falsify the radius hypothesis?", "Use a random forest.",
+                                         "Is the color column leaking the label?"]})
+    if "This script works and is the best so far" in text:
+        return json.dumps({"code": KNN_RADIUS, "notes": "no real change"})  # a non-improvement
     if "This script failed" in text:
         return json.dumps({"code": KNN_RADIUS, "notes": "rewrote"})
     if "Implement this hypothesis" in text:
@@ -71,23 +120,37 @@ def scripted_llm(req):
     raise AssertionError(f"unexpected prompt: {text[:200]}")
 
 
+SPEC = ROOT / "examples/research_v1.yaml"
+
+
 def test_research_loop_end_to_end(store, tmp_path, rings_task, monkeypatch):
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")  # trusted test code only
-    spec = HarnessSpec.model_validate(yaml.safe_load((ROOT / "examples/research_v0.yaml").read_text()))
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(scripted_llm)
     eng = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True))
     res = eng.run("rings", {"task_dir": str(rings_task)})
     assert res.status == RunStatus.COMPLETED, res.detail
     s = res.state
-    assert s["route"] == "verify"
     # h_noise was tried first (judge ranking), failed, got fixed into a working script
     assert s["attempts"][0]["error"] and s["attempts"][0]["hypothesis_id"] == "h_noise"
     assert s["best"]["dev_score"] > s["baseline_dev"]
-    assert s["verdict"]["verified"] is True, s["verdict"]
-    assert s["verdict"]["solution_mean"] > s["verdict"]["baseline_mean"]
+    # the claim was pre-registered BEFORE any held-out label was read (K2 is in the certificate)
+    cert = s["certificate"]
+    assert cert["label"] == "CERTIFIED-INTERNAL", cert
+    assert cert["subject_mean"] > cert["comparator_mean"] and cert["effect"] > 0
     assert s["audit"]["passed"], s["audit"]
-    assert "[T2_STATISTICAL]" in s["report"]
+    assert s["publishable"] is True, s["publish_blockers"]
+    assert "**CERTIFIED-INTERNAL** · tier T2" in s["report"] and "Reporting checklist" in s["report"]
+    from custom_harness.kernel import Kernel
+    from custom_harness.kernel.bundle import reproduce_bundle
+    from custom_harness.kernel.execution import SandboxReplayer
+    kernel = Kernel(store)
+    assert kernel.status(cert["hash"]) == "active" and kernel.ledger.verify() == []
+    rep = reproduce_bundle(Path(cert["bundle_path"]), lambda: SandboxReplayer(
+        lambda key: LocalSandbox(tmp_path / "repro" / key, i_understand_no_isolation=True)))
+    assert rep.reproduced, rep.problems
     # hidden labels never entered any prompt
     for req in llm.requests:
         for m in req.messages:
@@ -96,7 +159,7 @@ def test_research_loop_end_to_end(store, tmp_path, rings_task, monkeypatch):
 
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):
     monkeypatch.delenv("CHH_ALLOW_UNISOLATED", raising=False)
-    spec = HarnessSpec.model_validate(yaml.safe_load((ROOT / "examples/research_v0.yaml").read_text()))
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     eng = Engine(spec, backends={"proposer": MockBackend(["{}"])}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True))
     res = eng.run("rings", {"task_dir": str(rings_task)})
@@ -124,3 +187,136 @@ def test_t2_rules():
 def test_bradley_terry_orders_consistent_winner():
     bt = bradley_terry(["a", "b", "c"], rankings_to_wins([["a", "b", "c"], ["a", "c", "b"], ["a", "b", "c"]]))
     assert max(bt, key=bt.get) == "a" and bt["b"] > bt["c"]
+
+
+class _HiccupSandbox(LocalSandbox):
+    """Confirmation sandboxes that fail ONCE with a transient infrastructure error (the 4th confirm run)."""
+
+    confirm_execs = 0
+
+    def spawn(self, workspace):
+        return _HiccupSandbox(workspace, i_understand_no_isolation=True)
+
+    def exec(self, command, timeout_s=600, env=None):
+        if "-confirm" in str(self.workspace):
+            _HiccupSandbox.confirm_execs += 1
+            if _HiccupSandbox.confirm_execs == 4:
+                from custom_harness.errors import InfraError
+                raise InfraError("Cannot connect to the Docker daemon", transient=True)
+        return super().exec(command, timeout_s, env)
+
+
+def test_infra_retry_during_confirmation_does_not_reject_the_claim(store, tmp_path, rings_task, monkeypatch):
+    """An infrastructure retry of the confirm step must not repeat held-out evaluations (K4 would count the
+    repeats as unreported and reject an honest claim): confirm reuses the records it already made."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    from custom_harness.runtime.engine import RetryPolicy
+    _HiccupSandbox.confirm_execs = 0
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    llm = MockBackend(scripted_llm)
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+                 sandbox=_HiccupSandbox(tmp_path / "ws", i_understand_no_isolation=True),
+                 retry=RetryPolicy(max_attempts=3, backoff_s=0.0)).run("rings", {"task_dir": str(rings_task)})
+    assert res.status == RunStatus.COMPLETED, res.detail
+    confirm_step = next(s for s in store.trace(res.run_id) if s.node_id == "confirm")
+    assert confirm_step.output.get("_infra_retries"), "the hiccup did not happen: test is not testing anything"
+    assert res.state["certificate"]["label"] == "CERTIFIED-INTERNAL", res.state["certificate"]
+    assert len(res.state["evidence_ids"]) == 6 and res.state["audit"]["passed"]
+
+
+def test_improve_operator_runs_and_dev_racing_refuses_a_non_improvement(store, tmp_path, rings_task, monkeypatch):
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    llm = MockBackend(scripted_llm)
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+                 sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(rings_task)})
+    s = res.state
+    improves = [a for a in s["attempts"] if str(a["hypothesis_id"]).startswith("improve-")]
+    assert len(improves) == 2 and all(a["accepted_improvement"] is False for a in improves)
+    assert not str(s["best"]["hypothesis_id"]).startswith("improve-")  # the incumbent was kept
+    assert s["certificate"]["label"] == "CERTIFIED-INTERNAL" and s["audit"]["passed"]
+
+
+def test_dev_racing_rule():
+    from custom_harness.research.modules import _dev_better
+    from custom_harness.research.task import TaskSpec
+    task = TaskSpec(id="t", title="t", description="d", metric="accuracy", target_column="y")
+    y = ["1"] * 100
+    assert _dev_better(task, y, ["1"] * 100, ["0"] * 50 + ["1"] * 50)  # clearly better
+    assert not _dev_better(task, y, ["1"] * 100, ["1"] * 100)  # identical: no evidence of improvement
+    assert not _dev_better(task, y, ["0"] + ["1"] * 99, ["1"] * 100)  # worse
+
+
+def test_socratic_filter_keeps_only_questions():
+    from custom_harness.research.modules import socratic_filter
+    raw = {"questions": ["What would falsify the radius hypothesis?", "Use a random forest instead.",
+                         "Try scaling? Then it works?", "Have you checked for leakage via the color column?",
+                         "Why not `import sklearn`?", "Did you use a hold-out?", "Consider stacking?", "x?"]}
+    out = socratic_filter({"critique_raw": raw}, {"max_questions": 5}, None)["critique"]
+    assert out["questions"] == ["What would falsify the radius hypothesis?",
+                                "Have you checked for leakage via the color column?", "Did you use a hold-out?"]
+    assert out["dropped"] == 5
+    assert socratic_filter({}, {}, None)["critique"] == {"questions": [], "dropped": 0}
+
+
+def _run_v1(store, tmp_path, task, llm):
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(task)})
+
+
+def test_independent_replication_certifies_the_headline_without_seeing_the_code(store, tmp_path, rings_task,
+                                                                                 monkeypatch):
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    from custom_harness.evolve import score_state
+    from custom_harness.research.claims import headline
+    llm = MockBackend(scripted_llm)
+    res = _run_v1(store, tmp_path, rings_task, llm)
+    s = res.state
+    assert s["replica_certificate"]["label"] == "CERTIFIED-INTERNAL", s["replica_certificate"]
+    assert headline(s) and s["audit"]["passed"], s["audit"]
+    assert "independent re-implementation" in s["replica_claim"]["statement"]
+    assert s["replica_claim"]["effect"]["min_effect"] == s["claim"]["effect"]["min_effect"]  # same bar
+    replicate_prompt = next(r for r in llm.requests if "Re-implement the method" in r.messages[-1].content)
+    code_lines = [ln for ln in KNN_RADIUS.splitlines() if len(ln.strip()) > 12]
+    assert not any(ln in replicate_prompt.messages[-1].content for ln in code_lines)  # never saw the code
+    assert "Headline result** (certified AND independently replicated): yes" in s["report"]
+    assert score_state(s, res.status)[0] == 1.5  # certified + replicated + capped improvement
+
+
+def test_failed_replication_means_no_headline(store, tmp_path, rings_task, monkeypatch):
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    from custom_harness.evolve import score_state
+    from custom_harness.research.claims import headline
+
+    def llm(req):
+        if "Re-implement the method" in req.messages[-1].content:
+            return json.dumps({"code": BROKEN, "notes": "could not reproduce"})
+        return scripted_llm(req)
+    res = _run_v1(store, tmp_path, rings_task, MockBackend(llm))
+    s = res.state
+    assert s["certificate"]["label"] == "CERTIFIED-INTERNAL" and "replica_certificate" not in s
+    assert not headline(s) and s["audit"]["passed"]
+    assert "no replication claim was made" in s["report"]
+    assert score_state(s, res.status)[0] <= 1.0  # 1.5 when also replicated
+
+
+def test_a_copied_replica_is_not_an_independent_replication(store, tmp_path, rings_task, monkeypatch):
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    from custom_harness.research.claims import code_similarity, headline
+
+    def llm(req):
+        if "Re-implement the method" in req.messages[-1].content:
+            return json.dumps({"code": KNN_RADIUS, "notes": "verbatim copy"})
+        return scripted_llm(req)
+    s = _run_v1(store, tmp_path, rings_task, MockBackend(llm)).state
+    assert "replica_certificate" not in s and not headline(s)
+    assert s["replica_best"]["error"].startswith("not independent")
+    assert code_similarity(KNN_RADIUS, KNN_RADIUS) == 1.0 and code_similarity(KNN_RADIUS, KNN_REPLICA) < 0.3

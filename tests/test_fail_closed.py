@@ -19,7 +19,7 @@ from custom_harness.evolve.edits import Edit
 from custom_harness.evolve.propose import propose_edits
 from custom_harness.evolve.selection import PairedSample
 from custom_harness.gateway import MockBackend
-from custom_harness.records import Claim, Evidence, EvidenceKind, RunStatus
+from custom_harness.records import Evidence, EvidenceKind, RunStatus
 from custom_harness.research.modules import tournament
 from custom_harness.runtime import Engine, HarnessSpec, LLMNode, register
 from custom_harness.runtime.modules import ModuleContext
@@ -136,32 +136,56 @@ def test_tournament_never_guesses_a_ranking(tmp_path_factory, responses):
 @register("test.planted_fake_number")
 def _fake_number(state, params, ctx):
     """A fabricated result: a metric evidence record whose reported score was never computed."""
-    real = ctx.store.get_claim(state["claims"][0])
-    ev = ctx.store.get_evidence(next(e for e in real.evidence_ids
-                                     if ctx.store.get_evidence(e).kind == EvidenceKind.METRIC))
+    ev = ctx.store.get_evidence(state["evidence_ids"][0])
     payload = ctx.store.blobs.get_json(ev.payload_ref)
     payload["score"] = payload["score"] + 0.123  # the fabricated number
     fake = Evidence(kind=EvidenceKind.METRIC, tier=Tier.T1_EXECUTABLE, verifier_id=ev.verifier_id,
                     produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(payload), summary="fake")
     ctx.store.add_evidence(fake)
-    claim = Claim(text="fabricated improvement", evidence_ids=(fake.id,))
-    ctx.store.add_claim(claim)
-    return {"claims": list(state["claims"]) + [claim.id]}
+    return {"evidence_ids": [fake.id, *state["evidence_ids"][1:]]}
 
 
-def test_injected_fake_number_is_blocked_by_the_audit(store, tmp_path, rings_task, monkeypatch):  # noqa: F811
-    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
-    doc = yaml.safe_load((ROOT / "examples/research_v0.yaml").read_text())
-    doc["nodes"]["planted"] = {"kind": "module", "module": "test.planted_fake_number"}
-    doc["edges"] = [e for e in doc["edges"] if not (e["source"] == "report" and e["target"] == "audit")]
-    doc["edges"] += [{"source": "report", "target": "planted"}, {"source": "planted", "target": "audit"}]
+@register("test.planted_state_edit")
+def _state_edit(state, params, ctx):
+    """Inflate the run state's numbers after certification (what scoring reads)."""
+    cert = dict(state["certificate"])
+    cert["subject_mean"] = cert["subject_mean"] + 0.1
+    return {"certificate": cert}
+
+
+@register("test.planted_report_edit")
+def _report_edit(state, params, ctx):
+    return {"report": state["report"].replace("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")}
+
+
+def _planted_run(store, tmp_path, task, module, after):
+    doc = yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text())
+    nxt = next(e["target"] for e in doc["edges"] if e["source"] == after)
+    doc["nodes"]["planted"] = {"kind": "module", "module": module}
+    doc["edges"] = [e for e in doc["edges"] if not (e["source"] == after and e["target"] == nxt)]
+    doc["edges"] += [{"source": after, "target": "planted"}, {"source": "planted", "target": nxt}]
     llm = MockBackend(scripted_llm)
-    res = Engine(HarnessSpec.model_validate(doc), backends={"proposer": llm, "executor": llm, "judge": llm},
-                 store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
-        "rings", {"task_dir": str(rings_task)})
-    audit = res.state["audit"]
-    assert audit["I4"] is False and not audit["passed"]
-    assert score_state(res.state, res.status) == (0.0, False)  # no credit for a fabricated result
+    return Engine(HarnessSpec.model_validate(doc), backends={"proposer": llm, "executor": llm, "judge": llm},
+                  store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(task)})
+
+
+@pytest.mark.parametrize(("module", "after", "check"), [
+    ("test.planted_fake_number", "confirm", "kernel"),  # fabricated evidence before certification
+    ("test.planted_state_edit", "certify", "I1"),  # numbers edited in the run state after certification
+    ("test.planted_report_edit", "report", "I4"),  # report text edited after rendering
+])
+def test_injected_fake_number_is_blocked(store, tmp_path, rings_task, monkeypatch, module, after, check):  # noqa: F811
+    """GOAL §7 "inject a fake number -> blocked", along all three routes a number can be faked."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    res = _planted_run(store, tmp_path, rings_task, module, after)
+    if check == "kernel":
+        assert res.state["certificate"]["label"] == "REJECTED" and "K3" in res.state["certificate"]["failed"]
+        assert score_state(res.state, res.status)[1] is False
+    else:
+        assert res.state["audit"][check] is False and not res.state["audit"]["passed"], res.state["audit"]
+        assert score_state(res.state, res.status) == (0.0, False)  # no credit for a fabricated result
 
 
 # ---------------------------------------------------------------- §7: evolve/gate split overlap

@@ -2,13 +2,34 @@
 
 Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11). Updated 2026-10-06.
 
+## ⏸ STOPPING POINT (2026-10-06, halted at the user's request)
+- **Where the build stands:** M0 done (+2nd pass), M1 Evidence Kernel done (v1.1 after red-teaming), M2 research
+  loop v1 BUILT (Kernel-integrated loop, improve operator, Socratic critic, replication agent, profiling,
+  ObservationPack context, 21-task suite) but its **exit test has not been run** (needs a live-run budget).
+- **Verification state of the final code (honest):** the last quality-gate run was STOPPED by request during its
+  final "all tests" step. Completed steps of that run, on the final code: ruff ✅, mypy on src/ ✅,
+  `mypy --strict` on the Kernel ✅, Kernel tests 95 passed with **100% line+branch coverage** ✅. The full suite
+  was NOT completed on the final code. After the last code changes these were run individually and passed:
+  `test_research.py` (12), `test_evolve.py` (5), `test_leak.py` + `test_fail_closed.py` (non-fuzz part, 10),
+  `test_context.py` + `test_engine.py` (17), `test_profile.py` (2), `test_suite_builder.py` (2). Not re-run after
+  the last changes: `test_infra.py`, `test_resume.py`, `test_snapshot.py`, `test_stats.py`,
+  `test_winners_curse.py`, the Hypothesis fuzz tests. **First action on resume: `python scripts/check.py`.**
+- **Last complete full-suite run:** 172 passed, 1 skipped (end of M1, commit 6438201).
+- **State bundle:** see "State bundle" just below (code + 21-task suite + environment, frozen at a commit).
+- **Next on resume:** (1) run the full gate; (2) one live Docker + Codex run on a suite task to validate M2 end to
+  end; (3) user decision on the M2 exit-test budget (≈300 Codex calls, ≈5M tokens); (4) M3 evolution v1.
+
+### State bundle
+BUNDLE_PLACEHOLDER
+
 ## Environment
 - Code: this folder (git repo → github.com/meta-lucky-builds/auto-sci-harness, private). Runtime data + venv:
   `C:\Users\mykids\custom-harness-data` (outside OneDrive).
 - Python 3.12 venv: `C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe`
 - Quality gate: `python scripts/check.py` (ruff, mypy on src/, `mypy --strict` on the Kernel, Kernel tests with a
   100% branch-coverage gate, then all tests). `--fast` skips the full suite.
-- Tests: `python -m pytest -q` → 172 passed, 1 skipped, ~10 min (includes real-Docker tests, fuzzing, the 50-claim Kernel suite).
+- Tests: `python -m pytest -q` (~12 min; real-Docker tests, fuzzing, the 50-claim Kernel suite). Last COMPLETE run:
+  172 passed, 1 skipped at the end of M1; the run after M2 was stopped (see STOPPING POINT).
   The skip is the native-symlink test: this Windows account cannot create symlinks; the same guard is covered by
   the junction test and the real-Docker planted-link test.
 - Model access now: ChatGPT subscription via the official Codex CLI only.
@@ -21,7 +42,7 @@ Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11
 |---|---|
 | **M0 Hardening** | **Done** (2026-10-06), second hardening pass the same day, see below. |
 | **M1 Kernel v1** | **Done** (2026-10-06), see "M1" below. |
-| M2 Research loop v1 | Next: Kernel-integrated loop, experiment tree, replication agent, ≥ 20-task ML suite. |
+| M2 Research loop v1 | **Built** (2026-10-06), see "M2" below. **Exit test not yet run**: it needs live model runs on the suite (≈300 Codex calls / ≈5M tokens); waiting on the user's budget decision. |
 | M3–M7 | Not started (pieces of M2/M3 exist from the earlier v0 build, see "Done before M0"). |
 
 ### M0 — what was built and how it is tested
@@ -69,6 +90,35 @@ as "external" would have earned CERTIFIED-VALIDATED (K6 now rejects identical co
 `config.data_dir()` crashed without a home directory. Suite-design errors caught by auditing full failure sets: a
 "seed-dependent" method that was not (data too separable), and one scenario whose "true" claim was not true at its
 alpha (now a true claim; the overclaim is kept as an explicit rejected case).
+
+**Kernel v1.1 (commit 9e41e43): six loopholes found by red-teaming the Kernel, each first demonstrated by a
+failing test** (`tests/test_kernel_exploits.py`): labels laundered as a public input; peeking via a throwaway
+(unregistered) claim; certify used as a free look at the labels; forged certificates (lookup now hash-checked,
+plus `Kernel.verify()` re-derivation); unbounded re-execution tolerance; a predictable replay seed (now sampled
+from a hash of the evidence).
+
+## M2 — Research loop v1 (GOAL §5 L4, §11) — built; exit test pending
+| GOAL item | Built | Proof (test) |
+|---|---|---|
+| Kernel-integrated loop | `research/claims.py`, `examples/research_v1.yaml`: best dev candidate → typed claim (minimum effect = max(task floor, ½ × dev 90% lower bound); probability from dev) pre-registered before any label read → both arms × 3 seeds confirmed in fresh sandboxes through the vault → Kernel certificate (with re-execution) → bundle + checklist → report rendered from the ledger → audit | `test_research_loop_end_to_end`: CERTIFIED-INTERNAL, audit passed, publishable, bundle reproduces |
+| Report numbers resolve to artifacts (invariant 8) | report rendered only from ledger + evidence; audit I4 re-renders it byte-identically and recomputes every held-out score | `test_injected_fake_number_is_blocked` × 3 routes (fabricated evidence → K3; edited state → I1; edited report → I4) |
+| Experiment tree: improve operator + dev racing | `improve` node refines the best solution (up to 2×); a refinement replaces the incumbent only if a paired dev interval excludes 0 | `test_improve_operator_runs_and_dev_racing_refuses_a_non_improvement`, `test_dev_racing_rule` |
+| Socratic critic (question-only, enforced in code) | `critic` node + `research.socratic_filter` (single question, no code, no directive opening; dropped items counted); questions fed to implement/improve | `test_socratic_filter_keeps_only_questions` |
+| Independent replication agent | `replicate` (sees claim + idea + profile, never the code) → dev check → near-copy refusal (line Jaccard ≥ 0.8) → own claim at the SAME minimum effect → confirm → certify. Headline = both certified; evolution score 0.5·certified + 0.5·replicated + 0.5·clip(rel) | `test_independent_replication_certifies_the_headline_without_seeing_the_code`, `test_failed_replication_means_no_headline`, `test_a_copied_replica_is_not_an_independent_replication` |
+| Richer data profiling (ideation is conditioned on it) | roles (id-like / constant / binary / coded-categorical / continuous), IQR + z outliers, skew, feature-target association ranking (η² / abs Pearson), redundant pairs, leak / duplicate / imbalance flags | `test_profile.py` |
+| ObservationPack context | truncated values archived as blobs with handles recorded in the trace; `{{x\|log}}` verified-quote log reducer with raw fallback | `test_context.py` |
+| ML task suite ≥ 20 tasks | `research/suite.py`, `chh build-suite OUT --docker`: 12 synthetic (6 families × 2), 5 real (iris, wine, breast cancer, digits, diabetes; built inside the sandbox, offline), 4 ML-repair tasks with known defective baselines; 13/4/4 evolve/gate/sealed | `scripts/validate_suite.py`: **all 21 usable**, every baseline runs in Docker, a generic random-forest reference beats every baseline |
+| Evolution protections for the new loop | protected nodes: setup, claim, confirm, certify, replicate, replica_*, report, audit; edits may not write reserved state keys or reuse protected modules | `test_edits_cannot_fake_kernel_state_or_duplicate_protected_modules` |
+
+Bugs and loopholes found while building M2 (all fixed, each with a test): an infrastructure retry of `confirm` would
+repeat held-out evaluations and get an honest claim REJECTED by K4 (confirm is now idempotent; verified the test
+fails without the fix); claims asserted the weakest bound and K7 correctly rejected them as trivially safe (claims
+now assert what dev supports); suite tasks sharing a name collided in the vault (ids are now namespaced by a content
+digest); an evolved prompt could have shown the replicator the code, or an added node could have written the
+original code as the "replica" (replication nodes protected, `replica_impl` reserved, near-copy refusal); the new
+profiler called continuous features "IDs — do not use" (role logic fixed and tested); `reproduce` crashed when a
+bundle lacked the certificate blob (now reported); the E6 exploit test was flaky by design (rewritten to be
+deterministic in outcome).
 
 ## Done before M0 (v0 build)
 | Layer | What | Where |
@@ -126,9 +176,21 @@ alpha (now a true claim; the overclaim is kept as an explicit rejected case).
 - Subscription mode is slow and quota-bound; real evolution campaigns need API or open-weights backends.
 - I3 (citation check) is n/a until the literature module exists. SQLite only; Postgres before scorecard campaigns.
 
+- M2 exit test not run: needs ≈300 live Codex calls on the 21-task suite (user budget decision). Until then the
+  loop's research quality is unmeasured; only its integrity machinery is tested (with scripted models).
+- Test-set wear: every claim (and replication) on a task's test set enlarges its Bonferroni family, so a task's
+  test set becomes harder to certify on as campaigns reuse it. Campaign specs should pre-declare n_comparisons
+  (the claim node accepts it) to keep strictness constant during a campaign; synthetic tasks can be regenerated.
+- Small real test sets (iris 45 rows, wine 54) make K7 reject most claims there: correct, but those tasks are
+  close to uncertifiable.
+- Replication independence is enforced structurally (no code in the replicator's prompt, protected nodes,
+  near-copy refusal on line overlap); deeper copying (renamed variables) would pass the overlap check, and with a
+  single model family (Codex only today) the replicator shares the original author's biases.
+- A model backend raising an unexpected exception type crashes the run (deliberately loud); in a campaign that
+  aborts the campaign.
+
 ## Next (GOAL §11)
-1. **M2 Research loop v1**: the loop forms a typed claim from its dev results, pre-registers it, confirms through
-   the vault, gets a Kernel certificate, and writes the report + checklist + bundle from it; experiment tree with an
-   improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ≥ 20-task ML
-   suite (rings-style + real datasets + ML-repair family). Exit: ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures.
-2. Re-run the live rings task after M2 so the first real certificate and bundle come from the live loop.
+1. **M2 exit test** (user decision on budget): run the loop live on the suite; measure the CERTIFIED-or-NEGATIVE
+   rate, integrity failures (target 0), calibration of the claim forecasts, and cost per certified claim.
+2. **M3 Evolution v1**: evidence export, agentic proposer, structured diagnosis, family-separated critic, smoke
+   run, ledger upgrades, cost term (GOAL §11).

@@ -2,6 +2,8 @@
 
 Date: 2026-10-06. Owner: user (product decisions) · Claude (design + build).
 **This is the single source of truth for WHAT custom-harness is and when it is done.**
+(Stopping point 2026-10-06: M0 ✅, M1 ✅, M2 built with exit test pending; markers in §5/§11 reflect it, details and
+verification state in `STATUS.md`.)
 `PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
 
 Inputs this file is built on (read them only if a detail is needed):
@@ -264,11 +266,11 @@ schemas, redaction. Add: per-host pacing; cost tables; the provider registry ver
 - Never: an LLM verdict substring-matched as a pass (Adaptive, PARNESS, SciDER pitfalls).
 - Done when: the planted-exploit suite (including an RCON-style "found an evaluator backdoor" case) is caught ≥ target rate.
 
-### L4 Research loop (🟡 v0 live)
+### L4 Research loop (🟡 v1 built 2026-10-06, Kernel-integrated; live research quality not yet measured)
 Stages (each a node with a contract, all evolvable):
 1. **Problem Formulator** (❌, novel): mines anomalies, open problems and failed replications from the literature graph;
    ranks by (best available verifier tier) × value × feasibility.
-2. **Data profiling** (🟡): full-file profile plus outliers, cardinality, key graph, column roles; **ideation is
+2. **Data profiling** (✅ roles, outliers, association ranking, redundancy, flags; no multi-table key graph yet): full-file profile plus outliers, cardinality, key graph, column roles; **ideation is
    conditioned on it** (SciDER promised this, its code doesn't do it).
 3. **Literature** (❌): arXiv / Semantic Scholar / OpenAlex / Crossref with pacing and fallback, query splitting
    (Feynman, Robin); dated snapshots plus cache; citation check = ID resolution (resolves / doesn't / lookup failed) +
@@ -277,15 +279,15 @@ Stages (each a node with a contract, all evolvable):
    topic quotas; diversity measured by error correlation, not vendor count (SDE r>0.8).
 5. **Tournament** (✅): shuffled K-way rounds → BT; add both-order pairwise mode, BT CIs, Improve-weakest and Combine
    operators (SciDER), pinned incumbent.
-6. **Pre-registration** (❌): typed Claim + analysis plan committed to the Kernel ledger before execution.
-7. **Experiment tree** (❌): draft / debug / **improve** nodes, code-scored seeded selection, dev racing against dev
+6. **Pre-registration** (✅): typed Claim + analysis plan committed to the Kernel ledger before execution.
+7. **Experiment tree** (🟡 draft/debug/improve + dev racing; no snapshot backtracking or revivable dead-ends yet): draft / debug / **improve** nodes, code-scored seeded selection, dev racing against dev
    overfitting, stop when certified; tune → creative → ablation curriculum (AI-Sci v2, done properly); exact backtracking
    via snapshots; revivable dead-ends with a persistence rule (P(improvement) > θ).
-8. **Socratic critic** (🟡 example only): questions only, answers must cite evidence (AHOIS).
-9. **Replication agent** (❌, novel): re-implements from the claim text without access to the code; agreement is
+8. **Socratic critic** (✅ question-only enforced in code; answers citing evidence not yet checked): questions only, answers must cite evidence (AHOIS).
+9. **Replication agent** (✅, novel; same model family as the author today): re-implements from the claim text without access to the code; agreement is
    required for CERTIFIED headline claims.
-10. **Claims → Kernel → Report** (🟡): reports generated from certificates; checklist; bundle; VG-ladder mapping.
-- Context management: archive large outputs to blobs, keep a handle plus head/tail in context, provide paged recall
+10. **Claims → Kernel → Report** (✅): reports generated from certificates; checklist; bundle; VG-ladder mapping.
+- Context management (✅ archive + handle + head/tail, verified-quote log reducer; paged recall by an agent not yet): archive large outputs to blobs, keep a handle plus head/tail in context, provide paged recall
   (SoL-Pi ObservationPack); verified-quote log reducer with raw fallback.
 - Done when: on the ML suite, ≥ X% of runs end with a CERTIFIED or honest NEGATIVE claim, 0 fabricated numbers,
   0 leaks. X is set after the M1 baseline.
@@ -487,7 +489,7 @@ Principle: always keep one end-to-end path working. Build the Kernel early so ev
 |---|---|---|
 | **M0 Hardening** (P0) ✅ 2026-10-06 | infra/policy split; winner re-measure; safe snapshot restore; resume; gate unit-alignment; persisted budget; canary + leak audit | all §7 tests that apply to existing code pass |
 | **M1 Kernel v1** ✅ 2026-10-06 | Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data); certificates; Reproducibility Bundle; reporting checklist; prediction ledger | seeded 50-claim suite classified correctly; `chh reproduce` works |
-| **M2 Research loop v1** | Kernel-integrated loop; experiment tree; improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ML task suite ≥ 20 tasks (rings-style + real datasets + ML-repair family) | ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures |
+| **M2 Research loop v1** (built; exit test pending a live-run budget) | Kernel-integrated loop; experiment tree; improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ML task suite ≥ 20 tasks (rings-style + real datasets + ML-repair family) | ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures |
 | **M3 Evolution v1** | evidence export; agentic proposer; structured diagnosis; family-separated critic; smoke; ledger upgrades; cost term | first real campaign: certified improvement holding on sealed split |
 | **M4 Memory, verifiers, branching** | L5 store API; exploit quarantine; red team; judge panel validated; fault-injection verifiers; branching/routing | planted-exploit suite caught; router beats single best on sealed |
 | **M5 Literature + time-split** | literature module + citation check; dated snapshots; time-split prediction benchmark; Problem Formulator | §6.4 headline experiment run (VALIDATED loop) |

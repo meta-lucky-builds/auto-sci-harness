@@ -27,13 +27,13 @@ from custom_harness.evolve import (
 from custom_harness.gateway import MockBackend
 from custom_harness.runtime import HarnessSpec
 from custom_harness.sandbox import LocalSandbox
-from test_research import BROKEN, KNN_RADIUS
+from test_research import BROKEN, KNN_RADIUS, KNN_REPLICA
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def seed_spec() -> HarnessSpec:
-    spec = HarnessSpec.model_validate(yaml.safe_load((ROOT / "examples/research_v0.yaml").read_text()))
+    spec = HarnessSpec.model_validate(yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text()))
     doc = spec.model_dump(mode="json")
     doc["nodes"]["run"]["params"]["max_fixes"] = 0  # the defect evolution should discover
     return HarnessSpec.model_validate(doc)
@@ -46,6 +46,13 @@ def executor(req):
                                           {"id": "h2", "idea": "radius kNN, k=25", "rationale": "smoother"}]})
     if "Rank ALL" in text:
         return json.dumps({"ranking": ["h1", "h2"]})
+    if "Re-implement the method described below from scratch" in text:
+        return json.dumps({"code": KNN_REPLICA, "notes": "replica from the description"})
+    if "Ask at most 5 short questions" in text:
+        return json.dumps({"questions": ["What would falsify the radius hypothesis?", "Use a random forest.",
+                                         "Is the color column leaking the label?"]})
+    if "This script works and is the best so far" in text:
+        return json.dumps({"code": KNN_RADIUS, "notes": "no real change"})
     if "This script failed" in text:
         return json.dumps({"code": KNN_RADIUS, "notes": "fixed"})
     if "Implement this hypothesis" in text:
@@ -61,7 +68,7 @@ PROPOSALS = {"edits": [
                                      "value_json": json.dumps("You are a world-class ML engineer.")}],
      "rationale": "cosmetic", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.3,
      "tasks_at_risk": []},
-    {"type": "params", "ops": [{"op": "replace", "path": "/nodes/verify/params/min_seeds", "value_json": "1"}],
+    {"type": "params", "ops": [{"op": "replace", "path": "/nodes/claim/params/seeds", "value_json": "[0]"}],
      "rationale": "cheaper verification", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.1,
      "tasks_at_risk": []},
     {"type": "prompt_text", "ops": [{"op": "replace", "path": "/nodes/fix/prompt",
@@ -110,8 +117,8 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
 
 def test_apply_edit_guards():
     spec = seed_spec()
-    i = next(i for i, e in enumerate(spec.edges) if e.source == "verify")
-    with pytest.raises(EditRejected, match="end only at 'audit'"):
+    i = next(i for i, e in enumerate(spec.edges) if e.source == "report")
+    with pytest.raises(EditRejected, match=r"end only at .audit.|.audit. became unreachable"):
         apply_edit(spec, Edit(type=EditType.HOP, rationale="x",
                               ops=[EditOp(op="remove", path=f"/edges/{i}")]))  # verified runs would skip audit
     with pytest.raises(EditRejected, match="end only at 'audit'"):
@@ -143,3 +150,20 @@ def test_gate_rules():
     assert not gate([0.5, 0.6, 0.55], [0.2, 0.3]).accepted
     assert not gate([0.5, 0.6, 0.55], [0.2, -0.9, 0.3, 0.25]).accepted  # possible regression on held-out
     assert not gate([0.5, -0.5, 0.0], [0.3, 0.3]).accepted  # not significant where searched
+
+
+def test_edits_cannot_fake_kernel_state_or_duplicate_protected_modules():
+    """An evolved harness must not be able to write the state that scoring and reporting trust, nor run a
+    second copy of a protected step outside its protected position."""
+    spec = seed_spec()
+    for key in ("certificate", "claim", "best", "audit", "_private_canary"):
+        with pytest.raises(EditRejected, match=r"reserved state key|private data"):
+            apply_edit(spec, Edit(type=EditType.HOP, rationale="x", ops=[
+                EditOp(op="add", path="/nodes/sneak", value={"kind": "llm", "prompt": "p", "output_key": key})]))
+    with pytest.raises(EditRejected, match="protected module"):
+        apply_edit(spec, Edit(type=EditType.HOP, rationale="x", ops=[
+            EditOp(op="add", path="/nodes/certify2", value={"kind": "module", "module": "research.certify"})]))
+    for nid in ("claim", "confirm", "certify", "report"):
+        with pytest.raises(EditRejected, match="protected"):
+            apply_edit(spec, Edit(type=EditType.PARAMS, rationale="x", ops=[
+                EditOp(op="replace", path=f"/nodes/{nid}/params", value={"seeds": [0]})]))
