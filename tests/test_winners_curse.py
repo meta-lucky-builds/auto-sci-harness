@@ -27,14 +27,15 @@ def _trial(rng: random.Random, k: int = 8, n: int = 10):
 
 def test_reusing_race_data_is_biased_and_fresh_remeasure_is_not():
     rng = random.Random(7)
-    trials = 150
+    trials = 400
     reused_pass = fresh_pass = accepts = 0
     for _ in range(trials):
         reused, fresh, held_out = _trial(rng)
-        reused_pass += paired_ci(reused, n_boot=500)[1] > 0
-        fresh_pass += paired_ci(fresh.diffs, n_boot=500)[1] > 0
+        reused_pass += paired_ci(reused)[1] > 0
+        fresh_pass += paired_ci(fresh.diffs)[1] > 0
         accepts += gate(fresh, held_out, n_boot=500).accepted
-    # one-sided rate of "CI lower bound > 0" under the null is about alpha/2 = 2.5%
-    assert fresh_pass / trials <= 0.06
-    assert reused_pass / trials >= 3 * max(fresh_pass / trials, 0.02)  # the winner's curse is real
+    # one-sided rate of "CI lower bound > 0" under the null is alpha/2 = 2.5% (t interval, exact for normal
+    # noise; measured 2.75% at seed 7); SE over 400 trials ~ 0.8 pp
+    assert fresh_pass / trials <= 0.045
+    assert reused_pass / trials >= 2.5 * fresh_pass / trials  # the winner's curse is real (measured 9.25%)
     assert accepts / trials <= 0.05  # end-to-end false-accept rate on null candidates

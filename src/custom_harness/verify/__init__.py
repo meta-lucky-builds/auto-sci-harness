@@ -3,4 +3,4 @@
 from .metrics import HIGHER_IS_BETTER, score
 from .stats import DiffCI, T2Verdict, bootstrap_diff_ci, t2_verdict
 
-__all__ = ["HIGHER_IS_BETTER", "score", "DiffCI", "T2Verdict", "bootstrap_diff_ci", "t2_verdict"]
+__all__ = ["HIGHER_IS_BETTER", "DiffCI", "T2Verdict", "bootstrap_diff_ci", "score", "t2_verdict"]

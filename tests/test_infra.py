@@ -10,7 +10,7 @@ import pytest
 
 import custom_harness.research  # noqa: F401
 from custom_harness.errors import InfraError, infra_cause, is_transient
-from custom_harness.evolve import EvolveConfig, Evaluator, evolve_generation, gate, race
+from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate, race
 from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import BackendError, MockBackend
 from custom_harness.records import RunStatus

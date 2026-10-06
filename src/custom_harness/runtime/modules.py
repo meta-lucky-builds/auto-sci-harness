@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..budget import Budget
@@ -16,14 +17,14 @@ if TYPE_CHECKING:
 @dataclass
 class ModuleContext:
     run_id: str
-    store: "EvidenceStore"
-    backends: dict[str, "Backend"]
-    budget: "Budget"
-    sandbox: "Sandbox | None"
-    spent: "Cost" = field(default_factory=lambda: _cost())
+    store: EvidenceStore
+    backends: dict[str, Backend]
+    budget: Budget
+    sandbox: Sandbox | None
+    spent: Cost = field(default_factory=lambda: _cost())
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def llm(self, role: str, request: "ChatRequest", fallback_role: str | None = "executor") -> "ChatResponse":
+    def llm(self, role: str, request: ChatRequest, fallback_role: str | None = "executor") -> ChatResponse:
         """LLM call from inside a module: budget-checked, cost-accounted, logged into the step trace."""
         backend = self.backends.get(role) or (self.backends.get(fallback_role) if fallback_role else None)
         if backend is None:

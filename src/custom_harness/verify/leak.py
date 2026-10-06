@@ -22,8 +22,9 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from ..sandbox.base import is_link_like
 
@@ -53,11 +54,20 @@ def private_fingerprints(private_dir: Path, labels: list[str] | None = None) -> 
             hashes[_sha(data)] = p.relative_to(private_dir).as_posix()
             text = data.decode("utf-8", errors="ignore")
             canaries += [tok for tok in text.split() if tok.startswith(CANARY_PREFIX)]
-    windows: list[str] = []
-    if labels and len(labels) >= _WINDOW:
-        head = [str(x) for x in labels[:_WINDOW]]
-        windows = [sep.join(head) for sep in _SEPARATORS]
-    return {"hashes": hashes, "canaries": canaries, "label_windows": windows}
+    return {"hashes": hashes, "canaries": canaries, "label_windows": label_windows(labels or [])}
+
+
+def label_windows(labels: list[str]) -> list[str]:
+    """The first 40 labels joined by each common separator (empty when there are fewer than 40)."""
+    if len(labels) < _WINDOW:
+        return []
+    head = [str(x) for x in labels[:_WINDOW]]
+    return [sep.join(head) for sep in _SEPARATORS]
+
+
+def scan_text(text: str, where: str, canaries: list[str], windows: list[str]) -> list[str]:
+    """Public form of the per-text check (canaries, label windows, escape marker)."""
+    return _check_text(text, where, [c for c in canaries if c], windows)
 
 
 def _strings(obj: Any) -> Iterable[str]:
@@ -123,6 +133,5 @@ def leak_audit(trace: list, workspace: Path | None, fp: dict[str, Any], canaries
                 problems += _check_text(data.decode("utf-8", errors="ignore"), f"workspace file {rel}",
                                         canaries, [])
     # de-duplicate, keep order
-    seen: set[str] = set()
-    problems = [p for p in problems if not (p in seen or seen.add(p))]
+    problems = list(dict.fromkeys(problems))
     return {"passed": not problems, "problems": problems}

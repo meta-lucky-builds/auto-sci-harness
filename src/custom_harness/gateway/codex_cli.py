@@ -20,8 +20,16 @@ import time
 from pathlib import Path
 
 from ..records import AccessMode, Cost
-from .base import (Backend, BackendError, ChatRequest, ChatResponse, Message, redact, schema_instruction,
-                   to_strict_schema)
+from .base import (
+    Backend,
+    BackendError,
+    ChatRequest,
+    ChatResponse,
+    Message,
+    redact,
+    schema_instruction,
+    to_strict_schema,
+)
 from .registry import require_usable
 
 
@@ -80,7 +88,7 @@ class CodexCLIBackend(Backend):
             cmd.append("-")
             t0 = time.time()
             try:
-                proc = subprocess.run(cmd, input=_flatten(req), capture_output=True, text=True,
+                proc = subprocess.run(cmd, input=_flatten(req), capture_output=True, text=True, check=False,
                                       encoding="utf-8", timeout=self.timeout_s)
             except subprocess.TimeoutExpired as e:
                 raise BackendError(f"codex exec timed out after {self.timeout_s}s", transient=True) from e

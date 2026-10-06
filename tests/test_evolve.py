@@ -10,8 +10,20 @@ import pytest
 import yaml
 
 import custom_harness.research  # noqa: F401
-from custom_harness.evolve import (Edit, EditOp, EditRejected, EditType, EvolveConfig, Evaluator, SuiteTask,
-                                   apply_edit, evolve_generation, gate, proposer_calibration, race)
+from custom_harness.evolve import (
+    Edit,
+    EditOp,
+    EditRejected,
+    EditType,
+    Evaluator,
+    EvolveConfig,
+    SuiteTask,
+    apply_edit,
+    evolve_generation,
+    gate,
+    proposer_calibration,
+    race,
+)
 from custom_harness.gateway import MockBackend
 from custom_harness.runtime import HarnessSpec
 from custom_harness.sandbox import LocalSandbox
@@ -125,6 +137,9 @@ def test_race_eliminates_clear_losers_and_saves_evaluations():
 
 
 def test_gate_rules():
-    assert gate([0.5, 0.6, 0.55], [0.2, 0.3]).accepted
-    assert not gate([0.5, 0.6, 0.55], [0.2, -0.9]).accepted  # possible regression on held-out
+    assert gate([0.5, 0.6, 0.55], [0.2, 0.3, 0.25, 0.28]).accepted
+    # two gate units cannot show significance under an exact t interval (t_0.975,1 = 12.7); the old
+    # percentile bootstrap accepted this, which was false confidence (M0 review)
+    assert not gate([0.5, 0.6, 0.55], [0.2, 0.3]).accepted
+    assert not gate([0.5, 0.6, 0.55], [0.2, -0.9, 0.3, 0.25]).accepted  # possible regression on held-out
     assert not gate([0.5, -0.5, 0.0], [0.3, 0.3]).accepted  # not significant where searched

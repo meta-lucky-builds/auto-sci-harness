@@ -40,7 +40,7 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
     return {
         "n_runs": len(outcomes),
         "n_excluded_infra": n_infra,
-        "mean_score": sum(o.score for o in outcomes) / max(1, len(outcomes)),
+        "mean_score": sum(o.score or 0.0 for o in outcomes) / max(1, len(outcomes)),  # infra runs removed above
         "verified_rate": sum(o.verified for o in outcomes) / max(1, len(outcomes)),
         "clusters": [{"id": cid, "signature": sig, "count": clusters[sig], "examples": examples[sig]}
                      for cid, sig in named.items()],

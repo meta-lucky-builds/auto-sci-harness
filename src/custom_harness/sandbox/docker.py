@@ -28,13 +28,13 @@ def docker_available() -> bool:
     if exe is None:
         return False
     try:
-        return subprocess.run([exe, "info"], capture_output=True, timeout=20).returncode == 0
+        return subprocess.run([exe, "info"], capture_output=True, timeout=20, check=False).returncode == 0
     except (subprocess.TimeoutExpired, OSError):
         return False
 
 
 def _has_runtime(exe: str, name: str) -> bool:
-    p = subprocess.run([exe, "info", "--format", "{{json .Runtimes}}"], capture_output=True, text=True)
+    p = subprocess.run([exe, "info", "--format", "{{json .Runtimes}}"], capture_output=True, text=True, check=False)
     return p.returncode == 0 and f'"{name}"' in p.stdout
 
 
@@ -96,7 +96,7 @@ class DockerSandbox(Sandbox):
         t0 = time.time()
         try:
             try:
-                p = subprocess.run([self.exe, "start", "-a", name], capture_output=True, text=True,
+                p = subprocess.run([self.exe, "start", "-a", name], capture_output=True, text=True, check=False,
                                    encoding="utf-8", errors="replace", timeout=timeout_s)
             except subprocess.TimeoutExpired as e:
                 self._docker([self.exe, "kill", name], timeout_s=60)
@@ -128,7 +128,7 @@ class DockerSandbox(Sandbox):
     @staticmethod
     def _docker(args: list[str], timeout_s: float) -> subprocess.CompletedProcess:
         try:
-            return subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            return subprocess.run(args, capture_output=True, text=True, check=False, encoding="utf-8", errors="replace",
                                   timeout=timeout_s)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise InfraError(f"docker CLI call failed: {type(e).__name__}: {e}", transient=True) from e

@@ -29,3 +29,31 @@ custom_harness = ["gateway/providers.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "RUF", "BLE", "S110", "PLW1510"]
+# RUF001-3: unicode punctuation in prose (en dashes, arrows) is intentional; RUF005: style only
+ignore = ["RUF001", "RUF002", "RUF003", "RUF005"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLW1510", "BLE001", "B011"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+strict = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+
+# The Evidence Kernel is checked with `mypy --strict src/custom_harness/kernel` (see tests/test_quality.py).
+
+[tool.coverage.run]
+branch = true
+source = ["custom_harness"]

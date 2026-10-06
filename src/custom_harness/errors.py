@@ -9,6 +9,8 @@ harness being evaluated. Scoring it as 0 lets a Docker hiccup decide an accept/r
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 
 class InfraError(RuntimeError):
     """The environment failed, not the harness. `transient` = worth retrying after a backoff."""
@@ -18,12 +20,13 @@ class InfraError(RuntimeError):
         self.transient = transient
 
 
-def _chain(exc: BaseException):
-    seen = set()
-    while exc is not None and id(exc) not in seen:
-        seen.add(id(exc))
-        yield exc
-        exc = exc.__cause__ or exc.__context__
+def _chain(exc: BaseException) -> Iterator[BaseException]:
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        yield cur
+        cur = cur.__cause__ or cur.__context__
 
 
 def infra_cause(exc: BaseException) -> BaseException | None:

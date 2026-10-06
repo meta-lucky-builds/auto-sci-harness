@@ -5,8 +5,8 @@ A claim's tier is the weakest link in its evidence chain. Autonomy is gated by t
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from enum import IntEnum, StrEnum
-from typing import Iterable
 
 
 class Tier(IntEnum):

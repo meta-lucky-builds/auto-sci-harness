@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
@@ -41,7 +42,7 @@ class EvolveConfig:
     max_excluded_frac: float = 0.25  # gate fails closed above this share of infra-excluded units
     infra_retries: int = 1  # fresh re-runs of a unit whose run failed for infrastructure reasons
     protected_nodes: tuple[str, ...] = DEFAULT_PROTECTED_NODES
-    budget_per_run: dict[str, float] | None = None
+    budget_per_run: dict[str, float | None] | None = None
 
 
 @dataclass
@@ -59,13 +60,17 @@ class Evaluator:
     """Runs (spec, task, seed) and caches outcomes so parent results are reused across stages."""
 
     def __init__(self, backends: dict[str, Backend], store: EvidenceStore, sandbox_factory: SandboxFactory,
-                 tasks: list[SuiteTask], budget_per_run: dict[str, float] | None = None,
-                 infra_retries: int = 1, retry: RetryPolicy | None = None):
+                 tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
+                 infra_retries: int = 1, retry: RetryPolicy | None = None,
+                 campaign_budget: Budget | None = None):
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
         self.tasks = {t.task_id: t for t in tasks}
         self.budget_per_run = budget_per_run
         self.infra_retries = infra_retries
         self.retry = retry
+        # campaign-level cap across all runs (persisted when built with budget.persistent_budget); checked
+        # before every run, charged after it; exhaustion stops the campaign cleanly (BudgetExceeded)
+        self.campaign_budget = campaign_budget
         self.cache: dict[tuple[str, str, int], RunOutcome] = {}
         self.calls = 0  # actual harness runs executed (cache misses, incl. infra re-runs)
         self.infra_failures = 0  # runs that ended INFRA_FAILED (each one excluded, never scored)
@@ -76,10 +81,17 @@ class Evaluator:
         key = (spec.spec_hash(), unit[0], unit[1])
         if key not in self.cache:
             for _ in range(1 + self.infra_retries):
+                if self.campaign_budget is not None:
+                    self.campaign_budget.check()
                 self.calls += 1
                 out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
                                   store=self.store, sandbox_factory=self.sandbox_factory,
                                   budget_limits=self.budget_per_run, retry=self.retry)
+                if self.campaign_budget is not None:
+                    try:
+                        self.campaign_budget.charge(out.cost)
+                    except BudgetExceeded:
+                        pass  # recorded; the next check() stops the campaign before any further run
                 if not out.infra_failed:
                     break
                 self.infra_failures += 1
@@ -91,8 +103,9 @@ class Evaluator:
 
 
 def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator: Evaluator,
-                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig = EvolveConfig()
+                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig | None = None
                       ) -> GenerationResult:
+    cfg = cfg or EvolveConfig()
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
     gate_units = [(t.task_id, s) for t in tasks if t.split == "gate" for s in cfg.seeds]
     if not evolve_units or not gate_units:
@@ -107,7 +120,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     calls_before = evaluator.calls
 
     parent_outcomes = [evaluator.outcome(parent, u) for u in evolve_units]
-    parent_scores = {u: o.score for u, o in zip(evolve_units, parent_outcomes)}
+    parent_scores = {u: o.score for u, o in zip(evolve_units, parent_outcomes, strict=True)}
     digest = diagnose(parent_outcomes, store)
     ledger = store.records("harness_edit")
 
@@ -131,7 +144,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     accepted_spec, accepted, decision = parent, False, "no valid candidates"
     fixed_k = 0
     if candidates:
-        rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[h][1], u),
+        rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
                   parent_scores, rounds=cfg.race_rounds, keep=1)
         fixed_k = rr.evaluations_fixed_k
         for h, (edit, _) in candidates.items():
@@ -139,7 +152,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             records.append({"status": "raced", "candidate": h, "edit": edit.model_dump(), "race": st,
                             "survived": h in rr.survivors})
         if rr.survivors:
-            best = rr.survivors[0]
+            best = str(rr.survivors[0])
             edit, spec = candidates[best]
             # fresh runs for BOTH arms: the race data that selected this winner are never acceptance evidence
             evolve_s = paired_sample(fresh_units, lambda u: evaluator.score(spec, u),

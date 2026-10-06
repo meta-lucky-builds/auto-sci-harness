@@ -6,8 +6,7 @@ import pytest
 from custom_harness.budget import Budget
 from custom_harness.gateway import MockBackend
 from custom_harness.records import RunStatus
-from custom_harness.runtime import (END, Condition, Edge, Engine, HarnessSpec, LLMNode, ModuleNode,
-                                    ToolNode, register)
+from custom_harness.runtime import END, Condition, Edge, Engine, HarnessSpec, LLMNode, ModuleNode, ToolNode, register
 from custom_harness.runtime.template import render
 from custom_harness.sandbox import LocalSandbox
 

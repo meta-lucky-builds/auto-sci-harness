@@ -30,7 +30,7 @@ class BlobStore:
     def get(self, digest: str) -> bytes:
         data = self._path(digest).read_bytes()
         if hashlib.sha256(data).hexdigest() != digest:
-            raise IOError(f"blob {digest} is corrupted")
+            raise OSError(f"blob {digest} is corrupted")
         return data
 
     def put_json(self, obj: Any) -> str:

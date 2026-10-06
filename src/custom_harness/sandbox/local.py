@@ -34,7 +34,7 @@ class LocalSandbox(Sandbox):
         base_env.update(env or {})
         t0 = time.time()
         try:
-            p = subprocess.run(command, cwd=self.workspace, env=base_env, capture_output=True,
+            p = subprocess.run(command, cwd=self.workspace, env=base_env, capture_output=True, check=False,
                                text=True, encoding="utf-8", errors="replace", timeout=timeout_s)
             return ExecResult(returncode=p.returncode, stdout=p.stdout, stderr=p.stderr,
                               wall_s=time.time() - t0)

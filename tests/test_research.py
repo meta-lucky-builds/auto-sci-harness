@@ -112,7 +112,11 @@ def test_t2_rules():
     assert t2_verdict([0.9, 0.91, 0.92], [0.7, 0.71, 0.69], higher_is_better=True).verified
     assert not t2_verdict([0.9, 0.91], [0.7, 0.71], higher_is_better=True).verified  # too few seeds
     assert not t2_verdict([0.7, 0.9, 0.5], [0.7, 0.6, 0.8], higher_is_better=True).verified
-    assert t2_verdict([1.0, 1.1, 0.9], [2.0, 2.1, 1.9], higher_is_better=False).verified  # rmse-like
+    assert t2_verdict([1.0, 1.15, 0.9], [2.0, 2.1, 1.95], higher_is_better=False).verified  # rmse-like
+    # identical difference on every seed: the seed check is degenerate, never evidence (M0 review)
+    v = t2_verdict([1.0, 1.1, 0.9], [2.0, 2.1, 1.9], higher_is_better=False)
+    assert not v.verified and v.degenerate
+    assert not t2_verdict([0.9, 0.91, 0.92], [0.7, 0.71], higher_is_better=True).verified  # unpaired
     ci = bootstrap_diff_ci([1.0] * 3, [0.0] * 3)
     assert ci.lo == ci.hi == 1.0
 

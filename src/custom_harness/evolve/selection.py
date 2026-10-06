@@ -11,10 +11,10 @@ gate fails closed when too many units were excluded to trust the comparison (CR 
 from __future__ import annotations
 
 import math
-import random
-import statistics
+from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
-from typing import Callable, Hashable
+
+from ..verify.stats import mean_t_interval
 
 Unit = tuple[str, int]  # (task_id, seed)
 Score = float | None  # None = excluded (infra failure)
@@ -55,18 +55,19 @@ def paired_sample(units: list[Unit], candidate: Callable[[Unit], Score], parent:
 
 def paired_ci(diffs: list[float], *, n_boot: int = 4000, alpha: float = 0.05, seed: int = 0
               ) -> tuple[float, float, float]:
-    """Mean and percentile-bootstrap CI of paired differences. One unit -> CI is (-inf, inf)."""
+    """Mean and two-sided Student-t CI of paired differences (n_boot/seed kept for API compatibility).
+
+    M0 review: the previous percentile bootstrap under-covered at small n (4% vs nominal 2.5% one-sided
+    false passes in the winner's-curse simulation). One unit -> (-inf, inf). Zero spread over >= 2 units
+    is a point interval: a deterministic gain on every unit can pass only together with the gate's
+    min_units rule, never on CI width alone."""
     if not diffs:
         return 0.0, -math.inf, math.inf
     try:
-        mean = statistics.fmean(diffs)
-        if len(diffs) == 1:
-            return mean, -math.inf, math.inf
-        rng = random.Random(seed)
-        boots = sorted(statistics.fmean(rng.choice(diffs) for _ in diffs) for _ in range(n_boot))
+        ci = mean_t_interval(diffs, alpha=alpha)
     except OverflowError:  # absurd magnitudes: an uninformative CI, so nothing can be accepted on it
         return math.nan, -math.inf, math.inf
-    return mean, boots[int(alpha / 2 * n_boot)], boots[min(n_boot - 1, int((1 - alpha / 2) * n_boot))]
+    return ci.estimate, ci.lo, ci.hi
 
 
 @dataclass
@@ -98,12 +99,12 @@ def race(candidates: list[Hashable], units: list[Unit], evaluate: Callable[[Hash
             continue
         for c in alive:
             for u in chunk:
-                score = evaluate(c, u)
+                score, base = evaluate(c, u), parent_scores[u]
                 spent += 1
-                if score is None or parent_scores[u] is None:
+                if score is None or base is None:
                     excluded[c] += 1
                     continue
-                diffs[c].append(score - parent_scores[u])
+                diffs[c].append(score - base)
         ranked = []
         for c in alive:
             mean, lo, hi = paired_ci(diffs[c], seed=r, n_boot=n_boot)

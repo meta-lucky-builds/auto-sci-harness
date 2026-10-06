@@ -4,7 +4,7 @@ import sys
 import time
 from pathlib import Path
 
-from custom_harness.gateway import MockBackend
+from custom_harness.gateway import ChatRequest, Message, MockBackend
 from custom_harness.runtime import Edge, Engine, HarnessSpec, LLMNode, ModuleNode, register
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.store import EvidenceStore
@@ -18,7 +18,9 @@ def _write(state, params, ctx):
 
 @register("crash.wait")
 def _wait(state, params, ctx):
-    """First time: announce, then block until killed. After a resume the marker exists: continue."""
+    """Makes one model call (journalled), then: first time, announce and block until killed; after a
+    resume the marker exists and it continues."""
+    ctx.llm("executor", ChatRequest(messages=[Message(role="user", content="mid-step model call")]))
     marker = Path(params["marker"])
     if not marker.exists():
         marker.write_text("in flight")

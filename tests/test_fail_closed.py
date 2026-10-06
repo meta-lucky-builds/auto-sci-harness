@@ -7,7 +7,6 @@ a credit or a validated value; it produces a rejection or a recorded failure.
 
 import json
 import math
-from pathlib import Path
 
 import pytest
 import yaml
@@ -15,13 +14,12 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import custom_harness.research  # noqa: F401
-from custom_harness.evolve import EvolveConfig, Evaluator, evolve_generation, gate, score_state
+from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate, score_state
 from custom_harness.evolve.edits import Edit
 from custom_harness.evolve.propose import propose_edits
 from custom_harness.evolve.selection import PairedSample
 from custom_harness.gateway import MockBackend
-from custom_harness.records import Evidence, EvidenceKind, RunStatus
-from custom_harness.records import Claim
+from custom_harness.records import Claim, Evidence, EvidenceKind, RunStatus
 from custom_harness.research.modules import tournament
 from custom_harness.runtime import Engine, HarnessSpec, LLMNode, register
 from custom_harness.runtime.modules import ModuleContext
@@ -76,7 +74,7 @@ def test_score_state_never_raises_and_never_credits_garbage(state, status):
 @FUZZ
 @given(garbage_text)
 def test_proposer_garbage_never_becomes_an_edit(text):
-    edits, problems, _ = propose_edits(MockBackend([text]), seed_spec(), {"clusters": []}, [], n_edits=3,
+    edits, _problems, _ = propose_edits(MockBackend([text]), seed_spec(), {"clusters": []}, [], n_edits=3,
                                        protected=("setup", "verify", "audit"))
     for e in edits:
         assert isinstance(e, Edit)
@@ -90,8 +88,9 @@ SCHEMA = {"type": "object", "properties": {"answer": {"type": "integer"}}, "requ
 @FUZZ
 @given(garbage_text)
 def test_contract_only_admits_schema_valid_values(tmp_path_factory, text):
-    from custom_harness.store import EvidenceStore
     import jsonschema
+
+    from custom_harness.store import EvidenceStore
     store = EvidenceStore(tmp_path_factory.mktemp("s"))
     spec = HarnessSpec(id="c", entry="a", nodes={"a": LLMNode(prompt="q", output_key="v", output_schema=SCHEMA)})
     res = Engine(spec, backends={"executor": MockBackend([text])}, store=store).run("t", {})
@@ -121,7 +120,7 @@ def test_tournament_never_guesses_a_ranking(tmp_path_factory, responses):
                     all(isinstance(x, str) for x in ranking):
                 valid.append(ranking)
         except Exception:
-            pass
+            continue
     try:
         out = tournament(state, {"rounds": 3}, ctx)
     except RuntimeError as e:

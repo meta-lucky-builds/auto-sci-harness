@@ -14,9 +14,7 @@ from pathlib import Path
 import pytest
 
 import custom_harness.research  # noqa: F401
-from custom_harness.records import RunStatus
-from custom_harness.runtime import Engine, HarnessSpec
-from custom_harness.sandbox import LocalSandbox, restore_snapshot, take_snapshot
+from custom_harness.sandbox import restore_snapshot, take_snapshot
 from custom_harness.sandbox.base import WorkspaceEscape, safe_path
 from custom_harness.sandbox.docker import DockerSandbox, docker_available
 from custom_harness.sandbox.snapshot import SnapshotError
@@ -196,8 +194,8 @@ def test_planted_host_escape_from_container_fails(store, tmp_path):
         "a = p.parse_args()\n"
         f"os.symlink({labels.as_posix()!r}, a.out)\n"   # absolute host path to the hidden labels
     )
-    from custom_harness.runtime.modules import ModuleContext
     from custom_harness.research.modules import _run_solution
+    from custom_harness.runtime.modules import ModuleContext
     sb = DockerSandbox(tmp_path / "ws")
     (sb.workspace / "evil.py").write_text(evil)
     (sb.workspace / "dev").mkdir()

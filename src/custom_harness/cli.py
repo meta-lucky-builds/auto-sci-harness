@@ -13,7 +13,7 @@ import yaml
 from .config import data_dir
 from .gateway import Backend, MockBackend
 from .runtime import Engine, HarnessSpec
-from .sandbox import LocalSandbox
+from .sandbox import LocalSandbox, Sandbox
 from .store import EvidenceStore
 
 
@@ -48,7 +48,7 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
         k, _, v = kv.partition("=")
         inputs[k] = v
     import custom_harness.research  # noqa: F401  registers research.* modules
-    sandbox = None
+    sandbox: Sandbox | None = None
     ws = data_dir() / "sandboxes" / f"{spec.id}-{a.task}-{int(time.time())}"
     if a.docker:
         from .sandbox.docker import DockerSandbox
@@ -67,7 +67,7 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
     run = store.get_run(a.run_id)
     spec = HarnessSpec.model_validate(store.harness_spec(run.harness_hash))
     backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
-    sandbox = None
+    sandbox: Sandbox | None = None
     if run.workspace is not None:
         if a.docker:
             from .sandbox.docker import DockerSandbox
@@ -84,6 +84,7 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
+
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
@@ -104,8 +105,12 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
         raise SystemExit("pass --docker (or --dev-sandbox for trusted test code only)")
 
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
+    from .budget import persistent_budget
+    limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
+    campaign = persistent_budget(store, a.campaign_id or run_tag, {k: v for k, v in limits.items() if v is not None})
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
-           store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag)
+           store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag,
+           campaign_budget=campaign)
     print(f"outputs: {data_dir() / 'evolve' / run_tag}")
     return 0
 
@@ -149,6 +154,11 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--race-rounds", type=int, default=2)
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
+    ev.add_argument("--campaign-id", help="persisted campaign budget id (reuse it to continue a campaign)")
+    ev.add_argument("--max-usd", type=float)
+    ev.add_argument("--max-tokens", type=float)
+    ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
+    ev.add_argument("--max-wall-s", type=float)
     rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure)")
     rr.add_argument("run_id")
     rr.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")

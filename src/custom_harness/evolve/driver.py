@@ -15,11 +15,12 @@ from pathlib import Path
 
 import yaml
 
+from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .evaluate import SandboxFactory, SuiteTask
-from .loop import EvolveConfig, Evaluator, evolve_generation, proposer_calibration
+from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 
 
 def load_suite(path: Path) -> list[SuiteTask]:
@@ -36,14 +37,21 @@ def load_suite(path: Path) -> list[SuiteTask]:
 
 def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, backends: dict[str, Backend],
            proposer: Backend, store: EvidenceStore, sandbox_factory: SandboxFactory,
-           cfg: EvolveConfig = EvolveConfig(), out_dir: Path | None = None, log=print) -> HarnessSpec:
+           cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
+           campaign_budget: Budget | None = None) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs."""
+    cfg = cfg or EvolveConfig()
     working = [t for t in suite if t.split != "sealed"]
-    evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run)
+    evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run,
+                          campaign_budget=campaign_budget)
     parent = seed_spec
     for g in range(generations):
         t0 = time.time()
-        res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg)
+        try:
+            res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg)
+        except BudgetExceeded as e:
+            log(json.dumps({"generation": g, "stopped": f"campaign budget exhausted: {e}"}))
+            break
         summary = {"generation": g, "accepted": res.accepted, "decision": res.decision,
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,

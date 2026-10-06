@@ -13,7 +13,7 @@ Every field here is an edit surface with a known edit type:
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -64,7 +64,7 @@ class ModuleNode(_Strict):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-Node = Annotated[Union[LLMNode, ToolNode, ModuleNode], Field(discriminator="kind")]
+Node = Annotated[LLMNode | ToolNode | ModuleNode, Field(discriminator="kind")]
 
 
 class ContextPolicy(_Strict):
@@ -91,7 +91,7 @@ class HarnessSpec(_Strict):
     budget: BudgetSpec = Field(default_factory=BudgetSpec)
 
     @model_validator(mode="after")
-    def _check_graph(self) -> "HarnessSpec":
+    def _check_graph(self) -> HarnessSpec:
         if self.entry not in self.nodes:
             raise ValueError(f"entry '{self.entry}' is not a node")
         if END in self.nodes:

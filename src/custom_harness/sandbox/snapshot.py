@@ -156,11 +156,11 @@ def restore_snapshot(snapshot_ref: str, workspace: Path, blobs: BlobStore) -> No
         for rel in dirs:
             (staging / rel).mkdir(parents=True, exist_ok=True)
         for rel, entry in files.items():
-            target = staging / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(blobs.get(entry["blob"]))
+            dest = staging / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(blobs.get(entry["blob"]))
             if entry.get("mode") is not None:
-                os.chmod(target, entry["mode"])
+                os.chmod(dest, entry["mode"])
         for rel, link_target in symlinks.items():
             link = staging / rel
             link.parent.mkdir(parents=True, exist_ok=True)

@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from ..budget import Budget
 from ..errors import InfraError
@@ -107,7 +108,7 @@ def _score_completed(state: dict) -> tuple[float, bool]:
 
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
-                budget_limits: dict[str, float] | None = None, retry: RetryPolicy | None = None) -> RunOutcome:
+                budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None) -> RunOutcome:
     try:
         sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
     except InfraError as e:  # e.g. Docker daemon down before the run even started

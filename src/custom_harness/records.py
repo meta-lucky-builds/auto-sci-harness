@@ -49,7 +49,7 @@ class Cost(Frozen):
     # True when a number is an estimate rather than reported by the backend.
     estimated: bool = False
 
-    def __add__(self, other: "Cost") -> "Cost":
+    def __add__(self, other: Cost) -> Cost:
         return Cost(
             prompt_tokens=self.prompt_tokens + other.prompt_tokens,
             completion_tokens=self.completion_tokens + other.completion_tokens,

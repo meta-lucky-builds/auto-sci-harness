@@ -25,7 +25,7 @@ import jsonschema
 
 from ..budget import Budget, BudgetExceeded
 from ..errors import InfraError, infra_cause, is_transient
-from ..gateway import Backend, BackendError, ChatRequest, Message
+from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
@@ -35,9 +35,10 @@ from .template import lookup, render
 
 
 class ContractError(ValueError):
-    def __init__(self, msg: str, cost: Cost, attempts: list[str]):
+    def __init__(self, msg: str, cost: Cost, attempts: list[str], messages: list[dict] | None = None):
         super().__init__(msg)
         self.cost = cost
+        self.messages = messages or []
         self.attempts = attempts
 
 
@@ -46,6 +47,28 @@ class ModuleError(RuntimeError):
         super().__init__(msg)
         self.cost = cost
         self.llm_calls = llm_calls
+
+
+class _JournalingBackend(Backend):
+    """Transparent proxy: after every completed model call, append its cost to the run's cost journal
+    (kind "cost_journal", keyed by run and step) BEFORE control returns to the step. A hard kill can then
+    lose the step's outputs, but never the record of what it spent."""
+
+    def __init__(self, inner: Backend, engine: Engine):
+        self._inner, self._engine = inner, engine
+        self.name, self.provider, self.mode = inner.name, inner.provider, inner.mode
+        self.training_on_outputs = inner.training_on_outputs
+
+    def complete(self, req: ChatRequest) -> ChatResponse:
+        resp = self._inner.complete(req)
+        cursor = self._engine._cursor
+        if cursor is not None:
+            self._engine.store.append_record("cost_journal", {"run_id": cursor[0], "step": cursor[1],
+                                                              "cost": resp.cost.model_dump()})
+        return resp
+
+    def __getattr__(self, item: str) -> Any:  # e.g. MockBackend.requests in tests
+        return getattr(self._inner, item)
 
 
 @dataclass(frozen=True)
@@ -85,25 +108,40 @@ def parse_json_output(text: str) -> Any:
 
 def _holds(cond: Condition, state: dict[str, Any]) -> bool:
     value = lookup(state, cond.key, default=None)
-    match cond.op:
-        case "eq": return value == cond.value
-        case "ne": return value != cond.value
-        case "truthy": return bool(value)
-        case "falsy": return not value
-        case "contains": return value is not None and cond.value in value
-        case "lt": return value is not None and value < cond.value
-        case "gt": return value is not None and value > cond.value
-    raise ValueError(cond.op)
+    op = cond.op
+    if op == "eq":
+        return bool(value == cond.value)
+    if op == "ne":
+        return bool(value != cond.value)
+    if op == "truthy":
+        return bool(value)
+    if op == "falsy":
+        return not value
+    if value is None:
+        return False
+    try:
+        if op == "contains":
+            return cond.value in value
+        if op == "lt":
+            return bool(value < cond.value)
+        if op == "gt":
+            return bool(value > cond.value)
+    except TypeError:  # incomparable types: the condition does not hold (fail closed, never crash)
+        return False
+    raise ValueError(op)
 
 
 class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
-                 retry: RetryPolicy = RetryPolicy(), sleep=time.sleep):
+                 retry: RetryPolicy | None = None, sleep=time.sleep):
         self.spec = spec
-        self.retry = retry
+        self.retry = retry or RetryPolicy()
         self._sleep = sleep
-        self.backends = backends
+        # every model call is journalled the moment it returns (write-ahead), so the spend of a step that is
+        # killed mid-flight can be recovered by resume instead of being lost (M0 review)
+        self._cursor: tuple[str, int] | None = None
+        self.backends: dict[str, Backend] = {role: _JournalingBackend(b, self) for role, b in backends.items()}
         self.store = store
         self.sandbox = sandbox
         if budget is None:
@@ -183,6 +221,8 @@ class Engine:
         steps = self.store.trace(run_id)
         if steps:
             last = steps[-1]
+            if last.checkpoint_ref is None:
+                raise ValueError(f"run {run_id}: last step has no checkpoint; cannot resume")
             cp = self.store.blobs.get_json(last.checkpoint_ref)
             state, next_node, start = dict(cp["state"]), cp["next"], last.index + 1
             spent = _checkpoint_spent(cp, self.store, run_id, last.index)
@@ -202,8 +242,33 @@ class Engine:
         if next_node is None:
             self.store.set_run_status(run_id, RunStatus.FAILED, "resumed: last checkpoint was a failed terminal")
             return RunResult(run_id, RunStatus.FAILED, state, cost=Cost())
+        start = self._record_interrupted_step(run_id, start, next_node, state, ws_ref)
         self._started(run_id, note=f"resumed at step {start}")
         return self._loop(run_id, state, next_node, start_index=start)
+
+    def _record_interrupted_step(self, run_id: str, index: int, node_id: str, state: dict[str, Any],
+                                 ws_ref: str | None) -> int:
+        """If the process died inside step `index`, its model calls are in the cost journal but the step
+        has no trace row. Record that spend as an explicit 'interrupted' row (same checkpoint, so the node
+        is retried next) and charge it: resume never double-charges and never loses recorded spend."""
+        entries = [e for e in self.store.records_where("cost_journal", "run_id", run_id) if e.get("step") == index]
+        if not entries:
+            return index
+        spent = Cost()
+        for e in entries:
+            spent = spent + Cost.model_validate(e["cost"])
+        cp_ref = self.store.blobs.put_json({"state": state, "next": node_id, "workspace": ws_ref,
+                                            "spent": (self.budget.spent + spent).model_dump()})
+        node = self.spec.nodes[node_id]
+        now = time.time()
+        self.store.add_step(TraceStep(
+            run_id=run_id, index=index, node_id=node_id, kind=_kind(node), input={"node": node.model_dump(mode="json")},
+            output={"interrupted": True, "journalled_model_calls": len(entries)},
+            error="interrupted: the process died during this step; its model-call spend was recovered from the "
+                  "cost journal and the step is re-executed",
+            cost=spent, started_at=now, ended_at=now, checkpoint_ref=cp_ref))
+        self.budget.spent = self.budget.spent + spent
+        return index + 1
 
     def _started(self, run_id: str, note: str = "") -> None:
         owner = {"pid": os.getpid(), "host": socket.gethostname()}
@@ -239,7 +304,9 @@ class Engine:
 
             node = self.spec.nodes[node_id]
             t0 = time.time()
+            self._cursor = (run_id, index)
             out, cost, prov, error, infra = self._attempt(node, state, run_id)
+            self._cursor = None
             if infra is None:
                 state["_last_error"] = error
                 if error is None:
@@ -307,7 +374,7 @@ class Engine:
                 return out, failed + _walled(cost, time.monotonic() - t0), prov, None, None
             except ContractError as e:
                 # failed attempts still cost money and must appear in the trace
-                return ({"attempts": e.attempts, "messages": getattr(e, "messages", [])},
+                return ({"attempts": e.attempts, "messages": e.messages},
                         failed + _walled(e.cost, time.monotonic() - t0), None, f"ContractError: {e}", None)
             except (ModuleError, BackendError, InfraError, KeyError, ValueError, OSError) as e:
                 elapsed = time.monotonic() - t0
@@ -370,8 +437,8 @@ class Engine:
             messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction)))
         messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction)))
         total = Cost()
-        attempts = []
-        for attempt in range(node.retries + 1):
+        attempts: list[str] = []
+        for _ in range(node.retries + 1):
             resp = backend.complete(ChatRequest(messages=messages, json_schema=node.output_schema,
                                                 temperature=node.temperature, max_tokens=node.max_tokens))
             total = total + resp.cost
@@ -391,9 +458,8 @@ class Engine:
                     Message(role="user", content=f"Your output violated the required JSON contract: {msg}. "
                                                  f"Reply with only valid JSON matching the schema."),
                 ]
-        err = ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts)
-        err.messages = _dump(messages)
-        raise err
+        raise ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts,
+                            _dump(messages))
 
 
 def _dump(messages: list[Message]) -> list[dict]:

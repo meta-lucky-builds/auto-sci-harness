@@ -59,15 +59,21 @@ def test_hard_kill_then_resume_is_exact_and_not_double_charged(tmp_path):
     assert res.status == RunStatus.COMPLETED
     trace = store.trace(run.id)
     assert [s.model_dump() for s in trace[:2]] == prefix  # identical prefix
-    assert [s.index for s in trace] == [0, 1, 2, 3] and [s.node_id for s in trace] == ["a", "b", "c", "d"]
+    # the killed step is recorded explicitly with the spend recovered from the cost journal, then re-run
+    assert [s.index for s in trace] == [0, 1, 2, 3, 4]
+    assert [s.node_id for s in trace] == ["a", "b", "c", "c", "d"]
+    assert trace[2].output["interrupted"] is True and trace[2].error.startswith("interrupted")
+    lost_call = trace[2].cost
+    assert _tokens(lost_call) > 0  # the mid-step model call made before the kill is NOT lost
     assert res.state["seen"] == "step-a" and res.state["junk_present"] is False  # workspace restored exactly
 
     recorded = sum((s.cost for s in trace), Cost())
-    assert _tokens(eng.budget.spent) == _tokens(recorded)  # nothing charged twice
+    assert _tokens(eng.budget.spent) == _tokens(recorded)  # nothing charged twice, nothing lost
     clean_store = EvidenceStore(tmp_path / "clean")
     clean = Engine(H.spec(str(marker)), backends=H.backends(), store=clean_store,
                    sandbox=H.LocalSandbox(tmp_path / "ws2", i_understand_no_isolation=True)).run("t", {"q": 1})
-    assert _tokens(clean.cost) == _tokens(recorded)  # same total as a run that never crashed
+    # exactly one extra model call compared with a run that never crashed: the one the kill interrupted
+    assert _tokens(clean.cost) + _tokens(lost_call) == _tokens(recorded)
     store.close()
     clean_store.close()
 
@@ -147,3 +153,26 @@ def test_wall_clock_is_charged_but_outage_time_is_not(store):
     assert a.cost.wall_s >= 0.25
     assert b.cost.wall_s < 0.2  # the 0.4 s spent inside the outage is not charged
     assert abs(eng.budget.spent.wall_s - (a.cost.wall_s + b.cost.wall_s)) < 1e-9
+
+
+def test_campaign_budget_persists_across_processes_and_stops_the_campaign(tmp_path):
+    from custom_harness.budget import BudgetExceeded, persistent_budget
+    from custom_harness.evolve import Evaluator, SuiteTask
+
+    s1 = EvidenceStore(tmp_path / "s")
+    b1 = persistent_budget(s1, "campaign-1", {"tokens": 100})
+    b1.charge(Cost(prompt_tokens=60))
+    s1.close()
+    s2 = EvidenceStore(tmp_path / "s")  # a new process
+    b2 = persistent_budget(s2, "campaign-1", {"tokens": 100})
+    assert _tokens(b2.spent) == 60
+    assert _tokens(persistent_budget(s2, "other", {"tokens": 100}).spent) == 0  # ids are separate
+    with pytest.raises(BudgetExceeded):
+        b2.charge(Cost(prompt_tokens=50))
+    b3 = persistent_budget(s2, "campaign-1", {"tokens": 100})
+    assert _tokens(b3.spent) == 110  # the charge that crossed the cap was still recorded
+    ev = Evaluator({}, s2, lambda k: None, [SuiteTask("t", tmp_path, "evolve")], campaign_budget=b3)
+    with pytest.raises(BudgetExceeded):
+        ev.outcome(HarnessSpec(id="x", entry="a", nodes={"a": LLMNode(prompt="p", output_key="o")}), ("t", 0))
+    assert ev.calls == 0  # nothing ran once the campaign was over its cap
+    s2.close()

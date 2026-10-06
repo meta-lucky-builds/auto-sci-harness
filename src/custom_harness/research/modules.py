@@ -22,12 +22,12 @@ from ..records import Claim, Evidence, EvidenceKind
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
-from ..sandbox.base import WorkspaceEscape, safe_path
+from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
 from ..tiers import Action, Tier, decide
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, leak_audit, new_canary, private_fingerprints
 from ..verify.ranking import bradley_terry, rankings_to_wins
-from ..verify.stats import paired_bootstrap_metric, t2_verdict
+from ..verify.stats import paired_example_interval, t2_verdict
 from .data import dev_split, profile, read_csv, read_predictions
 from .task import TaskSpec, load_task
 
@@ -41,9 +41,15 @@ def _require_isolation(ctx: ModuleContext) -> None:
                               "(or set CHH_ALLOW_UNISOLATED=1 for trusted test code only)")
 
 
+def _sb(ctx: ModuleContext) -> Sandbox:
+    if ctx.sandbox is None:
+        raise RuntimeError("research modules require a sandbox")
+    return ctx.sandbox
+
+
 def _ws(ctx: ModuleContext, rel: str) -> Path:
     """Host-side access to a workspace path; refuses links planted by agent code (see safe_path)."""
-    return safe_path(ctx.sandbox.workspace, rel)
+    return safe_path(_sb(ctx).workspace, rel)
 
 
 def _task(state: dict[str, Any]) -> TaskSpec:
@@ -54,9 +60,10 @@ def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: 
                   timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
     out_rel = f"out/preds_{uuid.uuid4().hex[:8]}.csv"
     _ws(ctx, "out").mkdir(exist_ok=True)
-    res = ctx.sandbox.exec([ctx.sandbox.python, script, "--train", train, "--test", test,
-                            "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
-    info = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
+    sb = _sb(ctx)
+    res = sb.exec([sb.python, script, "--train", train, "--test", test,
+                   "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
+    info: dict[str, Any] = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
             "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:]}
     try:
         out = _ws(ctx, out_rel)
@@ -80,7 +87,7 @@ def _score(task: TaskSpec, y_true: list[str], preds: list[str] | None) -> float 
         return None
     try:
         return M.score(task.metric, y_true, preds)
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError):
         return None
 
 
@@ -246,7 +253,7 @@ def verify(state, params, ctx):
     train, test = f"data/{task.train_file}", f"data/{task.test_features_file}"
 
     scores: dict[str, list[float]] = {"solution": [], "baseline": []}
-    preds0: dict[str, list[str]] = {}
+    preds_by_seed: dict[str, list[list[str]]] = {"solution": [], "baseline": []}
     evidence_ids: list[str] = []
     for arm, script in (("solution", "solution.py"), ("baseline", "baseline.py")):
         for seed in seeds:
@@ -255,8 +262,7 @@ def verify(state, params, ctx):
             if s is None:
                 raise RuntimeError(f"{arm} failed on test (seed {seed}): {info['stderr_tail'][-500:]}")
             scores[arm].append(s)
-            if seed == seeds[0]:
-                preds0[arm] = preds
+            preds_by_seed[arm].append(preds)
             payload = {"arm": arm, "seed": seed, "metric": task.metric, "score": s,
                        "preds_ref": ctx.store.blobs.put_json(preds), "code_ref":
                        best["code_ref"] if arm == "solution" else ctx.store.blobs.put(
@@ -270,12 +276,17 @@ def verify(state, params, ctx):
 
     seed_v = t2_verdict(scores["solution"], scores["baseline"], higher_is_better=task.higher_is_better,
                         min_seeds=params.get("min_seeds", 3))
-    ex_ci = paired_bootstrap_metric(M.METRICS[task.metric], y_test, preds0["solution"], preds0["baseline"],
-                                    higher_is_better=task.higher_is_better)
-    verified = seed_v.verified and ex_ci.lo > 0
+    ex_ci = paired_example_interval(M.METRICS[task.metric], y_test, preds_by_seed["solution"],
+                                    preds_by_seed["baseline"], higher_is_better=task.higher_is_better)
+    # A degenerate seed check (identical difference on every seed: the method ignores the seed) carries no
+    # information: it is reported as such, and the evidence then rests on test-example resampling alone.
+    seed_ok = seed_v.verified or seed_v.degenerate
+    verified = seed_ok and not ex_ci.degenerate and ex_ci.lo > 0
     stat_payload = {"seed_verdict": seed_v.reason, "seed_ci": seed_v.ci.__dict__ if seed_v.ci else None,
-                    "example_bootstrap_ci": ex_ci.__dict__, "verified": verified, "scores": scores,
-                    "rule": "seed CI excludes 0 AND paired test-example bootstrap CI excludes 0"}
+                    "seed_check_degenerate": seed_v.degenerate,
+                    "example_ci": ex_ci.__dict__, "verified": verified, "scores": scores,
+                    "rule": "paired-seed t CI excludes 0 (or is degenerate and reported so) AND BCa test-example "
+                            "CI averaged over seeds excludes 0"}
     stat_ev = Evidence(kind=EvidenceKind.STAT, tier=Tier.T2_STATISTICAL, verifier_id="t2:seed+example-bootstrap",
                        produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(stat_payload),
                        summary=("verified" if verified else "not verified") + f": {seed_v.reason}")
@@ -287,8 +298,8 @@ def verify(state, params, ctx):
     if verified:
         text = (f"On task '{task.id}', the solution for hypothesis {hyp.get('hypothesis_id')} improves "
                 f"{task.metric} over the baseline: {mean(scores['solution']):.4g} vs "
-                f"{mean(scores['baseline']):.4g} (mean over seeds {seeds}); seed 95% CI of improvement "
-                f"[{seed_v.ci.lo:.4g}, {seed_v.ci.hi:.4g}], test-example 95% CI [{ex_ci.lo:.4g}, {ex_ci.hi:.4g}].")
+                f"{mean(scores['baseline']):.4g} (mean over seeds {seeds}); {seed_v.reason}; test-example "
+                f"95% CI [{ex_ci.lo:.4g}, {ex_ci.hi:.4g}].")
     else:
         text = (f"On task '{task.id}', the best solution (hypothesis {hyp.get('hypothesis_id')}) did NOT show a "
                 f"verified improvement over the baseline on {task.metric}: {mean(scores['solution']):.4g} vs "
@@ -350,7 +361,7 @@ def audit(state, params, ctx):
             try:
                 ev = ctx.store.get_evidence(eid)
                 payload = ctx.store.blobs.get_json(ev.payload_ref)
-            except (KeyError, IOError, OSError) as e:
+            except (KeyError, OSError) as e:
                 results["I1"] = False
                 results["problems"].append(f"{cid}: evidence {eid} unresolvable ({e})")
                 continue

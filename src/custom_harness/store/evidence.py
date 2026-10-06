@@ -11,9 +11,10 @@ import json
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
-from ..records import (Claim, ClaimStatus, Cost, Evidence, Run, RunStatus, TraceStep)
+from ..records import Claim, ClaimStatus, Cost, Evidence, Run, RunStatus, TraceStep
 from ..tiers import Tier, chain_tier
 from .blobs import BlobStore
 
@@ -29,7 +30,11 @@ CREATE TABLE IF NOT EXISTS harness_versions (hash TEXT PRIMARY KEY, harness_id T
                                              parent_hash TEXT, spec_ref TEXT, at REAL);
 CREATE TABLE IF NOT EXISTS records (kind TEXT, body TEXT NOT NULL, at REAL);
 CREATE INDEX IF NOT EXISTS records_kind ON records(kind);
+CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, body TEXT NOT NULL,
+                                   prev TEXT NOT NULL, hash TEXT NOT NULL UNIQUE, at REAL NOT NULL);
 """
+
+LedgerRow = tuple[int, str, str, str, str, float]  # seq, kind, body (canonical JSON), prev, hash, at
 
 
 class EvidenceStore:
@@ -140,11 +145,42 @@ class EvidenceStore:
     def append_record(self, kind: str, body: dict) -> None:
         self._exec("INSERT INTO records VALUES (?, ?, ?)", (kind, json.dumps(body, default=str), time.time()))
 
+    def records_where(self, kind: str, key: str, value: str) -> list[dict]:
+        """Records of `kind` whose top-level JSON field `key` equals `value` (in insertion order)."""
+        if not key.isidentifier():
+            raise ValueError(f"invalid record key {key!r}")
+        rows = self._rows(f"SELECT body FROM records WHERE kind=? AND json_extract(body, '$.{key}')=? ORDER BY rowid",
+                          (kind, value))
+        return [json.loads(r[0]) for r in rows]
+
     def records(self, kind: str, limit: int | None = None) -> list[dict]:
         sql = "SELECT body FROM records WHERE kind=? ORDER BY rowid"
         rows = self._rows(sql, (kind,))
         out = [json.loads(r[0]) for r in rows]
         return out[-limit:] if limit else out
+
+    # --- Evidence-Kernel ledger (hash chain; the chain rule lives in kernel/ledger.py) -------------
+    def ledger_append(self, kind: str, body: str, entry_hash: Callable[[int, str, str, str, float], str]
+                      ) -> LedgerRow:
+        """Append atomically: seq, prev and the timestamp are fixed under one lock and one transaction."""
+        with self._lock, self._db:
+            last = self._db.execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
+            seq, prev = (last[0] + 1, last[1]) if last else (1, "genesis")
+            at = time.time()
+            h = entry_hash(seq, kind, body, prev, at)
+            self._db.execute("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?)", (seq, kind, body, prev, h, at))
+        return seq, kind, body, prev, h, at
+
+    def ledger_import(self, row: LedgerRow) -> None:
+        """Raw insert of an existing entry (used only to rebuild a ledger excerpt from a bundle)."""
+        self._exec("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?)", row)
+
+    def ledger_rows(self, kind: str | None = None) -> list[LedgerRow]:
+        if kind is None:
+            rows = self._rows("SELECT seq, kind, body, prev, hash, at FROM ledger ORDER BY seq")
+        else:
+            rows = self._rows("SELECT seq, kind, body, prev, hash, at FROM ledger WHERE kind=? ORDER BY seq", (kind,))
+        return [tuple(r) for r in rows]  # type: ignore[misc]
 
     def close(self) -> None:
         self._db.close()
