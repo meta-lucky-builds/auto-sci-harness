@@ -10,7 +10,6 @@ from custom_harness.gateway import MockBackend
 from custom_harness.records import RunStatus
 from custom_harness.runtime import Engine, HarnessSpec
 from custom_harness.sandbox import LocalSandbox
-
 from test_research import KNN_RADIUS, rings_task, scripted_llm  # noqa: F401  (fixture re-export)
 
 ROOT = Path(__file__).resolve().parents[1]
