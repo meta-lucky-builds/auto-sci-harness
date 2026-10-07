@@ -15,6 +15,7 @@ All of these nodes are protected from automatic harness edits (evolve/edits.py).
 
 from __future__ import annotations
 
+import ast
 import csv
 import hashlib
 import io
@@ -339,12 +340,179 @@ def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[
 
 
 def copied_code_lines(code: str, text: str, min_len: int = 25) -> int:
-    """How many substantial lines of `code` (>= min_len characters after collapsing whitespace, comment lines
-    excluded) appear verbatim in `text` (whitespace collapsed). A verbatim-copy detector only: paraphrased or
-    re-formatted code is not detected (stated limitation)."""
+    """How many lines of `code` appear in `text`: substantial lines (>= min_len characters after collapsing
+    whitespace, comment lines excluded) verbatim, OR statements of `code` with >= BRIEF_MIN_TOKENS normalised tokens
+    that occur in `text` as code with renamed local names, other literals, quotes or spacing (see
+    _statement_signatures; candidate code in the text = each line, the part after its last ': ', and every
+    `backtick` span, dedented). Deep paraphrase (code retold in prose, restructured) is not detected."""
     hay = " ".join(text.split())
     lines = {" ".join(ln.split()) for ln in code.splitlines()}
-    return sum(1 for ln in lines if len(ln) >= min_len and not ln.startswith("#") and ln in hay)
+    verbatim = {ln for ln in lines if len(ln) >= min_len and not ln.startswith("#") and ln in hay}
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return len(verbatim)
+    local, aliases = _defined(tree)
+    library = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - local - set(aliases)
+    original = {s for s in _statement_signatures(code) if len(s) >= BRIEF_MIN_TOKENS}
+    found: set[tuple[str, ...]] = set()
+    for cand in _code_candidates(text):
+        try:
+            # a snippet has no context: every name that is not one of the original's library names (or import
+            # aliases) is treated as a renamed local
+            found |= _statement_signatures(cand, context=(library, aliases))
+        except (SyntaxError, ValueError, RecursionError):
+            continue
+    return max(len(verbatim), len(original & found))
+
+
+# ------------------------------------------------------------------ rename-invariant code comparison
+#: refusal threshold of structural_similarity (replica vs original); also the default `max_similarity`.
+MAX_STRUCTURAL_SIMILARITY = 0.8
+SHINGLE_K = 8  # token shingle length over the normalised AST token sequence
+MIN_SHINGLES, MIN_STATEMENTS = 20, 4  # below this, a side has too little non-boilerplate code to judge
+STATEMENT_MIN_TOKENS = 6  # statements shorter than this are too generic to count
+BRIEF_MIN_TOKENS = 8
+
+
+def _code_candidates(text: str) -> list[str]:
+    import re
+    import textwrap
+    cands = [text, textwrap.dedent(text)]
+    for ln in text.splitlines():
+        cands += [ln.strip(), ln.rsplit(": ", 1)[-1].strip()]
+    cands += re.findall(r"`([^`]+)`", text)
+    return [c for c in dict.fromkeys(cands) if c]
+
+
+def _defined(tree: ast.AST) -> tuple[set[str], dict[str, str]]:
+    """(names the code defines itself: variables, functions, classes, parameters, ...; import alias -> real name)."""
+    names: set[str] = set()
+    aliases: dict[str, str] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.add(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+        elif isinstance(n, ast.arg):
+            names.add(n.arg)
+        elif isinstance(n, ast.alias) and n.asname:
+            aliases[n.asname] = n.name
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            names.update(n.names)
+    return names - set(aliases), aliases
+
+
+def _label(n: ast.AST, names: set[str], aliases: dict[str, str], keep: set[str] | None = None) -> str | None:
+    """Normalised token for one AST node: local names -> '_', aliases -> the imported name, literals -> their type;
+    library names, attributes and keyword names are kept (with `keep`: only those names, all others -> '_').
+    None = skip the node."""
+    if isinstance(n, ast.expr_context):
+        return None
+    if isinstance(n, ast.Name):
+        if keep is not None:
+            return aliases.get(n.id) or (n.id if n.id in keep else "_")
+        return aliases.get(n.id) or ("_" if n.id in names else n.id)
+    if isinstance(n, ast.Attribute):
+        return "." + n.attr
+    if isinstance(n, ast.Constant):
+        return "C:" + type(n.value).__name__
+    if isinstance(n, ast.keyword):
+        return "kw:" + (n.arg or "**")
+    if isinstance(n, ast.alias):
+        return "import:" + n.name
+    return type(n).__name__
+
+
+def _is_docstring(n: ast.AST) -> bool:
+    return isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
+
+
+def _token_sequence(src: str) -> list[str]:
+    tree = ast.parse(src)
+    names, aliases = _defined(tree)
+    out: list[str] = []
+
+    def visit(n: ast.AST) -> None:
+        if _is_docstring(n):
+            return
+        lab = _label(n, names, aliases)
+        if lab is None:
+            return
+        out.append(lab)
+        for c in ast.iter_child_nodes(n):
+            visit(c)
+    visit(tree)
+    return out
+
+
+_BODY_FIELDS = ("body", "orelse", "finalbody", "handlers")
+
+
+def _statement_signatures(src: str, context: tuple[set[str], dict[str, str]] | None = None
+                          ) -> set[tuple[str, ...]]:
+    """Each statement as its normalised token tuple, nested statement bodies excluded (a compound statement's header
+    is its own signature), >= STATEMENT_MIN_TOKENS tokens. Insensitive to statement order and inserted statements.
+    `context` = (library names to keep, import aliases) of ANOTHER program, for snippets without their own imports."""
+    tree = ast.parse(src)
+    names, aliases = _defined(tree)
+    keep = None
+    if context is not None:
+        keep, aliases = context[0], {**context[1], **aliases}
+    sigs: set[tuple[str, ...]] = set()
+
+    def flat(n: ast.AST, out: list[str]) -> None:
+        lab = _label(n, names, aliases, keep)
+        if lab is None:
+            return
+        out.append(lab)
+        for f, v in ast.iter_fields(n):
+            if f in _BODY_FIELDS and isinstance(v, list) and v and isinstance(v[0], (ast.stmt, ast.excepthandler)):
+                continue
+            for c in v if isinstance(v, list) else [v]:
+                if isinstance(c, ast.AST):
+                    flat(c, out)
+    for n in ast.walk(tree):
+        if isinstance(n, ast.stmt) and not _is_docstring(n):
+            toks: list[str] = []
+            flat(n, toks)
+            if len(toks) >= STATEMENT_MIN_TOKENS:
+                sigs.add(tuple(toks))
+    return sigs
+
+
+def _containment(a: set[Any], b: set[Any], minimum: int) -> float | None:
+    if len(a) < minimum or len(b) < minimum:
+        return None
+    shared = len(a & b)
+    return max(shared / len(a), shared / len(b))
+
+
+def structural_similarity(a: str, b: str, boilerplate: str | None = None) -> float:
+    """Rename-invariant similarity of two programs in [0, 1]: the larger of (1) the containment of normalised token
+    shingles (SHINGLE_K) and (2) the containment of normalised statements, each in either direction (so a copy padded
+    with extra code, or a partial copy, still scores high), after removing everything that also occurs in
+    `boilerplate` (the task's baseline: the CLI contract and shared I/O). Renaming, aliasing imports, changing
+    literals/quotes/formatting/comments/docstrings, reordering top-level statements or inserting statements does
+    not lower it. A side with too little non-boilerplate code is not judged (0.0), nor is code that does not parse.
+    Not detected (stated residual): deep paraphrase, i.e. the same algorithm restructured (different control flow,
+    different library calls)."""
+    try:
+        ta, tb = _token_sequence(a), _token_sequence(b)
+        sa, sb = _statement_signatures(a), _statement_signatures(b)
+        tbase = _token_sequence(boilerplate) if boilerplate else []
+        sbase = _statement_signatures(boilerplate) if boilerplate else set()
+    except (SyntaxError, ValueError, RecursionError):
+        return 0.0
+
+    def shingles(t: list[str]) -> set[tuple[str, ...]]:
+        return {tuple(t[i:i + SHINGLE_K]) for i in range(len(t) - SHINGLE_K + 1)}
+    base_sh = shingles(tbase)
+    scores = [_containment(shingles(ta) - base_sh, shingles(tb) - base_sh, MIN_SHINGLES),
+              _containment(sa - sbase, sb - sbase, MIN_STATEMENTS)]
+    return max((s for s in scores if s is not None), default=0.0)
 
 
 # ------------------------------------------------------------------ independent replication (GOAL L4.9)
@@ -385,24 +553,31 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
     """Score the replicator's code (written WITHOUT the original code) by the same cross-validation as every
     candidate. It becomes a replication candidate only if it works and beats the baseline on dev; otherwise the
     replication fails honestly."""
-    from .modules import _better, _dev_predict, _score, _ws
+    from .modules import _baseline_code, _better, _dev_predict, _score, _ws
     _require_isolation(ctx)
     task = _task(state)
     code = (state.get("replica_impl") or {}).get("code", "")
     original = ctx.store.blobs.get((state.get("best") or {})["code_ref"]).decode("utf-8", errors="replace")
     similarity = code_similarity(code, original)
+    # rename-invariant comparison; what the task's baseline shares with both (CLI contract, I/O) is not evidence
+    structural = structural_similarity(code, original,
+                                       _baseline_code(state, ctx).decode("utf-8", errors="replace"))
+    why = None
     if similarity >= params.get("max_similarity", 0.8):
+        why = f"{similarity:.0%} of lines shared with the original"
+    elif structural >= params.get("max_structural_similarity", MAX_STRUCTURAL_SIMILARITY):
+        why = f"structurally {structural:.0%} identical to the original (names, literals and layout ignored)"
+    if why is not None:
         # a near-copy of the original code is not an independent replication, whatever produced it
         return {"replica_best": {"hypothesis_id": "replication", "dev_score": None, "dev_preds_ref": None,
-                                 "code_ref": ctx.store.blobs.put(code.encode()),
-                                 "error": f"not independent: {similarity:.0%} of lines shared with the original"},
+                                 "code_ref": ctx.store.blobs.put(code.encode()), "error": f"not independent: {why}"},
                 "route": "report"}
     _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
     cand = {"hypothesis_id": f"replication-of-{(state.get('best') or {}).get('hypothesis_id')}", "dev_score": s,
-            "similarity_to_original": round(similarity, 3),
+            "similarity_to_original": round(similarity, 3), "structural_similarity": round(structural, 3),
             "dev_preds_ref": ctx.store.blobs.put_json(preds) if s is not None else None,
             "code_ref": ctx.store.blobs.put(code.encode()),
             "error": None if s is not None else (info["stderr_tail"][-1500:] or "no valid predictions")}
