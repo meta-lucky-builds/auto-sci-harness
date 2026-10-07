@@ -35,7 +35,8 @@ from .ledger import Entry, Ledger, verify_chain
 from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRecord, Vault, VaultError
 
 _NORMAL = statistics.NormalDist()
-PEEKING_PURPOSES = frozenset({"develop", "audit"})
+PEEKING_PURPOSES = frozenset({"develop", "audit"})  # always peeking before a claim's registration
+INTEGRITY_PURPOSES = frozenset({"leakscan", "reproduce"})  # never fed to a model: logged, not peeking (K2)
 SCORE_TOLERANCE = 1e-9  # reported vs recomputed score: anything larger is a different number
 
 
@@ -126,6 +127,17 @@ def shared_examples(vault: Vault, target: str, other: str) -> dict[str, tuple[in
             if n:
                 found[f"{other}/{name}"] = (n, len(data[0]) > len(t[0]))
     return found
+
+
+def related_targets(vault: Vault, target: str) -> set[str]:
+    """`target` plus every other dataset tested against the same held-out examples: sharing example rows (exact
+    text, `shared_examples`) or sharing a byte-identical PRIVATE file (the same labels under another id, R1-F4)."""
+    datasets = vault.datasets()
+    if target not in datasets:  # unregistered (K1 reports it): related to nothing
+        return {target}
+    private = {f.blob for f in datasets[target].files.values() if f.private}
+    return {target} | {d for d, rec in datasets.items() if d != target and (
+        shared_examples(vault, target, d) or any(f.private and f.blob in private for f in rec.files.values()))}
 
 
 # ------------------------------------------------------------------ K0 provenance
@@ -238,27 +250,43 @@ def k2_preregistered(ctx: Context) -> CheckResult:
             reasons.append("the pre-registered claim content does not match its hash")
     except (KeyError, ValidationError) as e:
         reasons.append(f"pre-registration body unreadable: {type(e).__name__}")
+    first_prereg = {e.body.get("claim_hash"): e for e in reversed(ctx.ledger.entries("prereg"))}
+    obs: list[str] = []
     for target in ctx.claim.generalization_targets:
-        # Peeking = a development or inspection read, or evaluating THIS claim, before it was registered.
-        # Earlier reads made to evaluate or certify OTHER registered claims are test-set reuse, which K4
-        # charges as multiplicity (Bonferroni over every claim registered on the target), not a K2 failure.
-        # Reads made for a claim that was NOT registered at the time of the read are peeking too (a throwaway
-        # "claim" must not become a free look at the labels).
-        registered_at = {e.body.get("claim_hash"): e.seq for e in reversed(ctx.ledger.entries("prereg"))}
-        early = [a for a in ctx.vault.accesses(target)
-                 if a.body.get("private") and a.seq < prereg.seq
-                 and (a.body.get("purpose") in PEEKING_PURPOSES or a.body.get("claim_hash") == ctx.claim_hash
-                      or registered_at.get(a.body.get("claim_hash"), a.seq + 1) > a.seq)]
+        # Peeking = any read of the target's private data before this claim's registration, EXCEPT:
+        #  - evaluate/kernel reads made for ANOTHER claim that was registered before the read and whose targets
+        #    include this target or a related one: that is test-set reuse, charged by K4 as multiplicity;
+        #  - integrity reads (leakscan: building leak fingerprints; reproduce: re-checking a bundle), which never
+        #    feed a model; they are listed below for accountability (purposes are declared by trusted host code).
+        # A read for a claim registered on an unrelated target, or for an unregistered claim, is peeking.
+        related = related_targets(ctx.vault, target)
+        early, integrity = [], []
+        for a in ctx.vault.accesses(target):
+            if not a.body.get("private") or a.seq >= prereg.seq:
+                continue
+            purpose, ch = a.body.get("purpose"), a.body.get("claim_hash")
+            if purpose in INTEGRITY_PURPOSES:
+                integrity.append(a)
+                continue
+            other = first_prereg.get(ch)
+            excused = (purpose in ("evaluate", "kernel") and ch != ctx.claim_hash and other is not None
+                       and other.seq < a.seq
+                       and bool(related & set(other.body.get("claim", {}).get("generalization_targets", []))))
+            if not excused:
+                early.append(a)
         if early:
             reasons.append(f"private data of target {target!r} was read {len(early)} time(s) before "
                            f"pre-registration (first at ledger seq {early[0].seq}, purpose "
                            f"{early[0].body.get('purpose')!r})")
+        if integrity:
+            obs.append(f"{target}: {len(integrity)} integrity read(s) (leakscan/reproduce) before pre-registration: "
+                       f"not peeking (never fed to a model), logged for accountability")
     arts = ctx.vault.artifacts()
     for ref in (ctx.claim.subject, ctx.claim.comparator):
         reg = arts.get(ref.artifact_id)
         if reg is not None and reg.seq > prereg.seq:
             reasons.append(f"artifact {ref.artifact_id!r} was registered after the pre-registration")
-    return _result(reasons, [f"pre-registered at ledger seq {prereg.seq}"])
+    return _result(reasons, [f"pre-registered at ledger seq {prereg.seq}", *obs])
 
 
 # ------------------------------------------------------------------ K3 reproduced
@@ -306,8 +334,11 @@ def k3_reproduced(ctx: Context) -> CheckResult:
 def replay_seed(ctx: Context, rec: ExecRecord) -> int:
     """The seed re-executed for (arm, target) under 'sampled_seed': derived from a hash of ALL evidence after it
     is fixed, so a claimant cannot know in advance which seed will be checked. (Re-running evaluations to
-    steer it would leave unreported held-out reads, which K4 rejects.)"""
-    material = "|".join(sorted(r.preds_ref for _, r in ctx.records))
+    steer it would leave unreported held-out reads, which K4 rejects.) Only PLAN-MATCHED records (a claim target
+    and a planned seed) enter the hash: extra records cannot steer it (R1-F2), and K4 rejects them anyway."""
+    targets, seeds_planned = set(ctx.claim.generalization_targets), set(ctx.claim.analysis_plan.seeds)
+    material = "|".join(sorted(r.preds_ref for _, r in ctx.records
+                               if r.target in targets and r.seed in seeds_planned))
     digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
     seeds = sorted(ctx.claim.analysis_plan.seeds)
     return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
@@ -324,6 +355,11 @@ def k4_statistics(ctx: Context) -> CheckResult:
     if not ctx.records:
         return _result(["no usable evaluation records"])
     preregs = ctx.ledger.entries("prereg")
+    stray = sorted({f"{r.arm}@{r.target}/seed {r.seed}" for _, r in ctx.records
+                    if r.target not in c.generalization_targets or r.seed not in plan.seeds})
+    if stray:  # evidence outside the plan is not part of the claim (and must not steer K3's replay seed, R1-F2)
+        reasons.append(f"{len(stray)} evaluation record(s) outside the analysis plan (non-target dataset or "
+                       f"unplanned seed): {stray[:5]}")
     for target in c.generalization_targets:
         recs = [r for _, r in ctx.records if r.target == target]
         keys = Counter((r.arm, r.seed) for r in recs)
@@ -348,8 +384,8 @@ def k4_statistics(ctx: Context) -> CheckResult:
                            f"(scores not produced through the vault)")
         # the multiplicity family: claims on this target AND on any other target sharing held-out examples with it
         # (the same labels re-used under another id are the same test-set reuse)
-        related = {target} | {d for d in ctx.vault.datasets() if d != target and shared_examples(ctx.vault, target, d)}
-        family = {e.body.get("claim_hash") for e in preregs if related & set(e.body.get("claim", {}).get(
+        related = related_targets(ctx.vault, target)
+        family ={e.body.get("claim_hash") for e in preregs if related & set(e.body.get("claim", {}).get(
             "generalization_targets", []))}
         m = max(plan.n_comparisons, len(family))
         alpha_eff = plan.alpha / m

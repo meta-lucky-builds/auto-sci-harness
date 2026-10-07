@@ -147,11 +147,13 @@ def non_regression(sample: PairedSample, *, non_regression_eps: float = 0.0, max
     """Leave-one-family/domain-out check on ONE held-out group: the same Student-t interval as the gate split's,
     lower bound >= -eps. Fails closed on non-finite differences, too many infra exclusions, or fewer than
     `min_units` valid paired units (non-regression cannot be shown). `mean_diff` is the group's OOD drop."""
+    out: dict = {"n": len(sample.diffs), "excluded": len(sample.excluded)}
+    if not all(math.isfinite(d) for d in sample.diffs):  # checked BEFORE any interval arithmetic (R1-F6)
+        return out | {"mean_diff": None, "lo": None, "hi": None, "passed": False,
+                      "reason": "non-finite score difference (fail closed)"}
     m, lo, hi = paired_ci(sample.diffs, seed=2, n_boot=n_boot)
-    out = {"n": len(sample.diffs), "excluded": len(sample.excluded), "mean_diff": m, "lo": lo, "hi": hi}
-    if not all(math.isfinite(d) for d in sample.diffs):
-        reason = "non-finite score difference (fail closed)"
-    elif sample.excluded_frac > max_excluded_frac:
+    out |= {"mean_diff": m, "lo": lo, "hi": hi}
+    if sample.excluded_frac > max_excluded_frac:
         reason = (f"{len(sample.excluded)}/{sample.n_units} units excluded for infrastructure failures "
                   f"(> {max_excluded_frac:.0%})")
     elif len(sample.diffs) < min_units:
