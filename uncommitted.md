@@ -4,7 +4,7 @@ State on 2026-10-07 (verified with `git status` / `git rev-parse` this session):
 - There is **no uncommitted code** anywhere. Every piece of work below is committed and pushed to its own branch on
   origin, with local and origin at the same commit. What is missing is **merging to `main`**, and each merge needs
   the full gate (`python check.py`) to pass on the merged result first.
-- `main` = 4c9e755 (decisions batch a499a6f, gated at 241 passed, plus HANDOFF2.md).
+- `main` = 0cf8177 (m3-adapters merged after its full gate).
 - `.claude/` is untracked on purpose. It holds local worktrees and settings and must never be committed.
 
 Merge order (each step is gated, then pushed):
@@ -20,7 +20,7 @@ top of the adapter split and the K2 fix. The full design for each fix is in HAND
 
 ---
 
-## 1. `m3-adapters` @ 20cb09e — READY once its gate finishes
+## 1. `m3-adapters` @ 20cb09e — MERGED to main (0cf8177)
 
 **Contents:**
 - `kernel/adapters.py`:
@@ -40,7 +40,7 @@ top of the adapter split and the K2 fix. The full design for each fix is in HAND
 - 0f174d3 was fully gated: Kernel 101 passed at 100% line+branch coverage; whole suite 274 passed, 1 skipped.
 - On 20cb09e (gate10), these passed: lint, types, Kernel strict types, and Kernel tests (101 passed, 100% coverage).
 
-**Not verified:** gate10's "all tests" step was still running when this file was written.
+gate10 finished: all tests 281 passed, 1 skipped, `== all tests: OK`. Merged as 0cf8177; the merged tree differs from the gated tree only in HANDOFF2.md, liverun1.md and uncommitted.md (no code).
 
 **Needs:**
 - gate10 must finish with `== all tests: OK`. Then fast-forward `main` to it and push.
