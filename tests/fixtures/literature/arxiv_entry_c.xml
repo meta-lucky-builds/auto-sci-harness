@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <id>https://arxiv.org/api/ZyXwVuTsRqPoNmLkJiHgFeDcBa9</id>
+  <title>arXiv Query: search_query=&amp;id_list=2501.00077&amp;start=0&amp;max_results=1</title>
+  <updated>2026-10-07T10:00:00Z</updated>
+  <opensearch:itemsPerPage>1</opensearch:itemsPerPage>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2501.00077v1</id>
+    <title>Routing Tokens Through Learned Sparse Experts at Scale</title>
+    <updated>2025-01-05T12:00:00Z</updated>
+    <summary>We route tokens through learned sparse experts and report that routing collapse disappears at scale.</summary>
+    <published>2025-01-05T12:00:00Z</published>
+    <arxiv:doi>10.5555/lit.2025.077</arxiv:doi>
+    <arxiv:primary_category term="cs.LG"/>
+    <author>
+      <name>Priya Raman</name>
+    </author>
+  </entry>
+</feed>

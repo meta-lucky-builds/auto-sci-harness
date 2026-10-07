@@ -1,0 +1,12 @@
+{
+  "paperId": "3f1c2a9e5b7d4c6a8e0f1b2c3d4e5f6a7b8c9d0e",
+  "externalIds": {"ArXiv": "2403.01234", "CorpusId": 268000001},
+  "title": "Calibrated Early Stopping under Distribution Shift",
+  "abstract": "We propose a calibrated early stopping rule for models trained under covariate shift. Across nine shifted benchmarks the rule reduces expected calibration error by 23% relative to validation-loss stopping. It does not change top-1 accuracy.",
+  "year": 2024,
+  "publicationDate": "2024-03-02",
+  "authors": [
+    {"authorId": "2100000001", "name": "Lena Hartmann"},
+    {"authorId": "2100000002", "name": "Kofi Mensah"}
+  ]
+}

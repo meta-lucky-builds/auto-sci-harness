@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <id>https://arxiv.org/api/SsSsSsSsSsSsSsSsSsSsSsSsSs0</id>
+  <title>arXiv Query: search_query=all:calibrated AND all:early AND all:stopping&amp;id_list=&amp;start=0&amp;max_results=5</title>
+  <updated>2026-10-07T10:00:00Z</updated>
+  <opensearch:itemsPerPage>5</opensearch:itemsPerPage>
+  <opensearch:totalResults>2</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2403.01234v2</id>
+    <title>Calibrated Early Stopping under Distribution Shift</title>
+    <updated>2024-06-10T17:59:59Z</updated>
+    <summary>We propose a calibrated early stopping rule for models trained under covariate shift.</summary>
+    <published>2024-03-02T17:59:59Z</published>
+    <author><name>Lena Hartmann</name></author>
+    <author><name>Kofi Mensah</name></author>
+  </entry>
+  <entry>
+    <id>http://arxiv.org/abs/2501.00077v1</id>
+    <title>Routing Tokens Through Learned Sparse Experts at Scale</title>
+    <updated>2025-01-05T12:00:00Z</updated>
+    <summary>We route tokens through learned sparse experts.</summary>
+    <published>2025-01-05T12:00:00Z</published>
+    <author><name>Priya Raman</name></author>
+  </entry>
+</feed>

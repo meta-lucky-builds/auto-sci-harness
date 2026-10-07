@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">
+  <id>https://arxiv.org/api/EeEeEeEeEeEeEeEeEeEeEeEeEe0</id>
+  <title>arXiv Query: search_query=&amp;id_list=2403.012345&amp;start=0&amp;max_results=1</title>
+  <updated>2026-10-07T10:00:00Z</updated>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/api/errors#incorrect_id_format_for_2403.012345</id>
+    <title>Error</title>
+    <summary>incorrect id format for 2403.012345</summary>
+    <updated>2026-10-07T00:00:00-04:00</updated>
+    <author><name>arXiv api core</name></author>
+  </entry>
+</feed>

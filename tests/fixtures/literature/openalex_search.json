@@ -1,0 +1,33 @@
+{
+  "meta": {"count": 2, "db_response_time_ms": 41, "page": 1, "per_page": 5, "groups_count": null},
+  "results": [
+    {
+      "id": "https://openalex.org/W4300000001",
+      "doi": "https://doi.org/10.5555/lit.2021.001",
+      "title": "Sparse Gradient Routing for Tabular Ensembles",
+      "display_name": "Sparse Gradient Routing for Tabular Ensembles",
+      "publication_year": 2021,
+      "publication_date": "2021-03-15",
+      "ids": {"openalex": "https://openalex.org/W4300000001", "doi": "https://doi.org/10.5555/lit.2021.001"},
+      "authorships": [
+        {"author_position": "first", "author": {"id": "https://openalex.org/A5000000001", "display_name": "Mira Okafor"}, "institutions": []}
+      ],
+      "abstract_inverted_index": null,
+      "relevance_score": 88.1
+    },
+    {
+      "id": "https://openalex.org/W4400000009",
+      "doi": "https://doi.org/10.5555/lit.2025.009",
+      "title": "Sparse Routing for Tabular Foundation Models",
+      "display_name": "Sparse Routing for Tabular Foundation Models",
+      "publication_year": 2025,
+      "publication_date": "2025-02-01",
+      "ids": {"openalex": "https://openalex.org/W4400000009", "doi": "https://doi.org/10.5555/lit.2025.009"},
+      "authorships": [
+        {"author_position": "first", "author": {"id": "https://openalex.org/A5000000077", "display_name": "Priya Raman"}, "institutions": []}
+      ],
+      "abstract_inverted_index": {"We": [0], "scale": [1], "sparse": [2], "routing.": [3]},
+      "relevance_score": 61.0
+    }
+  ]
+}
