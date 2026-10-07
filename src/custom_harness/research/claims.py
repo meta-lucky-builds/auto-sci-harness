@@ -527,7 +527,7 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
     test = kernel.vault.dataset(ids["test"])
     raw = kernel.vault.read(ids["test"], task.test_labels_file, purpose="leakscan", run_id=ctx.run_id)
     fp = {"hashes": {f.blob: f"{ids['test']}/{name}" for name, f in test.files.items() if f.private},
-          "canaries": [], "label_windows": label_windows(_labels(raw))}
+          "canaries": [], "label_windows": label_windows(_labels(raw)), "contents": [raw]}
     canaries = [c for c in (kernel.vault.canary(ids["test"]), state.get("_private_canary")) if c]
     leak = leak_audit(ctx.store.trace(ctx.run_id), _sb(ctx).workspace, fp, canaries,
                       extra_texts={"report": state.get("report", "")})
