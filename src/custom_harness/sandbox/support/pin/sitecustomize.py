@@ -20,6 +20,12 @@ So it makes HONEST programs deterministic; it is not a boundary against a progra
 """
 
 import os as _os
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from importlib.machinery import ModuleSpec
+    from types import ModuleType
 
 
 def _install() -> None:
@@ -59,7 +65,7 @@ def _install() -> None:
         original_seed(self, a, version)  # type: ignore[arg-type]
 
     random.Random.seed = seed  # type: ignore[method-assign]
-    inst = random._inst  # type: ignore[attr-defined]  # the module-level functions are bound methods of this one
+    inst = random._inst  # the module-level functions are bound methods of this one
     inst.seed()  # it was seeded from the real urandom at import
     random.seed = inst.seed  # re-bound so that a later random.seed() goes through the pinned method
 
@@ -72,19 +78,20 @@ def _install() -> None:
     torch_seed = int.from_bytes(hashlib.sha256(key + b"torch").digest()[:8], "big") >> 1
 
     class _TorchSeeder(importlib.abc.MetaPathFinder):
-        def find_spec(self, name: str, path: object = None, target: object = None) -> object:
+        def find_spec(self, name: str, path: "Sequence[str] | None" = None,
+                      target: "ModuleType | None" = None) -> "ModuleSpec | None":
             if name != "torch":
                 return None
             sys.meta_path.remove(self)
-            spec = importlib.machinery.PathFinder.find_spec(name, path)  # type: ignore[arg-type]
+            spec = importlib.machinery.PathFinder.find_spec(name, path)
             if spec is None or spec.loader is None:
                 return spec
             loader = spec.loader
             original_exec = loader.exec_module
 
-            def exec_module(module: object) -> None:
-                original_exec(module)  # type: ignore[arg-type]
-                module.manual_seed(torch_seed)  # type: ignore[attr-defined]
+            def exec_module(module: "ModuleType") -> None:
+                original_exec(module)
+                module.manual_seed(torch_seed)
 
             loader.exec_module = exec_module  # type: ignore[method-assign]
             return spec

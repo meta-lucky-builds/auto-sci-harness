@@ -27,7 +27,8 @@ from pathlib import Path
 
 # ---------------------------------------------------------------------------------------------------------------
 # Parameters (GOAL §13.8). One place.
-PIN_THREADS = 1  # UNCALIBRATED (owner decision, GOAL §13.8): BLAS/OpenMP threads under the pin (1 = fixed reduction order)
+# BLAS/OpenMP threads under the pin (1 = a fixed floating-point reduction order)
+PIN_THREADS = 1  # UNCALIBRATED (owner decision, GOAL §13.8)
 CPU_WALL_BACKSTOP = 3.0  # UNCALIBRATED (owner decision, GOAL §13.8): wall backstop = this x the CPU limit
 WITNESS_CPU_S = 2.0  # UNCALIBRATED (owner decision, GOAL §13.8): CPU seconds of the contention witness loop
 WITNESS_CONTENDED_RATIO = 1.5  # UNCALIBRATED (owner decision, GOAL §13.8): witness wall/CPU above this = contended
@@ -151,7 +152,8 @@ def parse_supervisor(rec: dict[str, object] | None) -> SupervisorRecord | None:
         cpu_ex, wall_ex = rec["cpu_exceeded"], rec["wall_exceeded"]
         if not (isinstance(cpu_ex, bool) and isinstance(wall_ex, bool)):
             return None
-        return SupervisorRecord(rc=rc, cpu_s=float(cpu), cpu_exceeded=cpu_ex,  # type: ignore[arg-type]
+        assert isinstance(cpu, int | float) and isinstance(wall, int | float)
+        return SupervisorRecord(rc=rc, cpu_s=float(cpu), cpu_exceeded=cpu_ex,
                                 wall_exceeded=wall_ex, wall_s=float(wall), mode=str(rec.get("mode", "")))
     except KeyError:
         return None

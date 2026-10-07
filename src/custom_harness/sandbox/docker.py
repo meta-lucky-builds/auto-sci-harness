@@ -16,6 +16,7 @@ daemon does not keep a second, unbounded copy of the output.
 
 from __future__ import annotations
 
+import secrets
 import shutil
 import subprocess
 import time
@@ -31,6 +32,15 @@ from .base import (
     Sandbox,
     check_mount,
     run_bounded,
+)
+from .hermetic import (
+    CONTAINER_SUPPORT,
+    SUPERVISOR_GRACE_S,
+    parse_witness,
+    split_record,
+    supervisor_argv,
+    support_dir,
+    witness_argv,
 )
 
 # Two images (STATUS ledger BUNDLED-DATA). The full image ships scikit-learn's bundled datasets, from which the real
@@ -148,7 +158,8 @@ class DockerSandbox(Sandbox):
             self._image_id = p.stdout.strip()
         return {"sandbox": self.isolation, "image": self.image, "image_id": self._image_id}
 
-    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
+    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None, *,
+             cpu_s: float | None = None) -> ExecResult:
         """create -> start -a -> inspect -> rm. Splitting the steps is what lets us tell an
         infrastructure failure (create/inspect failed, runtime State.Error) from the agent process's
         own exit code: agent code can exit with any code, including Docker's 125, so exit codes alone
@@ -161,12 +172,21 @@ class DockerSandbox(Sandbox):
                 "--cap-drop", "ALL", "--user", "1000:1000",
                 "--ulimit", f"fsize={self.max_file_bytes}", "--log-driver", "none",
                 "-v", f"{self.workspace}:/work", "-w", "/work"]
+        supervised = cpu_s is not None
+        if supervised or self.entropy:  # the trusted helpers, read-only (sandbox/hermetic.py)
+            args += ["-v", f"{support_dir()}:{CONTAINER_SUPPORT}:ro"]
+        if supervised:
+            args += ["-i"]  # the nonce goes to the supervisor on stdin
+        env = self._pinned_env(env, CONTAINER_SUPPORT)
         if self.runtime:
             args += ["--runtime", self.runtime]
         if self.gpus:
             args += ["--gpus", self.gpus]
         for k, v in (env or {}).items():
             args += ["-e", f"{k}={v}"]
+        nonce = secrets.token_hex(16)
+        if supervised:
+            command = supervisor_argv("python", CONTAINER_SUPPORT, float(cpu_s or 0), timeout_s, command)
         args += [self.image, *command]
         # Creating the container runs no agent code, so retrying it here is always safe and keeps a brief
         # daemon hiccup from failing a whole multi-exec step (the engine-level retry re-runs entire nodes).
@@ -189,9 +209,11 @@ class DockerSandbox(Sandbox):
             time.sleep(self.create_backoff_s * 2 ** attempt)
         try:
             try:
-                p = run_bounded([self.exe, "start", "-a", name], timeout_s=timeout_s,
+                p = run_bounded([self.exe, "start", "-a", *(["-i"] if supervised else []), name],
+                                timeout_s=timeout_s + (SUPERVISOR_GRACE_S if supervised else 0),
                                 max_output_bytes=self.max_output_bytes, check=self._workspace_check,
-                                kill=lambda: self._docker([self.exe, "kill", name], timeout_s=60))
+                                kill=lambda: self._docker([self.exe, "kill", name], timeout_s=60),
+                                stdin_data=(nonce + "\n").encode() if supervised else None)
             except OSError as e:
                 raise InfraError(f"could not invoke docker: {e}", transient=True) from e
             if p.timed_out or p.limit_exceeded:  # we killed it: the program's failure (timeout / resource limit)
@@ -207,13 +229,34 @@ class DockerSandbox(Sandbox):
                 code = int(code_s)
             except ValueError as e:
                 raise InfraError(f"unreadable container state: {st.stdout[:200]!r}") from e
-            res = self._result(p, code)
+            if supervised:
+                res = self._supervised_result(p, nonce, float(cpu_s or 0), self._witness)
+            else:
+                res = self._result(p, code)
+                if self.entropy:
+                    res = res.model_copy(update={"entropy_pin": self.entropy.digest})
             if oom.strip() == "true":  # the agent's program exceeded its memory cap: its own failure
                 res = res.model_copy(update={"stderr": res.stderr + f"\n[sandbox] killed: out of memory "
                                                                     f"(cap {self.memory})"})
             return res
         finally:
             self._docker([self.exe, "rm", "-f", name], timeout_s=60)
+
+    def _witness(self) -> float | None:
+        """Contention witness: a fixed CPU loop in a fresh container with the same CPU cap; its wall/CPU ratio."""
+        wn = secrets.token_hex(16)
+        name = f"chh-witness-{uuid.uuid4().hex[:12]}"
+        try:
+            p = run_bounded([self.exe, "run", "--rm", "-i", "--name", name, "--network", "none",
+                             "--cpus", str(self.cpus), "--read-only", "--cap-drop", "ALL", "--user", "1000:1000",
+                             "--log-driver", "none",
+                             "-v", f"{support_dir()}:{CONTAINER_SUPPORT}:ro", self.image,
+                             *witness_argv("python", CONTAINER_SUPPORT)],
+                            timeout_s=120, max_output_bytes=1 << 16, stdin_data=(wn + "\n").encode())
+        except OSError:
+            return None
+        _, rec = split_record(p.stderr)
+        return parse_witness(p.stderr) if rec is not None and rec.get("nonce") == wn else None
 
     @staticmethod
     def _docker(args: list[str], timeout_s: float) -> subprocess.CompletedProcess:

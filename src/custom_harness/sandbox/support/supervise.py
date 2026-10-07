@@ -42,27 +42,53 @@ def _cgroup_usage() -> float | None:
     return None
 
 
-def _process_cpu(proc: "subprocess.Popen[bytes]") -> float | None:
-    if os.name == "nt":  # pragma: no cover - exercised on Windows test hosts only
-        import ctypes
-        from ctypes import wintypes
+class _WinJob:  # pragma: no cover - Windows test hosts only
+    """A Job Object holding the program and every process it starts (a venv python.exe is a launcher that runs the
+    real interpreter as a child, so the direct child's own times would miss nearly all the work). The program is
+    created suspended, assigned, then resumed, so nothing it starts escapes the job."""
 
-        c, e, k, u = (wintypes.FILETIME() for _ in range(4))
+    def __init__(self, proc: "subprocess.Popen[bytes]"):
+        import ctypes
+
+        self.k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+        self.k32.CreateJobObjectW.restype = ctypes.c_void_p
+        self.job = self.k32.CreateJobObjectW(None, None)
         handle = getattr(proc, "_handle", None)
-        if handle is None or not ctypes.windll.kernel32.GetProcessTimes(  # type: ignore[attr-defined]
-                int(handle), ctypes.byref(c), ctypes.byref(e), ctypes.byref(k), ctypes.byref(u)):
+        self.ok = bool(self.job) and handle is not None and bool(
+            self.k32.AssignProcessToJobObject(ctypes.c_void_p(self.job), ctypes.c_void_p(int(handle))))
+        if handle is not None:  # resume even when assignment failed (then cpu() is None: charged as unknown)
+            ctypes.WinDLL("ntdll").NtResumeProcess(ctypes.c_void_p(int(handle)))  # type: ignore[attr-defined,unused-ignore]
+
+    def cpu(self) -> float | None:
+        import ctypes
+
+        if not self.ok:
             return None
-        ticks = sum((t.dwHighDateTime << 32) | t.dwLowDateTime for t in (k, u))
-        return ticks / 1e7
+        info = (ctypes.c_longlong * 6)()  # JOBOBJECT_BASIC_ACCOUNTING_INFORMATION (48 bytes; exact size required)
+        if not self.k32.QueryInformationJobObject(ctypes.c_void_p(self.job), 1, ctypes.byref(info),
+                                                  ctypes.sizeof(info), None):
+            return None
+        return (info[0] + info[1]) / 1e7
+
+    def kill(self) -> None:
+        import ctypes
+
+        if self.job:
+            self.k32.TerminateJobObject(ctypes.c_void_p(self.job), 1)
+
+
+def _process_cpu(proc: "subprocess.Popen[bytes]", job: "_WinJob | None") -> float | None:
+    if job is not None:  # pragma: no cover - Windows test hosts only
+        return job.cpu()
     if proc.returncode is not None:  # reaped: its CPU (and that of the children it waited for) is in RUSAGE_CHILDREN
         import resource
 
-        ru = resource.getrusage(resource.RUSAGE_CHILDREN)
+        ru = resource.getrusage(resource.RUSAGE_CHILDREN)  # type: ignore[attr-defined,unused-ignore]  # POSIX only
         return ru.ru_utime + ru.ru_stime
     try:
         with open(f"/proc/{proc.pid}/stat", encoding="ascii") as f:
             fields = f.read().rsplit(")", 1)[1].split()
-        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+        return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")  # type: ignore[attr-defined,unused-ignore]  # POSIX only
     except (OSError, ValueError, IndexError):
         return None
 
@@ -70,13 +96,13 @@ def _process_cpu(proc: "subprocess.Popen[bytes]") -> float | None:
 def _kill_all() -> None:
     """As PID 1: kill every other process of the container (never this one) and reap them (PID 1 adopts orphans)."""
     try:
-        os.kill(-1, signal.SIGKILL)
+        os.kill(-1, signal.SIGKILL)  # type: ignore[attr-defined,unused-ignore]  # POSIX only
     except OSError:
         pass
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         try:
-            if os.waitpid(-1, os.WNOHANG) == (0, 0):
+            if os.waitpid(-1, os.WNOHANG) == (0, 0):  # type: ignore[attr-defined,unused-ignore]  # POSIX only
                 time.sleep(0.01)
         except ChildProcessError:
             break
@@ -86,12 +112,14 @@ def supervise(cpu_s: float, wall_s: float, cmd: list[str], poll_s: float = 0.25)
     in_container = os.getpid() == 1 and _cgroup_usage() is not None
     base = _cgroup_usage() if in_container else 0.0
     t0 = time.monotonic()
-    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+    suspended = 0x4 if os.name == "nt" else 0  # CREATE_SUSPENDED: resumed by _WinJob after it joins the job
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, creationflags=suspended)
+    job = _WinJob(proc) if os.name == "nt" else None
     last = 0.0
     cpu_exceeded = wall_exceeded = False
 
     def used() -> float:
-        u = (_cgroup_usage() or 0.0) - (base or 0.0) if in_container else _process_cpu(proc)
+        u = (_cgroup_usage() or 0.0) - (base or 0.0) if in_container else _process_cpu(proc, job)
         return last if u is None else max(last, u)
 
     rc: int | None = None
@@ -112,6 +140,8 @@ def supervise(cpu_s: float, wall_s: float, cmd: list[str], poll_s: float = 0.25)
     wall = time.monotonic() - t0
     if rc is None:  # we stop it: take its own status first (a later waitpid(-1) could reap it and lose the code)
         try:
+            if job is not None:  # pragma: no cover - Windows test hosts only
+                job.kill()
             proc.kill()
             rc = proc.wait(timeout=30)
         except (OSError, subprocess.TimeoutExpired):
