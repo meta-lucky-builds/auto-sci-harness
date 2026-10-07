@@ -1,9 +1,10 @@
-"""Red-team findings for the Kernel.
+"""Red-team findings for the Kernel (each test asserts the SECURE behaviour).
 
-Open finding (2026-10-07), awaiting a statistics-policy decision by the user, pinned by a test of the CURRENT
-behaviour so the gate fails the day it changes either way: K7 (risk) returns "n/a" for negative-result and equivalence
-claims, and "n/a" counts as a pass, so a vacuous claim ("does not improve by 0.9 accuracy", "within 0.9 of each
-other") is CERTIFIED although it could not have failed. The research loop only makes improvement claims today.
+Found 2026-10-07: K7 (risk) returned "n/a" for negative-result and equivalence claims, and "n/a" counted as a pass,
+so a vacuous claim ("does not improve by 0.9 accuracy", "within 0.9 of each other") was CERTIFIED although it
+could not have failed. No noise-based rule can tell a vacuous bound from a tight one (at the claimed bound, success
+is always <= alpha); that needs a prior over effects, which v1 does not have. Decision: fail closed (K7 fails these
+kinds; certification counts only "pass").
 """
 
 import pytest
@@ -18,10 +19,8 @@ from kernel_world import World
     # "good_k17 and good are within 0.9 accuracy of each other": true for ANY two classifiers
     (ClaimKind.EQUIVALENCE, "good_k17", "good", 0.9),
 ])
-def test_open_gap_k7_certifies_vacuous_negative_and_equivalence_claims(tmp_path, monkeypatch, kind, subject,
-                                                                       comparator, delta):
-    """PINS the open gap exactly (certified, K7 n/a). When the policy is decided and implemented, this test
-    must be turned into the secure assertion (REJECTED by K7); until then any change in behaviour fails here."""
+def test_k7_vacuous_negative_and_equivalence_claims_are_not_certified(tmp_path, monkeypatch, kind, subject,
+                                                                      comparator, delta):
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
     w = World(tmp_path / "w", seed=11)
     try:
@@ -35,5 +34,5 @@ def test_open_gap_k7_certifies_vacuous_negative_and_equivalence_claims(tmp_path,
         cert = w.kernel.certify(claim, w.evaluate_all(claim))
     finally:
         w.close()
-    assert cert.failed() == [] and cert.checks["K7"].status == "n/a", (cert.label.value, cert.failed())
-    assert cert.label.value == "CERTIFIED-INTERNAL"  # the gap: a claim that could not have failed is certified
+    assert cert.label.value == "REJECTED" and cert.failed() == ["K7"], (cert.label.value, cert.failed())
+    assert "no risk model" in " ".join(cert.checks["K7"].reasons)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -55,7 +56,8 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
         sandbox = DockerSandbox(ws)
     elif a.dev_sandbox:
         sandbox = LocalSandbox(ws, i_understand_no_isolation=True)
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox).run(a.task, inputs, seed=a.seed)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
+                 allow_same_family=a.allow_same_family).run(a.task, inputs, seed=a.seed)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -76,7 +78,8 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
             sandbox = LocalSandbox(Path(run.workspace), i_understand_no_isolation=True)
         else:
             raise SystemExit("this run used a sandbox: pass --docker (or --dev-sandbox for trusted test code)")
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox).resume(a.run_id, force=a.force)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
+                 allow_same_family=a.allow_same_family).resume(a.run_id, force=a.force)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -93,6 +96,8 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
         role, _, kind = binding.partition("=")
         backends[role] = _backend(kind)
     proposer = _backend(a.proposer)
+    if a.allow_same_family:  # evaluation engines read it; recorded as NOT MET in every run
+        os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
     run_tag = f"evolve-{spec.id}-{int(time.time())}"
 
     def factory(key: str):
@@ -199,12 +204,44 @@ def cmd_trace(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Re-run a per-run Reproducibility Bundle (invariant 9): same spec, inputs and seed; refused if the task files on
+    disk no longer match the hashes recorded in the bundle."""
+    import custom_harness.research  # noqa: F401
+
+    from .store.run_bundle import check_task_files, read_run_bundle
+    m = read_run_bundle(Path(a.bundle))
+    spec = HarnessSpec.model_validate(m["spec"])
+    inputs = dict((m.get("inputs") or {}).get("input") or {})
+    if a.task_dir:
+        inputs["task_dir"] = a.task_dir
+    if inputs.get("task_dir"):
+        diff = check_task_files(m, inputs["task_dir"])
+        if diff:
+            raise SystemExit("task files differ from the bundle: " + "; ".join(diff[:10]))
+    backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
+    ws = data_dir() / "sandboxes" / f"rerun-{m['run']['id']}-{int(time.time())}"
+    sandbox: Sandbox | None = None
+    if a.docker:
+        from .sandbox.docker import DockerSandbox
+        sandbox = DockerSandbox(ws)
+    elif a.dev_sandbox:
+        sandbox = LocalSandbox(ws, i_understand_no_isolation=True)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
+                 allow_same_family=a.allow_same_family).run(m["run"]["task_id"], inputs, seed=int(m["seed"]))
+    print(json.dumps({"rerun_of": m["run"]["id"], "run_id": res.run_id, "status": res.status,
+                      "detail": res.detail}, indent=1))
+    return 0 if res.status == "completed" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="run a harness spec (YAML)")
     r.add_argument("spec")
     r.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
+    r.add_argument("--allow-same-family", action="store_true",
+                   help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     r.add_argument("--input", action="append", default=[], help="key=value")
     r.add_argument("--task", default="adhoc")
     r.add_argument("--seed", type=int, default=0)
@@ -214,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("spec")
     ev.add_argument("--suite", required=True)
     ev.add_argument("--role", action="append", default=[], help="role=backend for harness runs")
+    ev.add_argument("--allow-same-family", action="store_true",
+                   help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     ev.add_argument("--proposer", required=True, help="backend for the edit proposer")
     ev.add_argument("--generations", type=int, default=1)
     ev.add_argument("--seeds", type=int, nargs="+", default=[0])
@@ -229,9 +268,19 @@ def main(argv: list[str] | None = None) -> int:
     rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure)")
     rr.add_argument("run_id")
     rr.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
+    rr.add_argument("--allow-same-family", action="store_true",
+                   help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rb = sub.add_parser("rerun", help="re-run a per-run Reproducibility Bundle (same spec, inputs, seed)")
+    rb.add_argument("bundle")
+    rb.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
+    rb.add_argument("--allow-same-family", action="store_true",
+                    help="override invariant 5 (judge/replicator family); recorded as NOT MET")
+    rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
+    rb.add_argument("--docker", action="store_true")
+    rb.add_argument("--dev-sandbox", action="store_true")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -253,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "resume": cmd_resume, "evolve": cmd_evolve, "runs": cmd_runs,
+        return {"run": cmd_run, "resume": cmd_resume, "rerun": cmd_rerun, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)

@@ -151,7 +151,8 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
         from custom_harness.store import EvidenceStore
         st = EvidenceStore(tmp_path / sub)
         llm = MockBackend(executor)
-        ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm}, st, factory, suite, retry=NO_WAIT)
+        roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
+        ev = Evaluator(roles, st, factory, suite, retry=NO_WAIT)
         res = evolve_generation(seed_spec(), suite, evaluator=ev, proposer=MockBackend([json.dumps(PROPOSALS)]),
                                 store=st, cfg=EvolveConfig(n_edits=4, race_rounds=2))
         st.close()

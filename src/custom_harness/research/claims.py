@@ -85,22 +85,28 @@ def _kernel(ctx: ModuleContext) -> Kernel:
 
 
 def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[str, str]:
-    """Register the task's data and baseline in the vault and return their ids (namespaced by a digest of the
-    files, so equal names with different data never collide). The labels are read from disk here, once, to
-    register them; afterwards only through the vault."""
+    """Register the task's data and baseline in the vault and return their ids (content-based, see
+    TaskSpec.dataset_ids). The labels are read from disk here, once, to register them; afterwards only through the
+    vault. A task whose canary differs from the canary registered for the same data is refused: its own canary
+    would never be scanned for (tasks sharing data must share the canary)."""
     vault = Kernel(ctx.store).vault
     train = (task_dir / "public" / task.train_file).read_bytes()
     test_x = (task_dir / "public" / task.test_features_file).read_bytes()
     test_y = (task_dir / "private" / task.test_labels_file).read_bytes()
     baseline = (task_dir / task.baseline_file).read_bytes()
-    parts = (train, test_x, test_y, baseline)  # fixed-length per-file digests: no separator ambiguity
-    digest = hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
-    ids = task.dataset_ids(digest)
+
+    def digest(*parts: bytes) -> str:  # fixed-length per-file digests: no separator ambiguity
+        return hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
+
+    ids = task.dataset_ids(digest(train, test_x, test_y), digest(train, test_x, test_y, baseline))
     vault.register_dataset(ids["train"], DatasetRole.DEV, public={task.train_file: train}, private={})
     canary_path = task_dir / "private" / task.canary_file
+    canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.exists() else None
     vault.register_dataset(ids["test"], DatasetRole.TEST, public={task.test_features_file: test_x},
-                           private={task.test_labels_file: test_y},
-                           canary=canary_path.read_text(encoding="utf-8").strip() if canary_path.exists() else None)
+                           private={task.test_labels_file: test_y}, canary=canary)
+    if vault.canary(ids["test"]) != canary:
+        raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same held-out data "
+                         f"({ids['test']}); tasks sharing data must share the canary")
     vault.register_artifact(ids["baseline"], baseline, "baseline")
     return ids
 
@@ -270,7 +276,11 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     bundle_path = data_dir() / "bundles" / f"{h[:20]}.zip"
     bundle_hash = build_bundle(kernel, h, bundle_path)
     n_hyp = len(_hypotheses(state))
-    checklist = fill(cert, run_costs={ctx.run_id: ctx.store.run_cost(ctx.run_id)}, models=_models_used(ctx),
+    policy = state.get("model_policy") or {}
+    models = [*_models_used(ctx),  # invariant 5 status, never omitted (a missing record is reported as unknown)
+              f"model families {policy.get('families', 'unknown')}; invariant 5 (judge/replicator family differs "
+              f"from proposer/executor family): {policy.get('invariant_5', 'UNKNOWN (no policy record)')}"]
+    checklist = fill(cert, run_costs={ctx.run_id: ctx.store.run_cost(ctx.run_id)}, models=models,
                      bundle_hash=bundle_hash,
                      selection_policy=(f"{n_hyp} model-proposed hypotheses ranked by a K-way tournament; "
                                        f"candidates scored by {_dev_scheme_text(state)} on the public training "
@@ -409,15 +419,25 @@ _CERTIFIED = ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
 
 
 def headline(state: dict[str, Any]) -> bool:
-    """GOAL L4.9: a headline result = certified AND an independent re-implementation certified at the same bar."""
+    """GOAL L4.9: a headline result = certified AND an independent re-implementation certified at the same bar,
+    where independent includes invariant 5 (the replicator is not of the author's model family)."""
     return ((state.get("certificate") or {}).get("label") in _CERTIFIED
-            and (state.get("replica_certificate") or {}).get("label") in _CERTIFIED)
+            and (state.get("replica_certificate") or {}).get("label") in _CERTIFIED
+            and (state.get("model_policy") or {}).get("invariant_5") == "met")
+
+
+def loop_label(state: dict[str, Any]) -> str:
+    """GOAL §6.1: VALIDATED only if the run's accepted claim was certified on external or future data
+    (CERTIFIED-VALIDATED); a run that optimised and confirmed on internal data is MECHANICAL."""
+    return "VALIDATED" if (state.get("certificate") or {}).get("label") == "CERTIFIED-VALIDATED" else "MECHANICAL"
 
 
 def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
     task = _task(state)
     lines = [f"# Research report: {task.title}", "",
              f"Task `{task.id}` · metric `{task.metric}` ({'higher' if task.higher_is_better else 'lower'} is better)",
+             "", f"Loop label (GOAL §6.1): **{loop_label(state)}** · invariant 5 (model families): "
+                 f"{_inline((state.get('model_policy') or {}).get('invariant_5', 'UNKNOWN (no policy record)'))}",
              ""]
     info = state.get("certificate")
     if info:
@@ -457,8 +477,8 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
             lines.append(f"Replication attempted; no replication claim was made ({_inline(why)}).")
         else:
             lines.append("No independent replication was performed.")
-        lines += ["", f"**Headline result** (certified AND independently replicated): "
-                      f"{'yes' if headline(state) else 'no'}", ""]
+        lines += ["", f"**Headline result** (certified AND independently replicated, replicator of a different "
+                      f"model family): {'yes' if headline(state) else 'no'}", ""]
     else:
         lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
     lines += [f"## Exploration log (dev estimate: {_dev_scheme_text(state)} on public training data; "

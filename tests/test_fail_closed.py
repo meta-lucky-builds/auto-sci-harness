@@ -168,7 +168,8 @@ def _planted_run(store, tmp_path, task, module, after):
             e["source"] = "planted"
     doc["edges"].append({"source": after, "target": "planted"})
     llm = MockBackend(scripted_llm)
-    res = Engine(HarnessSpec.model_validate(doc), backends={"proposer": llm, "executor": llm, "judge": llm},
+    roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
+    res = Engine(HarnessSpec.model_validate(doc), backends=roles,
                  store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(task)})
     # the attack must actually have been executed, or a pass/fail below says nothing about the defence

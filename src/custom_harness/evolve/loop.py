@@ -54,6 +54,9 @@ class GenerationResult:
     candidates: list[dict] = field(default_factory=list)
     evaluations: int = 0
     evaluations_fixed_k: int = 0
+    # GOAL §6.1: VALIDATED only if the gate decision rested entirely on CERTIFIED-VALIDATED evidence (external or
+    # future data); otherwise the generation optimised an internal metric: MECHANICAL
+    loop_label: str = "MECHANICAL"
 
 
 class Evaluator:
@@ -142,6 +145,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=parent_hash)
 
     accepted_spec, accepted, decision = parent, False, "no valid candidates"
+    loop_label = "MECHANICAL"
     fixed_k = 0
     if candidates:
         rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
@@ -162,7 +166,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             d = gate(evolve_s, gate_s, non_regression_eps=cfg.non_regression_eps,
                      require_evolve_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
             decision = d.reason
+            gate_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in gate_units]
+            loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in gate_labels) else "MECHANICAL"
             records.append({"status": "accepted" if d.accepted else "rejected_gate", "candidate": best,
+                            "loop_label": loop_label,
                             "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
                             "gate": d.gate})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
@@ -171,14 +178,14 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "rationale": edit.rationale, "accepted": d.accepted, "decision": d.reason,
                 "predicted_delta": edit.predicted.expected_delta, "actual_evolve_delta": d.evolve["mean_diff"],
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
-                "actual_gate_delta": d.gate["mean_diff"],
+                "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
                 "clusters_claimed": edit.predicted.failure_clusters_fixed})
             if d.accepted:
                 accepted_spec, accepted = spec, True
     for r in records:
         store.append_record("lineage", {"parent": parent_hash, **r})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
-                            evaluator.calls - calls_before, fixed_k)
+                            evaluator.calls - calls_before, fixed_k, loop_label)
 
 
 def proposer_calibration(store: EvidenceStore) -> dict[str, float]:

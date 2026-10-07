@@ -97,6 +97,30 @@ def _result(reasons: list[str], observations: list[str] | None = None) -> CheckR
                        observations=tuple(observations or ()))
 
 
+# ------------------------------------------------------------------ shared examples across datasets
+def _csv_rows(data: bytes) -> list[list[str]]:
+    return list(csv.reader(io.StringIO(data.decode("utf-8", errors="replace"))))
+
+
+def shared_examples(vault: Vault, target: str, other: str) -> dict[str, tuple[int, bool]]:
+    """Held-out examples of `target` (rows of its public files) found in `other`'s public files, compared on the
+    target file's columns (exact text). Returns {"other/file": (count, may_carry_labels)}, where may_carry_labels
+    means the other file has columns beyond the target's features (a label column can be among them)."""
+    found: dict[str, tuple[int, bool]] = {}
+    targets = [_csv_rows(vault.store.blobs.get(f.blob)) for f in vault.dataset(target).files.values() if not f.private]
+    for name, f in vault.dataset(other).files.items():
+        data = [] if f.private else _csv_rows(vault.store.blobs.get(f.blob))
+        for t in targets:
+            if not data or not t or not set(t[0]) <= set(data[0]):
+                continue
+            idx = [data[0].index(col) for col in t[0]]
+            rows = {tuple(r) for r in t[1:]}
+            n = len(rows & {tuple(r[i] for i in idx) for r in data[1:] if len(r) == len(data[0])})
+            if n:
+                found[f"{other}/{name}"] = (n, len(data[0]) > len(t[0]))
+    return found
+
+
 # ------------------------------------------------------------------ K0 provenance
 def k0_provenance(ctx: Context) -> CheckResult:
     """Every artifact, record, prediction and input resolves to an intact stored object."""
@@ -310,8 +334,11 @@ def k4_statistics(ctx: Context) -> CheckResult:
         if unlogged:
             reasons.append(f"{target}: {sum(unlogged.values())} reported evaluation(s) have no logged label read "
                            f"(scores not produced through the vault)")
-        family = {e.body.get("claim_hash") for e in preregs if target in e.body.get("claim", {}).get(
-            "generalization_targets", [])}
+        # the multiplicity family: claims on this target AND on any other target sharing held-out examples with it
+        # (the same labels re-used under another id are the same test-set reuse)
+        related = {target} | {d for d in ctx.vault.datasets() if d != target and shared_examples(ctx.vault, target, d)}
+        family = {e.body.get("claim_hash") for e in preregs if related & set(e.body.get("claim", {}).get(
+            "generalization_targets", []))}
         m = max(plan.n_comparisons, len(family))
         alpha_eff = plan.alpha / m
         obs.append(f"{target}: {m} claim(s) tested on this target -> Bonferroni alpha {alpha_eff:.4g}")
@@ -401,6 +428,10 @@ def k6_held_out(ctx: Context) -> CheckResult:
         twins = sorted(d for d, other in datasets.items() if d != target and other.hash == rec.hash)
         if twins:  # e.g. the internal test set re-registered under a new id as "external" (label laundering)
             reasons.append(f"{target}: identical content registered under other id(s) {twins}")
+        for other in sorted(d for d in datasets if d != target):  # held-out labels public elsewhere = not held out
+            for where, (n, may_carry_labels) in shared_examples(ctx.vault, target, other).items():
+                if may_carry_labels:
+                    reasons.append(f"{n} held-out example(s) of {target!r} appear in public file {where}")
         dev_use = [a for a in ctx.vault.accesses(target) if a.body.get("purpose") == "develop"]
         if dev_use:
             reasons.append(f"{target}: used for development ({len(dev_use)} logged 'develop' read(s))")
@@ -424,10 +455,15 @@ def is_external(ctx: Context) -> bool:
 # ------------------------------------------------------------------ K7 risk
 def k7_risk(ctx: Context) -> CheckResult:
     """Success must have been improbable under a no-effect noise model (and under the declared prior).
-    p_null(target) = P(effect >= min_effect | true effect 0), normal model with the target's resampling SE."""
+    p_null(target) = P(effect >= min_effect | true effect 0), normal model with the target's resampling SE.
+
+    Negative-result and equivalence claims FAIL (fail closed): at their claimed bound, success is at most alpha
+    for any bound, so no noise model can tell a vacuous bound ("does not improve by 0.9 accuracy") from a tight one;
+    that needs a prior over effects, which v1 does not have. Such claims are reported, never certified."""
     c = ctx.claim
     if c.kind not in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT):
-        return CheckResult(status="n/a", reasons=(f"risk is defined for improvement-type claims, not {c.kind.value}",))
+        return _result([f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
+                        f"(one that could not have failed) cannot be detected without a prior over effects"])
     if not ctx.stats:
         return _result(["no statistics to assess risk (see K4)"])
     reasons: list[str] = []

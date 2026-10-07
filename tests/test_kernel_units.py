@@ -259,7 +259,8 @@ def test_k7_degenerate_spread_and_certain_success(base):
     res = K.k7_risk(cx)  # min effect 0.2 is ~40 standard errors away: P(success | null) underflows to 0
     assert res.status == "pass" and "inf bits" in res.observations[0]
     neg = ctx(w, variant(c, kind="negative_result"), ids)
-    assert K.k7_risk(neg).status == "n/a"
+    res = K.k7_risk(neg)  # fail closed: no risk model for this kind in v1 (an "n/a" would have passed)
+    assert res.status == "fail" and "no risk model for negative_result claims" in reasons(res)
     assert "no statistics" in reasons(K.k7_risk(ctx(w, c, [])))
 
 
@@ -585,6 +586,39 @@ def test_test_set_reuse_is_multiplicity_not_peeking(tmp_path):
     w.kernel.preregister(third)
     assert "K2" in w.kernel.certify(third, w.evaluate_all(third)).failed()
     w.close()
+
+
+def test_k6_and_k4_see_held_out_examples_shared_under_other_dataset_ids(tmp_path):
+    """Found 2026-10-07 (live suite): every held-out example of a real-data task was public, WITH its label, in its
+    repair variant's training file, and 16 were in the repair task's own held-out set. Identity by dataset id and
+    exact bytes saw none of it. K6 now refuses a target whose examples appear in a public file of any other dataset
+    that has more columns than the target's features (a label can be there); K4 counts claims on any target that
+    shares held-out examples into the multiplicity family."""
+    w = World(tmp_path / "w", seed=5, n_train=120, n_test=120)
+    try:
+        lines = w.vault.read_public("test", "test_X.csv").decode().splitlines()
+        header, rows, labels = lines[0], lines[1:], w.labels["test"]
+        leaky = "\n".join([f"{header},label", *[f"{r},{y}" for r, y in zip(rows[:10], labels[:10], strict=True)]])
+        w.vault.register_dataset("other_train", DatasetRole.DEV, public={"train.csv": (leaky + "\n").encode()},
+                                 private={})
+        # no target columns / empty file: ignored
+        w.vault.register_dataset("misc", DatasetRole.DEV, public={"notes.csv": b"a,b\n1,2\n", "empty.csv": b""},
+                                 private={})
+        # another held-out target re-using 15 of the same examples (features only: no label exposed, but reuse)
+        w.vault.register_dataset("test_reuse", DatasetRole.TEST,
+                                 public={"test_X.csv": ("\n".join([header, *rows[5:20]]) + "\n").encode()},
+                                 private={"test_y.csv": ("label\n" + "\n".join(labels[5:20]) + "\n").encode()})
+        other = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2, targets=("test_reuse",))
+        w.kernel.preregister(other)
+        c = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2, n_boot=1000)
+        w.kernel.preregister(c)
+        cert = w.kernel.certify(c, w.evaluate_all(c))
+    finally:
+        w.close()
+    k6 = reasons(cert.checks["K6"])
+    assert "10 held-out example(s) of 'test' appear in public file other_train/train.csv" in k6, k6
+    assert "test_reuse" not in k6 and "misc" not in k6
+    assert any("2 claim(s) tested on this target" in o for o in cert.checks["K4"].observations), cert.checks["K4"]
 
 
 def test_infrastructure_outage_during_certification_issues_no_certificate(tmp_path, monkeypatch):

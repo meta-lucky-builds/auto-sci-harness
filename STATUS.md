@@ -17,7 +17,7 @@ Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11
 - **Previous complete full-suite run:** 172 passed, 1 skipped (end of M1, commit 6438201).
 - **State bundle:** see "State bundle" just below (code + 21-task suite + environment, frozen at a commit).
 - **Next on resume:** (1) run the full gate; (2) one live Docker + Codex run on a suite task to validate M2 end to
-  end; (3) user decision on the M2 exit-test budget (≈300 Codex calls, ≈5M tokens); (4) M3 evolution v1.
+  end; (3) user decision on the M2 exit-test budget (≈300 Codex calls, ≈5M tokens); (4) M3 core/adapter split + Lean T0 + approval node (GOAL §11, renumbered 2026-10-07), then M4 evolution v1.
 
 ### State bundle
 - File: `C:\Users\mykids\custom-harness-data\bundles\state-f15c3d4fd53f.zip` (1.1 MB, 132 members; NOT in git:
@@ -51,7 +51,7 @@ Living checklist against `GOAL.md` (the source of truth; milestones in GOAL §11
 | **M0 Hardening** | **Done** (2026-10-06), second hardening pass the same day, see below. |
 | **M1 Kernel v1** | **Done** (2026-10-06), see "M1" below. |
 | M2 Research loop v1 | **Built** (2026-10-06), see "M2" below. **Exit test not yet run**: it needs live model runs on the suite (≈300 Codex calls / ≈5M tokens); waiting on the user's budget decision. |
-| M3–M7 | Not started (pieces of M2/M3 exist from the earlier v0 build, see "Done before M0"). |
+| M3–M9 | Not started (renumbered 2026-10-07: M3 core/adapter split + T0 + approval node, M4 evolution v1, M5 multi-agent domain expansion, M6–M9 = former M4–M7; pieces of evolution exist from the v0 build). |
 
 ### M0 — what was built and how it is tested
 | GOAL item | Built | Proof (test) |
@@ -161,9 +161,13 @@ that FAILS on the pre-fix code (run on an untouched copy) and passes after the f
 | F4 | Near-copy check defeated by appending a comment to every line (similarity 1.0 → 0.0) | compares Python logical lines as token sequences (comments, wrapping, indentation ignored) |
 | F5 | Model text with newlines injected a fake `**Headline result**` line into the report (audit I4 re-renders identically, so it passed) | model-written ids/ideas/errors rendered as one bounded line |
 
-Open (verified, pinned by `tests/test_redteam_kernel.py`, **user decision**): K7 returns `n/a` for negative-result
-and equivalence claims and `n/a` counts as pass, so vacuous claims ("does not improve by 0.9", "within 0.9") are
-CERTIFIED-INTERNAL. The research loop makes only improvement claims, so no current run is affected.
+K7 gap (verified): K7 returned `n/a` for negative-result and equivalence claims and `n/a` counted as pass, so vacuous
+claims ("does not improve by 0.9", "within 0.9") were CERTIFIED-INTERNAL. **Decided 2026-10-07 (delegated to me):
+fail closed.** At the claimed bound a negative/equivalence claim succeeds with probability ≤ α for ANY bound, so no
+noise-based rule (e.g. "bound ≤ k·SE") can separate a vacuous bound from a tight one; that needs a prior over
+effects (GOAL §13 open question 1), and a self-declared prior would be a new loophole. K7 now FAILS these kinds and
+certification counts only "pass". The 50-claim suite's true negative/equivalence scenarios are now
+"true-but-uncertifiable" (REJECTED by K7 only); `tests/test_redteam_kernel.py` asserts the secure behaviour.
 
 Checked and held (by test or by reading, as stated): the dev-cheating fold isolation (test); bundle reproduce has
 no zip-slip (blobs are read into the content-addressed store, never extracted; reading); Docker fold runs cannot
@@ -223,40 +227,49 @@ memory.
   and say so instead of counting it as a passed check.
 
 ## Known limitations (honest)
-- Evolution only tested with scripted LLMs; no evidence yet that a real proposer finds good edits (M3).
+- Evolution only tested with scripted LLMs; no evidence yet that a real proposer finds good edits (M4).
 - The evolution objective is not yet VDS: `evolve/evaluate.py` scores 0.5·certified + 0.5·replicated +
-  0.5·clip(relative held-out improvement) from Kernel certificates (M2). VDS as the objective = M3, once enough
+  0.5·clip(relative held-out improvement) from Kernel certificates (M2). VDS as the objective = M4, once enough
   predictions resolve.
-- **Invariant 5 (critic ≠ proposer family) is NOT met.** With Codex as the only backend, three places in the M2 loop
-  judge the proposer's work with the same model family: the Socratic `critic` node, the hypothesis `tournament`
-  (`research/modules.py`, `ctx.llm("judge", …)`), and the replication agent (same family as the original author).
-  No code checks model family anywhere: the gateway's "same-family detection" (GOAL §5 L0) does not exist. Fixing it
-  needs a second model family (API key or open-weights model; user decision). Until then live results are labelled
-  "invariant 5 not met".
-- **Invariant 9 incomplete:** Reproducibility Bundles are built only by `research.certify` (and `chh bundle`), so a
-  run that stops before certifying has no bundle. Every run does have a cost record.
-- **Held-out examples shared across suite tasks (found 2026-10-06, verified on public files):** each real-data task
-  and its repair variant are re-splits of the same base dataset. Every test example of `wine-real` (54/54),
-  `breast_cancer-real` (171/171), `digits-real` (540/540) and `diabetes-real` (133/133) appears in the paired repair
-  task's public test or TRAIN file (e.g. 38 of wine-real's 54 hidden test labels are public in
-  `wine_knn_unscaled/public/train.csv`). Each pair sat in the same split only by luck of the cyclic assignment.
-  **Fixed 2026-10-07 (user decision: option A):** every suite task records its `source` (base dataset);
-  `assign_splits` keeps a source in one split; `check_split_isolation` refuses a missing source, a source spanning
-  splits, and (content-based, whatever the declared sources) any example row shared by tasks of different splits;
-  `build_suite` and `load_suite` fail closed on it, `validate_suite.py` reports it. The live suite's `suite.yaml`
-  was annotated with sources (backup `suite.pre-source.yaml`, sha256 5eff7015…); splits unchanged (verified for all
-  21 tasks); 0 isolation problems. **Still open (option B, before M3):** the Kernel identifies held-out sets by
-  dataset id and exact bytes, so K6 ("never used") and the Bonferroni family cannot see overlapping examples
-  under different ids; the row check matches exact text only (re-formatted copies are not detected).
+- **Invariant 5 (critic/replicator ≠ author family): ENFORCED since 2026-10-07, but NOT MET by any run so far.**
+  `policy.py` holds the human-owned rule (judge ≠ proposer, replicator ≠ executor, by model family; a vendor
+  provider is the family, generic hosts are classified by model name, unknown never counts as different) and the
+  engine refuses a violating configuration before any model call, checking EFFECTIVE bindings (an unbound judging
+  role falls back to the executor). The replicate node now has its own `replicator` role. A single-family run needs
+  an explicit override (`--allow-same-family` / `CHH_ALLOW_SAME_FAMILY=1`), which is recorded in the run state
+  (`model_policy`, reserved), the report and every certificate checklist as "NOT MET"; such a run can never yield a
+  headline result or replication credit. With Codex as the only backend every live run needs the override: a
+  second model family is still required (user's resources).
+- **Invariant 9: implemented 2026-10-07.** Every run, whatever its status (crashes included), ends with a per-run
+  Reproducibility Bundle (`store/run_bundle.py`: spec, inputs, seed, scrubbed trace, cost, environment, final
+  workspace snapshot, task-file hashes; never private bytes) recorded as a `run_bundle` record; `chh rerun BUNDLE`
+  re-runs it after checking the task files' hashes. Claim bundles (`kernel/bundle.py`) still carry held-out labels.
+- **Held-out examples shared across suite tasks (found 2026-10-06; FIXED 2026-10-07).** Each real-data task and its
+  repair variant were re-splits of one base dataset, so every held-out example of `wine-real`, `breast_cancer-real`,
+  `digits-real` and `diabetes-real` was public (with its label) in the paired repair task. Fixes: (1) suite: tasks
+  carry `source`, splits keep a source together, `check_split_isolation` (sources + content-level row overlap) is
+  enforced by `build_suite`/`load_suite`/`validate_suite`; (2) suite rebuilt: repair tasks now use their real
+  task's SAME split and canary, test rows duplicating a training example are dropped (iris lost 1 of 45); old suite
+  kept as `suites/m2-v1`; `validate_suite.py`: 21/21 usable, 0 isolation problems; (3) vault ids are content-based
+  (`data@<digest>/train|test`; baselines stay per task), so tasks sharing data name ONE held-out target (one
+  multiplicity family), and a task whose canary differs from its data's registered canary is refused; (4) Kernel:
+  K6 fails a target whose examples appear in a public file of any other dataset that may carry labels, K4 counts
+  claims on any target sharing examples into the Bonferroni family (`checks.shared_examples`, exact text match:
+  re-formatted copies are not detected). The old evidence store (registrations of the old, leaky suite) was
+  archived as `store-v1`; a fresh store starts with the new suite.
 - **Dev honesty depends on the harness spec:** every public training row is now a dev example, and the run
   workspace holds the public training file. A `tool` node (an allowed edit type) could put training rows into a
   prompt, letting a model write a lookup-table solution that inflates the dev score. Held-out integrity is not
   affected (confirmation runs in fresh sandboxes without the labels; K6 would reject the claim), but dev
   selection, dev racing and forecasts would be corrupted. Under `LocalSandbox` (tests only) a program can also
   read the host filesystem; only Docker's mount isolation protects dev and held-out runs.
-- **Invariant 10 not implemented:** runs and loops carry no MECHANICAL / VALIDATED label (GOAL §6.1).
+- **Invariant 10: implemented 2026-10-07** with the strict reading of GOAL §6.1: a research run is VALIDATED only if
+  its accepted claim is CERTIFIED-VALIDATED (external/future data), an evolution generation only if every gate
+  certificate behind its decision is; everything else is MECHANICAL. Every run report and every generation (result
+  + `harness_edit` ledger) carries the label. All loops so far are MECHANICAL (internal data only).
 - Kernel v1 deviations from GOAL §4: untested assumptions are listed, not yet tier-lowering; label SUPPORTED is
-  never issued (no judge/retrospective evidence yet); kinds scaling_law/rediscovery are typed but rejected (K1);
+  never issued (no judge/retrospective evidence yet); kinds scaling_law/rediscovery are typed but rejected (K1); kinds negative_result/equivalence are checked but
+  never certified (K7 fails them: no risk model, see the red-team section);
   Bonferroni (conservative) rather than Holm; bundles are per certified claim, not yet per run; a ledger excerpt in a
   bundle is checked per entry and for order, not as an unbroken chain from genesis.
 - Dataset roles (external/future) are declared by whoever registers the dataset. Content laundering is caught
@@ -266,7 +279,7 @@ memory.
 - Test-set reuse: a target may serve several registered claims; K4 charges it as Bonferroni over every claim
   registered on that target. This is the standard practical defence, NOT a guarantee against adaptive reuse (later
   claims chosen after seeing earlier results; cf. reusable-holdout literature). SEALED targets used once via
-  `finalize` (L6, M3) remain the strong form.
+  `finalize` (L6, M4) remain the strong form.
 - Bundles contain the hidden labels of their targets (needed to re-check); they must never be agent-visible.
 - The ledger is tamper-EVIDENT (hash chain), not tamper-proof: whoever controls the database can rewrite it.
   Publishing the head hash (bundles, commits) pins it.
@@ -297,5 +310,6 @@ memory.
 ## Next (GOAL §11)
 1. **M2 exit test** (user decision on budget): run the loop live on the suite; measure the CERTIFIED-or-NEGATIVE
    rate, integrity failures (target 0), calibration of the claim forecasts, and cost per certified claim.
-2. **M3 Evolution v1**: evidence export, agentic proposer, structured diagnosis, family-separated critic, smoke
+2. **M3 Core/adapter split + Lean T0 + approval node** (GOAL §11, §4.7, §5 Domain adapters), then
+   **M4 Evolution v1** (with leave-one-family/domain-out gates): evidence export, agentic proposer, structured diagnosis, family-separated critic, smoke
    run, ledger upgrades, cost term (GOAL §11).

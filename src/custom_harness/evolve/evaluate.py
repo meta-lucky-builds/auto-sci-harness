@@ -50,6 +50,7 @@ class RunOutcome:
     status: str
     cost: Cost
     failure_signatures: list[str] = field(default_factory=list)
+    cert_label: str | None = None  # the run's Kernel certificate label (drives the loop label, GOAL §6.1)
 
     @property
     def infra_failed(self) -> bool:
@@ -102,8 +103,11 @@ def _score_completed(state: dict) -> tuple[float, bool]:
     cert = state.get("certificate") or {}
     # Credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger.
     verified = cert.get("label") in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
-    replicated = verified and (state.get("replica_certificate") or {}).get("label") in ("CERTIFIED-INTERNAL",
-                                                                                     "CERTIFIED-VALIDATED")
+    # replication earns credit only when it was independent by policy too: a replicator of the author's model
+    # family (invariant 5 not met) shares its biases (GOAL §10.5)
+    independent = (state.get("model_policy") or {}).get("invariant_5") == "met"
+    replicated = verified and independent and (state.get("replica_certificate") or {}).get("label") in (
+        "CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
     sol, base = cert.get("subject_mean"), cert.get("comparator_mean")
     rel = 0.0
     if (isinstance(sol, (int, float)) and isinstance(base, (int, float)) and not isinstance(sol, bool)
@@ -125,5 +129,7 @@ def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
                  budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
     score, verified = score_state(res.state, res.status)
+    cert = res.state.get("certificate")
+    label = cert.get("label") if isinstance(cert, dict) else None
     return RunOutcome(task.task_id, res.run_id, seed, score, verified, res.status.value, res.cost,
-                      failure_signatures(store, res.run_id))
+                      failure_signatures(store, res.run_id), cert_label=label)

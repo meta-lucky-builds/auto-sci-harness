@@ -130,17 +130,25 @@ def _csv(rows: list[list[str]]) -> bytes:
     return buf.getvalue().encode()
 
 
-def write_task(spec: TaskSpecFiles, root: Path) -> Path:
+def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Path:
+    """Write one task. Test rows whose features also occur in the training file are dropped (de-duplication:
+    their label would be public). `canary`: share one between tasks that share data (default: a fresh one)."""
     d = Path(root) / spec.task_id
     (d / "public").mkdir(parents=True, exist_ok=True)
     (d / "private").mkdir(parents=True, exist_ok=True)
     ti = spec.header.index(spec.target)
     feat = [c for j, c in enumerate(spec.header) if j != ti]
+
+    def x(r: list[str]) -> tuple[str, ...]:
+        return tuple(v for j, v in enumerate(r) if j != ti)
+
+    seen = {x(r) for r in spec.train}
+    test = [r for r in spec.test if x(r) not in seen]
     (d / "public" / "train.csv").write_bytes(_csv([spec.header, *spec.train]))
-    (d / "public" / "test_X.csv").write_bytes(_csv([feat, *[[v for j, v in enumerate(r) if j != ti]
-                                                             for r in spec.test]]))
-    (d / "private" / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in spec.test]]))
-    (d / "private" / "canary.txt").write_text("CHH-CANARY-" + secrets.token_hex(16) + "\n", encoding="utf-8")
+    (d / "public" / "test_X.csv").write_bytes(_csv([feat, *[list(x(r)) for r in test]]))
+    (d / "private" / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in test]]))
+    (d / "private" / "canary.txt").write_text((canary or "CHH-CANARY-" + secrets.token_hex(16)) + "\n",
+                                              encoding="utf-8")
     (d / "baseline.py").write_text(spec.baseline, encoding="utf-8")
     (d / "task.yaml").write_text(yaml.safe_dump({
         "id": spec.task_id, "title": spec.title, "description": spec.description, "metric": spec.metric,
@@ -309,6 +317,7 @@ def real_task(name: str, data: dict, seed: int, *, baseline: str | None = None, 
 
 
 # ---------------------------------------------------------------- the suite
+REAL_SPLIT_SEED = 7
 _PATTERN = ("evolve", "gate", "evolve", "sealed", "evolve")
 
 
@@ -374,14 +383,17 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None) -> Path:
     out = Path(out)
     specs = [gen(seed, n) for gen, seed, n in SYNTHETIC]
     if real_data is not None:
-        specs += [real_task(name, real_data[name], seed=7) for name in REAL]
+        specs += [real_task(name, real_data[name], seed=REAL_SPLIT_SEED) for name in REAL]
         for tid, (name, model, defect) in REPAIRS.items():
-            specs.append(real_task(name, real_data[name], seed=11, task_id=tid, defect=defect,
+            # the SAME split as the real-data task: no held-out label of one is public in the other (they name one
+            # held-out target in the vault; see TaskSpec.dataset_ids)
+            specs.append(real_task(name, real_data[name], seed=REAL_SPLIT_SEED, task_id=tid, defect=defect,
                                    baseline=_fill(_SK, "target", model)))
     splits = assign_splits(specs)
+    canaries = {src: "CHH-CANARY-" + secrets.token_hex(16) for src in {s.data_source for s in specs}}
     entries = []
     for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
-        d = write_task(s, out)
+        d = write_task(s, out, canary=canaries[s.data_source])
         entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
                         "family": s.family, "source": s.data_source, **({"defect": s.defect} if s.defect else {})})
     problems = check_split_isolation(entries)

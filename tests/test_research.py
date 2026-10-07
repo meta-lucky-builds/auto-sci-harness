@@ -129,7 +129,7 @@ def test_research_loop_end_to_end(store, tmp_path, rings_task, monkeypatch):
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(scripted_llm)
-    eng = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    eng = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True))
     res = eng.run("rings", {"task_dir": str(rings_task)})
     assert res.status == RunStatus.COMPLETED, res.detail
@@ -201,7 +201,7 @@ def test_perfect_dev_predictions_are_not_a_leak(store, tmp_path, rings_task, mon
 
     llm = MockBackend(llm_fn)
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
-    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(rings_task)})
     assert res.status == RunStatus.COMPLETED, res.detail
@@ -245,7 +245,7 @@ def _run_with_impl(store, tmp_path, task, code):
 
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(llm_fn)
-    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                   sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(task)})
 
@@ -282,6 +282,26 @@ def test_dev_estimate_covers_every_public_training_row_once(store, tmp_path, rin
     assert Counter(dev) == Counter(train_labels)
     preds = store.blobs.get_json(res.state["best"]["dev_preds_ref"])
     assert len(preds) == len(dev)  # one out-of-fold prediction per dev example
+
+
+def test_tasks_sharing_data_share_held_out_ids_and_canary(store, tmp_path, rings_task):
+    """Dataset ids are content-based (data files only): a repair task re-using a real task's split names the same
+    held-out target (one multiplicity family, no 'twin' under another id); the baseline stays per task. A task whose
+    canary differs from the one registered for its data is refused (its canary would never be scanned)."""
+    import shutil
+
+    from custom_harness.research.claims import register_task
+    from custom_harness.research.task import load_task
+    from custom_harness.runtime.modules import ModuleContext
+    twin = tmp_path / "twin"
+    shutil.copytree(rings_task, twin)
+    (twin / "baseline.py").write_text("# a different (repair) baseline\n" + (twin / "baseline.py").read_text())
+    ctx = ModuleContext(run_id="r", store=store, backends={}, budget=None, sandbox=None)
+    a, b = register_task(ctx, load_task(rings_task), rings_task), register_task(ctx, load_task(twin), twin)
+    assert a["test"] == b["test"] and a["train"] == b["train"] and a["baseline"] != b["baseline"]
+    (twin / "private" / "canary.txt").write_text("CHH-CANARY-different\n")
+    with pytest.raises(ValueError, match="canary"):
+        register_task(ctx, load_task(twin), twin)
 
 
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):
@@ -342,7 +362,7 @@ def test_infra_retry_during_confirmation_does_not_reject_the_claim(store, tmp_pa
     _HiccupSandbox.confirm_execs = 0
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(scripted_llm)
-    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=_HiccupSandbox(tmp_path / "ws", i_understand_no_isolation=True),
                  retry=RetryPolicy(max_attempts=3, backoff_s=0.0)).run("rings", {"task_dir": str(rings_task)})
     assert res.status == RunStatus.COMPLETED, res.detail
@@ -357,7 +377,7 @@ def test_improve_operator_runs_and_dev_racing_refuses_a_non_improvement(store, t
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(scripted_llm)
-    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(rings_task)})
     s = res.state
@@ -391,7 +411,7 @@ def test_socratic_filter_keeps_only_questions():
 
 def _run_v1(store, tmp_path, task, llm):
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
-    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                   sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(task)})
 
@@ -402,18 +422,40 @@ def test_independent_replication_certifies_the_headline_without_seeing_the_code(
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     from custom_harness.evolve import score_state
     from custom_harness.research.claims import headline
-    llm = MockBackend(scripted_llm)
-    res = _run_v1(store, tmp_path, rings_task, llm)
+    monkeypatch.delenv("CHH_ALLOW_SAME_FAMILY")  # two families: invariant 5 met, no override
+    author, other = MockBackend(scripted_llm), MockBackend(scripted_llm)
+    author.family, other.family = "family-a", "family-b"
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    res = Engine(spec, backends={"proposer": author, "executor": author, "judge": other, "replicator": other},
+                 store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(rings_task)})
     s = res.state
+    assert s["model_policy"]["invariant_5"] == "met"
     assert s["replica_certificate"]["label"] == "CERTIFIED-INTERNAL", s["replica_certificate"]
     assert headline(s) and s["audit"]["passed"], s["audit"]
     assert "independent re-implementation" in s["replica_claim"]["statement"]
     assert s["replica_claim"]["effect"]["min_effect"] == s["claim"]["effect"]["min_effect"]  # same bar
-    replicate_prompt = next(r for r in llm.requests if "Re-implement the method" in r.messages[-1].content)
+    replicate_prompt = next(r for r in other.requests if "Re-implement the method" in r.messages[-1].content)
+    assert not any("Re-implement the method" in r.messages[-1].content for r in author.requests)
     code_lines = [ln for ln in KNN_RADIUS.splitlines() if len(ln.strip()) > 12]
     assert not any(ln in replicate_prompt.messages[-1].content for ln in code_lines)  # never saw the code
-    assert "Headline result** (certified AND independently replicated): yes" in s["report"]
+    assert "model family): yes" in s["report"] and "Loop label (GOAL §6.1): **MECHANICAL**" in s["report"]
     assert score_state(s, res.status)[0] == 1.5  # certified + replicated + capped improvement
+
+
+def test_same_family_replication_is_not_a_headline_and_earns_no_replication_credit(store, tmp_path, rings_task,
+                                                                                   monkeypatch):
+    """Invariant 5: a replicator of the author's family shares its biases. With the (recorded) override the run
+    proceeds, the replica may certify, but it is not independent: no headline, no replication credit."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    from custom_harness.evolve import score_state
+    from custom_harness.research.claims import headline
+    res = _run_v1(store, tmp_path, rings_task, MockBackend(scripted_llm))  # one family, CHH_ALLOW_SAME_FAMILY=1
+    s = res.state
+    assert s["model_policy"]["invariant_5"].startswith("NOT MET")
+    assert s["replica_certificate"]["label"] == "CERTIFIED-INTERNAL" and not headline(s)
+    assert "invariant 5" in s["report"] and "NOT MET" in s["report"] and "model family): no" in s["report"]
+    assert score_state(s, res.status)[0] == 1.0  # certified + capped improvement, no replication credit
 
 
 def test_failed_replication_means_no_headline(store, tmp_path, rings_task, monkeypatch):

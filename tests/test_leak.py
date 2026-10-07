@@ -28,7 +28,7 @@ def research_spec(extra_before_audit: str | None = None) -> HarnessSpec:
 
 
 def run(store, tmp_path, task, llm, spec=None):
-    eng = Engine(spec or research_spec(), backends={"proposer": llm, "executor": llm, "judge": llm},
+    eng = Engine(spec or research_spec(), backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm},
                  store=store, sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True))
     return eng.run("rings", {"task_dir": str(task)})
 

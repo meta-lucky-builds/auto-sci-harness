@@ -51,11 +51,13 @@ class TaskSpec(BaseModel):
             return 0.02
         return max(1e-9, 0.02 * abs(baseline_dev_score))
 
-    def dataset_ids(self, digest: str) -> dict[str, str]:
-        """Vault ids, namespaced by a digest of the task's files: two tasks may share a name, never an id
-        (same bytes -> same ids, so repeated claims on the same data share one multiplicity family)."""
-        ns = f"{self.id}@{digest[:12]}"
-        return {"train": f"{ns}/train", "test": f"{ns}/test", "baseline": f"{ns}/baseline"}
+    def dataset_ids(self, data_digest: str, task_digest: str) -> dict[str, str]:
+        """Vault ids. Datasets are identified by their CONTENT (digest of the data files only), whatever the task:
+        tasks sharing data (a repair task re-using a real task's split) name ONE held-out target, so every claim
+        on those labels joins one multiplicity family and no 'twin' exists under another id. The baseline is the
+        task's own (task id + a digest of all task files): equal names never collide."""
+        ns = f"data@{data_digest[:16]}"
+        return {"train": f"{ns}/train", "test": f"{ns}/test", "baseline": f"{self.id}@{task_digest[:12]}/baseline"}
 
 
 def load_task(task_dir: Path) -> TaskSpec:

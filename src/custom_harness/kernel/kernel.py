@@ -94,7 +94,7 @@ class Kernel:
                 raise
             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
                 results[kid] = CheckResult(status="fail", reasons=(f"check raised {type(e).__name__}: {e}",))
-        ok = all(r.status in ("pass", "n/a") for r in results.values())
+        ok = all(r.status == "pass" for r in results.values())  # fail closed: only an explicit pass counts
         label = (Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL) if ok else Label.REJECTED
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
                     for o in results[kid].observations if "seed-invariant" in o]

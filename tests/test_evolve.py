@@ -94,7 +94,7 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
     llm = MockBackend(executor)
     factory = lambda key: LocalSandbox(tmp_path / "sb" / key, i_understand_no_isolation=True)  # noqa: E731
-    ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm}, store, factory, suite)
+    ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store, factory, suite)
     proposer = MockBackend([json.dumps(PROPOSALS)])
     parent = seed_spec()
 
@@ -103,6 +103,9 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
 
     assert res.accepted, res.decision
     assert res.new_parent.nodes["run"].params["max_fixes"] == 2
+    # GOAL §6.1 / invariant 10: internal gate data -> MECHANICAL, labelled in the result and in the ledger
+    assert res.loop_label == "MECHANICAL"
+    assert [r["loop_label"] for r in store.records("harness_edit")][-1:] == ["MECHANICAL"]
     statuses = [c["status"] for c in res.candidates]
     assert statuses.count("rejected_static") == 2  # protected verify node + private-data leak
     # proposer saw diagnosis grounded in traces

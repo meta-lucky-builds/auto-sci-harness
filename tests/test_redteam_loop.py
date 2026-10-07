@@ -33,7 +33,7 @@ with open(a.out, "w", newline="") as f:
 def _run(store, tmp_path, task, llm_fn):
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
     llm = MockBackend(llm_fn)
-    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                   sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(task)})
 

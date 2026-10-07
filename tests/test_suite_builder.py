@@ -82,6 +82,37 @@ def test_tasks_from_one_dataset_share_a_split(tmp_path, monkeypatch, drop):
     assert len(load_suite(path)) == len(tasks)  # the evolution entry point accepts it
 
 
+def test_repair_tasks_share_their_real_tasks_data_and_tests_are_deduplicated(tmp_path):
+    """A repair task and its real-data task now use the SAME split (and canary): no held-out label of one is public
+    in the other, and both name one held-out target in the vault (one multiplicity family). Test rows whose
+    features also occur in the training file are dropped (benchmark de-duplication; the live iris task had one)."""
+    data = _fake_real_data()
+    data["wine"]["X"][1] = list(data["wine"]["X"][0])  # a duplicate example, so de-duplication has work to do
+    build_suite(tmp_path / "s", real_data=data)
+    for tid, (name, _model, _defect) in REPAIRS.items():
+        real, rep = tmp_path / "s" / f"{name}-real", tmp_path / "s" / tid
+        for rel in ("public/train.csv", "public/test_X.csv", "private/test_y.csv", "private/canary.txt"):
+            assert (real / rel).read_bytes() == (rep / rel).read_bytes(), (tid, rel)
+    for d in (tmp_path / "s").iterdir():
+        if (d / "task.yaml").exists():
+            task = load_task(d)
+            lines = (d / "public" / task.train_file).read_text(encoding="utf-8").splitlines()
+            ti = lines[0].split(",").index(task.target_column)
+            feats = {",".join(v for j, v in enumerate(r.split(",")) if j != ti) for r in lines[1:]}
+            test = (d / "public" / task.test_features_file).read_text(encoding="utf-8").splitlines()[1:]
+            assert not feats & set(test), d.name
+            assert len(test) == len(_labels(d / "private" / task.test_labels_file))
+
+
+def test_write_task_drops_test_rows_duplicating_a_training_example(tmp_path):
+    spec = suite_mod.TaskSpecFiles("t", "t", "d", "accuracy", "y", ["a", "b", "y"],
+                                   train=[["1", "2", "0"], ["3", "4", "1"]],
+                                   test=[["1", "2", "1"], ["5", "6", "0"]], baseline="x", family="f")
+    d = write_task(spec, tmp_path)
+    assert (d / "public" / "test_X.csv").read_text().splitlines() == ["a,b", "5,6"]
+    assert (d / "private" / "test_y.csv").read_text().splitlines() == ["y", "0"]
+
+
 def _two_task_suite(tmp_path, *, share_rows: bool, sources: tuple[str | None, str | None]) -> Path:
     a = rings(1, 120)
     b = dataclasses.replace(a, task_id="rings-copy") if share_rows else rings(2, 120)

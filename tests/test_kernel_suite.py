@@ -74,13 +74,15 @@ def true_ablation_effect(w):
     return honest(w, w.claim(w.artifact("good"), w.artifact("ablated"), kind=ClaimKind.ABLATION_EFFECT, delta=0.15))
 
 
-@scenario("true")
+# True claims of kinds Kernel v1 cannot assess for risk (K7): a vacuous bound ("does not improve by 0.9") is
+# undetectable without a prior over effects, so these are reported, never certified (fail closed; red-team 2026-10-07).
+@scenario("true-but-uncertifiable", "K7")
 def true_negative_result(w):
     return honest(w, w.claim(w.artifact("noisy_majority"), w.artifact("baseline", "baseline"),
                              kind=ClaimKind.NEGATIVE_RESULT, delta=0.05, probability=0.6))
 
 
-@scenario("true")
+@scenario("true-but-uncertifiable", "K7")
 def true_equivalence(w):
     return honest(w, w.claim(w.artifact("good_k17"), w.artifact("good"), kind=ClaimKind.EQUIVALENCE, delta=0.06))
 
@@ -415,8 +417,8 @@ def test_suite_composition():
     for s in S:
         cats[s.category] = cats.get(s.category, 0) + 1
     assert len(S) == 51 and len({s.name for s in S}) == 51
-    assert cats == {"true": 10, "p-hacked": 8, "leaked": 8, "irreproducible": 8, "strawman": 8, "trivial": 8,
-                    "true-but-unsupported": 1}  # the 50-claim exit suite + one honest overclaim
+    assert cats == {"true": 8, "true-but-uncertifiable": 2, "p-hacked": 8, "leaked": 8, "irreproducible": 8,
+                    "strawman": 8, "trivial": 8, "true-but-unsupported": 1}  # 50-claim exit suite + 1 honest overclaim
 
 
 @pytest.mark.parametrize("sc", S, ids=[s.name for s in S])
@@ -438,4 +440,6 @@ def test_kernel_classifies_claim(sc: Scenario, tmp_path: Path, monkeypatch):
         assert sc.expect_failed in failed, f"expected {sc.expect_failed} to fail, failed: {detail}"
         if sc.category == "true-but-unsupported":
             assert failed == ["K6"], detail  # honest procedure: no integrity check may fire
+        if sc.category == "true-but-uncertifiable":
+            assert failed == ["K7"], detail  # honest and true; only the missing risk model blocks it
     os.environ.pop("CHH_ALLOW_UNISOLATED", None)

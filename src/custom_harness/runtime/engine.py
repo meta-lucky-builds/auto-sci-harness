@@ -26,6 +26,7 @@ import jsonschema
 from ..budget import Budget, BudgetExceeded
 from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
+from ..policy import model_policy
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
@@ -134,7 +135,12 @@ def _holds(cond: Condition, state: dict[str, Any]) -> bool:
 class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
-                 retry: RetryPolicy | None = None, sleep=time.sleep):
+                 retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None):
+        # invariant 5, checked before any model call; an override (argument or CHH_ALLOW_SAME_FAMILY=1) is
+        # recorded in every run's state as NOT MET and reported in every certificate checklist
+        allowed = allow_same_family if allow_same_family is not None else (
+            os.environ.get("CHH_ALLOW_SAME_FAMILY") == "1")
+        self.model_policy = model_policy(backends, allow_same_family=allowed)
         self.spec = spec
         self.retry = retry or RetryPolicy()
         self._sleep = sleep
@@ -153,7 +159,7 @@ class Engine:
 
     # ------------------------------------------------------------------ public
     def run(self, task_id: str, inputs: dict[str, Any], seed: int = 0) -> RunResult:
-        state = {"input": inputs, "_seed": seed}
+        state = {"input": inputs, "_seed": seed, "model_policy": self.model_policy}
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash, task_id=task_id, seed=seed,
                   inputs_ref=self.store.blobs.put_json(state),
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None)
@@ -281,12 +287,30 @@ class Engine:
 
     # ----------------------------------------------------------------- internals
     def _loop(self, run_id: str, state: dict[str, Any], node_id: str, start_index: int) -> RunResult:
-        """Never leaves a run in RUNNING: any escaping exception marks it FAILED, then re-raises."""
+        """Never leaves a run in RUNNING: any escaping exception marks it FAILED, then re-raises. Every run, whatever
+        its outcome, ends with a Reproducibility Bundle (invariant 9)."""
         try:
-            return self._loop_inner(run_id, state, node_id, start_index)
+            res = self._loop_inner(run_id, state, node_id, start_index)
         except BaseException as e:
             self.store.set_run_status(run_id, RunStatus.FAILED, f"engine crash: {type(e).__name__}: {e}")
+            self._write_run_bundle(run_id)
             raise
+        self._write_run_bundle(run_id)
+        return res
+
+    def _write_run_bundle(self, run_id: str) -> None:
+        from ..config import data_dir
+        from ..store.run_bundle import build_run_bundle
+        path = data_dir() / "bundles" / "runs" / f"{run_id}.zip"
+        try:
+            env = self.sandbox.environment() if self.sandbox is not None else None
+        except Exception as e:  # noqa: BLE001  (e.g. Docker gone at the very end): recorded, bundle still written
+            env = {"environment_unavailable": f"{type(e).__name__}: {e}"}
+        try:
+            digest = build_run_bundle(self.store, run_id, path, environment=env, workspace_ref=self._ws_ref)
+            self.store.append_record("run_bundle", {"run_id": run_id, "path": str(path), "manifest_sha256": digest})
+        except (OSError, ValueError, KeyError) as e:  # a missing bundle is recorded, never silent
+            self.store.append_record("run_bundle", {"run_id": run_id, "error": f"{type(e).__name__}: {e}"})
 
     def _loop_inner(self, run_id: str, state: dict[str, Any], node_id: str, start_index: int) -> RunResult:
         index = start_index

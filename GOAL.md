@@ -1,9 +1,10 @@
 # GOAL — the harness we are building
 
-Date: 2026-10-06. Owner: user (product decisions) · Claude (design + build).
+Date: 2026-10-06; scope revised 2026-10-07 (user decision: life sciences + engineering, core/adapter split, §4.7,
+§5 "Domain adapters", §11, §15). Owner: user (product decisions) · Claude (design + build).
 **This is the single source of truth for WHAT custom-harness is and when it is done.**
-(Stopping point 2026-10-06: M0 ✅, M1 ✅, M2 built with exit test pending; markers in §5/§11 reflect it, details and
-verification state in `STATUS.md`.)
+(State: M0 ✅, M1 ✅, M2 built with exit test pending; markers in §5/§11 reflect it, details and verification state in
+`STATUS.md`.)
 `PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
 
 Inputs this file is built on (read them only if a detail is needed):
@@ -24,6 +25,15 @@ every skill it keeps and every change it makes to itself must pass the Kernel at
 improves itself only through **validated loops**, driven by external evidence, never by its own metric alone. It does
 everything the 36 surveyed systems do combined. It fixes what all of them failed to do. It proves its superiority on a
 pinned, held-out, cost-matched scorecard that anyone can rerun from a single bundle.
+
+**Scope: life sciences and engineering** (ML/DL is the first, already-built domain and stays the test bed). A
+domain-agnostic Kernel core judges every claim; **domain adapters** (a human-approved, fixed verifier layer) supply
+each domain's data formats, metrics, invariants and tools. Claims are certified at the strongest tier the available
+tools allow (§4.7): **formal** claims by Lean (T0), **computational and data** claims by solvers, exact checkers and
+held-out data (T1/T2), **simulated** claims only within the simulator that produced them (the gap to reality is an
+untested assumption), and **physical or empirical** claims never as "done" by the system: they go through a
+pre-registered protocol, a human-in-the-loop approval node, human execution, and a Kernel check of the returned
+data. The harness evolves; the adapters do not.
 
 ---
 
@@ -111,7 +121,10 @@ matching their reported numbers wherever we can test the same thing.
   L4 Research Loop ── formulate → profile → literature → hypotheses → PRE-REGISTER → experiment tree → critic → replicate → claims → report
   ┌──────────────────────────────── EVIDENCE KERNEL (trusted core) ────────────────────────────────┐
   │ Claim Language · Pre-registration commits · checks K0–K9 · Certificates (tier) · Prediction Ledger │
+  │ domain-agnostic: everything domain-specific comes from a registered adapter                        │
   └────────────────────────────────────────────────────────────────────────────────────────────────┘
+  DOMAIN ADAPTERS (human-approved, FIXED: never edited by L6) ── ML · Lean/formal · solvers · simulators ·
+                  life sciences · engineering: formats, metrics, invariants (K8), tools, validation evidence
   L3 Verifier Ladder ── T0 formal · T1 executable · T2 statistical · T3 physical · T4 time-split · T5 judge panel · T6 none
                          + fault-injection validation · calibrated tolerances · exploit quarantine · red team · verifier synthesis
   L2 Evidence Store ── append-only, content-addressed; claims only from evidence; Reproducibility Bundles
@@ -121,7 +134,8 @@ matching their reported numbers wherever we can test the same thing.
 ```
 
 Rule: a layer may call layers below it. It influences layers above only by writing Evidence. The Kernel is the only
-component allowed to mint a Certificate.
+component allowed to mint a Certificate. Adapters are called by the Kernel and the research loop but are part of
+the trusted, human-controlled base: no layer above may modify them.
 
 ---
 
@@ -175,7 +189,9 @@ Prose in reports is generated from Claims. A sentence that asserts something mus
 Plus **K0 Provenance (always)**: every number and citation resolves to an artifact (current audit I1/I3/I4).
 
 ### 4.4 Certificates and tiers
-The Kernel issues `Certificate{claim, tier, checks_passed, checks_failed, assumptions, bundle_hash, verifier_ids}`.
+The Kernel issues `Certificate{claim, tier, checks_passed, checks_failed, assumptions, bundle_hash, verifier_ids,
+evidence_class, adapters}` (`evidence_class` and `adapters` = §4.7: the class of evidence and the exact adapter
+versions, by hash, that the certificate relied on).
 - Tier = the weakest link of the strongest verifier chain that passed (T0 … T6, mapped to VG's ladder in reports).
 - Labels: **CERTIFIED-VALIDATED** (K0–K9 including K6 on external or future data), **CERTIFIED-INTERNAL** (K6 on
   sealed internal data only), **SUPPORTED** (judge or retrospective only), **REJECTED** (with reasons).
@@ -196,6 +212,28 @@ baseline prior. This gives:
 ### 4.6 What the Kernel does not do (stated in every report)
 It doesn't judge importance or creativity. It doesn't detect confounders absent from the data. It doesn't validate
 measurement instruments. It certifies inference, not reality. Soft qualities stay at T5 and are labelled as such.
+It never certifies that a physical experiment was performed, nor that a simulator matches reality (§4.7).
+
+### 4.7 Scope and claim classes (life sciences + engineering)
+Every claim declares its **evidence class**; the class fixes the strongest tier it can reach and what the certificate
+may say. A claim is certified at the strongest tier its available tools support, never higher.
+
+| Class | Examples | Verifier (via a registered adapter) | Max tier | What the certificate states |
+|---|---|---|---|---|
+| **Formal** | a lemma, a bound, an algorithm's correctness | Lean 4 build + comparator against a HUMAN-APPROVED statement; axiom audit (no `sorry`, no new axioms); statement-fidelity check | T0 | the statement holds, given Lean's kernel and the listed axioms |
+| **Computational** | an optimum, a feasibility or impossibility result, an exact count, a structural property | exact solvers (SMT/SAT/MILP/CAS) with **independently checkable certificates** (proof logs, duals, witnesses) checked by a small trusted checker; float screens only prune | T1 | the stated computation's result, re-checkable from the certificate |
+| **Data / statistical** | a method improves a metric on held-out data; an association holds on future data | today's Kernel (K0–K9, held-out / time-split / external data) | T2 (T4 time-split) | the effect on the stated data population, with intervals |
+| **Simulated** | a design meets a spec in FEM/CFD/circuit/molecular-dynamics/systems-biology simulation | a pinned simulator (version, solver settings, mesh/step convergence evidence) inside an adapter | T1/T2 **within the simulator** | the claim holds **in simulator S (version, config)**; the scope names S; "simulation matches reality" is listed as an UNTESTED assumption; never relabelled as physical |
+| **Physical / empirical** | a compound's effect in cells; a prototype's measured strength | none inside the system: **protocol → approval node → human execution → returned data → Kernel check** | T3 | the returned data support the pre-registered claim under the pre-registered analysis; data provenance is a human ATTESTATION (untested by the system) |
+
+Physical/empirical claims are **never certified as done by the system**. The only route: (1) the claim, the protocol
+and the analysis plan are pre-registered (K2); (2) an **approval node** pauses the run until a named human approves
+the protocol, including a biosafety / dual-use and ethics screen; categories on the human-owned prohibited list are
+refused outright and never reach approval; (3) humans execute; (4) the returned data are registered in the vault
+with role `external`/`future` and a signed provenance attestation; (5) the Kernel checks them against the
+pre-registered plan. Until (5), the claim exists only as a pending prediction in the ledger. The system cannot
+approve its own protocol, cannot fabricate returned data (the data enter only through the human-operated path),
+and the attestation is listed as an untested assumption on every such certificate.
 
 ---
 
@@ -208,8 +246,11 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
 **Runtime** (🟡) — typed `HarnessSpec` (JSON Schema) interpreted as a graph.
 - Must: full trace per step; checkpoint per step; `fork(step, state_patch)`; **`resume(run_id)` after crash** (CR P0-4) ✅;
   **MapNode fan-out** with per-branch persisted outputs, deterministic ids and declared reducers (LangGraph); **Approval
-  node** (PAUSED → human); transient-only retry policy that charges every attempt ✅; unmatched edge = FAILED ✅; any
-  crash leaves FAILED, never RUNNING ✅.
+  node** (❌, **brought forward to M3**): the run goes PAUSED with the exact item to approve (e.g. a physical-claim
+  protocol, §4.7) pinned by hash; only a human action through L9 (CLI first) records approve/reject with the
+  approver's identity in the ledger and resumes the run; no model, module or evolved node can approve, and an
+  approval binds only the hashed item it names; transient-only retry policy that charges every attempt ✅; unmatched
+  edge = FAILED ✅; any crash leaves FAILED, never RUNNING ✅.
 - Never: pickle or arbitrary deserialisation of untrusted data; silent defaults.
 - Done when: kill -9 mid-run, then resume, completes with an identical trace prefix and no double-charged cost. ✅
 - Absorbs: LangGraph (resume, fan-out, interrupts) without its heuristic resume detection or async-durability loss;
@@ -225,8 +266,8 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
 
 **Model gateway** (✅ core) — three access modes (OW / API / BYOS allowlist), provenance on every output, strict
 schemas, redaction. Add: per-host pacing; cost tables; the provider registry verified each release; same-family detection
-(❌ not built; needed for the "critic ≠ proposer family" rule, invariant 5, which the M2 loop currently violates when
-one family fills every role, see STATUS "Known limitations").
+(✅ 2026-10-07, `policy.py`: enforced before any model call; a single-family run needs an explicit override that is
+recorded as invariant 5 NOT MET in every run, report and certificate checklist, and earns no replication credit).
 
 ### L1 Control plane (🟡)
 - Must: budgets in neutral units **persisted across crash and fork** plus a wall-clock unit (✅ per run; campaign-level
@@ -237,7 +278,7 @@ one family fills every role, see STATUS "Known limitations").
 
 ### L2 Evidence store & reporting (🟡)
 - Must: append-only, content-addressed ✅; claims only from evidence ✅; **Reproducibility Bundle** per run and per claim
-  (VG) (✅ per certified claim; per-run bundles to do); **reporting checklist** auto-filled (seeds, traces, selection
+  (VG) (✅ per certified claim; ✅ per run since 2026-10-07, `chh rerun`); **reporting checklist** auto-filled (seeds, traces, selection
   policy, human-in-the-loop points, cost) ✅ (Kernel `checklist.py`; wiring into reports is M2); Postgres
   backend for campaigns; read-only **evidence filesystem export** for the proposer (L6).
 - Done when: `chh reproduce <bundle>` on a clean machine reproduces a headline claim. ✅ (tested with the original
@@ -249,14 +290,33 @@ one family fills every role, see STATUS "Known limitations").
   coverage and contains no LLM call. ✅ both (`tests/test_kernel_suite.py`, `scripts/check.py` coverage gate,
   `tests/test_kernel_quality.py` import-closure test). v1 deviations are listed in STATUS.md.
 
+### Domain adapters (❌, M3: the core/adapter split; §4.7)
+A domain adapter is everything domain-specific the Kernel and the loop need, as a **human-approved, fixed verifier
+layer**: claim-scope vocabulary, data formats and readers, registered metrics with direction and range, background
+invariants for K8 (units/dimensions, conservation laws, physical bounds), tool wrappers (Lean, solvers with
+certificate checkers, pinned simulators, statistical procedures), noise models for K7, and the **validation evidence**
+that its verifiers reject planted faults (fault injection, golden cases, calibrated tolerances).
+- Must: a stable adapter interface the Kernel core calls (the core contains no domain logic); every adapter is
+  versioned, content-hashed and registered in the ledger with the approving human; every certificate records the
+  adapter hashes it used (§4.4); an adapter is usable only after its validation evidence passes; the ML adapter is
+  the current code, extracted; first new adapters: **Lean (T0)**, **one exact-solver adapter (T1)**, **one simulator
+  adapter (simulation-scoped claims)**, then life-science and engineering adapters (§15).
+- Never: the evolver (L6), the research loop or any model edits, adds or re-parameterises an adapter (adapter files
+  are outside every edit surface and protected like the Kernel); an adapter change without human approval and fresh
+  validation; a simulated or physical claim certified beyond its class (§4.7).
+- Done when: the same Kernel core certifies an ML claim (ML adapter), a Lean theorem (T0, comparator against an
+  approved statement; planted `sorry`/axiom/statement-drift cases rejected), a solver result (certificate re-checked;
+  planted wrong certificates rejected) and a simulator-scoped claim (scope and untested gap listed); an edit that
+  touches an adapter is rejected statically; an adapter whose validation evidence fails cannot be used.
+
 ### L3 Verifier ladder (🟡)
 - Must:
   - **Verifier validation by fault injection**: each T1/T2 verifier carries evidence that it rejects planted faults
     (ScienceIDE).
   - **Calibrated tolerances** from measured noise floors (nominal / perturbed / rebuild; seed spread).
   - **Float-screen → exact-certificate** gate where exact checks exist (Station).
-  - **T0 split**: Lean build + hygiene vs Lean + comparator against a human-approved Challenge spec, with axiom audit
-    and statement-fidelity gate (AutoOPT).
+  - **T0 split** (❌, **brought forward to M3**, delivered as the Lean adapter): Lean build + hygiene vs Lean +
+    comparator against a human-approved Challenge spec, with axiom audit and statement-fidelity gate (AutoOPT).
   - **Judge panel (T5)**: ≥ 3 families, both orders, ensemble + meta-review (AI-Sci v1 design with its bugs fixed),
     rubric decomposition (MM-Agent), BT with CIs (Robin, fixed); **validated against human labels before use**.
   - **Exploit quarantine**: any skill or edit gain must survive a perturbed evaluator (hidden invariants, stricter spec,
@@ -320,6 +380,13 @@ Pipeline per generation:
 7. **Smoke run**: one task through the real loop.
 8. **Race** ✅ (paired CI successive halving) → **re-measure the winner on fresh seeds and units** (CR P0-2) → **gate** ✅
    on the never-shown split, with a unit-alignment check and a cost term (RRSI).
+   **Leave-one-family-out / leave-one-domain-out gates** (❌, M4): the campaign's gate split contains at least one
+   ENTIRE task family (and, once ≥ 2 domains have adapters, at least one entire domain) that never appears in the
+   evolve split nor in any evolver-visible export; a candidate is accepted only if, on EACH held-out family/domain
+   separately, the paired-CI lower bound of its difference to the parent is ≥ −ε (non-regression), in addition to the
+   pooled gate; the per-family/domain OOD drop is recorded in the ledger. Across campaigns the held-out family and
+   domain rotate (each one is left out at least once before `finalize`), and `load_suite`/the driver refuse a
+   campaign whose held-out families/domains leak into evolve (same content-level isolation as `check_split_isolation`).
 9. **Branch / route**: if a candidate wins on a cluster but not globally, create a branch; route by descriptors
    **generated from gate evidence**; a select/materialize adaptation seam (Adaptive Auto-Harness, fail-closed); the router
    is tested on the sealed split.
@@ -328,8 +395,10 @@ Pipeline per generation:
 11. **Temporal-reveal mode** for streams: labels sealed outside every evolver mount; watermark rule; undated = unrevealed.
 12. **Finalize**: a one-shot freeze; the sealed split is touched once, by a human-run command.
 - Objective: §6.3 (VDS-centred for research harnesses; benchmark score for agent harnesses).
-- Done when: on a real campaign the loop finds and certifies ≥ 1 improvement that holds on the sealed split, with OOD drop
-  ≤ RRSI's reported regularised level.
+- Done when: on a real campaign the loop finds and certifies ≥ 1 improvement that holds on the sealed split AND passes
+  the leave-one-family-out gate (and leave-one-domain-out once ≥ 2 domains exist), with OOD drop ≤ RRSI's reported
+  regularised level.
+- Never: edit, add or re-parameterise a domain adapter (adapters are not an edit surface).
 
 ### L7 Search over search (❌)
 Islands with different proposer and mutator mixes (MILO idea; no public code exists). An orchestrator detects stalls and
@@ -368,7 +437,7 @@ claim "self-improving research harness" refers only to VALIDATED loops.
 - **Agent harness objective** = pinned benchmark pass rate, gated identically.
 - No objective ever uses an LLM judge as its only signal.
 
-### 6.4 The headline experiment (M5; needs the literature module and dated snapshots)
+### 6.4 The headline experiment (M7; needs the literature module and dated snapshots)
 Freeze literature and data at date T (after all executor models' cutoffs). Evolve the research harness on tasks whose
 answers resolve in window (T, T1]. Then, with no further changes, run it on window (T1, T2]. **Success = the evolved
 harness has higher VDS and calibration on (T1, T2] than the seed harness, with CIs.** This makes the self-improvement
@@ -394,6 +463,10 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 | Evaluate on the training tasks (Meta-Harness TB2, EvoMaster) | Disjoint splits by construction | split-overlap check in the driver |
 | Claims without dates, so no time-split (SDE, ResearchBench) | Dated snapshots + time-split benchmark | released benchmark |
 | No cost accounting (most) | Cost in every number | scorecard axis G |
+| Simulation or model output presented as a real-world finding (common in AI-for-science) | Evidence classes with hard tier ceilings; simulated claims scoped to the simulator (§4.7) | a simulated claim cannot be certified as physical (M3 test) |
+| Lab results claimed without a human loop or with self-approved protocols (MatAgent prose gates) | Approval node: only a human approves a hash-bound protocol; returned data checked by the Kernel | model/evolved-node approval refused; uncertified until data return (M3 test) |
+| Verifiers changed by the optimiser that is graded by them (coupled Goodhart) | Domain adapters fixed and human-approved; certificates pin adapter hashes | adapter edit rejected statically (M3 test) |
+| Gains that do not transfer across task families or domains (RRSI OOD drop) | Leave-one-family/domain-out gates | a candidate that regresses on the held-out family is rejected (M4 test) |
 
 ---
 
@@ -419,6 +492,10 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 18. **Independent replication agent** as a certification requirement.
 19. **Reproducibility Bundle + auto-filled VG reporting checklist** on every output.
 20. **MECHANICAL / VALIDATED loop labelling** as a first-class property.
+21. **Evidence classes with tier ceilings** (formal → physical), and a **human-approved, hash-bound approval node** as
+    the only path for physical claims (§4.7).
+22. **Fixed, validated domain adapters** under an evolving harness: the core/adapter split keeps the verifier out of
+    the optimiser's reach while the system expands across life sciences and engineering (§15).
 
 ---
 
@@ -471,7 +548,7 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 2. No hidden label, grader or sealed-split artifact inside any agent-visible mount, prompt or trace.
 3. No certificate without the Kernel; no Kernel path with an LLM call.
 4. No persistent write (memory, skill, harness, weights) without evidence at the tier floor.
-5. No critic from the same model family as the proposer it judges.
+5. No critic (or independent replicator) from the same model family as the proposer (author) it judges.
 6. No acceptance without paired statistics and a never-shown gate; the sealed split is touched only via `finalize`.
 7. Every parser and gate fails closed.
 8. Every number in a report resolves to an artifact and is recomputed by the audit.
@@ -479,6 +556,14 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 10. Every loop is labelled MECHANICAL or VALIDATED.
 11. BYOS only for allowlisted providers through official auth; training only on licence-permitted outputs.
 12. No README-only features: every claimed capability has code, a test and an ablation.
+13. Domain adapters are human-approved and fixed: no model, module or evolved harness edits them; every certificate
+    records the adapter versions (hashes) it relied on; an adapter without passing validation evidence is unusable.
+14. No claim is certified above its evidence class (§4.7): simulated claims are scoped to their simulator, with the
+    gap to reality listed as untested; physical/empirical claims are never certified as done by the system and
+    reach the Kernel only as human-returned data on a pre-registered, human-approved protocol.
+15. Only a human approves an approval node, and an approval binds only the hashed item it names.
+16. No harness edit is accepted without passing the leave-one-family-out gate (and leave-one-domain-out once ≥ 2
+    domains exist).
 
 ---
 
@@ -491,11 +576,13 @@ Principle: always keep one end-to-end path working. Build the Kernel early so ev
 | **M0 Hardening** (P0) ✅ 2026-10-06 | infra/policy split; winner re-measure; safe snapshot restore; resume; gate unit-alignment; persisted budget; canary + leak audit | all §7 tests that apply to existing code pass |
 | **M1 Kernel v1** ✅ 2026-10-06 | Claim Language (ML); pre-registration commits; K0–K9 (K6 on sealed internal data); certificates; Reproducibility Bundle; reporting checklist; prediction ledger | seeded 50-claim suite classified correctly; `chh reproduce` works |
 | **M2 Research loop v1** (built; exit test pending a live-run budget) | Kernel-integrated loop; experiment tree; improve operator; replication agent; Socratic critic; richer profiling; ObservationPack context; ML task suite ≥ 20 tasks (rings-style + real datasets + ML-repair family) | ≥ X% CERTIFIED-or-NEGATIVE, 0 integrity failures |
-| **M3 Evolution v1** | evidence export; agentic proposer; structured diagnosis; family-separated critic; smoke; ledger upgrades; cost term | first real campaign: certified improvement holding on sealed split |
-| **M4 Memory, verifiers, branching** | L5 store API; exploit quarantine; red team; judge panel validated; fault-injection verifiers; branching/routing | planted-exploit suite caught; router beats single best on sealed |
-| **M5 Literature + time-split** | literature module + citation check; dated snapshots; time-split prediction benchmark; Problem Formulator | §6.4 headline experiment run (VALIDATED loop) |
-| **M6 Scorecard** | pinned benchmarks A–H, re-run baselines, ablations, bundles | SOTA criteria §2 evaluated and published honestly |
-| **M7 Discovery & weights** | L7 islands; T0 Lean comparator; verifier synthesis; L8 two-timescale | ≥ 1 independently verified result on a known-value problem; coupled-Goodhart gap not widening |
+| **M3 Core/adapter split + T0 + approval node** (new 2026-10-07; T0 and the approval node brought forward from M7/L9) | domain-agnostic Kernel core + adapter interface; adapter registry (versioned, hashed, human-approved, validation evidence required); ML adapter extracted from today's code; **Lean adapter (T0)**: build + comparator against a human-approved statement, axiom audit, statement-fidelity gate; one exact-solver adapter (T1, re-checkable certificates); one simulator adapter (simulation-scoped claims); evidence classes in claims and certificates (§4.7); **approval node** (PAUSED → human approve/reject via CLI, hash-bound, ledgered) and the physical-claim path (protocol prereg → approval → returned-data registration with attestation → Kernel check) | the §5 "Domain adapters" done-when; a physical-claim dry run with synthetic returned data: no certificate without a human approval, a model/evolved node cannot approve, the attestation is listed as untested; adapter edits rejected statically |
+| **M4 Evolution v1** (was M3) | evidence export; agentic proposer; structured diagnosis; family-separated critic; smoke; ledger upgrades; cost term; **leave-one-family-out / leave-one-domain-out gates** | first real campaign: certified improvement holding on sealed split AND on the held-out family |
+| **M5 Multi-agent domain expansion** (new; plan §15) | life-science and engineering adapters built by parallel agents under human approval; per-domain task suites with held-out families; cross-domain LODO gate live | each new adapter passes its validation suite and human review; one certified claim per new domain at its evidence class; LODO gate exercised |
+| **M6 Memory, verifiers, branching** (was M4) | L5 store API; exploit quarantine; red team; judge panel validated; fault-injection verifiers; branching/routing | planted-exploit suite caught; router beats single best on sealed |
+| **M7 Literature + time-split** (was M5) | literature module + citation check; dated snapshots; time-split prediction benchmark; Problem Formulator | §6.4 headline experiment run (VALIDATED loop) |
+| **M8 Scorecard** (was M6) | pinned benchmarks A–H, re-run baselines, ablations, bundles | SOTA criteria §2 evaluated and published honestly |
+| **M9 Discovery & weights** (was M7, minus T0) | L7 islands; verifier synthesis; L8 two-timescale | ≥ 1 independently verified result on a known-value problem; coupled-Goodhart gap not widening |
 
 Each milestone updates `STATUS.md` and is committed with its tests.
 
@@ -504,15 +591,28 @@ Each milestone updates `STATUS.md` and is committed with its tests.
 ## 12. Resources and constraints (honest)
 - Today: ChatGPT subscription via the official Codex CLI (BYOS, allowlisted), Docker, no local GPU.
 - M0–M2 fit this setup (slow, but enough for development).
-- M3+ campaigns and M6 need an API budget and/or rented GPUs with open-weights models. Each campaign is budgeted before
+- M4+ campaigns and M8 need an API budget and/or rented GPUs with open-weights models. Each campaign is budgeted before
   it starts, with the two budgets (inference, experiment compute).
+- Invariant 5 needs a second model family (API key or open-weights model); until then every live run is recorded as
+  "invariant 5 NOT MET".
+- M3 needs a Lean 4 toolchain (+ Mathlib) and at least one exact solver; they run inside the sandbox image (installing
+  them on the user's machine or image is the user's decision). Simulators for M5 may carry licences; only
+  licence-compatible, pinnable simulators qualify for adapters.
+- Physical/empirical claims need human operators and labs; the system only prepares protocols and checks returned
+  data.
 - The time-split set needs cutoff-dated models; contamination probes may reduce usable windows.
 
 ## 13. Open questions (decide when reached)
 1. The risk prior for K7: baseline-model predictive distribution vs empirical prior from the ledger (likely both, max).
 2. The VDS weighting between information gain and miss penalty (pick a proper scoring rule; simulate before fixing).
-3. Kernel scope beyond ML (physics invariants for K8 come with the first non-ML domain).
+3. Kernel scope beyond ML: decided 2026-10-07 (life sciences + engineering via adapters, §4.7); open: which K8
+   invariants each first adapter registers, and the K7 risk models for formal/computational/simulated claims (a
+   theorem has no resampling noise: its "risk" needs a prior over statements, e.g. from the literature graph).
 4. Whether to release the prediction ledger publicly as it accrues or at milestones.
+5. A risk model for negative-result/equivalence claims (K7 fails them in v1, fail closed).
+6. The human-owned prohibited list and review standard for life-science protocols (biosafety / dual use) before
+   any life-science adapter is approved.
+7. Adapter validation standards per evidence class (minimum fault-injection suite, golden cases, tolerances).
 
 ## 14. Glossary
 - **Certificate**: Kernel output stating which checks a claim passed, at what tier.
@@ -521,3 +621,44 @@ Each milestone updates `STATUS.md` and is committed with its tests.
 - **Reproducibility Bundle**: everything needed to rerun a result with one command.
 - **Evolve / gate / sealed**: task splits. The proposer sees evolve; acceptance uses gate; humans alone touch sealed.
 - **Infra vs policy failure**: the environment broke vs the harness's behaviour failed.
+- **Evidence class**: formal · computational · data/statistical · simulated · physical/empirical (§4.7).
+- **Domain adapter**: the human-approved, fixed, versioned verifier layer for one domain or tool (§5).
+- **Approval node**: a run step that only a human can complete; binds to one hashed item.
+- **LOFO / LODO gate**: acceptance also requires non-regression on an entire task family / domain never shown to the
+  evolver.
+
+---
+
+## 15. Plan: multi-agent domain expansion (after the M3 core/adapter split)
+
+Goal: grow from ML to life sciences and engineering without weakening the trusted base. The adapter interface (M3)
+is the contract; domain work happens outside the Kernel, and nothing an agent writes becomes trusted without a human.
+
+**Order.** (1) M3 delivers the core/adapter split, the Lean, solver and simulator reference adapters and the approval
+node. (2) The user fixes the domain list, the prohibited list and the review standard (§13.6-7). (3) Expansion starts.
+
+**Roles (separate agents, separate model families where invariant 5 applies):**
+- *Domain scout* (one per domain): proposes the domain's evidence classes, metrics, K8 invariants, candidate tools and
+  task sources, with citations; output is a written adapter proposal, never code in the trusted base.
+- *Adapter builder*: implements the adapter in a sandboxed branch against the interface, with its validation suite
+  (golden cases, fault injection, tolerance calibration).
+- *Adapter red team* (a different family from the builder): tries to get a false claim certified through the adapter
+  (wrong units, unconverged simulations, forged solver certificates, scope creep from simulated to physical); every
+  success becomes a regression test before review.
+- *Task-suite builder*: builds the domain's task suite with held-out families, content-level isolation
+  (`check_split_isolation`) and recorded sources.
+- *Human reviewer* (the user or delegate): approves or rejects each adapter version through the approval node;
+  approval registers its hash in the ledger. Without it the adapter cannot be used.
+
+**Parallelism and isolation.** Domains proceed in parallel, each in its own branch/worktree and sandbox; one writer
+per branch; the Kernel core and existing adapters are read-only to all of them. Merging requires: the full gate green,
+the adapter's validation suite green, the red-team report attached, and the human approval recorded.
+
+**First candidates (to be confirmed by the user):** engineering: structural/thermal FEM with mesh-convergence
+evidence (simulated class), circuit/ODE models with exact solvers (computational); life sciences: computational
+biology on public data (statistical class: e.g. expression/association analyses on held-out cohorts), molecular or
+systems-biology simulation (simulated class); wet-lab claims only as protocols through the approval node (physical
+class), after the prohibited list exists.
+
+**Exit (M5):** see §11; additionally each domain's LODO gate is live, and the scorecard (§2, axis D) gains one
+hard-verifier problem per domain.

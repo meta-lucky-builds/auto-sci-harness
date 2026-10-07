@@ -12,7 +12,7 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
    1. this file;
    2. `STATUS.md`, the "STOPPING POINT" section first, then the M0/M1/M2 tables and "Known limitations";
    3. `GOAL.md` §0, §4 (Evidence Kernel), §5 (component specs, with ✅/🟡/❌ markers), §10 (invariants), §11 (milestones);
-   4. only when needed: `code_review/00_CODE_REVIEW_SYNTHESIS.md` (what other systems' code does, the P1/P2 backlog for M3+),
+   4. only when needed: `code_review/00_CODE_REVIEW_SYNTHESIS.md` (what other systems' code does, the P1/P2 backlog for M4+),
       `../autoresearch_survey/00_SYNTHESIS.md` (the survey; the user calls it the master reference), `PLAN.md` (history only).
 2. Start Docker Desktop if it is not running (`docker info`). AutoStart is OFF, and the user has not changed it.
    Do not change that setting yourself.
@@ -73,7 +73,7 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
 
 # one live research run (Docker + Codex) on a suite task, e.g. a repair task with big headroom
 set CHH_DATA_DIR=C:\Users\mykids\custom-harness-data
-...\python.exe -m custom_harness.cli run examples\research_v1.yaml --role proposer=codex --role executor=codex --role judge=codex --input task_dir=C:/Users/mykids/custom-harness-data/suites/m2/wine_knn_unscaled --task wine_knn_unscaled --docker
+...\python.exe -m custom_harness.cli run examples\research_v1.yaml --role proposer=codex --role executor=codex --role judge=codex --role replicator=codex --allow-same-family --input task_dir=C:/Users/mykids/custom-harness-data/suites/m2/wine_knn_unscaled --task wine_knn_unscaled --docker
 # then re-check its bundle on a clean store (path is printed in the run's report / state["certificate"]["bundle_path"])
 ...\python.exe -m custom_harness.cli reproduce <bundle.zip> --docker
 
@@ -146,6 +146,11 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
   `setup` node (`dev_folds`, `split_seed`); each fold runs in a fresh sandbox with only its own inputs
   (`modules._dev_predict`); out-of-fold predictions in fold order pair with the private dev labels. Before this,
   dev runs shared the run workspace with the full training file (a demonstrated dev-cheating loophole).
+- **Since 2026-10-07 (decisions delegated by the user):** K7 fails negative/equivalence claims (fail closed);
+  dataset ids are content-based (`data@<digest>`), repair tasks share their real task's split + canary, K6/K4 see
+  examples shared across dataset ids; invariant 5 enforced (`policy.py`, role `replicator`; Codex-only runs need
+  `--allow-same-family`, recorded as NOT MET); invariant 9 per-run bundles (`chh rerun`); invariant 10 loop labels.
+  The old store is archived as `store-v1`, the old suite as `suites/m2-v1`.
 - **Suite splits**: tasks carry `source`; `load_suite`/`build_suite` refuse a source or any example row spanning
   two splits (`research/suite.py: check_split_isolation`).
 - **Evolution score** (`evolve/evaluate.py`): 0.5·certified + 0.5·replicated + 0.5·clip(relative held-out
@@ -209,10 +214,12 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
    The exit metric: share of runs ending CERTIFIED or honestly NEGATIVE, integrity failures (target 0), forecast
    calibration (`chh predictions`), cost per certified claim. GOAL leaves "X%" to be set after the M1 baseline:
    propose a value from the first runs, do not invent one.
-4. **M3 Evolution v1** (GOAL §5 L6, §11; CR backlog P1 #7–13): read-only evidence export (exclude bundles and
+4. **M3 Core/adapter split + Lean T0 + approval node** (GOAL §4.7, §5 Domain adapters, §11; scope revised
+   2026-10-07 to life sciences + engineering), then **M4 Evolution v1** (GOAL §5 L6, §11; CR backlog P1
+   #7–13; plus leave-one-family/domain-out gates), then M5 multi-agent domain expansion (GOAL §15). M4: read-only evidence export (exclude bundles and
    private blobs!), agentic proposer in a sandbox, structured diagnosis, critic from a DIFFERENT model family
    (needs an API key or open-weights model — ask the user; Codex-only cannot satisfy invariant 5, which already
-   affects the M2 loop's critic, tournament and replicator, not just M3), smoke run,
+   affects the M2 loop's critic, tournament and replicator, not just M4), smoke run,
    ledger upgrades, cost term in the gate, VDS objective once enough predictions resolve. Real campaigns need an API
    budget or rented GPU (user said they will rent cloud GPU when experiments need it).
 5. Update `STATUS.md` (and GOAL markers) at every milestone step; keep the stopping-point style when stopping.

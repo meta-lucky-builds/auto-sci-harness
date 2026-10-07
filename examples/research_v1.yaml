@@ -149,7 +149,7 @@ nodes:
   # the same minimum effect, confirmed and certified like any claim. Headline = both certified.
   replicate:
     kind: llm
-    role: executor
+    role: replicator  # invariant 5: a different model family from the executor that wrote the original (policy.py)
     system: You implement ML methods from written descriptions. Output only JSON.
     prompt: |
       Re-implement the method described below from scratch. You do NOT have the original code.

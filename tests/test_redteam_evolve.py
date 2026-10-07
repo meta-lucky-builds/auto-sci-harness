@@ -97,7 +97,7 @@ def test_e3b_idea_channel_cannot_carry_the_code(store, tmp_path, rings_task, mon
         return scripted_llm(req)
 
     llm = MockBackend(llm_fn)
-    res = Engine(evolved, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(evolved, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(rings_task)})
     assert res.status.value == "completed", (res.status, res.detail)
@@ -119,7 +119,7 @@ def test_honest_replication_brief_is_not_refused(store, tmp_path, rings_task, mo
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     llm = MockBackend(scripted_llm)
-    res = Engine(_seed(), backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(_seed(), backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(rings_task)})
     assert "replication_refused" not in res.state and res.state.get("replication_brief")
@@ -134,7 +134,7 @@ def test_reserved_writing_modules_are_declared(store, tmp_path, rings_task, monk
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     spec = _seed()
     llm = MockBackend(scripted_llm)
-    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+    res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
         "rings", {"task_dir": str(rings_task)})
     assert res.state.get("replica_certificate"), "the run must reach every module (incl. the replication chain)"
