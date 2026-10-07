@@ -26,6 +26,8 @@ class ClaimKind(StrEnum):
     REDISCOVERY = "rediscovery"  # declared in the language; not checkable by Kernel v1
     # computational class only: "the exact value of the computation on the registered instance (subject) is `value`"
     COMPUTED_VALUE = "computed_value"
+    # formal class only: "the human-approved Lean statement (subject) holds" (Lean 4 adapter, T0)
+    THEOREM = "theorem"
 
 
 SUPPORTED_KINDS = frozenset({ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT, ClaimKind.NEGATIVE_RESULT,

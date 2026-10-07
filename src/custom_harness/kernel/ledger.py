@@ -28,6 +28,7 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "retraction", "adapter_approval",
                    # a HUMAN's approval that a dataset really is external/future data (`chh approve-role`)
                    "role_approval",
+                   "statement_approval",  # a HUMAN approved a Lean statement (`chh approve-statement`)
                    # approval node (runtime/engine.py): the engine records each pause; only `chh approve` records
                    # a human decision
                    "approval_request", "approval"})

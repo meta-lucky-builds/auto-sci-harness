@@ -680,7 +680,7 @@ def test_adapter_approval_refuses_unknown_anonymous_or_failing_adapters(tmp_path
     w = World(tmp_path / "w", approve_adapters=False)
     try:
         with pytest.raises(AdapterError, match="unknown adapter"):
-            w.kernel.approve_adapter("lean", approver="alice")
+            w.kernel.approve_adapter("no-such-adapter", approver="alice")  # ("lean" exists since M3)
         with pytest.raises(AdapterError, match="name the human approver"):
             w.kernel.approve_adapter("ml", approver="  ")
 

@@ -30,6 +30,9 @@ VG_LADDER = {
     "CERTIFIED-SIMULATED": "re-executed, converged simulation in the named pinned simulator (VG: executable "
                            "verification within the simulator; certifies the simulator's answer, not that the "
                            "simulator matches reality)",
+    "CERTIFIED-FORMAL": "Lean 4 kernel check of a proof of the human-approved statement (VG: formal verification; "
+                        "holds given Lean's kernel and the listed axioms; says nothing about whether the statement "
+                        "formalises the intended claim beyond the human approval)",
     "REJECTED": "no verification claimed",
 }
 
@@ -39,6 +42,7 @@ class Label(StrEnum):
     CERTIFIED_INTERNAL = "CERTIFIED-INTERNAL"
     CERTIFIED_EXACT = "CERTIFIED-EXACT"  # computational class: an exact certificate re-checked by an approved adapter
     CERTIFIED_SIMULATED = "CERTIFIED-SIMULATED"  # simulated class: holds in the named simulator only (GOAL §4.7)
+    CERTIFIED_FORMAL = "CERTIFIED-FORMAL"  # formal class: a Lean check record re-checked by the approved adapter
     SUPPORTED = "SUPPORTED"  # judge/retrospective evidence only; not issued by Kernel v1
     REJECTED = "REJECTED"
 

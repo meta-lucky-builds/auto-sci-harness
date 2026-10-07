@@ -26,7 +26,9 @@ def test_cli_approve_adapter_records_the_human_approval(capsys):
     finally:
         s.close()
     with pytest.raises(SystemExit, match="unknown adapter"):
-        main(["approve-adapter", "lean", "--approver", "alice"])
+        main(["approve-adapter", "no-such-adapter", "--approver", "alice"])  # ("lean" exists since M3)
+    with pytest.raises(SystemExit, match=r"NOT approved: .*the Lean version and the Mathlib commit are pinned"):
+        main(["approve-adapter", "lean", "--approver", "alice"])  # unusable until the owner pins Mathlib
 
 
 def test_research_setup_fails_fast_without_an_approved_adapter(tmp_path, rings_task, monkeypatch):  # noqa: F811

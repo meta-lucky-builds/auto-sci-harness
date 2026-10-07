@@ -1,0 +1,9 @@
+# lake configuration of the pinned checker (copied to /opt/chh-lean-check/lakefile.toml by docker/lean.Dockerfile).
+# Depends on Lean core only; reads the proof's and Mathlib's .olean files at run time (same toolchain version).
+name = "chhleancheck"
+defaultTargets = ["chh-lean-check"]
+
+[[lean_exe]]
+name = "chh-lean-check"
+root = "ChhLeanCheck"
+supportInterpreter = true
