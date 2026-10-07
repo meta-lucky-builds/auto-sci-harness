@@ -143,6 +143,33 @@ def forecast(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, floor: f
     return delta, min(0.95, max(0.05, q)), iv.lo, iv.hi
 
 
+def _preflight(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, claim: Claim,
+               candidate_key: str) -> Any:
+    """Run the certifiability preflight (research/preflight.py) on PUBLIC numbers only: the held-out row count (from
+    the target's public feature file), the paired dev outcome (public training labels and out-of-fold predictions)
+    and the family size from the public prereg ledger. No held-out label is read; nothing is written to the ledger."""
+    from ..kernel.checks import related_targets
+    from .preflight import DEFAULT_CONFIG, PreflightResult, PublicInputs, dev_pairs, preflight
+    kernel = ctx.kernel()
+    target = claim.generalization_targets[0]
+    test_x = kernel.vault.read_public(target, task.test_features_file)
+    n_test = len(list(csv.reader(io.StringIO(test_x.decode("utf-8"))))) - 1
+    related = related_targets(kernel.vault, target)
+    registered = {e.body.get("claim_hash") for e in kernel.ledger.entries("prereg")
+                  if related & set(e.body.get("claim", {}).get("generalization_targets", []))}
+    family = max(claim.analysis_plan.n_comparisons, len(registered - {claim.claim_hash()}) + 1)
+    best = state[candidate_key]
+    if not (best.get("dev_preds_ref") and state.get("baseline_dev_preds_ref")):
+        return PreflightResult("unsupported", None, None, None, None, None, 0, DEFAULT_CONFIG.theta,
+                               ["no paired dev predictions: nothing to simulate from (no objection)"])
+    pairs = dev_pairs(_dev_labels(state, ctx), ctx.store.blobs.get_json(best["dev_preds_ref"]),
+                          ctx.store.blobs.get_json(state["baseline_dev_preds_ref"]))
+    plan = claim.analysis_plan
+    return preflight(PublicInputs(metric=task.metric, higher_is_better=task.higher_is_better, n_test=n_test,
+                                  dev_pairs=pairs, min_effect=claim.effect.min_effect, alpha=plan.alpha,
+                                  family_size=family, seeds=plan.seeds, n_boot=plan.n_boot, kind=claim.kind))
+
+
 @register("research.claim")
 def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """params: seeds, alpha, n_comparisons, delta_fraction; prefix (state-key prefix, "" or "replica_");
@@ -186,7 +213,17 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
                      "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
+    if params.get("preflight", False):  # GOAL §16.8: deny-only; it never registers or certifies anything
+        result = _preflight(task, state, ctx, claim, candidate_key)
+        if result.denied:
+            return {f"{p}preflight": result.as_record(), "route": "preflight_denied"}
+        extra = {f"{p}preflight": result.as_record()}
+    else:
+        extra = {}
     entry = kernel.preregister(claim)
+    if extra:
+        return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
+                f"{p}prereg_seq": entry.seq, **extra, "route": "confirm"}
     return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
             f"{p}prereg_seq": entry.seq}
 
@@ -656,7 +693,13 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", f"**Headline result** (certified AND independently replicated, replicator of a different "
                       f"model family): {'yes' if headline(state) else 'no'}", ""]
     else:
-        lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
+        pf = state.get("preflight") or {}
+        if pf.get("verdict") == "deny":
+            lines += ["## Result", "", "No claim was registered: the certifiability preflight (GOAL §16.8, deny-only) "
+                      f"estimated P(certify) = {pf.get('p_certify')} < theta {pf.get('theta')} (UNCALIBRATED) from "
+                      "public numbers. No held-out label was read.", ""]
+        else:
+            lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
     lines += [f"## Exploration log (dev estimate: {_dev_scheme_text(state)} on public training data; "
               f"NOT evidence)", "",
               f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
