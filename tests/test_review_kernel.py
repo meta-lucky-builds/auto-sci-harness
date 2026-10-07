@@ -57,7 +57,18 @@ def test_r1_control_honest_claim_certifies(w):
 
 
 # ------------------------------------------------------------------ K2/K4: peeking under a registered claim
-@pytest.mark.parametrize("purpose", ["evaluate", "kernel", "leakscan", "reproduce"])
+_LEAKSCAN_BOUNDARY = (
+    "documented TRUST BOUNDARY (docs/kernel.md, 'Integrity reads'): K2 lists a 'leakscan' read before registration "
+    "as an observation instead of counting it as peeking, because the research audit must build leak fingerprints "
+    "from the held-out labels of a task that later runs claim again (K2-TWO-RUN). Vault purposes are declared by "
+    "trusted host code; the Kernel cannot tell a mislabelled peek from a real leak scan. Strict: an XPASS means the "
+    "boundary was closed and this marker must go.")
+
+
+@pytest.mark.parametrize("purpose", ["evaluate", "kernel",
+                                     pytest.param("leakscan", marks=pytest.mark.xfail(strict=True,
+                                                                                      reason=_LEAKSCAN_BOUNDARY)),
+                                     "reproduce"])
 def test_r1_label_read_under_a_registered_claim_on_another_target_is_peeking(w, purpose):
     """Attack: register a throwaway claim on target test2, then read the labels of target `test` 'for' it (a
     registered claim, so the vault allows the read and K2 treats it as test-set reuse), then register and certify
@@ -98,19 +109,29 @@ def test_r1_replay_seed_cannot_be_steered_with_records_on_non_target_datasets(w)
     ALL submitted records, and records on datasets that are NOT generalization targets of the claim are accepted
     by every check (K4/K5/K6 only look at the claim's targets). So the claimant appends harmless extra records
     (here: the deterministic comparator on another registered dataset) until the hash selects the one seed on
-    which the subject is deterministic. Secure: the claim is not certified."""
+    which the subject is deterministic. Secure: the claim is not certified.
+
+    Revised with the R1-F2 fix: (a) the extra records are written WITHOUT a vault read (since R1-F1 the vault refuses
+    an 'evaluate' read of a dataset that is not a target of the named claim, so a claimant would fabricate them; the
+    attack on the hash is the same); (b) the original version was flaky by construction: with probability 1/3 the
+    UNSTEERED seed is already 1, and the claim then certified without any attack (the documented single-replay
+    residual, not this finding). The secure behaviour asserted now holds in every case: extra records never move the
+    replay seed, and a submission containing them is rejected."""
     c = w.claim(w.artifact("steered", code=STEERED), w.artifact("baseline", "baseline"), delta=0.2, n_boot=1000)
     w.kernel.preregister(c)
     ids = w.evaluate_all(c)
-    if _replay_seed(c, w, ids, "subject", "test") != 1:  # control: unsteered, K3 catches the irreproducible subject
+    unsteered = _replay_seed(c, w, ids, "subject", "test")
+    if unsteered != 1:  # control: unsteered, K3 catches the irreproducible subject
         assert "K3" in w.kernel.certify(c, ids, record=False).failed()
     extras: list[str] = []
-    for i in range(40):
-        if _replay_seed(c, w, ids + extras, "subject", "test") == 1:
+    for i in range(40):  # the attack: add records until the seed MOVES to 1 (at least one record)
+        if extras and _replay_seed(c, w, ids + extras, "subject", "test") == 1:
             break
-        extras.append(w.evaluate(c, "comparator", seed=100 + i, target="test2"))
-    assert _replay_seed(c, w, ids + extras, "subject", "test") == 1, "could not steer the replay seed"
+        extras.append(w.evaluate(c, "comparator", seed=100 + i, target="test2", log_read=False))
+    assert _replay_seed(c, w, ids + extras, "subject", "test") == unsteered, (
+        f"{len(extras)} extra non-target record(s) moved K3's replay seed from {unsteered}")
     cert = w.kernel.certify(c, ids + extras)
+    assert "outside the analysis plan" in " ".join(cert.checks["K4"].reasons), cert.checks["K4"].reasons
     assert cert.label == Label.REJECTED, (
         f"subject is irreproducible on seeds 0 and 2, yet {len(extras)} extra non-target record(s) steered K3's "
         f"replay to seed 1 and the claim was {cert.label.value}")
@@ -234,7 +255,7 @@ def test_r1_adapter_identity_covers_the_modules_its_modules_import(tmp_path, mon
         for m in ("rv_dep_mod", "rv_adapter_mod"):
             sys.modules.pop(m, None)
         assert importlib.import_module("rv_adapter_mod").ok(-5)  # behaviour did change
-        adapter, why = A.resolve(w.kernel.ledger, EvidenceClass.DATA, "accuracy")
+        adapter, _why = A.resolve(w.kernel.ledger, EvidenceClass.DATA, "accuracy")
         assert adapter is None, "adapter behaviour changed through an imported module; the approval still resolves"
     finally:
         w.close()
@@ -259,8 +280,12 @@ def _internal_imports(modname: str) -> set[str]:
 
 
 def test_r1_ml_adapter_hash_covers_its_internal_imports():
-    """The real ML adapter: every custom_harness module imported by one of its modules is inside its hash."""
-    missing = sorted({m for mod in A.ML.modules for m in _internal_imports(mod) if m not in A.ML.modules})
+    """The real ML adapter: every custom_harness module imported by one of its modules is inside its hash.
+    (Since the R1-F5 fix the hash covers `A.covered_modules(spec)`, the listed modules plus their transitive project
+    imports; this test checks that set, which is exactly what `adapter_hash` hashes, and its transitive closure.)"""
+    covered = set(A.covered_modules(A.ML))
+    assert set(A.ML.modules) <= covered
+    missing = sorted({m for mod in covered for m in _internal_imports(mod) if m not in covered})
     assert missing == [], f"ML adapter behaviour depends on modules outside its hash: {missing}"
 
 
@@ -299,6 +324,6 @@ def test_r1_non_regression_rejects_a_non_finite_difference_instead_of_raising():
     for bad in (math.nan, math.inf):
         try:
             r = non_regression(PairedSample(units, [0.1, bad], []))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             pytest.fail(f"non_regression raised {type(e).__name__} on {bad!r} instead of failing closed")
         assert r["passed"] is False

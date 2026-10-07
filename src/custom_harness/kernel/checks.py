@@ -28,15 +28,18 @@ from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
 from . import adapters
-from .certificate import CHECK_IDS, CheckResult
+from .certificate import CHECK_IDS, Certificate, CheckResult
 from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
 from .execution import ExecRecord, ExecutionError
 from .ledger import Entry, Ledger, verify_chain
 from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRecord, Vault, VaultError
 
 _NORMAL = statistics.NormalDist()
-PEEKING_PURPOSES = frozenset({"develop", "audit"})  # always peeking before a claim's registration
-INTEGRITY_PURPOSES = frozenset({"leakscan", "reproduce"})  # never fed to a model: logged, not peeking (K2)
+# K2: an INTEGRITY read (building leak fingerprints) never feeds a model; it is listed on the certificate, not counted
+# as peeking. TRUST BOUNDARY (docs/kernel.md): purposes are declared by trusted host code, so a host that mislabels a
+# peek as "leakscan" is not caught. "reproduce" is NOT excused: nothing on a live store reads with it (bundles are
+# re-checked on a fresh store with purpose "kernel"), so excusing it would only widen the trusted surface.
+INTEGRITY_PURPOSES = frozenset({"leakscan"})
 SCORE_TOLERANCE = 1e-9  # reported vs recomputed score: anything larger is a different number
 
 
@@ -256,8 +259,8 @@ def k2_preregistered(ctx: Context) -> CheckResult:
         # Peeking = any read of the target's private data before this claim's registration, EXCEPT:
         #  - evaluate/kernel reads made for ANOTHER claim that was registered before the read and whose targets
         #    include this target or a related one: that is test-set reuse, charged by K4 as multiplicity;
-        #  - integrity reads (leakscan: building leak fingerprints; reproduce: re-checking a bundle), which never
-        #    feed a model; they are listed below for accountability (purposes are declared by trusted host code).
+        #  - integrity reads (leakscan: building leak fingerprints), which never feed a model; they are listed
+        #    below for accountability (purposes are declared by trusted host code: a trust boundary).
         # A read for a claim registered on an unrelated target, or for an unregistered claim, is peeking.
         related = related_targets(ctx.vault, target)
         early, integrity = [], []
@@ -279,8 +282,8 @@ def k2_preregistered(ctx: Context) -> CheckResult:
                            f"pre-registration (first at ledger seq {early[0].seq}, purpose "
                            f"{early[0].body.get('purpose')!r})")
         if integrity:
-            obs.append(f"{target}: {len(integrity)} integrity read(s) (leakscan/reproduce) before pre-registration: "
-                       f"not peeking (never fed to a model), logged for accountability")
+            obs.append(f"{target}: {len(integrity)} integrity read(s) (leakscan) before pre-registration: not "
+                       f"counted as peeking (never fed to a model; purpose declared by trusted host code)")
     arts = ctx.vault.artifacts()
     for ref in (ctx.claim.subject, ctx.claim.comparator):
         reg = arts.get(ref.artifact_id)
@@ -300,6 +303,7 @@ def k3_reproduced(ctx: Context) -> CheckResult:
         if not abs(recomputed - rec.score) <= SCORE_TOLERANCE:
             reasons.append(f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
                            f"the stored predictions give {recomputed!r}")
+    reasons += _earlier_reproduction_failures(ctx)
     if ctx.replayer is None:
         return _result([*reasons, "no replayer configured: re-execution was not performed"], obs)
     plan = ctx.claim.analysis_plan
@@ -329,6 +333,30 @@ def k3_reproduced(ctx: Context) -> CheckResult:
                                f"(tolerance {plan.reproduce_tolerance})")
     obs.append(f"re-executed {len(chosen)} record(s) ({plan.reproduce})")
     return _result(reasons, obs)
+
+
+def _earlier_reproduction_failures(ctx: Context) -> list[str]:
+    """R1-F3: certify may be called again on the same claim, and a program that reproduces only sometimes would pass
+    on a lucky replay. So once a RECORDED certificate of this claim failed K3, K3 fails for good. Only certificates
+    issued while the claim was registered count (an unregistered claim's K3 is 'not evaluated', not a failure to
+    reproduce); a certificate rejected for another reason (e.g. K1 before an adapter approval) blocks nothing. An
+    unreadable or tampered earlier certificate counts as a failure (fail closed)."""
+    out = []
+    for e in ctx.ledger.entries("certificate"):
+        if e.body.get("claim_hash") != ctx.claim_hash:
+            continue
+        try:
+            earlier = Certificate.model_validate(ctx.store.blobs.get_json(e.body["blob"]))
+            if earlier.cert_hash() != e.body.get("cert_hash"):
+                raise ValueError("content does not match its ledger entry")
+        except (KeyError, ValueError, OSError, ValidationError) as err:
+            out.append(f"earlier certificate at ledger seq {e.seq} is unreadable ({type(err).__name__}): its K3 "
+                       f"result is unknown (fail closed)")
+            continue
+        if earlier.prereg_seq is not None and earlier.checks["K3"].status != "pass":
+            out.append(f"an earlier certificate of this claim (ledger seq {e.seq}) failed K3: a claim that did not "
+                       f"reproduce once is not certified by trying again (re-register a new claim instead)")
+    return out
 
 
 def replay_seed(ctx: Context, rec: ExecRecord) -> int:
@@ -471,6 +499,12 @@ def k6_held_out(ctx: Context) -> CheckResult:
             continue
         if rec.role not in HELD_OUT_ROLES:
             reasons.append(f"{target}: role {rec.role.value!r} is not a held-out role")
+        if rec.role in EXTERNAL_ROLES:
+            approval = ctx.vault.role_approval(target)
+            obs.append(f"{target}: role {rec.role.value!r} approved by a human ({approval.body.get('approver')!r}, "
+                       f"ledger seq {approval.seq})" if approval is not None else
+                       f"{target}: role {rec.role.value!r} is NOT human-approved: treated as internal data (at most "
+                       f"CERTIFIED-INTERNAL; `chh approve-role {target}`)")
         if rec.hash in dev_hashes:
             reasons.append(f"{target}: identical content to a development dataset")
         twins = sorted(d for d, other in datasets.items() if d != target and other.hash == rec.hash)
@@ -496,8 +530,12 @@ def k6_held_out(ctx: Context) -> CheckResult:
 
 
 def is_external(ctx: Context) -> bool:
+    """CERTIFIED-VALIDATED needs every target to be external/future data AND that role approved by a human
+    (`chh approve-role`). Fail closed: without the approval the claim can earn at most CERTIFIED-INTERNAL, the label
+    that asserts less (its K6 still ran on held-out data never used in development)."""
     datasets = ctx.vault.datasets()
-    return all(t in datasets and datasets[t].role in EXTERNAL_ROLES for t in ctx.claim.generalization_targets)
+    return all(t in datasets and datasets[t].role in EXTERNAL_ROLES and ctx.vault.role_approval(t) is not None
+               for t in ctx.claim.generalization_targets)
 
 
 # ------------------------------------------------------------------ K7 risk
@@ -573,6 +611,7 @@ def k9_leaks(ctx: Context) -> CheckResult:
     canaries = [x for x in (ctx.vault.canary(d) for d in datasets) if x]
     private_blobs: dict[str, str] = {}
     windows: list[str] = []
+    label_lists: list[list[str]] = []
     for target in ctx.claim.generalization_targets:
         drec = datasets.get(target)
         if drec is None:
@@ -580,6 +619,8 @@ def k9_leaks(ctx: Context) -> CheckResult:
         private_blobs |= {f.blob: f"{target}/{name}" for name, f in drec.files.items() if f.private}
         if any(r.target == target for _, r in ctx.records):
             windows += leak.label_windows(ctx.label_values(target))
+            label_lists.append(ctx.label_values(target))
+    runs = [leak.label_runs(*label_lists)]  # any long, informative run of labels, at any offset (not only the first)
     for role, ref in (("subject", ctx.claim.subject), ("comparator", ctx.claim.comparator)):
         if ref.hash in private_blobs:
             reasons.append(f"{role} code IS a private file ({private_blobs[ref.hash]})")
@@ -587,13 +628,13 @@ def k9_leaks(ctx: Context) -> CheckResult:
             text = ctx.store.blobs.get(ref.hash).decode("utf-8", errors="ignore")
         except OSError:
             continue  # K0 reports unresolvable artifacts
-        reasons += leak.scan_text(text, f"{role} code", canaries, windows)
+        reasons += leak.scan_text(text, f"{role} code", canaries, windows, runs)
     # program inputs: hidden labels must not reach a program even as a renamed or re-headed copy (records here
     # passed K0, so every input blob resolves; a read error would fail this check via certify, never pass it)
     for blob in sorted({ref.blob for _, r in ctx.records for ref in r.inputs.values()}):
         text = ctx.store.blobs.get(blob).decode("utf-8", errors="ignore")
-        reasons += leak.scan_text(text, f"program input {blob[:12]}", canaries, windows)
-    fp = {"hashes": private_blobs, "canaries": canaries, "label_windows": windows}
+        reasons += leak.scan_text(text, f"program input {blob[:12]}", canaries, windows, runs)
+    fp = {"hashes": private_blobs, "canaries": canaries, "label_windows": windows, "label_runs": runs}
     for run_id in sorted({r.run_id for _, r in ctx.records}):
         result = leak.leak_audit(ctx.store.trace(run_id), None, fp, canaries)
         reasons += [f"run {run_id}: {p}" for p in result["problems"]]

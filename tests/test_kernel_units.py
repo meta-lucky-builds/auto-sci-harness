@@ -544,6 +544,7 @@ def test_external_target_earns_validated_label(tmp_path):
     """K6 on an EXTERNAL (or FUTURE) dataset -> CERTIFIED-VALIDATED; internal held-out -> CERTIFIED-INTERNAL."""
     w = World(tmp_path / "ext", seed=8, n_train=120, n_test=120)
     w.register_target("external_lab", DatasetRole.EXTERNAL, n=120)
+    w.kernel.approve_role("external_lab", approver="test-human")  # a role alone earns nothing: a human approves it
     c = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2, targets=("external_lab",),
                 n_boot=1000)
     w.kernel.preregister(c)
@@ -936,7 +937,14 @@ def test_lp_adapter_validation_and_checker(lpw):
     from custom_harness.kernel import adapters as A
     from custom_harness.kernel import lp
     assert A.validate(A.LP_CHECKS) == [] and len(A.LP_CHECKS) >= 8
-    assert A.adapter_hash(A.ML) == "71694bb1ca60010f9ea241073c89255f5f0937bc1f215b7797e088ca8e363fca"  # unchanged
+    # an adapter without an exact checker hashes exactly as before that field existed (no "exact_module" key), so
+    # adding the field invalidated no approval. (A pinned hex value lived here; since R1-F5 the hash covers every
+    # project module the adapter imports, so any edit to them changes it by design and needs a new approval.)
+    import hashlib
+    legacy = {"name": "ml", "version": "1", "classes": ["data"], "metrics": sorted(A.ML.metrics),
+              "modules": {m: hashlib.sha256(p.read_bytes()).hexdigest() for m, p in A.covered_modules(A.ML).items()}}
+    assert A.ML.exact_module is None
+    assert A.adapter_hash(A.ML) == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
     p, cert = canonical_json(LP_PROBLEM), canonical_json(LP_CERT)
     assert lp.check(p, cert, Fraction(13, 5)) == [] and lp.bounds(p, cert, Fraction(13, 5)) == []
     no_b = {k: v for k, v in LP_PROBLEM.items() if k != "b"}

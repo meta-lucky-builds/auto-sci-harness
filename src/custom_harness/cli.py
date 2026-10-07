@@ -127,7 +127,9 @@ def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
                            public={"provenance.json": json.dumps(provenance, sort_keys=True).encode()},
                            private={protocol.measurements.filename: data})
     print(json.dumps({"registered": item["dataset_id"], "data_sha256": provenance["data_sha256"],
-                      "next": f"chh approve {a.run_id} data_received --decision approve --approver <you>"}))
+                      "next": f"chh approve {a.run_id} data_received --decision approve --approver <you>",
+                      "role": f"role 'future' earns CERTIFIED-VALIDATED only after a human runs: chh approve-role "
+                              f"{item['dataset_id']} --approver <you>"}))
     return 0
 
 
@@ -221,11 +223,16 @@ def _sandbox_factory(a: argparse.Namespace, root: Path):
 def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Re-check a Reproducibility Bundle from its bytes alone (GOAL L2 done-when)."""
     from .kernel import SandboxReplayer
-    from .kernel.bundle import reproduce_bundle
+    from .kernel.bundle import BundleError, reproduce_bundle
     factory = _sandbox_factory(a, data_dir() / "sandboxes" / f"reproduce-{int(time.time())}")
-    report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
+    try:
+        report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
+    except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
+        print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
+        return 1
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
+                      "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
                       "problems": report.problems}, indent=1))
     return 0 if report.reproduced else 1
 
@@ -250,9 +257,49 @@ def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_ledger_verify(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .kernel import Ledger
-    problems = Ledger(store).verify()
-    print(json.dumps({"entries": len(store.ledger_rows()), "intact": not problems, "problems": problems}, indent=1))
+    from .kernel.ledger import check_anchors
+    ledger = Ledger(store)
+    problems = ledger.verify()
+    for path in a.anchor:
+        try:
+            problems += check_anchors(ledger.entries(), Path(path))
+        except OSError as e:
+            problems.append(f"anchor file {path} unreadable: {e}")
+    print(json.dumps({"entries": len(store.ledger_rows()), "intact": not problems, "anchors_checked": a.anchor,
+                      "problems": problems}, indent=1))
     return 0 if not problems else 1
+
+
+def cmd_ledger_anchor(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Append the ledger's (length, head hash) to an anchor file OUTSIDE the store. Keep copies where whoever controls
+    this machine cannot rewrite them (another disk, a git remote, a message to a third party): `chh ledger-verify
+    --anchor FILE` then detects a rewrite of anything before the anchor. It does not stop someone who also controls
+    every copy of the anchor."""
+    from .kernel import Ledger
+    from .kernel.ledger import AnchorError, write_anchor
+    try:
+        anchor = write_anchor(Ledger(store), Path(a.file), data_dir() / "store")
+    except AnchorError as e:
+        raise SystemExit(f"NOT anchored: {e}") from e
+    print(json.dumps({"anchored": str(a.file), **anchor}))
+    return 0
+
+
+def cmd_approve_role(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action: approve that a dataset registered as external/future really is external/future data. Without it
+    the dataset never supports CERTIFIED-VALIDATED (at most CERTIFIED-INTERNAL). Models and harness code never run
+    this; the ledger entry names the approver."""
+    from .kernel import Kernel, VaultError
+    kernel = Kernel(store)
+    try:
+        rec = kernel.vault.dataset(a.dataset_id)
+        print(f"dataset {rec.dataset_id}: role {rec.role.value}, content hash {rec.hash}, files {sorted(rec.files)}")
+        entry = kernel.approve_role(a.dataset_id, approver=a.approver, note=a.note)
+    except VaultError as e:
+        raise SystemExit(f"NOT approved: {e}") from e
+    print(json.dumps({"approved_role": rec.role.value, "dataset": a.dataset_id, "approver": a.approver,
+                      "ledger_seq": entry.seq}))
+    return 0
 
 
 def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
@@ -403,6 +450,10 @@ def main(argv: list[str] | None = None) -> int:
     aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
     aa.add_argument("name")
     aa.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
+    ar = sub.add_parser("approve-role", help="HUMAN: approve a dataset's external/future role (needed for VALIDATED)")
+    ar.add_argument("dataset_id")
+    ar.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
+    ar.add_argument("--note", default="", help="why this data is external/future (provenance)")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -414,7 +465,10 @@ def main(argv: list[str] | None = None) -> int:
     bs.add_argument("out")
     bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
     sub.add_parser("certificates", help="list Kernel certificates")
-    sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain")
+    lv = sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain (and external anchors)")
+    lv.add_argument("--anchor", action="append", default=[], help="anchor file written by ledger-anchor (repeatable)")
+    la = sub.add_parser("ledger-anchor", help="append the ledger head + length to an anchor file outside the store")
+    la.add_argument("file")
     sub.add_parser("predictions", help="prediction ledger: VDS and calibration")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
@@ -426,7 +480,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
-                "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
+                "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role,
+                "ledger-anchor": cmd_ledger_anchor, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)

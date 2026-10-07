@@ -7,9 +7,20 @@ to (code, data, predictions, canaries). Bundle hash = sha256 of manifest.json.
 
 `reproduce_bundle` rebuilds a fresh store from the bundle alone, re-runs the Kernel with a fresh
 replayer (programs are re-executed from the bundled bytes) and compares the result with the bundled
-certificate. Limits, stated: the ledger in a bundle is an EXCERPT, so each entry's own hash and the
-ordering are verified, not the unbroken chain from genesis; the environment is re-created from the
-recorded description, not from a pinned image digest unless one was recorded.
+certificate.
+
+Ledger (format chh-bundle/2): the bundle carries the WHOLE ledger prefix up to and including the certificate
+entry, and reproduction checks it as one unbroken hash chain from genesis, so no entry (e.g. an early label
+read) can be left out or replaced without breaking the chain. Its head hash is reported, so it can be compared
+with a published anchor (`chh ledger-anchor`). Entry bodies hold ids, hashes and purposes, never data. The
+bundle also carries the public files and canaries of every registered dataset (the Kernel's shared-example and
+canary checks look at all of them). Old chh-bundle/1 bundles carry an excerpt: they are still re-checked, but
+the report labels the ledger check "EXCERPT ONLY" (per-entry hashes and order, not an unbroken chain).
+
+Reading is bounded (zip bombs): per-member and total uncompressed size caps, a member-count cap and a
+compression-ratio cap; a bundle over any cap is refused with a BundleError naming the cap (fail closed).
+The environment is re-created from the recorded description, not from a pinned image digest unless one was
+recorded.
 
 A bundle CONTAINS THE HIDDEN LABELS of its targets (a third party needs them to re-check). Treat it like a
 task's private/ directory: never mount it, or anything derived from it, into an agent-visible place.
@@ -38,7 +49,22 @@ from .kernel import Kernel
 from .ledger import Entry, verify_chain
 from .vault import CertificateRecord
 
-FORMAT = "chh-bundle/1"
+FORMAT = "chh-bundle/2"
+LEGACY_FORMATS = frozenset({"chh-bundle/1"})  # ledger excerpt only: re-checked, labelled "EXCERPT ONLY"
+
+
+@dataclass(frozen=True)
+class ReadLimits:
+    """Caps on what reproduction reads from a bundle (all uncompressed bytes)."""
+
+    member_bytes: int = 512 * 2**20
+    total_bytes: int = 2 * 2**30
+    members: int = 100_000
+    ratio: float = 200.0  # uncompressed / compressed, enforced for members larger than `ratio_floor`
+    ratio_floor: int = 8 * 2**20
+
+
+DEFAULT_LIMITS = ReadLimits()
 
 
 class BundleError(ValueError):
@@ -71,26 +97,19 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         blobs |= {rec.preds_ref, rec.artifact_hash} | {r.blob for r in rec.inputs.values()}
         dataset_ids |= {rec.target} | {r.dataset_id for r in rec.inputs.values()}
         run_ids.add(rec.run_id)
-    entries: list[Entry] = []
     all_entries = kernel.ledger.entries()
     cert_seq = next(e.seq for e in all_entries if e.kind == "certificate" and e.body.get("cert_hash") == cert_hash)
-    for e in all_entries:
+    # the WHOLE prefix up to the certificate (an unbroken chain from genesis): the ledger as it was when the
+    # certificate was issued, with nothing left out
+    entries = [e for e in all_entries if e.seq <= cert_seq]
+    for e in entries:
         b = e.body
-        if e.seq > cert_seq:
-            break  # the bundle captures the ledger as it was when the certificate was issued
-        keep = (e.kind in ("prereg", "adapter_approval")  # approvals: K1 re-checks the adapter on reproduction
-                or (e.kind == "register_dataset" and b.get("dataset_id") in dataset_ids)
-                or (e.kind == "register_artifact" and b.get("hash") in blobs)
-                or (e.kind == "data_access" and b.get("dataset_id") in dataset_ids)
-                or (e.kind == "certificate" and b.get("cert_hash") == cert_hash))
-        if keep:
-            entries.append(e)
-        if e.kind == "register_dataset" and b.get("dataset_id") in dataset_ids:
-            blobs |= {f["blob"] for f in b["files"].values()}
+        if e.kind == "register_dataset":  # private files only of the claim's datasets; public files of all
+            blobs |= {f["blob"] for f in b["files"].values() if b.get("dataset_id") in dataset_ids or not f["private"]}
             if b.get("canary_ref"):
                 blobs.add(b["canary_ref"])
-        if e.kind == "certificate" and b.get("cert_hash") == cert_hash:
-            blobs.add(b["blob"])
+        if e.kind == "certificate" and b.get("claim_hash") == cert.claim_hash:
+            blobs.add(b["blob"])  # this certificate, and earlier ones of the same claim (K3 reads them, R1-F3)
     runs = []
     for rid in sorted(run_ids):
         try:
@@ -102,7 +121,8 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
                      "steps": [s.model_dump(mode="json") for s in store.trace(rid)]})
     manifest = {
         "format": FORMAT, "cert_hash": cert_hash, "claim_hash": cert.claim_hash, "label": cert.label.value,
-        "kernel_config": cert.config, "ledger": [list(e.row()) for e in entries], "evidence": evidence,
+        "kernel_config": cert.config, "ledger": [list(e.row()) for e in entries], "ledger_head": entries[-1].hash,
+        "evidence": evidence,
         "runs": runs, "blobs": sorted(blobs),
         "environment": {"python": sys.version.split()[0], "platform": platform.platform()},
     }
@@ -129,42 +149,84 @@ class ReproduceReport:
     reproduced_label: str | None
     problems: list[str] = field(default_factory=list)
     certificate: Certificate | None = None
+    ledger_check: str = ""  # what was verified about the bundled ledger (full chain, or EXCERPT ONLY for v1)
+    ledger_head: str | None = None  # hash of the last bundled ledger entry (compare with a published anchor)
 
 
-def reproduce_bundle(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path | None = None
-                     ) -> ReproduceReport:
-    """Re-check a bundle from its bytes alone. reproduced = same label AND the same status on every check."""
+def reproduce_bundle(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path | None = None,
+                     limits: ReadLimits = DEFAULT_LIMITS) -> ReproduceReport:
+    """Re-check a bundle from its bytes alone. reproduced = same label AND the same status on every check.
+    Raises BundleError for an unsupported format or a bundle over a read limit (refused, never partly read)."""
     tmp = None
     if workdir is None:
         tmp = tempfile.TemporaryDirectory(prefix="chh-reproduce-")
         workdir = Path(tmp.name)
     try:
-        return _reproduce(Path(path), replayer_factory, Path(workdir))
+        return _reproduce(Path(path), replayer_factory, Path(workdir), limits)
     finally:
         if tmp is not None:
             tmp.cleanup()
 
 
-def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path) -> ReproduceReport:
+class _Reader:
+    """Bounded member reads: a zip bomb is refused before it is held in memory."""
+
+    def __init__(self, z: zipfile.ZipFile, limits: ReadLimits):
+        self.z, self.limits, self.total = z, limits, 0
+        infos = z.infolist()
+        if len(infos) > limits.members:
+            raise BundleError(f"bundle has {len(infos)} members, more than the cap of {limits.members}")
+        self.infos = {i.filename: i for i in infos}
+
+    def read(self, name: str) -> bytes:
+        info, lim = self.infos[name], self.limits
+        if info.file_size > lim.member_bytes:
+            raise BundleError(f"bundle member {name} declares {info.file_size} bytes, over the per-member cap of "
+                              f"{lim.member_bytes}")
+        if info.file_size > lim.ratio_floor and info.file_size > lim.ratio * max(info.compress_size, 1):
+            raise BundleError(f"bundle member {name} has a compression ratio over {lim.ratio:g} "
+                              f"({info.file_size} bytes from {info.compress_size}): refused as a possible zip bomb")
+        self.total += info.file_size
+        if self.total > lim.total_bytes:
+            raise BundleError(f"bundle content exceeds the total cap of {lim.total_bytes} bytes (at member {name})")
+        # zipfile never returns more than the DECLARED size (ZipExtFile truncates at file_size, and a stream that
+        # does not match the declared size and CRC raises BadZipFile): checking declared sizes bounds memory
+        return self.z.read(info)
+
+
+def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path, limits: ReadLimits
+               ) -> ReproduceReport:
     with zipfile.ZipFile(path) as z:
-        data = z.read("manifest.json")
+        reader = _Reader(z, limits)
+        if "manifest.json" not in reader.infos:
+            raise BundleError("bundle has no manifest.json")
+        data = reader.read("manifest.json")
         manifest = json.loads(data)
         bundle_hash = hashlib.sha256(data).hexdigest()
-        if manifest.get("format") != FORMAT:
-            raise BundleError(f"unsupported bundle format {manifest.get('format')!r}")
+        fmt = manifest.get("format")
+        if fmt != FORMAT and fmt not in LEGACY_FORMATS:
+            raise BundleError(f"unsupported bundle format {fmt!r}")
         store = EvidenceStore(workdir / "store")
         problems: list[str] = []
-        names = set(z.namelist())
-        for h in manifest["blobs"]:
-            if f"blobs/{h}" not in names:
-                problems.append(f"blob {h[:12]} missing from the bundle")
-                continue
-            if store.blobs.put(z.read(f"blobs/{h}")) != h:
-                problems.append(f"blob {h[:12]} does not match its hash (tampered)")
+        try:
+            for h in manifest["blobs"]:
+                if f"blobs/{h}" not in reader.infos:
+                    problems.append(f"blob {h[:12]} missing from the bundle")
+                    continue
+                if store.blobs.put(reader.read(f"blobs/{h}")) != h:
+                    problems.append(f"blob {h[:12]} does not match its hash (tampered)")
+        except BundleError:
+            store.close()
+            raise
+    full = fmt == FORMAT
     try:
         entries = [Entry.from_row((int(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), float(r[5])))
                    for r in manifest["ledger"]]
-        problems += verify_chain(entries, full=False)
+        problems += verify_chain(entries, full=full)
+        head = entries[-1].hash if entries else None
+        ledger_check = (f"unbroken hash chain from genesis: {len(entries)} entries, head {head}" if full else
+                        f"EXCERPT ONLY ({fmt}): {len(entries)} entries, each checked against its own hash and for "
+                        f"order; NOT an unbroken chain from genesis, so omitted entries cannot be detected")
         for e in entries:
             store.ledger_import(e.row())
         for item in manifest["runs"]:
@@ -181,20 +243,22 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                      None)
         if entry is None:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
-                                   [*problems, "certificate entry missing from the bundle"])
+                                   [*problems, "certificate entry missing from the bundle"], None, ledger_check, head)
         try:
             original = Certificate.model_validate(store.blobs.get_json(entry.body["blob"]))
         except OSError:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
-                                   [*problems, "certificate content missing from the bundle"])
+                                   [*problems, "certificate content missing from the bundle"], None, ledger_check,
+                                   head)
         kernel = Kernel(store, config=KernelConfig(**manifest["kernel_config"]), replayer=replayer_factory())
-        again = kernel.certify(Claim.model_validate(original.claim), list(original.evidence_ids), full_chain=False)
+        again = kernel.certify(Claim.model_validate(original.claim), list(original.evidence_ids), full_chain=full)
         for kid in CHECK_IDS:
             if again.checks[kid].status != original.checks[kid].status:
                 problems.append(f"{kid}: {original.checks[kid].status} originally, {again.checks[kid].status} now "
                                 f"({'; '.join(again.checks[kid].reasons)[:300]})")
         if again.label != original.label:
             problems.append(f"label {original.label.value} originally, {again.label.value} now")
-        return ReproduceReport(not problems, bundle_hash, original.label.value, again.label.value, problems, again)
+        return ReproduceReport(not problems, bundle_hash, original.label.value, again.label.value, problems, again,
+                               ledger_check, head)
     finally:
         store.close()

@@ -26,8 +26,9 @@ from .vault import CertificateRecord, Vault
 STANDARD_ASSUMPTIONS = (
     Assumption(text="held-out examples are an i.i.d. sample of the population the claim is about", tested_by=None),
     Assumption(text="held-out labels are correct", tested_by=None),
-    Assumption(text="no verbatim leak of held-out labels, canaries or private files into code, prompts or traces",
-               tested_by="K9"),
+    Assumption(text="no leak of held-out labels, canaries or private files into code, prompts or traces (K9 detects "
+                    "verbatim, reversed, URL-, hex- and base64-encoded copies and long label runs; other "
+                    "transformations are not detected)", tested_by="K9"),
     Assumption(text="the program's output depends only on its declared inputs, code and seed", tested_by="K3"),
 )
 COMPUTATIONAL_ASSUMPTIONS = (
@@ -58,6 +59,10 @@ class Kernel:
     def approve_adapter(self, name: str, approver: str) -> Entry:
         """Human approval of a domain adapter's current content (CLI: `chh approve-adapter`); validation must pass."""
         return adapters.approve(self.ledger, name, approver)
+
+    def approve_role(self, dataset_id: str, approver: str, note: str = "") -> Entry:
+        """Human approval of a dataset's external/future role (CLI: `chh approve-role`); see Vault.approve_role."""
+        return self.vault.approve_role(dataset_id, approver, note)
 
     def preregister(self, claim: Claim) -> Entry:
         """Commit the claim (and its analysis plan) to the ledger. Idempotent per claim hash."""

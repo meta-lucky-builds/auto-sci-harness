@@ -2,7 +2,9 @@
 
 An adapter is a named, versioned set of source modules that supply a domain's verifiers (metrics, statistics, leak
 fingerprints, the program-execution contract, later Lean / solvers / simulators) for some evidence classes. Its
-identity is a content hash over those modules' source bytes. It is USABLE only while the ledger holds a human
+identity is a content hash over those modules' source bytes AND over every project module they import, transitively
+(`covered_modules`; stdlib and installed packages excluded), so an edit to a helper the adapter imports also needs a
+new approval. It is USABLE only while the ledger holds a human
 approval for exactly that hash, recorded after the adapter's own fault-injection validation passed; changing any of
 its files (a new version) needs a new approval. The registry below is code: adding an adapter is a code change AND
 an approval. Adapters are not an edit surface of the harness evolver (they are not part of any HarnessSpec).
@@ -14,9 +16,14 @@ enforcement. No model output and no harness edit can reach it.
 
 from __future__ import annotations
 
+import ast
+import functools
 import hashlib
 import importlib
+import importlib.util
 import json
+import site
+import sysconfig
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
@@ -44,14 +51,76 @@ class AdapterSpec:
     exact_module: str | None = None
 
 
+@functools.cache
+def _external_roots() -> tuple[Path, ...]:
+    """Directories whose modules are NOT project code: the standard library and installed packages."""
+    paths = sysconfig.get_paths()
+    roots = {paths[k] for k in ("stdlib", "platstdlib", "purelib", "platlib") if k in paths}
+    roots |= set(site.getsitepackages()) | {site.getusersitepackages()}
+    return tuple(Path(r).resolve() for r in sorted(roots))
+
+
+def _source_file(name: str) -> Path | None:
+    """The source file of module `name` if it is PROJECT code (not stdlib, not site-packages, not built in)."""
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):  # unresolvable (e.g. a parent that is a plain module): nothing to hash
+        return None
+    if spec is None or not spec.has_location or spec.origin is None:
+        return None  # built-in / frozen / namespace package: no source of ours
+    path = Path(spec.origin).resolve()
+    return None if any(path.is_relative_to(r) for r in _external_roots()) else path
+
+
+_IMPORTS: dict[str, frozenset[str]] = {}  # sha256 of a module's source -> absolute names it imports (parse cache)
+
+
+def _imports(name: str, path: Path, src: bytes) -> frozenset[str]:
+    """Absolute names of every module `name` imports explicitly (anywhere in the file, incl. lazy imports); for
+    `from X import y`, X.y when that is a module, else X. Relative imports are resolved against the package."""
+    key = f"{name}|{hashlib.sha256(src).hexdigest()}"
+    if key not in _IMPORTS:
+        package = name if path.name == "__init__.py" else name.rpartition(".")[0]
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Import):
+                found |= {a.name for a in node.names}
+            elif isinstance(node, ast.ImportFrom):
+                base = importlib.util.resolve_name("." * node.level + (node.module or ""), package) \
+                    if node.level else str(node.module)
+                found.add(base)
+                found |= {f"{base}.{a.name}" for a in node.names if a.name != "*"}  # kept only if a module
+        _IMPORTS[key] = frozenset(found)
+    return _IMPORTS[key]
+
+
+def covered_modules(spec: AdapterSpec) -> dict[str, Path]:
+    """The adapter's listed modules plus the transitive closure of the PROJECT modules they import (R1-F5): an
+    adapter's behaviour depends on them, so they are part of its identity. Stdlib and installed packages are pinned
+    by the environment, not by the approval (limit: docs/kernel.md)."""
+    out: dict[str, Path] = {}
+    todo = list(spec.modules)
+    while todo:
+        name = todo.pop()
+        if name in out:
+            continue
+        path = _source_file(name)
+        if path is None:
+            if name in spec.modules:  # a listed module must resolve to project source (fail closed)
+                raise AdapterError(f"adapter module {name!r} has no project source file")
+            continue
+        out[name] = path
+        todo += sorted(_imports(name, path, path.read_bytes()))
+    return dict(sorted(out.items()))
+
+
 def adapter_hash(spec: AdapterSpec) -> str:
     parts: dict[str, Any] = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
                              "metrics": sorted(spec.metrics), "modules": {}}
     if spec.exact_module is not None:  # only when set: adapters without one keep their approved hashes
         parts["exact_module"] = spec.exact_module
-    for mod in spec.modules:
-        src = Path(str(importlib.import_module(mod).__file__)).read_bytes()
-        parts["modules"][mod] = hashlib.sha256(src).hexdigest()
+    for mod, path in covered_modules(spec).items():
+        parts["modules"][mod] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 
 

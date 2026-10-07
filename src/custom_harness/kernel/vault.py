@@ -37,11 +37,12 @@ EXTERNAL_ROLES = frozenset({DatasetRole.EXTERNAL, DatasetRole.FUTURE})
 # Declared by TRUSTED host code (never by agents, which have no vault access). The log provides accountability;
 # it cannot enforce, inside one process, that a declared purpose is the true one.
 #   develop   development use (peeking if before a claim's registration; never allowed on a claim's targets)
-#   evaluate  scoring one arm/seed of a REGISTERED claim
+#   evaluate  scoring one arm/seed of a REGISTERED claim on one of ITS generalization targets (refused otherwise)
 #   audit     human/inspection read (peeking for any claim registered later)
-#   kernel    the Kernel or the integrity audit re-checking a REGISTERED claim
-#   leakscan  building leak fingerprints (canary/label-window scan); never used to score or model
-#   reproduce re-checking a bundle
+#   kernel    the Kernel or the integrity audit re-checking a REGISTERED claim on one of ITS targets (refused otherwise)
+#   leakscan  building leak fingerprints (canary/label-window scan); never used to score or model. K2 lists such
+#             reads but does not count them as peeking: a TRUST BOUNDARY on the host code (docs/kernel.md)
+#   reproduce re-checking a bundle (K2 counts it as peeking like any unexcused early read)
 Purpose = Literal["develop", "evaluate", "audit", "kernel", "leakscan", "reproduce"]
 
 
@@ -118,6 +119,27 @@ class Vault:
         entry = self.ledger.append("register_dataset", rec.model_dump(mode="json", exclude={"seq"}))
         return rec.model_copy(update={"seq": entry.seq})
 
+    def approve_role(self, dataset_id: str, approver: str, note: str = "") -> Entry:
+        """HUMAN action (CLI: `chh approve-role`): attest that a dataset registered as external/future really is data
+        from outside the project's development distribution (or that did not exist at pre-registration time). The
+        registrant's role alone never earns CERTIFIED-VALIDATED: a role can be typed by anyone who registers data.
+        The approval binds the dataset's content hash and role; models and harness code never call this (trust
+        boundary, like adapter approvals: the ledger entry names the approver, which is accountability)."""
+        rec = self.dataset(dataset_id)
+        if rec.role not in EXTERNAL_ROLES:
+            raise VaultError(f"{dataset_id!r} has role {rec.role.value!r}: only external/future roles are approved")
+        if not approver.strip():
+            raise VaultError("a role approval must name the human approver")
+        return self.ledger.append("role_approval", {"dataset_id": dataset_id, "dataset_hash": rec.hash,
+                                                    "role": rec.role.value, "approver": approver, "note": note})
+
+    def role_approval(self, dataset_id: str) -> Entry | None:
+        """The latest human approval of the dataset's CURRENT role and content, or None."""
+        rec = self.dataset(dataset_id)
+        ok = [e for e in self.ledger.entries("role_approval") if e.body.get("dataset_id") == dataset_id
+              and e.body.get("dataset_hash") == rec.hash and e.body.get("role") == rec.role.value]
+        return ok[-1] if ok else None
+
     def register_artifact(self, artifact_id: str, data: bytes, kind: str) -> ArtifactRecord:
         h = self.store.blobs.put(data)
         existing = self.artifacts().get(artifact_id)
@@ -164,9 +186,14 @@ class Vault:
         ref = self._file(dataset_id, name)
         if purpose == "evaluate" and (claim_hash is None or arm is None or seed is None):
             raise VaultError("an 'evaluate' read must name the claim, the arm and the seed")
-        if purpose in ("evaluate", "kernel") and not self.registered(claim_hash):
-            raise VaultError(f"claim {str(claim_hash)[:12]} is not pre-registered: held-out data are only read for "
-                             f"registered claims")
+        if purpose in ("evaluate", "kernel"):
+            targets = self.registered_targets(claim_hash)
+            if targets is None:
+                raise VaultError(f"claim {str(claim_hash)[:12]} is not pre-registered: held-out data are only read "
+                                 f"for registered claims")
+            if dataset_id not in targets:  # R1-F1: a registered claim is no licence to read ANOTHER target's labels
+                raise VaultError(f"{dataset_id!r} is not a generalization target of claim {str(claim_hash)[:12]}: "
+                                 f"'{purpose}' reads are bound to the named claim's targets")
         rec = self.dataset(dataset_id)
         self.ledger.append("data_access", {"dataset_id": dataset_id, "dataset_hash": rec.hash, "file": name,
                                            "private": ref.private, "purpose": purpose, "run_id": run_id,
@@ -174,8 +201,14 @@ class Vault:
         return self.store.blobs.get(ref.blob)
 
     def registered(self, claim_hash: str | None) -> bool:
-        return claim_hash is not None and any(e.body.get("claim_hash") == claim_hash
-                                              for e in self.ledger.entries("prereg"))
+        return self.registered_targets(claim_hash) is not None
+
+    def registered_targets(self, claim_hash: str | None) -> frozenset[str] | None:
+        """The generalization targets of a pre-registered claim, or None if it was never pre-registered."""
+        for e in self.ledger.entries("prereg"):
+            if claim_hash is not None and e.body.get("claim_hash") == claim_hash:
+                return frozenset(e.body.get("claim", {}).get("generalization_targets", ()))
+        return None
 
     def accesses(self, dataset_id: str | None = None) -> list[Entry]:
         es = self.ledger.entries("data_access")
