@@ -10,7 +10,9 @@ entry: setup
 max_steps: 60
 nodes:
   # dev estimate = k-fold cross-validation on the public training data, each fold in a fresh sandbox (protected)
-  setup: {kind: module, module: research.setup, params: {dev_folds: 5, split_seed: 0}}
+  # cpu_limit_s: CPU-seconds per dev program run, UNCALIBRATED (owner decision, GOAL §13.8); null = off until the
+  # sandbox CPU-time limit (workstream flowsb) is merged. Held-out runs are not yet covered (needs kernel run_program).
+  setup: {kind: module, module: research.setup, params: {dev_folds: 5, split_seed: 0, cpu_limit_s: null}}
   profile: {kind: module, module: research.profile_data}
   baseline: {kind: module, module: research.baseline_dev}
 

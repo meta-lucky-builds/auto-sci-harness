@@ -65,8 +65,21 @@ def _dev_labels(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
     return ctx.store.blobs.get_json(state["_private_dev_labels_ref"])[_DEV_LABELS_KEY]
 
 
+def cpu_exec_kwargs(sb: Sandbox, cpu_s: float | None) -> dict[str, Any]:
+    """CPU-time limit wiring (GOAL §16.8; the limit itself is the sandbox's, workstream flowsb). None = off (today's
+    wall-clock-only behaviour). A configured limit on a sandbox whose exec() cannot enforce it is REFUSED (fail
+    closed), never silently dropped."""
+    if cpu_s is None:
+        return {}
+    import inspect
+    if "cpu_s" not in inspect.signature(sb.exec).parameters:
+        raise RuntimeError(f"a CPU-time limit ({cpu_s} s) is configured but {type(sb).__name__}.exec cannot enforce "
+                           f"it (needs the sandbox CPU-time limit)")
+    return {"cpu_s": float(cpu_s)}
+
+
 def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
-                  timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
+                  timeout_s: float, cpu_s: float | None = None) -> tuple[list[str] | None, dict[str, Any]]:
     """Run a solution under the CLI contract in sandbox `sb` (paths relative to its workspace). The output path is
     the one held-out runs use (kernel.execution.OUT_PATH), so the command line does not reveal the run kind."""
     out_rel = OUT_PATH
@@ -75,7 +88,7 @@ def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
     if stale.exists():
         stale.unlink()
     res = sb.exec([sb.python, script, "--train", train, "--test", test,
-                   "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
+                   "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s, **cpu_exec_kwargs(sb, cpu_s))
     info: dict[str, Any] = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
             "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:]}
     try:
@@ -136,7 +149,8 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
             p = safe_path(box.workspace, rel)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(ctx.store.blobs.get(ref))
-        out, info = _run_solution(box, "solution.py", train_rel, test_rel, 0, timeout)
+        out, info = _run_solution(box, "solution.py", train_rel, test_rel, 0, timeout,
+                                  (state.get("limits") or {}).get("cpu_s"))
         wall += info["wall_s"]
         if out is None and info.get("timed_out") and timeout < task.solution_timeout_s:
             info["stderr_tail"] += over
@@ -208,7 +222,9 @@ def setup(state, params, ctx: ModuleContext):
             # the trace or the workspace, private state leaked (checked by the audit, I5)
             "_private_canary": new_canary(),
             "_private_dev_labels_ref": ctx.store.blobs.put_json({_DEV_LABELS_KEY: labels}),
-            "attempts": [], "n_attempts": 0, "best": None, "route": None}
+            "attempts": [], "n_attempts": 0, "best": None, "route": None,
+            # CPU-seconds per program run (setup param cpu_limit_s; None = off). Protected node: not evolvable.
+            **({"limits": {"cpu_s": float(params["cpu_limit_s"])}} if params.get("cpu_limit_s") is not None else {})}
 
 
 @register("research.profile_data")

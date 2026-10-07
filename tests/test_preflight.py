@@ -98,3 +98,22 @@ def test_vote_and_signatures():
     assert vote([["a", "a", "b"], ["b", "c", "b"], ["c", "c", "a"]]) == ["a", "c", "b"]
     assert agreement(["a", "b"], ["a", "c"]) == 0.5
     assert signature(["a"]) != signature(["b"])
+
+
+def test_cpu_limit_is_passed_through_or_refused():
+    import pytest
+
+    from custom_harness.research.modules import cpu_exec_kwargs
+
+    class Old:
+        def exec(self, command, timeout_s=600, env=None):
+            raise AssertionError
+
+    class New:
+        def exec(self, command, timeout_s=600, env=None, *, cpu_s=None):
+            raise AssertionError
+
+    assert cpu_exec_kwargs(Old(), None) == {}  # off: today's behaviour
+    assert cpu_exec_kwargs(New(), 30) == {"cpu_s": 30.0}
+    with pytest.raises(RuntimeError, match="cannot enforce"):
+        cpu_exec_kwargs(Old(), 30)  # never silently dropped
