@@ -2,10 +2,12 @@
 
 Suite file (YAML):
     tasks:
-      - {id: rings-a, dir: C:/.../rings-a, split: evolve, source: rings-a}
-      - {id: rings-b, dir: C:/.../rings-b, split: gate, source: rings-b}
-      - {id: rings-c, dir: C:/.../rings-c, split: sealed, source: rings-c}   # never used here
+      - {id: rings-a, dir: C:/.../rings-a, split: evolve, family: rings, domain: ml, source: rings-a}
+      - {id: spirals-a, dir: C:/.../spirals-a, split: gate, family: spirals, domain: ml, source: spirals-a}
+      - {id: rings-c, dir: C:/.../rings-c, split: sealed, family: rings, domain: ml, source: rings-c}  # never used
 `source` = the base dataset; loading refuses a suite where a source, or any example row, spans two splits.
+`family` is required and `domain` defaults to ml. Loading refuses a suite without a held-out family (gate tasks, no
+evolve task) and, once it spans >= 2 domains, without a held-out domain (leave-one-family/domain-out gate).
 """
 
 from __future__ import annotations
@@ -20,13 +22,17 @@ from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
-from .evaluate import SandboxFactory, SuiteTask
+from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 
 
 def load_suite(path: Path) -> list[SuiteTask]:
     doc = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    tasks = [SuiteTask(t["id"], Path(t["dir"]), t["split"]) for t in doc["tasks"]]
+    missing = [t.get("id") for t in doc["tasks"] if not isinstance(t.get("family"), str) or not t["family"]]
+    if missing:  # fail closed: the leave-one-family-out gate needs every task's family
+        raise ValueError(f"task(s) with no `family`: {', '.join(map(str, missing[:5]))}")
+    tasks = [SuiteTask(t["id"], Path(t["dir"]), t["split"], family=t["family"], domain=str(t.get("domain", "ml")))
+             for t in doc["tasks"]]
     ids = [t.task_id for t in tasks]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate task ids in suite")
@@ -38,6 +44,7 @@ def load_suite(path: Path) -> list[SuiteTask]:
     problems = check_split_isolation(doc["tasks"])
     if problems:
         raise ValueError("suite splits are not isolated: " + "; ".join(problems))
+    check_held_out(tasks)  # GOAL invariant 16: no campaign without a held-out family (/domain once >= 2)
     return tasks
 
 

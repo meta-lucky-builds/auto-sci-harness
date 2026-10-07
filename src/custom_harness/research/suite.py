@@ -330,16 +330,41 @@ def source_of(task_id: str) -> str:
     return task_id
 
 
-def assign_splits(specs: list[TaskSpecFiles]) -> dict[str, str]:
-    """~60/20/20 evolve/gate/sealed, cycled over tasks ordered by family so every split mixes families; then every
-    task takes the split of the first task (in that order) drawn from the same base dataset, so examples shared
-    by re-splits of one dataset can never sit in two splits (a gate/sealed label would be public elsewhere)."""
+# Held out of evolution by default (leave-one-family-out gate, GOAL §5 L6.8): every task of these families goes to
+# the gate split. spirals: a synthetic family whose tasks each have their own base dataset (holding it out moves no
+# other task, unlike real/repair, which share datasets), a geometry no other family has (two interleaved spirals),
+# and the cheapest tasks to evaluate (2 features, <= 1400 rows). The lead rotates it across campaigns (GOAL L6.8).
+DEFAULT_HELDOUT_FAMILIES: tuple[str, ...] = ("spirals",)
+
+
+def assign_splits(specs: list[TaskSpecFiles], heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES
+                  ) -> dict[str, str]:
+    """Every task of a `heldout_families` family goes to gate (the leave-one-family-out gate's held-out family:
+    gate tasks, no evolve task). The other tasks get ~60/20/20 evolve/gate/sealed, cycled over tasks ordered by
+    family so every split mixes families. Then every task takes the split of the first task drawn from the same base
+    dataset (held-out tasks first, so their datasets stay in gate), so examples shared by re-splits of one dataset can
+    never sit in two splits (a gate/sealed label would be public elsewhere). Fails closed (ValueError) on no or an
+    unknown held-out family, or an empty split."""
+    families = {s.family for s in specs}
+    if not heldout_families:
+        raise ValueError("no held-out family requested (the leave-one-family-out gate needs one)")
+    unknown = sorted(set(heldout_families) - families)
+    if unknown:
+        raise ValueError(f"held-out families with no task: {unknown}")
     ordered = sorted(specs, key=lambda t: (t.family, t.task_id))
-    proposed = {s.task_id: _PATTERN[i % len(_PATTERN)] for i, s in enumerate(ordered)}
+    held = [s for s in ordered if s.family in heldout_families]
+    rest = [s for s in ordered if s.family not in heldout_families]
+    proposed = {s.task_id: "gate" for s in held} | {s.task_id: _PATTERN[i % len(_PATTERN)] for i, s in enumerate(rest)}
     first: dict[str, str] = {}
-    for s in ordered:
+    for s in held + rest:
         first.setdefault(s.data_source, proposed[s.task_id])
-    return {s.task_id: first[s.data_source] for s in ordered}
+    splits = {s.task_id: first[s.data_source] for s in ordered}
+    empty = sorted({"evolve", "gate", "sealed"} - set(splits.values()))
+    if empty:
+        raise ValueError(f"split(s) {empty} would be empty")
+    if any(splits[s.task_id] != "gate" for s in held):  # unreachable: held-out sources were claimed first
+        raise ValueError("a held-out family's task left the gate split")
+    return splits
 
 
 def _example_rows(task_dir: Path) -> set[str]:
@@ -378,8 +403,10 @@ def check_split_isolation(entries: list[dict]) -> list[str]:
     return problems
 
 
-def build_suite(out: Path, *, real_data: dict[str, dict] | None) -> Path:
-    """Write every task and suite.yaml. real_data=None builds the synthetic families only."""
+def build_suite(out: Path, *, real_data: dict[str, dict] | None,
+                heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES) -> Path:
+    """Write every task and suite.yaml. real_data=None builds the synthetic families only. Every task is in domain
+    `ml`; `heldout_families` are held out of evolution (see assign_splits)."""
     out = Path(out)
     specs = [gen(seed, n) for gen, seed, n in SYNTHETIC]
     if real_data is not None:
@@ -389,13 +416,14 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None) -> Path:
             # held-out target in the vault; see TaskSpec.dataset_ids)
             specs.append(real_task(name, real_data[name], seed=REAL_SPLIT_SEED, task_id=tid, defect=defect,
                                    baseline=_fill(_SK, "target", model)))
-    splits = assign_splits(specs)
+    splits = assign_splits(specs, heldout_families)
     canaries = {src: "CHH-CANARY-" + secrets.token_hex(16) for src in {s.data_source for s in specs}}
     entries = []
     for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
         d = write_task(s, out, canary=canaries[s.data_source])
         entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
-                        "family": s.family, "source": s.data_source, **({"defect": s.defect} if s.defect else {})})
+                        "family": s.family, "domain": "ml", "source": s.data_source,
+                        **({"defect": s.defect} if s.defect else {})})
     problems = check_split_isolation(entries)
     if problems:  # fail closed: never write a suite whose splits leak into each other
         raise ValueError("suite splits are not isolated: " + "; ".join(problems))

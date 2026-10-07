@@ -86,7 +86,8 @@ def suite(tmp_path):
         subprocess.run([sys.executable, str(ROOT / "examples/tasks/make_rings_task.py"), str(d),
                         "--n-train", "300", "--n-test", "200", "--seed", str(100 + i)],
                        check=True, capture_output=True)
-        tasks.append(SuiteTask(f"rings{i}", d, split))
+        # the gate tasks form their own family, held out of evolution (leave-one-family-out gate, invariant 16)
+        tasks.append(SuiteTask(f"rings{i}", d, split, family="rings" if split == "evolve" else "rings-heldout"))
     return tasks
 
 

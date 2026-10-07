@@ -119,7 +119,8 @@ def _two_task_suite(tmp_path, *, share_rows: bool, sources: tuple[str | None, st
     entries = []
     for spec, split, source in ((a, "evolve", sources[0]), (b, "gate", sources[1])):
         d = write_task(spec, tmp_path)
-        entries.append({"id": spec.task_id, "dir": str(d), "split": split, **({"source": source} if source else {})})
+        entries.append({"id": spec.task_id, "dir": str(d), "split": split, "family": f"fam-{split}",  # gate: held out
+                        **({"source": source} if source else {})})
     p = tmp_path / "suite.yaml"
     p.write_text(yaml.safe_dump({"tasks": entries}), encoding="utf-8")
     return p
