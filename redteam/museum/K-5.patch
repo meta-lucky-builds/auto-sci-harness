@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..5f2c1ac 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -226,7 +226,7 @@ def k1_well_formed(ctx: Context) -> CheckResult:
+         reasons.append(f"alpha must be in (0, {cfg.max_alpha}]")
+     if plan.n_comparisons < 1 or plan.n_boot < cfg.min_boot:
+         reasons.append(f"n_comparisons must be >= 1 and n_boot >= {cfg.min_boot}")
+-    if not 0 <= plan.reproduce_tolerance <= cfg.max_reproduce_tolerance:
++    if not 0 <= plan.reproduce_tolerance:
+         reasons.append(f"reproduce_tolerance must be in [0, {cfg.max_reproduce_tolerance}]")
+     e = c.effect
+     if not e.predicted_lo <= e.predicted_hi:

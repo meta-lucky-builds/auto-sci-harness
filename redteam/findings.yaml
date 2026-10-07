@@ -1,0 +1,177 @@
+# Red-team findings registry (GOAL §16.6 invariant 19; schema from code_review/upgrade_review_2026-10-07/
+# verify-the-verifier.md P3). Checked by `python scripts/museum.py --check-only` (part of `scripts/check.py --fast`):
+# every test id must name an existing test function, every fixed finding needs a museum patch or a reason why none
+# can exist, and every patch on disk must be referenced. `python scripts/museum.py` applies each patch in a scratch
+# copy and requires at least one of the finding's tests to fail.
+#
+# capability = the weakest attacker that can mount it:
+#   A0 model text, A1 evolved harness edit, A2 sandboxed program, A3 trusted host module that is buggy or mis-declares
+#   a purpose, A4 store writer, A5 human operator.
+# status: fixed (a fix is in the code) / open (not fixed) / accepted (a STATUS §D limitation; pinned by a strict xfail
+# where a test can be written).
+findings:
+  # ------------------------------------------------------------------ STATUS §A, Kernel rows (K-1..K-6 split)
+  - id: K-1
+    title: hidden labels registered as a PUBLIC file of another dataset (laundering)
+    invariant: "§10 inv. 2 (no hidden label in an agent-visible input); §4.3 K6/K8"
+    capability: A3
+    tests: ["tests/test_kernel_exploits.py::test_e1_labels_laundered_as_a_public_input"]
+    museum: redteam/museum/K-1.patch
+    status: fixed
+  - id: K-2a
+    title: peek at the labels under a throwaway unregistered claim (vault layer)
+    invariant: "§4.3 K2 (pre-registered before any run touched the targets)"
+    capability: A3
+    tests: ["tests/test_kernel_exploits.py::test_e2_peek_under_an_unregistered_claim"]
+    museum: redteam/museum/K-2a.patch
+    status: fixed
+  - id: K-2b
+    title: an evaluate read naming an unregistered claim is excused by K2 (defence in depth)
+    invariant: "§4.3 K2"
+    capability: A4
+    tests: ["tests/test_kernel_exploits.py::test_e2b_peek_recorded_in_a_ledger_is_still_caught_by_k2"]
+    museum: redteam/museum/K-2b.patch
+    status: fixed
+  - id: K-3
+    title: certify on an unregistered claim used as a free look at the labels
+    invariant: "§10 inv. 6 (sealed split touched only via finalize); §4.3 K2"
+    capability: A3
+    tests: ["tests/test_kernel_exploits.py::test_e3_certifying_an_unregistered_claim_reveals_nothing"]
+    museum: redteam/museum/K-3.patch
+    status: fixed
+  - id: K-4a
+    title: forged certificate filed under another hash accepted on lookup
+    invariant: "§4.4 certificates are immutable; §10 inv. 3"
+    capability: A4
+    tests: ["tests/test_kernel_exploits.py::test_e4_forged_certificate_is_rejected"]
+    museum: redteam/museum/K-4a.patch
+    status: fixed
+  - id: K-4b
+    title: self-consistent forged certificate not detected by verify()
+    invariant: "§10 inv. 3 (no certificate without the Kernel)"
+    capability: A4
+    tests: ["tests/test_kernel_exploits.py::test_e4b_self_consistent_forgery_is_caught_by_verify"]
+    museum: redteam/museum/K-4b.patch
+    status: fixed
+  - id: K-5
+    title: unbounded declared re-execution tolerance makes K3 meaningless
+    invariant: "§4.3 K3 (within calibrated tolerance)"
+    capability: A1
+    tests: ["tests/test_kernel_exploits.py::test_e5_huge_reproduce_tolerance_is_malformed"]
+    museum: redteam/museum/K-5.patch
+    status: fixed
+  - id: K-6
+    title: predictable replay seed (a program deterministic only for that seed passes K3)
+    invariant: "§4.3 K3"
+    capability: A2
+    tests: ["tests/test_kernel_exploits.py::test_e6_only_the_first_seed_is_deterministic"]
+    museum: redteam/museum/K-6.patch
+    status: fixed
+  - id: M1-a
+    title: internal test set re-registered under a new id as external earns VALIDATED
+    invariant: "§4.4 labels; §4.3 K6"
+    capability: A3
+    tests: ["tests/test_kernel_units.py::test_relabelled_internal_test_set_cannot_launder_validation"]
+    museum: redteam/museum/M1-a.patch
+    status: fixed
+  - id: M1-b
+    title: a claim with NaN is unhashable (the reproduce and data_dir crashes of the same row have no dedicated test)
+    invariant: "§10 inv. 7 (fail closed)"
+    capability: A1
+    tests: ["tests/test_kernel_units.py::test_k1_every_malformation_is_named"]
+    museum: redteam/museum/M1-b.patch
+    status: fixed
+  - id: K7-gap
+    title: vacuous negative/equivalence claims got K7 n/a counted as a pass and were CERTIFIED
+    invariant: "§4.3 K7; §10 inv. 7"
+    capability: A1
+    tests: ["tests/test_redteam_kernel.py::test_k7_vacuous_negative_and_equivalence_claims_are_not_certified",
+            "tests/test_review_kernel.py::test_r1_a_check_returning_na_never_counts_as_pass"]
+    museum: redteam/museum/K7-gap.patch
+    status: fixed
+  - id: K9-FP
+    title: perfect dev predictions hashed like the private dev labels (false leak flag)
+    invariant: "§4.3 K9 (no false positive on an honest run)"
+    capability: A3
+    tests: ["tests/test_research.py::test_perfect_dev_predictions_are_not_a_leak"]
+    museum: redteam/museum/K9-FP.patch
+    status: fixed
+  - id: CERT-INFRA
+    title: a Docker outage during certification issued a REJECTED certificate
+    invariant: "GOAL L1 (infra != policy); §10 inv. 7"
+    capability: A5
+    tests: ["tests/test_kernel_units.py::test_infrastructure_outage_during_certification_issues_no_certificate"]
+    museum: redteam/museum/CERT-INFRA.patch
+    status: fixed
+  - id: SPLIT-K6
+    title: held-out examples public WITH labels in another dataset's file pass K6
+    invariant: "§10 inv. 2; §4.3 K6"
+    capability: A3
+    tests: ["tests/test_kernel_units.py::test_k6_and_k4_see_held_out_examples_shared_under_other_dataset_ids"]
+    museum: redteam/museum/SPLIT-K6.patch
+    status: fixed
+  - id: SPLIT-K4
+    title: multiplicity family ignores targets that share held-out examples
+    invariant: "§4.3 K4 (multiple-comparison correction)"
+    capability: A3
+    tests: ["tests/test_kernel_units.py::test_k6_and_k4_see_held_out_examples_shared_under_other_dataset_ids"]
+    museum: redteam/museum/SPLIT-K4.patch
+    status: fixed
+  # ------------------------------------------------------------------ STATUS §B (now merged), Kernel rows
+  - id: R1-F1a
+    title: a registered claim licenses evaluate/kernel reads of ANOTHER target (vault layer)
+    invariant: "§4.3 K2/K4"
+    capability: A3
+    tests: ["tests/test_kernel_integrity.py::test_evaluate_and_kernel_reads_are_bound_to_the_named_claims_targets"]
+    museum: redteam/museum/R1-F1a.patch
+    status: fixed
+  - id: R1-F1b
+    title: an early read for a registered claim on an unrelated target is excused by K2
+    invariant: "§4.3 K2"
+    capability: A4
+    tests: ["tests/test_kernel_integrity.py::test_k2_counts_an_early_read_logged_for_a_claim_on_an_unrelated_target_as_peeking"]
+    museum: redteam/museum/R1-F1b.patch
+    status: fixed
+  - id: R1-F2
+    title: the sampled replay seed can be steered with records on non-target datasets
+    invariant: "§4.3 K3/K4"
+    capability: A3
+    tests: ["tests/test_kernel_integrity.py::test_records_outside_the_plan_neither_steer_the_replay_seed_nor_pass_k4",
+            "tests/test_review_kernel.py::test_r1_replay_seed_cannot_be_steered_with_records_on_non_target_datasets"]
+    museum: redteam/museum/R1-F2.patch
+    status: fixed
+  - id: R1-F3
+    title: repeated certification shops for a lucky replay of a flaky program
+    invariant: "§4.3 K3"
+    capability: A3
+    tests: ["tests/test_kernel_integrity.py::test_a_claim_that_failed_k3_once_is_never_certified_by_retrying"]
+    museum: redteam/museum/R1-F3.patch
+    status: fixed
+  - id: R1-F4
+    title: byte-identical private labels under another id are not in the Bonferroni family
+    invariant: "§4.3 K4"
+    capability: A3
+    tests: ["tests/test_review_kernel.py::test_r1_bonferroni_family_includes_targets_with_byte_identical_private_labels"]
+    museum: redteam/museum/R1-F4.patch
+    status: fixed
+  - id: R1-F5
+    title: an adapter's hash ignores the project modules its modules import
+    invariant: "§10 inv. 13 (adapters fixed, by hash)"
+    capability: A1
+    tests: ["tests/test_kernel_integrity.py::test_adapter_identity_covers_the_project_modules_it_imports"]
+    museum: redteam/museum/R1-F5.patch
+    status: fixed
+  - id: R1-F6
+    title: non_regression raised on a NaN difference instead of failing closed
+    invariant: "§10 inv. 7; inv. 16"
+    capability: A2
+    tests: ["tests/test_review_kernel.py::test_r1_non_regression_rejects_a_non_finite_difference_instead_of_raising"]
+    museum: redteam/museum/R1-F6.patch
+    status: fixed
+  - id: K2-TWO-RUN
+    title: run 1's audit leakscan read makes every later claim on the task fail K2
+    invariant: "§4.3 K2 (no false positive on honest sequential runs)"
+    capability: A3
+    tests: ["tests/test_kernel_integrity.py::test_k2_lists_leakscan_reads_but_counts_reproduce_reads_as_peeking"]
+    museum: redteam/museum/K2-TWO-RUN.patch
+    status: fixed

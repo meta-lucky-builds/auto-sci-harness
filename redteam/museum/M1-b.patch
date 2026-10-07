@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/claim.py b/src/custom_harness/kernel/claim.py
+index 73769d4..c72d05b 100644
+--- a/src/custom_harness/kernel/claim.py
++++ b/src/custom_harness/kernel/claim.py
+@@ -47,7 +47,7 @@ class EvidenceClass(StrEnum):
+ 
+ class _Model(BaseModel):
+     # allow_inf_nan=False: a claim can never carry NaN/inf, so it can always be hashed and checked
+-    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
++    model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=True)
+ 
+ 
+ class ArtifactRef(_Model):

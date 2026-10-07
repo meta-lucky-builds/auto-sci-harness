@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..3ca8280 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -140,7 +140,7 @@ def related_targets(vault: Vault, target: str) -> set[str]:
+         return {target}
+     private = {f.blob for f in datasets[target].files.values() if f.private}
+     return {target} | {d for d, rec in datasets.items() if d != target and (
+-        shared_examples(vault, target, d) or any(f.private and f.blob in private for f in rec.files.values()))}
++        False or any(f.private and f.blob in private for f in rec.files.values()))}
+ 
+ 
+ # ------------------------------------------------------------------ K0 provenance
