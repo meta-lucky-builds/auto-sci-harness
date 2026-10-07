@@ -500,3 +500,10 @@ def test_verify_difference_direction(world):
     ctx = K.Context(claim=formal, claim_hash=formal.claim_hash(), store=world.store, vault=world.vault,
                     ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
     assert K.p0_reasons(ctx) == []
+
+
+def test_ledger_accepts_the_kinds_other_workstreams_append():
+    from custom_harness.kernel.ledger import KINDS
+
+    assert {"release", "alpha_open", "alpha_reserve", "alpha_retire", "mint", "feature_ruling", "role_exam",
+            "tree_event"} <= KINDS

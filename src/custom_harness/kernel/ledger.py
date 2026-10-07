@@ -37,7 +37,8 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "release", "alpha_open", "alpha_reserve", "alpha_retire",
                    # §16.2 minted targets (Kernel.record_mint); bodies owned by other workstreams: human feature-
                    # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
-                   "mint", "feature_ruling", "role_exam"})
+                   "mint", "feature_ruling", "role_exam",
+                   "tree_event"})  # L4.7 experiment-tree events (research/tree.py owns the body)
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
