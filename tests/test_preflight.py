@@ -117,3 +117,21 @@ def test_cpu_limit_is_passed_through_or_refused():
     assert cpu_exec_kwargs(New(), 30) == {"cpu_s": 30.0}
     with pytest.raises(RuntimeError, match="cannot enforce"):
         cpu_exec_kwargs(Old(), 30)  # never silently dropped
+
+
+def test_preflight_suite_cli_zero_calls(tmp_path, monkeypatch, capsys):
+    import json
+    import subprocess
+    import sys
+
+    from custom_harness import cli
+    root = Path(__file__).resolve().parents[1]
+    task = tmp_path / "suite" / "rings"
+    subprocess.run([sys.executable, str(root / "examples/tasks/make_rings_task.py"), str(task), "--n-train", "100",
+                    "--n-test", "60"], check=True, capture_output=True)
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    out = tmp_path / "audit.json"
+    assert cli.main(["preflight-suite", str(tmp_path / "suite"), "--sims", "10", "--json", str(out)]) == 0
+    rows = json.loads(out.read_text())
+    assert [r["task"] for r in rows] and rows[0]["n_test"] == 60 and rows[0]["verdict"] in ("deny", "no objection")
+    assert "0 model calls" in capsys.readouterr().out

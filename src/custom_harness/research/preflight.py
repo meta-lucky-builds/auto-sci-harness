@@ -246,3 +246,41 @@ def preflight(inp: PublicInputs, config: PreflightConfig = DEFAULT_CONFIG) -> Pr
     k7_given_k6 = passes["K6K7"] / passes["K6"] if passes["K6"] else None
     return PreflightResult(verdict, p["all"], p["K4"], p["K6"], p["K7"], k7_given_k6, n, config.theta, reasons,
                            record)
+
+
+def _rows(path: Path) -> int:
+    with open(path, newline="", encoding="utf-8") as f:
+        return max(0, sum(1 for _ in f) - 1)
+
+
+def suite_audit(task_dirs: Sequence[Path], *, baseline_acc: float = 0.8, family_size: int = 1,
+                config: PreflightConfig = DEFAULT_CONFIG) -> list[dict[str, Any]]:
+    """Zero-call audit (`chh preflight-suite`): for every task, P(certify) of a solution that is PERFECT on dev against
+    a baseline of dev accuracy `baseline_acc` (an ASSUMPTION, printed with the result: the audit runs no program),
+    claimed the way research.claim claims (min effect = max(task floor, 0.5 x the dev 90% lower bound)). Reads only
+    task.yaml and the PUBLIC files' row counts; never a private file, never a model."""
+    from ..verify import metrics as M
+    from ..verify.stats import paired_example_interval
+    from .task import load_task
+    out: list[dict[str, Any]] = []
+    for d in task_dirs:
+        task = load_task(Path(d))
+        n_dev, n_test = _rows(Path(d) / "public" / task.train_file), _rows(Path(d) / "public" / task.test_features_file)
+        row: dict[str, Any] = {"task": task.id, "metric": task.metric, "n_dev": n_dev, "n_test": n_test,
+                               "assumed_baseline_dev_accuracy": baseline_acc}
+        wrong = round((1 - baseline_acc) * n_dev)
+        floor = task.effect_floor(baseline_acc)
+        if task.metric in SIMULATED_METRICS and n_dev >= 2:
+            iv = paired_example_interval(M.METRICS[task.metric], ["y"] * n_dev, [["y"] * n_dev],
+                                         [["n"] * wrong + ["y"] * (n_dev - wrong)], higher_is_better=True,
+                                         alpha=0.1, n_boot=1000)
+            delta = max(floor, 0.5 * iv.lo) if not iv.degenerate else floor
+        else:
+            delta = floor
+        r = preflight(PublicInputs(metric=task.metric, higher_is_better=task.higher_is_better, n_test=n_test,
+                                   dev_pairs=(n_dev - wrong, wrong, 0, 0), min_effect=delta,
+                                   family_size=family_size), config)
+        row.update({"min_effect": delta, **r.as_record()})
+        row.pop("inputs", None)
+        out.append(row)
+    return out
