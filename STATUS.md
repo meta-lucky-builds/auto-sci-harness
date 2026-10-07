@@ -236,6 +236,17 @@ slower than ~2/5 of the per-run limit per fold.
     (baseline 22/24, every candidate 24/24), so it fell back to the 0.02 floor. **Changed 2026-10-07 (user
     decision):** the dev estimate is now 5-fold cross-validation (see "M2 changes after the first live run").
     Not yet validated live.
+- **Second live run of research_v1** (2026-10-07, `run_f1bff8ab659f48e6`, wine_knn_unscaled, Codex in all roles with
+  the recorded override: invariant 5 NOT MET; code of commit a499a6f, i.e. 5-fold CV but BEFORE the dev-time cap and
+  the adapter requirement). Completed, 33 steps, 13 Codex calls, 207,195 input + 27,333 output tokens, 8,077 s wall
+  (inflated: five agents and test suites shared the machine). CV worked as intended: baseline dev accuracy 0.645 over
+  124 out-of-fold predictions (the 24-row split had shown 0.917), best candidate 0.984, claimed minimum effect 0.133
+  (was the 0.02 floor). Certificate **REJECTED**: the claimed candidate (h4, a tuned 3-model ensemble whose dev
+  evaluation took 2,258 s) produced no predictions in one of its three held-out runs (K4: subject seeds [0, 1] ≠
+  [0, 1, 2]) and in the Kernel's re-execution (K3); K6/K7 had no statistics. K9 and audit I1–I5 passed (no false
+  leak flag). Interpretation (inferred, not run): under the dev-time cap built afterwards h4 would have failed dev
+  (2,258 s > 1,200 s budget) and the fast h2 (dev 0.976, 62 s) would have been claimed; the timeouts were partly
+  caused by machine load.
 - Finding for M1 (K4): the seed CI was [+0.607, +0.607]. The generated solution ignores the seed, so the seed check
   was degenerate and the evidence rested on the test-example bootstrap alone. K4 must detect zero seed variance
   and say so instead of counting it as a passed check.
@@ -271,6 +282,18 @@ slower than ~2/5 of the per-run limit per fold.
   claims on any target sharing examples into the Bonferroni family (`checks.shared_examples`, exact text match:
   re-formatted copies are not detected). The old evidence store (registrations of the old, leaky suite) was
   archived as `store-v1`; a fresh store starts with the new suite.
+- **OPEN (found 2026-10-07 by integrity reviews R1/R2, each reproduced by me; tests in `tests/test_review_*.py` on
+  branches m3-r1-kernel / m3-r2-loop; fixes in progress):** R1-F1 a label read under a registered claim on ANOTHER
+  target escapes K2 and K4; R1-F2 the sampled re-execution seed can be steered with records on non-target datasets;
+  R1-F3 repeated certification can shop for a lucky replay of a flaky program; R1-F4 byte-identical private labels
+  under different datasets are not counted in the Bonferroni family; R1-F5 an adapter's hash ignores modules its
+  modules import (the ML adapter depends on kernel.vault and sandbox.base); R1-F6 `non_regression` raises on NaN;
+  R2-1 a role-rebinding edit (author nodes run as `replicator`/`judge`) keeps invariant 5 "met" on paper and earns
+  replication credit and a headline; R2-2 evolution scores depend on evaluation ORDER through the Kernel's growing
+  multiplicity family (identical harnesses scored 1.0 vs 0.5); R2-3 request-caused backend errors (e.g. context
+  length) are classified as infrastructure, so an edit can turn its own failures into excluded units; R2-4 the
+  generation label ignores the fresh re-measure evidence; R2-5 an edit can render the unfiltered critic output
+  (`critique_raw`) into prompts.
 - **Dev honesty depends on the harness spec:** every public training row is now a dev example, and the run
   workspace holds the public training file. A `tool` node (an allowed edit type) could put training rows into a
   prompt, letting a model write a lookup-table solution that inflates the dev score. Held-out integrity is not
