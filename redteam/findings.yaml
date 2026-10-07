@@ -299,3 +299,10 @@ findings:
     capability: A3
     tests: ["tests/spec/test_spec_kernel.py::test_mr_as_of_stability_later_events_do_not_change_verify"]
     status: open
+  - id: KD3
+    title: a held-out target whose PUBLIC input file carries its true labels as a column is CERTIFIED-VALIDATED
+    invariant: "§10 inv. 2; §4.3 K6/K8/K9"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_kd3_a_target_whose_public_input_carries_its_labels_is_rejected",
+            "tests/spec/test_spec_kernel.py::test_kd3_attack_really_certifies_today"]
+    status: open
