@@ -73,7 +73,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         b = e.body
         if e.seq > cert_seq:
             break  # the bundle captures the ledger as it was when the certificate was issued
-        keep = (e.kind == "prereg"
+        keep = (e.kind in ("prereg", "adapter_approval")  # approvals: K1 re-checks the adapter on reproduction
                 or (e.kind == "register_dataset" and b.get("dataset_id") in dataset_ids)
                 or (e.kind == "register_artifact" and b.get("hash") in blobs)
                 or (e.kind == "data_access" and b.get("dataset_id") in dataset_ids)

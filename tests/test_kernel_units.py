@@ -19,6 +19,7 @@ from custom_harness.kernel import (
     CHECK_IDS,
     AnalysisPlan,
     ArtifactRef,
+    Certificate,
     Claim,
     ClaimKind,
     DatasetRole,
@@ -33,6 +34,7 @@ from custom_harness.kernel import (
     Scope,
     Vault,
     VaultError,
+    canonical_json,
     run_program,
 )
 from custom_harness.kernel import checks as K
@@ -619,6 +621,88 @@ def test_k6_and_k4_see_held_out_examples_shared_under_other_dataset_ids(tmp_path
     assert "10 held-out example(s) of 'test' appear in public file other_train/train.csv" in k6, k6
     assert "test_reuse" not in k6 and "misc" not in k6
     assert any("2 claim(s) tested on this target" in o for o in cert.checks["K4"].observations), cert.checks["K4"]
+
+
+def test_k1_requires_a_human_approved_unchanged_adapter_for_the_evidence_class(tmp_path):
+    """GOAL §4.7 / invariant 13: a claim is checked only by a human-approved domain adapter whose content is unchanged
+    since approval; a claim of a class no approved adapter serves (here: simulated) is never certified."""
+    w = World(tmp_path / "w", seed=6, n_train=120, n_test=120, approve_adapters=False)
+    try:
+        c = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2, n_boot=1000)
+        w.kernel.preregister(c)
+        ids = w.evaluate_all(c)
+        cert = w.kernel.certify(c, ids)
+        assert cert.failed() == ["K1"] and "no human approval" in reasons(cert.checks["K1"]) and cert.adapters == ()
+        entry = w.kernel.approve_adapter("ml", approver="alice")
+        cert = w.kernel.certify(c, ids)
+        assert cert.label == Label.CERTIFIED_INTERNAL, cert.failed()
+        (used,) = cert.adapters
+        assert used["name"] == "ml" and used["approval_seq"] == entry.seq and used["approver"] == "alice"
+        sim = variant(c, evidence_class="simulated")
+        w.kernel.preregister(sim)
+        k1 = reasons(w.kernel.certify(sim, []).checks["K1"])
+        assert "no registered adapter serves evidence class 'simulated'" in k1
+    finally:
+        w.close()
+
+
+def test_adapter_content_change_after_approval_invalidates_it(tmp_path, monkeypatch):
+    import sys
+
+    from custom_harness.kernel import adapters as A
+    pkg = tmp_path / "adapter_mod_x"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("VALUE = 1\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    spec = A.AdapterSpec("ml", "1", frozenset({A.EvidenceClass.DATA}), ("adapter_mod_x",), frozenset({"accuracy"}))
+    monkeypatch.setitem(A.REGISTRY, "ml", (spec, (("trivially true", lambda: True),)))
+    w = World(tmp_path / "w", approve_adapters=False)
+    try:
+        w.kernel.approve_adapter("ml", approver="alice")
+        assert A.resolve(w.kernel.ledger, A.EvidenceClass.DATA, "accuracy")[0] is not None
+        (pkg / "__init__.py").write_text("VALUE = 2  # an unapproved change\n")
+        sys.modules.pop("adapter_mod_x", None)
+        adapter, why = A.resolve(w.kernel.ledger, A.EvidenceClass.DATA, "accuracy")
+        assert adapter is None and "changed since approval" in why[0]
+    finally:
+        w.close()
+
+
+def test_adapter_approval_refuses_unknown_anonymous_or_failing_adapters(tmp_path, monkeypatch):
+    from custom_harness.kernel import AdapterError
+    from custom_harness.kernel import adapters as A
+    assert A.validate(A.ML_CHECKS) == []  # the real ML adapter passes its own fault-injection validation
+    assert A._raises(lambda: None) is False  # a "must refuse" check whose target does NOT refuse fails
+    w = World(tmp_path / "w", approve_adapters=False)
+    try:
+        with pytest.raises(AdapterError, match="unknown adapter"):
+            w.kernel.approve_adapter("lean", approver="alice")
+        with pytest.raises(AdapterError, match="name the human approver"):
+            w.kernel.approve_adapter("ml", approver="  ")
+
+        def boom() -> bool:
+            raise RuntimeError("crash")
+
+        broken = (("ok", lambda: True), ("wrong answer", lambda: False), ("crashes", boom))
+        monkeypatch.setitem(A.REGISTRY, "ml", (A.ML, broken))
+        with pytest.raises(AdapterError, match=r"failed its validation: \['wrong answer', 'crashes'\]"):
+            w.kernel.approve_adapter("ml", approver="alice")
+        assert w.kernel.ledger.entries("adapter_approval") == []
+    finally:
+        w.close()
+
+
+def test_evidence_class_and_adapters_keep_old_hashes_stable(base):
+    w, c, ids = base
+    assert b"evidence_class" not in c.canonical()  # the default is omitted: pre-existing claim hashes unchanged
+    assert b'"evidence_class":"formal"' in variant(c, evidence_class="formal").canonical()
+    cert = w.kernel.certify(c, ids, record=False)
+    legacy = Certificate.model_validate({k: v for k, v in cert.model_dump(mode="json").items() if k != "adapters"})
+    assert legacy.adapters == () and cert.adapters != ()
+    import hashlib
+    old_rule = {k: v for k, v in legacy.model_dump(mode="json").items() if k != "adapters"}  # how v1.0 hashed it
+    assert legacy.cert_hash() == hashlib.sha256(canonical_json(old_rule)).hexdigest()
+    assert legacy.cert_hash() != cert.cert_hash()  # adapters are part of a new certificate's identity
 
 
 def test_infrastructure_outage_during_certification_issues_no_certificate(tmp_path, monkeypatch):

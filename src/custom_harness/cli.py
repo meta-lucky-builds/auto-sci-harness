@@ -234,6 +234,24 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0 if res.status == "completed" else 1
 
 
+def cmd_approve_adapter(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §4.7, invariant 13): approve a domain adapter's current content after its validation passes.
+    The approval names the approver and is recorded in the hash-chained ledger."""
+    from .kernel import AdapterError, Kernel
+    from .kernel.adapters import REGISTRY, adapter_hash
+    if a.name not in REGISTRY:
+        raise SystemExit(f"unknown adapter {a.name!r}; known: {sorted(REGISTRY)}")
+    spec, checks = REGISTRY[a.name]
+    print(f"adapter {spec.name} v{spec.version}: classes {sorted(spec.classes)}, modules {list(spec.modules)}")
+    print(f"content hash {adapter_hash(spec)}; running {len(checks)} validation checks")
+    try:
+        entry = Kernel(store).approve_adapter(a.name, approver=a.approver)
+    except AdapterError as e:
+        raise SystemExit(f"NOT approved: {e}") from e
+    print(json.dumps({"approved": a.name, "approver": a.approver, "ledger_seq": entry.seq}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -281,6 +299,9 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
     rb.add_argument("--docker", action="store_true")
     rb.add_argument("--dev-sandbox", action="store_true")
+    aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
+    aa.add_argument("name")
+    aa.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -302,7 +323,8 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "resume": cmd_resume, "rerun": cmd_rerun, "evolve": cmd_evolve, "runs": cmd_runs,
+        return {"run": cmd_run, "resume": cmd_resume, "rerun": cmd_rerun,
+                "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)

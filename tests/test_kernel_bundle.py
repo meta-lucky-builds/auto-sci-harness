@@ -81,16 +81,26 @@ def test_tampered_bundle_is_not_reproduced(tmp_path):
     report = reproduce_bundle(tampered, _fresh_replayer(tmp_path / "r1"))
     assert not report.reproduced and any("tampered" in p for p in report.problems)
 
-    def bump_seq(name, data):
-        if name != "manifest.json":
-            return data
-        m = json.loads(data)
-        m["ledger"][0][2] = m["ledger"][0][2].replace('"dev"', '"test"')  # edit a ledger entry body
-        return json.dumps(m).encode()
-    edited = tmp_path / "tampered_ledger.zip"
-    _rewrite(bundle, edited, bump_seq)
-    report = reproduce_bundle(edited, _fresh_replayer(tmp_path / "r2"))
-    assert not report.reproduced and any("does not match its hash" in p for p in report.problems)
+    def edit_entry(kind: str, old: str, new: str):
+        """Edit the body of the first ledger entry of `kind`; asserts the edit really changed it (an earlier version
+        of this test located the entry by position and silently became a no-op when the excerpt grew)."""
+        def edit(name, data):
+            if name != "manifest.json":
+                return data
+            m = json.loads(data)
+            row = next(r for r in m["ledger"] if r[1] == kind)
+            before = row[2]
+            row[2] = before.replace(old, new)
+            assert row[2] != before, f"tamper of {kind} changed nothing"
+            return json.dumps(m).encode()
+        return edit
+
+    for i, (kind, old, new) in enumerate([("register_dataset", '"dev"', '"test"'),  # a dataset's role
+                                          ("adapter_approval", '"test-world"', '"mallory"')]):  # who approved
+        edited = tmp_path / f"tampered_ledger_{i}.zip"
+        _rewrite(bundle, edited, edit_entry(kind, old, new))
+        report = reproduce_bundle(edited, _fresh_replayer(tmp_path / f"r2-{i}"))
+        assert not report.reproduced and any("does not match its hash" in p for p in report.problems), kind
 
     wrong = tmp_path / "wrong.zip"
     _rewrite(bundle, wrong, lambda n, d: json.dumps({**json.loads(d), "format": "x"}).encode()

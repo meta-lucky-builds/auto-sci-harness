@@ -28,6 +28,17 @@ SUPPORTED_KINDS = frozenset({ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT, C
                              ClaimKind.EQUIVALENCE})
 
 
+class EvidenceClass(StrEnum):
+    """GOAL §4.7: the class of evidence a claim rests on; it fixes the strongest tier the claim can reach and which
+    (human-approved) domain adapter must check it. Only classes served by an approved adapter can be certified."""
+
+    FORMAL = "formal"  # Lean (T0)
+    COMPUTATIONAL = "computational"  # exact solvers with re-checkable certificates (T1)
+    DATA = "data"  # held-out / time-split / external data (T2, T4)
+    SIMULATED = "simulated"  # holds only within the named simulator (T1/T2 within it)
+    PHYSICAL = "physical"  # human-executed via an approved protocol; returned data checked (T3)
+
+
 class _Model(BaseModel):
     # allow_inf_nan=False: a claim can never carry NaN/inf, so it can always be hashed and checked
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
@@ -87,9 +98,13 @@ class Claim(_Model):
     assumptions: tuple[str, ...] = ()
     risk: Risk = Field(default_factory=Risk)
     resolve_by: float  # epoch seconds; an unresolved prediction past this is scored as a miss
+    evidence_class: EvidenceClass = EvidenceClass.DATA
 
     def canonical(self) -> bytes:
-        return canonical_json(self.model_dump(mode="json"))
+        doc = self.model_dump(mode="json")
+        if doc["evidence_class"] == EvidenceClass.DATA.value:
+            del doc["evidence_class"]  # the default is omitted: claims hashed before the field existed keep their hash
+        return canonical_json(doc)
 
     def claim_hash(self) -> str:
         return hashlib.sha256(self.canonical()).hexdigest()

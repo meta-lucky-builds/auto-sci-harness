@@ -169,6 +169,11 @@ def setup(state, params, ctx: ModuleContext):
     stratified = task.metric in M.CLASSIFICATION
     folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified)
     labels = [y for f in folds for y in f["labels"]]  # fold order = the order of out-of-fold predictions
+    from ..kernel import EvidenceClass, Ledger
+    from ..kernel.adapters import resolve
+    adapter, why = resolve(Ledger(ctx.store), EvidenceClass.DATA, task.metric)
+    if adapter is None:  # fail fast, before any model call: no claim of this run could be certified (K1)
+        raise RuntimeError("no human-approved adapter for this task: " + "; ".join(why))
     from .claims import register_task  # local import: claims.py builds on the helpers in this module
     datasets = register_task(ctx, task, task_dir)
     return {"task": task.model_dump(), "datasets": datasets,

@@ -18,7 +18,7 @@ from ..store.evidence import EvidenceStore, LedgerRow
 from .claim import canonical_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
-                   "retraction"})
+                   "retraction", "adapter_approval"})
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
