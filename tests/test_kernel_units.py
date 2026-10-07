@@ -912,7 +912,7 @@ def test_n_a_outside_the_table_fails_closed(lpw, base, monkeypatch):
     from custom_harness.kernel import CheckResult, EvidenceClass
     from custom_harness.kernel import adapters as A
     assert set(K.applicability(EvidenceClass.DATA).values()) == {None}  # every check applies to data claims
-    assert K.applicability(EvidenceClass.SIMULATED) == K.applicability(EvidenceClass.DATA)  # unknown: all apply
+    assert K.applicability(EvidenceClass.PHYSICAL) == K.applicability(EvidenceClass.DATA)  # unknown: all apply
     w, c, ids = base
     na = lambda ctx: CheckResult(status="n/a", reasons=("planted",))  # noqa: E731
     monkeypatch.setitem(K.ALL_CHECKS, "K7", na)

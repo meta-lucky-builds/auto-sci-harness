@@ -27,7 +27,7 @@ from ..store.evidence import EvidenceStore
 from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
-from . import adapters
+from . import adapters, simulated
 from .certificate import CHECK_IDS, CheckResult
 from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
 from .execution import ExecRecord, ExecutionError
@@ -730,9 +730,20 @@ CHECK_APPLICABILITY: Mapping[EvidenceClass, Mapping[str, str | None]] = MappingP
         "K7": "n/a (computational): correctness is proven exactly; triviality/importance are not judged by the "
               "Kernel (GOAL §4.6)",
         "K8": None, "K9": None}),
+    EvidenceClass.SIMULATED: MappingProxyType({
+        "K0": None, "K1": None, "K2": None, "K3": None,
+        "K4": "n/a (simulated): a deterministic simulation has no sampling and no seeds; the convergence study (K3) "
+              "replaces statistics",
+        "K5": "n/a (simulated): no comparator; the claim states one quantity of one pinned simulation",
+        "K6": "n/a (simulated): no held-out data; the claim holds in the named simulator only, never in reality",
+        "K7": "n/a (simulated): the value is re-computed, not predicted from data; importance is not judged (GOAL "
+              "§4.6)",
+        "K8": None, "K9": None}),
 })
 _CHECKS_BY_CLASS: Mapping[EvidenceClass, dict[str, Any]] = MappingProxyType({
-    EvidenceClass.COMPUTATIONAL: COMPUTATIONAL_CHECKS})
+    EvidenceClass.COMPUTATIONAL: COMPUTATIONAL_CHECKS,
+    EvidenceClass.SIMULATED: {"K0": k0_computational, "K1": simulated.k1_simulated, "K2": k2_computational,
+                              "K3": simulated.k3_simulated, "K8": simulated.k8_simulated, "K9": k9_computational}})
 
 
 def applicability(evidence_class: EvidenceClass) -> Mapping[str, str | None]:

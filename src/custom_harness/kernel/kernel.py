@@ -21,6 +21,7 @@ from .checks import Context, KernelConfig, Replayer, applicability, checks_for, 
 from .claim import Claim, EvidenceClass
 from .execution import ExecRecord
 from .ledger import Entry, Ledger
+from .simulated import SIMULATED_ASSUMPTIONS
 from .vault import CertificateRecord, Vault
 
 STANDARD_ASSUMPTIONS = (
@@ -108,6 +109,7 @@ class Kernel:
         registered = self.vault.registered(ctx.claim_hash)
         table, impl = applicability(claim.evidence_class), checks_for(claim.evidence_class)
         computational = claim.evidence_class == EvidenceClass.COMPUTATIONAL
+        simulated = claim.evidence_class == EvidenceClass.SIMULATED
         for kid in CHECK_IDS:
             na = table[kid]
             if na is not None:  # the human-owned table says this check does not apply to the class: record why
@@ -132,6 +134,8 @@ class Kernel:
             label = Label.REJECTED
         elif computational:
             label = Label.CERTIFIED_EXACT
+        elif simulated:  # holds in the named simulator only; T2 (conservative, UNCALIBRATED: T1 allowed by §4.7)
+            label = Label.CERTIFIED_SIMULATED
         else:
             label = Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
@@ -143,12 +147,14 @@ class Kernel:
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
         tier = Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T2_STATISTICAL
         verifiers = (("kernel:K0-K9", f"exact:{claim.metric.id}") if computational else
+                     ("kernel:K0-K9", f"sim:{claim.metric.id}") if simulated else
                      ("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
                       "stats:paired-t-seeds", "stats:bca-examples"))
         cert = Certificate(
             kernel_version=self.config.version, claim_hash=ctx.claim_hash, claim=claim.model_dump(mode="json"),
             label=label, tier=int(tier), checks=results,
-            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else STANDARD_ASSUMPTIONS), *observed,
+            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else SIMULATED_ASSUMPTIONS if simulated else
+                           STANDARD_ASSUMPTIONS), *observed,
                          *(Assumption(text=a, tested_by=None) for a in claim.assumptions)),
             evidence_ids=tuple(evidence_ids), verifier_ids=verifiers,
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),
