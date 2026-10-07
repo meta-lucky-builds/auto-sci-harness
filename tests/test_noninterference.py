@@ -13,7 +13,6 @@ import sys
 
 import pytest
 
-from custom_harness.kernel.execution import run_program
 from custom_harness.sandbox.hermetic import EntropyPin
 from custom_harness.sandbox.local import LocalSandbox
 from custom_harness.verify.noninterference import (
@@ -25,6 +24,7 @@ from custom_harness.verify.noninterference import (
     flip_values,
     replace_column,
     replay_noninterference,
+    sandbox_runner,
     world_files,
 )
 
@@ -250,21 +250,18 @@ def _sandbox_run(tmp_path, mode, f):
     code = f"MODE = {mode!r}\nF = {f}\n{DEVICE_PROG}".encode()
     y, hs = toy_task(3)
     test_x = ("x\n" + "\n".join(repr(v) for v in hs) + "\n").encode()
-    pin = EntropyPin.for_run("claim", "subject", 0)
-    counter = iter(range(1000))
-
-    def run(files):
-        box = LocalSandbox(tmp_path / f"r{next(counter)}", i_understand_no_isolation=True)
-        box.pin_entropy(pin)
-        inputs = {"train": ("train.csv", b"x\n0\n"), "test": ("test_X.csv", test_x),
-                  "leak": ("leak.csv", files["leak.csv"])}
-        preds, _ = run_program(box, code=code, entrypoint="solution.py",
-                               argv=(sys.executable, "{entrypoint}", "--train", "{train}", "--test", "{test}",
-                                     "--out", "{out}", "--seed", "{seed}"), inputs=inputs, seed=0, timeout_s=120)
-        return preds
-    production = run(files_for(y))
+    run = sandbox_runner(lambda name: LocalSandbox(tmp_path / name, i_understand_no_isolation=True), code=code,
+                         entrypoint="solution.py",
+                         argv=(sys.executable, "{entrypoint}", "--train", "{train}", "--test", "{test}", "--out",
+                               "{out}", "--seed", "{seed}"),
+                         inputs={"train": ("train.csv", b"x\n0\n"), "test": ("test_X.csv", test_x),
+                                 "leak": ("leak.csv", b"")},
+                         seed=0, timeout_s=120, pin=EntropyPin.for_run("claim", "subject", 0))
+    files = {"leak": files_for(y)["leak.csv"]}
+    production = run(files)
     assert production is not None
-    return replay_noninterference(run, files_for(y), [COPY], production, regression=False), production, y, hs
+    return (replay_noninterference(run, files, [TruthCopy("leak", "y")], production, regression=False), production,
+            y, hs)
 
 
 def test_real_stealth_device_in_pinned_sandbox_is_caught(tmp_path):

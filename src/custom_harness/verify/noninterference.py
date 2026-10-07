@@ -31,6 +31,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from ..kernel.execution import run_program
+from ..sandbox.base import Sandbox
+from ..sandbox.hermetic import EntropyPin
+
 # ---------------------------------------------------------------------------------------------------------------
 # Parameters (GOAL §13.8). One place.
 MCNEMAR_RUNS = 3  # UNCALIBRATED (owner decision, GOAL §13.8): m real + m counterfactual runs (toy: 3 + 3)
@@ -260,3 +264,22 @@ def replay_noninterference(run: Runner, files: dict[str, bytes], copies: list[Tr
         rep.reasons.append(Reason.MCNEMAR_LABEL_DEPENDENCE)
     rep.ok = not rep.reasons
     return rep
+
+
+def sandbox_runner(sandbox_factory: Callable[[str], Sandbox], *, code: bytes, entrypoint: str, argv: tuple[str, ...],
+                   inputs: dict[str, tuple[str, bytes]], seed: int, timeout_s: float,
+                   pin: EntropyPin | None) -> Runner:
+    """A Runner over the program's input files, keyed by input role: `files[role]` replaces that input's bytes.
+    Every call runs in a FRESH sandbox with the production run's entropy pin (the replay must reproduce production,
+    so production must have run under the same pin: see EntropyPin.for_run)."""
+    calls = [0]
+
+    def run(files: dict[str, bytes]) -> list[str] | None:
+        calls[0] += 1
+        box = sandbox_factory(f"ni-{calls[0]}")
+        box.pin_entropy(pin)
+        ins = {role: (name, files.get(role, data)) for role, (name, data) in inputs.items()}
+        preds, _ = run_program(box, code=code, entrypoint=entrypoint, argv=argv, inputs=ins, seed=seed,
+                               timeout_s=timeout_s)
+        return preds
+    return run
