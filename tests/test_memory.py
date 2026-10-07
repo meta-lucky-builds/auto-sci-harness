@@ -321,7 +321,7 @@ def test_exploit_check_verdict_is_explicit():
         PerturbedEvaluatorCheck(lambda e, p: 1.0, min_retained=0.0)  # a check that keeps nothing is no check
 
 
-# ======================================================================== M6 exit: revoking one claim removes every dependent
+# ================================================================ M6 exit: revoking one claim removes every dependent
 def test_m6_revoking_one_claim_removes_every_dependent_entry(mw):
     k = mw.kernel
     x, y = mw.lp_cert("cascade-x"), mw.lp_cert("cascade-y")
@@ -359,7 +359,9 @@ def test_retracting_any_certificate_of_a_claim_revokes_entries_citing_its_other_
     assert s.status(eid) == Status.ACTIVE  # status() alone does not sync; reads do
     s.sync()
     assert s.status(eid) == Status.REVOKED
-    assert s.cascades()[0]["root"] == f"claim:{claim.claim_hash()}"
+    (cascade,) = s.cascades()
+    assert cascade["root"] == f"cert:{second}" and cascade["claim"] == claim.claim_hash()
+    assert cascade["revoked"] == [eid]
     # and nothing new can cite that claim
     third = k.certify(claim, list(k.certificate(first).evidence_ids)).cert_hash()
     res = s.submit(P(Kind.POSITIVE, "fresh certificate, retracted claim", (third,)), writer="w")
