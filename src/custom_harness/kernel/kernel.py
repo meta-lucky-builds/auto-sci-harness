@@ -17,11 +17,11 @@ from ..store.evidence import EvidenceStore
 from ..tiers import Tier
 from . import adapters
 from .certificate import CHECK_IDS, VG_LADDER, Assumption, Certificate, CheckResult, Label
-from .checks import ALL_CHECKS, Context, KernelConfig, Replayer, is_external
-from .claim import Claim
+from .checks import Context, KernelConfig, Replayer, applicability, checks_for, is_external
+from .claim import Claim, EvidenceClass
 from .execution import ExecRecord
 from .ledger import Entry, Ledger
-from .vault import Vault
+from .vault import CertificateRecord, Vault
 
 STANDARD_ASSUMPTIONS = (
     Assumption(text="held-out examples are an i.i.d. sample of the population the claim is about", tested_by=None),
@@ -29,6 +29,14 @@ STANDARD_ASSUMPTIONS = (
     Assumption(text="no verbatim leak of held-out labels, canaries or private files into code, prompts or traces",
                tested_by="K9"),
     Assumption(text="the program's output depends only on its declared inputs, code and seed", tested_by="K3"),
+)
+COMPUTATIONAL_ASSUMPTIONS = (
+    Assumption(text="the registered problem instance encodes the problem the claim is about (statement fidelity)",
+               tested_by=None),
+    Assumption(text="the approved adapter's exact checker is correct (human-approved; fault-injection validated)",
+               tested_by=None),
+    Assumption(text="the certificate is checked in exact rational arithmetic from the stored bytes (no floats)",
+               tested_by="K3"),
 )
 
 
@@ -75,6 +83,19 @@ class Kernel:
         self.store.add_evidence(ev)
         return ev.id
 
+    def record_certificate(self, claim: Claim, artifact_id: str) -> str:
+        """Link a registered certificate artifact (e.g. an exact solver's primal/dual certificate) to a computational
+        claim as PROOF evidence; returns the evidence id. Nothing is trusted here: K0-K3 resolve and re-check it."""
+        art = self.vault.artifacts().get(artifact_id)
+        if art is None:
+            raise KernelError(f"certificate artifact {artifact_id!r} is not registered")
+        rec = CertificateRecord(claim_hash=claim.claim_hash(), artifact_id=artifact_id, hash=art.hash)
+        ev = Evidence(kind=EvidenceKind.PROOF, tier=Tier.T1_EXECUTABLE, verifier_id=f"certificate:{claim.metric.id}",
+                      produced_by_run=None, payload_ref=self.store.blobs.put_json(rec.model_dump(mode="json")),
+                      summary=f"certificate {artifact_id} for claim {rec.claim_hash[:12]}")
+        self.store.add_evidence(ev)
+        return ev.id
+
     # ------------------------------------------------------------------ certification
     def certify(self, claim: Claim, evidence_ids: list[str] | tuple[str, ...], *,
                 full_chain: bool = True, record: bool = True) -> Certificate:
@@ -85,22 +106,34 @@ class Kernel:
                       evidence_ids=tuple(evidence_ids), full_chain=full_chain)
         results: dict[str, CheckResult] = {}
         registered = self.vault.registered(ctx.claim_hash)
+        table, impl = applicability(claim.evidence_class), checks_for(claim.evidence_class)
+        computational = claim.evidence_class == EvidenceClass.COMPUTATIONAL
         for kid in CHECK_IDS:
+            na = table[kid]
+            if na is not None:  # the human-owned table says this check does not apply to the class: record why
+                results[kid] = CheckResult(status="n/a", reasons=(na,))
+                continue
             if not registered and kid not in ("K0", "K1", "K2"):
                 # never touch held-out data for an unregistered claim: certify must not be a free look
                 results[kid] = CheckResult(status="fail", reasons=(
                     "not evaluated: the claim was never pre-registered (held-out data are not read for it)",))
                 continue
             try:
-                results[kid] = ALL_CHECKS[kid](ctx)
+                results[kid] = impl[kid](ctx)
             except InfraError:
                 # the environment broke (e.g. Docker down during K3 re-execution): issue NO certificate, so the
                 # claim is judged on a retry instead of being rejected for an outage (infra != policy, GOAL L1)
                 raise
             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
                 results[kid] = CheckResult(status="fail", reasons=(f"check raised {type(e).__name__}: {e}",))
-        ok = all(r.status == "pass" for r in results.values())  # fail closed: only an explicit pass counts
-        label = (Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL) if ok else Label.REJECTED
+        # fail closed: only an explicit pass counts, or an n/a where the TABLE (not the check) says it does not apply
+        ok = all(r.status == "pass" or (r.status == "n/a" and table[k] is not None) for k, r in results.items())
+        if not ok:
+            label = Label.REJECTED
+        elif computational:
+            label = Label.CERTIFIED_EXACT
+        else:
+            label = Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
                     for o in results[kid].observations if "seed-invariant" in o]
         stats = {t: {"estimate": s.example.estimate, "lo": s.example.lo, "hi": s.example.hi, "met": s.met,
@@ -108,14 +141,16 @@ class Kernel:
         p_nulls = [s.p_null for s in ctx.stats.values() if s.p_null is not None]
         resolution = {"outcome": ok, "declared_probability": claim.effect.probability,
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
+        tier = Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T2_STATISTICAL
+        verifiers = (("kernel:K0-K9", f"exact:{claim.metric.id}") if computational else
+                     ("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
+                      "stats:paired-t-seeds", "stats:bca-examples"))
         cert = Certificate(
             kernel_version=self.config.version, claim_hash=ctx.claim_hash, claim=claim.model_dump(mode="json"),
-            label=label, tier=int(Tier.T2_STATISTICAL if ok else Tier.T6_NONE), checks=results,
-            assumptions=(*STANDARD_ASSUMPTIONS, *observed,
+            label=label, tier=int(tier), checks=results,
+            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else STANDARD_ASSUMPTIONS), *observed,
                          *(Assumption(text=a, tested_by=None) for a in claim.assumptions)),
-            evidence_ids=tuple(evidence_ids),
-            verifier_ids=("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
-                          "stats:paired-t-seeds", "stats:bca-examples"),
+            evidence_ids=tuple(evidence_ids), verifier_ids=verifiers,
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),
             vg_ladder=VG_LADDER.get(label.value, VG_LADDER["REJECTED"]), config=asdict(self.config),
             adapters=(ctx.adapter,) if ctx.adapter else ())

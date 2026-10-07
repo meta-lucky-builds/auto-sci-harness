@@ -24,6 +24,9 @@ VG_LADDER = {
                            "empirical validation)",
     "CERTIFIED-INTERNAL": "sealed internal held-out confirmation with re-execution and statistics (VG: "
                           "statistical evaluation on held-out data; not external validation)",
+    "CERTIFIED-EXACT": "exact, re-checkable certificate of the stated computation on the registered instance (VG: "
+                       "executable/exact verification; says nothing about the computation's importance or whether "
+                       "the instance models anything real)",
     "REJECTED": "no verification claimed",
 }
 
@@ -31,6 +34,7 @@ VG_LADDER = {
 class Label(StrEnum):
     CERTIFIED_VALIDATED = "CERTIFIED-VALIDATED"
     CERTIFIED_INTERNAL = "CERTIFIED-INTERNAL"
+    CERTIFIED_EXACT = "CERTIFIED-EXACT"  # computational class: an exact certificate re-checked by an approved adapter
     SUPPORTED = "SUPPORTED"  # judge/retrospective evidence only; not issued by Kernel v1
     REJECTED = "REJECTED"
 
@@ -58,7 +62,7 @@ class Certificate(BaseModel):
     claim_hash: str
     claim: dict[str, Any]
     label: Label
-    tier: int  # verifier tier (tiers.Tier); T2 for a certified ML claim, T6 when rejected
+    tier: int  # verifier tier (tiers.Tier); T2 for a certified ML claim, T1 for a computational one, T6 when rejected
     checks: dict[str, CheckResult]
     assumptions: tuple[Assumption, ...]
     evidence_ids: tuple[str, ...]

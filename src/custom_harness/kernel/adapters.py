@@ -19,13 +19,15 @@ import importlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
 from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import mean_t_interval, paired_example_interval
-from .claim import EvidenceClass
+from . import lp
+from .claim import EvidenceClass, canonical_json
 from .execution import ExecutionError, parse_predictions
 from .ledger import Entry, Ledger
 
@@ -37,11 +39,16 @@ class AdapterSpec:
     classes: frozenset[EvidenceClass]
     modules: tuple[str, ...]  # importable modules whose source bytes define the adapter
     metrics: frozenset[str]
+    # computational class: the module (one of `modules`) exporting the exact certificate checker the Kernel calls:
+    # check(problem, certificate, value) -> reasons (K3), bounds(...) -> reasons (K8), HIGHER_IS_BETTER
+    exact_module: str | None = None
 
 
 def adapter_hash(spec: AdapterSpec) -> str:
     parts: dict[str, Any] = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
                              "metrics": sorted(spec.metrics), "modules": {}}
+    if spec.exact_module is not None:  # only when set: adapters without one keep their approved hashes
+        parts["exact_module"] = spec.exact_module
     for mod in spec.modules:
         src = Path(str(importlib.import_module(mod).__file__)).read_bytes()
         parts["modules"][mod] = hashlib.sha256(src).hexdigest()
@@ -85,7 +92,41 @@ ML_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
     ("multi-column predictions are refused", lambda: _raises(lambda: parse_predictions(b"prediction\n1,2\n"))),
 )
 
-REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {"ml": (ML, ML_CHECKS)}
+LP = AdapterSpec(
+    name="lp", version="1", classes=frozenset({EvidenceClass.COMPUTATIONAL}), modules=("custom_harness.kernel.lp",),
+    metrics=frozenset({"lp_optimum"}), exact_module="custom_harness.kernel.lp")
+
+# golden case: max x1 + x2 s.t. 2 x1 + x2 <= 4, x1 + 3 x2 <= 5, x >= 0; optimum 13/5, x = (7/5, 6/5), y = (2/5, 1/5)
+_LP_P = {"format": "chh-lp/1", "sense": "max", "c": ["1", "1"], "A": [["2", "1"], ["1", "3"]], "b": ["4", "5"]}
+_LP_C = {"format": "chh-lp-certificate/1", "x": ["7/5", "6/5"], "y": ["2/5", "1/5"]}
+
+
+def _lp(cert: dict[str, Any], value: Fraction = Fraction(13, 5)) -> list[str]:
+    return lp.check(canonical_json(_LP_P), canonical_json({**_LP_C, **cert}), value)
+
+
+def _lp_rejects(cert: dict[str, Any], why: str, value: Fraction = Fraction(13, 5)) -> bool:
+    """The planted fault is rejected FOR THE RIGHT REASON (a checker failing for another reason fails validation)."""
+    return any(why in r for r in _lp(cert, value))
+
+
+# Fault-injection validation of the LP adapter: one golden certificate that must pass, and each planted fault.
+LP_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
+    ("a correct optimality certificate is accepted", lambda: _lp({}) == []),
+    ("an infeasible primal point is rejected", lambda: _lp_rejects({"x": ["2", "1"]}, "primal infeasible")),
+    ("an infeasible dual point is rejected", lambda: _lp_rejects({"y": ["1/5", "1/5"]}, "dual infeasible")),
+    ("a nonzero duality gap is rejected", lambda: _lp_rejects({"x": ["1", "1"]}, "duality gap")),
+    ("an objective other than the claimed value is rejected",
+     lambda: _lp_rejects({}, "differs from the claimed value", Fraction(3))),
+    ("a float-encoded certificate value is refused", lambda: _lp_rejects({"x": [1.4, 1.2]}, "exact rational string")),
+    ("a float-encoded rational is refused", lambda: _raises(lambda: lp.parse_rational("2.6"))),
+    ("wrong dimensions are refused", lambda: _lp_rejects({"x": ["7/5", "6/5", "0"]}, "dimension mismatch")),
+    ("a number beyond the registered size bound is flagged",
+     lambda: bool(lp.bounds(canonical_json(_LP_P), canonical_json(_LP_C), Fraction(10**lp.MAX_DIGITS)))),
+)
+
+REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
+    "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS)}
 
 
 def validate(checks: tuple[tuple[str, Callable[[], bool]], ...]) -> list[str]:
