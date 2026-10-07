@@ -32,7 +32,7 @@ from typing import Any, Literal
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
-from ..kerneld.releases import VERDICT_LABELS
+from ..kerneld.releases import VERDICT_LABELS, Releases, private_reads
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
 from ..runtime.engine import RetryPolicy
@@ -199,7 +199,9 @@ _SEALED_ACCESS = object()
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
                 budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
-                sealed_access: object | None = None) -> RunOutcome:
+                sealed_access: object | None = None, releases: Releases | None = None) -> RunOutcome:
+    """`releases`: where the score's verdict bits are released (default: the store's ledger, live mode). Evolve-
+    split scores reach the proposer, so their bits are emitted on every target the run read privately."""
     if task.split == "sealed" and sealed_access is not _SEALED_ACCESS:  # invariant 6: sealed only via finalize
         raise ValueError(f"task {task.task_id} is in the sealed split: only `chh finalize` (a human action) runs it")
     try:
@@ -209,8 +211,16 @@ def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
                           [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"])
     eng = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
+    rows = store.ledger_rows()
+    before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
-    score, verified = score_state(res.state, res.status)
+    bits = verdict_bits(res.state, res.status) if isinstance(res.state, dict) else verdict_bits({}, res.status)
+    if task.split == "evolve":
+        rel = releases if releases is not None else Releases.live(store)
+        bits = rel.emit(bits, targets=private_reads(store, after_seq=before), channel="evolution_score",
+                        alphabet="verdict_bit", note="evolve.score:verdict",
+                        key=f"{spec.spec_hash()}|{task.task_id}|{seed}")
+    score, verified = combine(res.status, bits, dev_term(res.state) if isinstance(res.state, dict) else 0.0)
     cert = res.state.get("certificate")
     label = cert.get("label") if isinstance(cert, dict) else None
     return RunOutcome(task.task_id, res.run_id, seed, score, verified, res.status.value, res.cost,

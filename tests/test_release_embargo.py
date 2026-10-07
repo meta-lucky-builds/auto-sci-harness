@@ -49,3 +49,54 @@ def test_evolution_score_still_moves_with_dev_and_verdict_bits():
     assert score_state(_state(0.6, label="REJECTED"), RunStatus.COMPLETED)[0] == pytest.approx(base - 0.5)
     no_audit = {**_state(0.6), "audit": {"passed": False}}
     assert score_state(no_audit, RunStatus.COMPLETED) == (0.0, False)
+
+
+# ---------------------------------------------------------------- emission of the score's verdict bits
+from custom_harness.evolve.evaluate import SuiteTask, run_harness  # noqa: E402
+from custom_harness.kerneld.releases import Releases, released  # noqa: E402
+from custom_harness.runtime import HarnessSpec, register  # noqa: E402
+from custom_harness.sandbox import LocalSandbox  # noqa: E402
+
+
+@register("test.release_reader")
+def _reader(state, params, ctx):
+    from custom_harness.kernel import DatasetRole
+    vault = ctx.kernel().vault
+    vault.register_dataset("t-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
+    vault.read("t-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)  # a private read during the run
+    return {"audit": {"passed": True}, "certificate": {"label": "CERTIFIED-INTERNAL", "subject_mean": 0.9}}
+
+
+SPEC = {"id": "rel", "entry": "m", "nodes": {"m": {"kind": "module", "module": "test.release_reader"}}}
+
+
+def _run(store, tmp_path, split, releases=None):
+    return run_harness(HarnessSpec.model_validate(SPEC), SuiteTask(f"t-{split}", tmp_path, split, family="A"), 0,
+                       backends={}, store=store, releases=releases,
+                       sandbox_factory=lambda k: LocalSandbox(tmp_path / k, i_understand_no_isolation=True))
+
+
+def test_evolve_split_score_is_a_ledgered_verdict_release(store, tmp_path):
+    out = _run(store, tmp_path, "evolve")
+    assert out.verified is True  # the score really carried a held-out verdict
+    rel = released(store, "t-held")
+    assert [(r["channel"], r["alphabet"], r["note"]) for r in rel] == [
+        ("evolution_score", "verdict_bit", "evolve.score:verdict")]
+
+
+def test_gate_split_score_is_not_released_by_the_run(store, tmp_path):
+    """Gate scores never reach the proposer per run (only the aggregate decision does)."""
+    _run(store, tmp_path, "gate")
+    assert released(store, "t-held") == []
+
+
+def test_replay_pins_the_released_bits(store, tmp_path):
+    rec = Releases(None, mode="record")
+    assert _run(store, tmp_path, "evolve", rec).verified is True
+    pinned = Releases(None, mode="replay", pins={r["key"]: [{**r["value"], "certified": False, "label": "REJECTED"}]
+                                                 for r in rec.log})
+    out = _run(store, tmp_path, "evolve", pinned)
+    assert out.verified is False and pinned.misses == [] and pinned.unused() == []  # pinned value was used
+    miss = Releases(None, mode="replay", pins={})
+    _run(store, tmp_path, "evolve", miss)
+    assert miss.misses  # an unrecorded release is a replay flag
