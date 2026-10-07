@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -38,6 +38,46 @@ class SuiteTask:
     task_id: str
     task_dir: Path
     split: Split
+    # task family (e.g. "rings", "repair") and domain (e.g. "ml"); "" = unknown, which evolution refuses
+    # (fail closed: the leave-one-family-out gate needs every task's family). Defaulted only so positional
+    # construction keeps working; load_suite requires `family` in the suite file.
+    family: str = ""
+    domain: str = "ml"
+
+
+def held_out(pairs: Iterable[tuple[str, str]]) -> list[str]:
+    """Groups (families or domains) HELD OUT in a campaign, from (split, group) pairs: they have >= 1 gate task
+    and no evolve task. Sealed tasks neither count as held out nor as exposed."""
+    gate, evolve = set(), set()
+    for split, group in pairs:
+        if split == "gate":
+            gate.add(group)
+        elif split == "evolve":
+            evolve.add(group)
+    return sorted(gate - evolve)
+
+
+def check_held_out(tasks: list[SuiteTask]) -> tuple[list[str], list[str]]:
+    """(held-out families, held-out domains) of a campaign; raises ValueError unless it has a held-out family and,
+    once the tasks span >= 2 domains, a held-out domain (GOAL §10.16: no acceptance without a LOFO/LODO gate;
+    refusing to run is the fail-closed form). Held-out domains are [] while there is a single domain."""
+    missing = [t.task_id for t in tasks if not t.family]
+    if missing:
+        raise ValueError(f"task(s) with no family: {', '.join(missing[:5])} (needed for the leave-one-family-out "
+                         "gate)")
+    if any(not t.domain for t in tasks):
+        raise ValueError("task(s) with an empty domain")
+    families = held_out((t.split, t.family) for t in tasks)
+    if not families:
+        raise ValueError("no held-out family: some family must have gate tasks and no evolve task "
+                         "(leave-one-family-out gate, GOAL invariant 16)")
+    domains: list[str] = []
+    if len({t.domain for t in tasks}) >= 2:
+        domains = held_out((t.split, t.domain) for t in tasks)
+        if not domains:
+            raise ValueError("no held-out domain although the suite spans >= 2 domains (leave-one-domain-out "
+                             "gate, GOAL invariant 16)")
+    return families, domains
 
 
 @dataclass
