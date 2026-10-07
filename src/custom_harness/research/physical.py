@@ -36,7 +36,6 @@ from ..kernel import (
     ClaimKind,
     Effect,
     EvidenceClass,
-    Kernel,
     MetricRef,
     Scope,
     canonical_json,
@@ -177,7 +176,7 @@ def prereg(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
     protocol = Protocol.model_validate(state["physical_protocol"])
     if screen(protocol):  # defence in depth: the screen node must have run and passed
         raise RuntimeError("protocol matches a prohibited category; it cannot be pre-registered")
-    kernel = Kernel(ctx.store)
+    kernel = ctx.kernel()
     h = protocol_hash(protocol)
     kernel.vault.register_artifact(f"protocol@{h[:16]}", canonical_json(protocol.model_dump(mode="json")), "protocol")
     d = protocol.claim
@@ -204,17 +203,17 @@ def prereg(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
             "physical_data_item": {"protocol_hash": h, "dataset_id": target}}
 
 
-def returned_dataset(ctx_store: Any, state: dict[str, Any]) -> Any:
-    ds = Kernel(ctx_store).vault.datasets().get(state["physical_item"]["dataset_id"])
+def returned_dataset(ctx: Any, state: dict[str, Any]) -> Any:
+    ds = ctx.kernel().vault.datasets().get(state["physical_item"]["dataset_id"])
     return ds
 
 
 @register("physical.check_returned")
 def check_returned(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
-    ds = returned_dataset(ctx.store, state)
+    ds = returned_dataset(ctx, state)
     if ds is None:  # a human confirmed receipt, but nothing came in through `chh return-data`
         raise RuntimeError("no returned data registered for this protocol (use `chh return-data` before confirming)")
-    prov = json.loads(Kernel(ctx.store).vault.read_public(ds.dataset_id, "provenance.json"))
+    prov = json.loads(ctx.kernel().vault.read_public(ds.dataset_id, "provenance.json"))
     if prov.get("protocol_hash") != state["physical_item"]["protocol_hash"]:
         raise RuntimeError("returned data belong to another protocol")
     return {"physical_returned": {"dataset_id": ds.dataset_id, "attestation": prov["attestation"],
@@ -224,7 +223,7 @@ def check_returned(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCon
 @register("physical.certify")
 def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     claim = Claim.model_validate(state["physical_claim"])
-    cert = Kernel(ctx.store).certify(claim, [], record=False)  # not recorded: see the module docstring
+    cert = ctx.kernel().certify(claim, [], record=False)  # not recorded: see the module docstring
     attestation = state["physical_returned"]["attestation"]
     return {"physical_certificate": {
         "label": cert.label.value, "failed": cert.failed(), "k1_reasons": list(cert.checks["K1"].reasons),

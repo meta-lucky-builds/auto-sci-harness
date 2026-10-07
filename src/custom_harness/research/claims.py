@@ -82,7 +82,7 @@ def _kernel(ctx: ModuleContext) -> Kernel:
     """A Kernel whose replayer re-executes in fresh sandboxes of the same kind as the run's sandbox."""
     sb = _sb(ctx)
     root = sb.workspace.parent / f"{sb.workspace.name}-replay"
-    return Kernel(ctx.store, replayer=SandboxReplayer(lambda key: sb.spawn(root / key)))
+    return ctx.kernel(replayer=SandboxReplayer(lambda key: sb.spawn(root / key)))
 
 
 def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[str, str]:
@@ -90,7 +90,7 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
     TaskSpec.dataset_ids). The labels are read from disk here, once, to register them; afterwards only through the
     vault. A task whose canary differs from the canary registered for the same data is refused: its own canary
     would never be scanned for (tasks sharing data must share the canary)."""
-    vault = Kernel(ctx.store).vault
+    vault = ctx.kernel().vault
     train = (task_dir / "public" / task.train_file).read_bytes()
     test_x = (task_dir / "public" / task.test_features_file).read_bytes()
     test_y = (task_dir / "private" / task.test_labels_file).read_bytes()
@@ -156,7 +156,7 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     fixed = None
     if params.get("same_delta_as"):
         fixed = Claim.model_validate(state[params["same_delta_as"]]).effect.min_effect
-    kernel = Kernel(ctx.store)
+    kernel = ctx.kernel()
     ids = state["datasets"]
     subject = kernel.vault.register_artifact(f"{task.id}/solution/{best['code_ref'][:16]}",
                                              ctx.store.blobs.get(best["code_ref"]), "method")
@@ -198,7 +198,7 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     p = params.get("prefix", "")
     claim = Claim.model_validate(state[f"{p}claim"])
     h = claim.claim_hash()
-    kernel = Kernel(ctx.store)
+    kernel = ctx.kernel()
     vault = kernel.vault
     ids = state["datasets"]
     train = vault.read_public(ids["train"], task.train_file)
@@ -332,7 +332,7 @@ def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[
     import tempfile
 
     from .data import profile
-    data = Kernel(ctx.store).vault.read_public(train_id, task.train_file)
+    data = ctx.kernel().vault.read_public(train_id, task.train_file)
     with tempfile.TemporaryDirectory() as d:
         p = Path(d) / task.train_file
         p.write_bytes(data)
@@ -616,7 +616,7 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
              ""]
     info = state.get("certificate")
     if info:
-        kernel = Kernel(ctx.store)
+        kernel = ctx.kernel()
         cert = kernel.certificate(info["hash"])
         claim = cert.claim
         lines += ["## Result (Evidence Kernel certificate)", "",
@@ -687,7 +687,7 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
         res[key] = False
         res["problems"].append(msg)
 
-    kernel = Kernel(ctx.store)
+    kernel = ctx.kernel()
     ids = state["datasets"]
     for p in ("", "replica_"):
         _audit_certificate(state, p, ctx, kernel, ids, task, fail)

@@ -141,7 +141,9 @@ def _fake_number(state, params, ctx):
     payload["score"] = payload["score"] + 0.123  # the fabricated number
     fake = Evidence(kind=EvidenceKind.METRIC, tier=Tier.T1_EXECUTABLE, verifier_id=ev.verifier_id,
                     produced_by_run=ctx.run_id, payload_ref=ctx.store.blobs.put_json(payload), summary="fake")
-    ctx.store.add_evidence(fake)
+    # the module store facade blocks ctx.store.add_evidence (test_module_store_facade.py); the Kernel object's
+    # store is the remaining in-process path, and the Kernel must still catch the fabricated record (K3)
+    ctx.kernel().store.add_evidence(fake)
     return {"evidence_ids": [fake.id, *state["evidence_ids"][1:]]}
 
 
