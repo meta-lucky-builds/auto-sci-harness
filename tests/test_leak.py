@@ -51,8 +51,7 @@ def test_clean_run_passes_and_trace_holds_prompts_but_no_private_values(store, t
 
 @register("test.planted_copy_labels")
 def _copy_labels(state, params, ctx):  # a harness bug: hidden labels copied into the agent workspace
-    from custom_harness.kernel import Kernel
-    labels = Kernel(ctx.store).vault.read(state["datasets"]["test"], "test_y.csv", purpose="leakscan")
+    labels = ctx.kernel().vault.read(state["datasets"]["test"], "test_y.csv", purpose="leakscan")
     (ctx.sandbox.workspace / "data" / "maybe_useful.csv").write_bytes(labels)
     return {}
 

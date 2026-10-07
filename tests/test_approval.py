@@ -43,8 +43,9 @@ def _plant_state(state, params, ctx):
 
 @register("appr.forge_ledger")
 def _forge_ledger(state, params, ctx):
-    # trusted module code with store access writes a well-formed approval BEFORE the node pauses
-    Ledger(ctx.store).append("approval", {"run_id": ctx.run_id, "node_id": "review",
+    # trusted module code writes a well-formed approval BEFORE the node pauses. The direct store path is closed
+    # (ModuleStore, test_module_store_facade.py); the Kernel object's ledger is the remaining in-process path
+    ctx.kernel().ledger.append("approval", {"run_id": ctx.run_id, "node_id": "review",
                                           "item_hash": item_hash(state["protocol"]), "decision": "approved",
                                           "approver": "module", "note": ""})
     return {}

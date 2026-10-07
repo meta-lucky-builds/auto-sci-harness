@@ -540,6 +540,8 @@ class Engine:
                 raise ValueError("tool node requires a sandbox")
             cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
+            if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
+                raise ValueError(f"tool command exceeded a sandbox limit: {res.limit_exceeded}")
             return {"value": res.model_dump()}, Cost(wall_s=res.wall_s), None
         if isinstance(node, ModuleNode):
             fn = get_module(node.module)
@@ -602,8 +604,11 @@ def _dump(messages: list[Message]) -> list[dict]:
 
 
 def _private_values(state: dict[str, Any]) -> list[str]:
+    """Every literal string that means a private value reached the trace: the value itself (>= 8 characters) and,
+    for long values, its common encodings and long fragments (verify.leak.secret_patterns, thresholds there)."""
+    from ..verify.leak import secret_patterns
     vals = [str(v) for k, v in state.items() if k.startswith("_private") and v is not None]
-    return sorted((v for v in vals if len(v) >= 8), key=len, reverse=True)
+    return sorted({p for v in vals for p in secret_patterns(v)}, key=lambda p: (-len(p), p))
 
 
 def _scrub(obj: Any, secrets: list[str], hits: list[int] | None = None) -> Any:

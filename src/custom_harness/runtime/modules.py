@@ -9,20 +9,64 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..budget import Budget
     from ..gateway import Backend, ChatRequest, ChatResponse
+    from ..kernel import Kernel
+    from ..kernel.checks import Replayer as _Replayer
     from ..records import Cost
     from ..sandbox import Sandbox
     from ..store import EvidenceStore
 
 
+class ModuleStore:
+    """What a module may do with the evidence store directly (STATUS §D "trusted modules have store access"): read
+    runs, traces and evidence, and use the content-addressed blob store. It has NO method that writes ledger entries,
+    evidence, claims, records, runs or trace steps: those go through the Kernel API (ModuleContext.kernel(), which
+    runs the K-checks) or the engine. `Ledger(ctx.store)`, `Kernel(ctx.store)` and `ctx.store.ledger_append(...)`
+    therefore fail.
+
+    Not a security boundary (stated): modules are in-process Python, and the Kernel object returned by
+    ctx.kernel() holds the real store (kernel.store / kernel.ledger). It stops accidental or casual bypasses of the
+    Kernel and makes every write path greppable; a real boundary needs the Kernel in a separate process (or a signed
+    ledger) with modules holding only an RPC handle."""
+
+    _READS = ("get_run", "run_status", "list_runs", "trace", "run_cost", "evidence_for_run", "get_evidence",
+              "get_claim", "claim_tier", "claim_status", "harness_spec", "records_where", "records", "ledger_rows")
+
+    def __init__(self, store: EvidenceStore):
+        object.__setattr__(self, "_ModuleStore__store", store)
+        object.__setattr__(self, "blobs", store.blobs)
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ModuleStore._READS:
+            return getattr(self.__store, name)
+        raise AttributeError(f"modules have no direct '{name}' on the evidence store: write through the Kernel "
+                             f"(ctx.kernel()) or return state updates")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("the module store facade is read-only")
+
+
 @dataclass
 class ModuleContext:
     run_id: str
-    store: EvidenceStore
+    store: EvidenceStore | ModuleStore
     backends: dict[str, Backend]
     budget: Budget
     sandbox: Sandbox | None
     spent: Cost = field(default_factory=lambda: _cost())
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
+    _store: Any = field(init=False, repr=False, default=None)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.store, ModuleStore):
+            self._store = self.store
+            self.store = ModuleStore(self.store)
+        else:
+            self._store = self.store._ModuleStore__store
+
+    def kernel(self, replayer: _Replayer | None = None) -> Kernel:
+        """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes."""
+        from ..kernel import Kernel
+        return Kernel(self._store, replayer=replayer)
 
     def llm(self, role: str, request: ChatRequest, fallback_role: str | None = "executor") -> ChatResponse:
         """LLM call from inside a module: budget-checked, cost-accounted, logged into the step trace."""

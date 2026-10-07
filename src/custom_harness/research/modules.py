@@ -22,7 +22,7 @@ from ..kernel.execution import OUT_PATH
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
-from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
+from ..sandbox.base import Sandbox, WorkspaceEscape, check_mount, protect_path, safe_path
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
 from ..verify.ranking import bradley_terry, rankings_to_wins
@@ -109,8 +109,12 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
     rows and validation features: never the run workspace, which holds the full public training file and hence
     every validation label (a program reading it could score itself perfectly on dev). The workspace layout,
     file names, command line and seed are those of held-out runs (kernel.execution.run_program), so a program
-    cannot tell a dev fold from a held-out evaluation by names; it still can by data size or content (stated
-    limitation). Predictions are concatenated in fold order, which is the order of the private dev labels. The
+    cannot tell a dev fold from a held-out evaluation by names, and the fold files use the byte conventions of the
+    held-out input files (data.cv_folds). It still can by ROW COUNTS (stated limitation, not fixable without changing
+    the estimator): a fold trains on (k-1)/k of the public rows and predicts 1/k of them, so len(test)/len(train) is
+    1/(k-1) on dev but n_test/n_train held-out, and the training size differs from the profile's row count. Impact is
+    bounded: dev scores only select and forecast; evidence is the held-out runs the Kernel replays.
+    Predictions are concatenated in fold order, which is the order of the private dev labels. The
     first failing fold fails the whole evaluation; its diagnostics are returned (with "fold" set)."""
     task = _task(state)
     sb = _sb(ctx)
@@ -147,8 +151,7 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
 
 def _baseline_code(state: dict[str, Any], ctx: ModuleContext) -> bytes:
     """The baseline exactly as registered in the vault: the dev comparator is byte-identical to the held-out one."""
-    from ..kernel import Kernel
-    return ctx.store.blobs.get(Kernel(ctx.store).vault.artifacts()[state["datasets"]["baseline"]].hash)
+    return ctx.store.blobs.get(ctx.kernel().vault.artifacts()[state["datasets"]["baseline"]].hash)
 
 
 def _score(task: TaskSpec, y_true: list[str], preds: list[str] | None) -> float | None:
@@ -174,6 +177,10 @@ def setup(state, params, ctx: ModuleContext):
     _require_isolation(ctx)
     task_dir = Path(state["input"]["task_dir"]).resolve()
     task = load_task(task_dir)
+    # the hidden labels must never be inside the agent's mount (invariant 2): protect the task's private files for
+    # every sandbox created from now on, and refuse the run's own workspace if it overlaps them
+    protect_path(task_dir / "private")
+    check_mount(_sb(ctx).workspace)
     _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
     for name in (task.train_file, task.test_features_file):
         shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
@@ -182,11 +189,12 @@ def setup(state, params, ctx: ModuleContext):
     # setup is a protected node, so the evolver cannot change how dev evidence is produced.
     k, split_seed = int(params.get("dev_folds", 5)), int(params.get("split_seed", 0))
     stratified = task.metric in M.CLASSIFICATION
-    folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified)
+    folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified,
+                     test_csv=_ws(ctx, f"data/{task.test_features_file}"))
     labels = [y for f in folds for y in f["labels"]]  # fold order = the order of out-of-fold predictions
-    from ..kernel import EvidenceClass, Ledger
+    from ..kernel import EvidenceClass
     from ..kernel.adapters import resolve
-    adapter, why = resolve(Ledger(ctx.store), EvidenceClass.DATA, task.metric)
+    adapter, why = resolve(ctx.kernel().ledger, EvidenceClass.DATA, task.metric)
     if adapter is None:  # fail fast, before any model call: no claim of this run could be certified (K1)
         raise RuntimeError("no human-approved adapter for this task: " + "; ".join(why))
     from .claims import register_task  # local import: claims.py builds on the helpers in this module

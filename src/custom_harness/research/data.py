@@ -40,23 +40,45 @@ def read_predictions(path: Path) -> list[str]:
     return [r[0] for r in rows]
 
 
-def _csv_bytes(header: list[str], rows: list[list[str]]) -> bytes:
+_BOM = b"\xef\xbb\xbf"
+
+
+def csv_style(raw: bytes) -> tuple[str, bool, bool]:
+    """(line terminator, ends with a terminator, starts with a UTF-8 BOM) of a CSV file's bytes."""
+    return ("\r\n" if b"\r\n" in raw else "\n"), raw.endswith(b"\n"), raw.startswith(_BOM)
+
+
+def _csv_bytes(header: list[str], rows: list[list[str]], style: tuple[str, bool, bool] = ("\n", True, False)
+               ) -> bytes:
+    term, final, bom = style
     buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
+    w = csv.writer(buf, lineterminator=term)
     w.writerow(header)
     w.writerows(rows)
-    return buf.getvalue().encode("utf-8")
+    text = buf.getvalue()
+    if not final and text.endswith(term):
+        text = text[: -len(term)]
+    return (_BOM if bom else b"") + text.encode("utf-8")
 
 
-def cv_folds(train_csv: Path, target: str, k: int, seed: int, stratify: bool) -> list[dict[str, Any]]:
+def cv_folds(train_csv: Path, target: str, k: int, seed: int, stratify: bool,
+             test_csv: Path | None = None) -> list[dict[str, Any]]:
     """K-fold cross-validation over the public training file (the dev estimate, GOAL L4.7).
 
     Rows are shuffled with `seed`, then dealt round-robin to the k folds (stratified: dealt class by class, so
     every fold's class counts differ by at most one). Each fold is {"train": csv bytes of every OTHER fold's rows
     (with the target), "valid_x": csv bytes of this fold's rows without the target, "labels": this fold's
     target values, "rows": their 0-based indices in the file}; validation rows keep their file order. Every row
-    is a validation row in exactly one fold. The labels stay on the host (they are the private dev labels)."""
+    is a validation row in exactly one fold. The labels stay on the host (they are the private dev labels).
+
+    Byte conventions (line terminator, final newline, BOM) mirror the files a held-out run receives: fold training
+    files those of `train_csv`, validation files those of `test_csv` (default: `train_csv`), so a program cannot
+    tell a dev fold from a held-out run by file format. Row counts still differ (stated limitation)."""
     header, rows = read_csv(train_csv)
+    if header:
+        header = [header[0].removeprefix("﻿"), *header[1:]]
+    train_style = csv_style(Path(train_csv).read_bytes())
+    test_style = csv_style(Path(test_csv).read_bytes()) if test_csv is not None else train_style
     if target not in header:
         raise ValueError(f"target column '{target}' not in {train_csv}")
     if not 2 <= k <= len(rows):
@@ -74,8 +96,10 @@ def cv_folds(train_csv: Path, target: str, k: int, seed: int, stratify: bool) ->
     folds = []
     for f in range(k):
         valid = [i for i in range(len(rows)) if fold_of[i] == f]
-        folds.append({"train": _csv_bytes(header, [rows[i] for i in range(len(rows)) if fold_of[i] != f]),
-                      "valid_x": _csv_bytes(x_header, [[v for j, v in enumerate(rows[i]) if j != ti] for i in valid]),
+        folds.append({"train": _csv_bytes(header, [rows[i] for i in range(len(rows)) if fold_of[i] != f],
+                                          train_style),
+                      "valid_x": _csv_bytes(x_header, [[v for j, v in enumerate(rows[i]) if j != ti] for i in valid],
+                                            test_style),
                       "labels": [rows[i][ti] for i in valid], "rows": valid})
     return folds
 

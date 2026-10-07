@@ -560,6 +560,11 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
     a = p.parse_args(argv)
+    if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
+        from .sandbox.local import TEST_MODE_ENV
+        if os.environ.get(TEST_MODE_ENV) != "1":
+            raise SystemExit(f"--dev-sandbox runs programs on the host WITHOUT isolation; it is refused unless "
+                             f"{TEST_MODE_ENV}=1 (trusted test code only). Use --docker.")
     store = EvidenceStore(data_dir() / "store")
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,

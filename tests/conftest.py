@@ -9,6 +9,9 @@ def _isolated_data_dir(tmp_path, monkeypatch):
     # scripted test models share one family; runs are recorded as NOT meeting invariant 5 (test_policy.py checks
     # the enforcement itself with this override removed)
     monkeypatch.setenv("CHH_ALLOW_SAME_FAMILY", "1")
+    # pytest is test mode: LocalSandbox (no isolation, trusted test code only) refuses to run without this switch.
+    # Tests of the refusal itself delete it (test_sandbox_hardening.py, test_research.py, test_run_bundle.py).
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
 
 
 @pytest.fixture

@@ -41,6 +41,8 @@ class EvidenceStore:
     def __init__(self, root: Path):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
+        from ..sandbox.base import protect_path
+        protect_path(root)  # blobs hold private labels: no sandbox workspace may overlap the store (invariant 2)
         self.blobs = BlobStore(root / "blobs")
         self._db = sqlite3.connect(root / "evidence.sqlite", check_same_thread=False)
         self._db.executescript(SCHEMA)
