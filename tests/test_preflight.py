@@ -135,3 +135,29 @@ def test_preflight_suite_cli_zero_calls(tmp_path, monkeypatch, capsys):
     rows = json.loads(out.read_text())
     assert [r["task"] for r in rows] and rows[0]["n_test"] == 60 and rows[0]["verdict"] in ("deny", "no objection")
     assert "0 model calls" in capsys.readouterr().out
+
+
+def test_ensemble_wrapper_reproduces_the_stored_vote(tmp_path):
+    """The harness-written wrapper, run as a program, equals vote() of its members' outputs (exact-dev contract)."""
+    import subprocess
+    import sys
+
+    from custom_harness.research.modules import ensemble_code
+    member = ('import argparse, csv\np = argparse.ArgumentParser()\nfor k in ("--train", "--test", "--out"): '
+              'p.add_argument(k)\np.add_argument("--seed", type=int)\na = p.parse_args()\n'
+              'rows = list(csv.reader(open(a.test)))[1:]\nw = csv.writer(open(a.out, "w", newline=""))\n'
+              'w.writerow(["prediction"])\nfor i, r in enumerate(rows): w.writerow([{expr}])\n')
+    exprs = ['"a" if i % 2 else "b"', '"a" if i % 3 else "c"', '"c" if i % 5 else "b"']
+    outs = []
+    (tmp_path / "test.csv").write_text("x\n" + "".join(f"{i}\n" for i in range(30)))
+    for k, e in enumerate(exprs):
+        (tmp_path / f"m{k}.py").write_text(member.format(expr=e))
+        subprocess.run([sys.executable, str(tmp_path / f"m{k}.py"), "--train", "x", "--test",
+                        str(tmp_path / "test.csv"), "--out", str(tmp_path / f"o{k}.csv"), "--seed", "0"], check=True)
+        outs.append([ln for ln in (tmp_path / f"o{k}.csv").read_text().split()[1:]])
+    (tmp_path / "out").mkdir()
+    (tmp_path / "ens.py").write_text(ensemble_code([member.format(expr=e).encode() for e in exprs]))
+    subprocess.run([sys.executable, str(tmp_path / "ens.py"), "--train", "x", "--test", str(tmp_path / "test.csv"),
+                    "--out", str(tmp_path / "out" / "preds.csv"), "--seed", "0"], check=True)
+    got = (tmp_path / "out" / "preds.csv").read_text().split()[1:]
+    assert got == vote(outs) and len(set(got)) > 1
