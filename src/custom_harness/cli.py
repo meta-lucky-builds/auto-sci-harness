@@ -418,6 +418,43 @@ def cmd_finalize(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_memory(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """L5 memory (GOAL §5 L5). Inspection, retraction sync, Kernel-derived negative memory and HUMAN revocation.
+    No command writes free text into memory: every write comes from Kernel certificates through the gate."""
+    from .kernel import Kernel
+    from .memory import MemoryStore, NotReadable, harvest_negatives
+    mem = MemoryStore(Kernel(store), namespace=a.namespace)
+    try:
+        if a.action == "verify-log":
+            problems = mem.verify_log()
+            print(json.dumps({"namespace": a.namespace, "records": len(mem.log()), "intact": not problems,
+                              "problems": problems}, indent=1))
+            return 0 if not problems else 1
+        if a.action == "sync":
+            print(json.dumps({"cascades": mem.sync()}, indent=1))
+        elif a.action == "harvest-negatives":
+            res = harvest_negatives(mem)
+            print(json.dumps([{"entry_id": r.entry_id, "passed": r.passed, "status": r.status.value,
+                               "reasons": list(r.reasons)} for r in res], indent=1))
+        elif a.action == "list":
+            mem.sync()
+            for e in mem.log():
+                if e["type"] == "propose":
+                    eid = e["entry_id"]
+                    tier = mem.tier(eid)
+                    print(f"{eid[:20]}  {mem.status(eid).value:<11} {(tier.name.split('_')[0] if tier else '-'):<3} "
+                          f"{e['entry']['proposal']['kind']:<9} {e['entry']['proposal']['title'][:60]}")
+        elif a.action == "unused":
+            print(json.dumps(mem.unused(), indent=1))
+        elif a.action == "revoke":
+            if not (a.entry and a.reason and a.by):
+                raise SystemExit("revoke needs ENTRY, --reason and --by (the human revoking)")
+            print(json.dumps({"revoked": mem.revoke(a.entry, a.reason, by=a.by)}, indent=1))
+    except NotReadable as e:
+        raise SystemExit(f"memory not readable: {e}") from e
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -511,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
     la = sub.add_parser("ledger-anchor", help="append the ledger head + length to an anchor file outside the store")
     la.add_argument("file")
     sub.add_parser("predictions", help="prediction ledger: VDS and calibration")
+    mm = sub.add_parser("memory", help="L5 memory: list, unused, verify-log, sync, harvest-negatives, HUMAN revoke")
+    mm.add_argument("action", choices=["list", "unused", "verify-log", "sync", "harvest-negatives", "revoke"])
+    mm.add_argument("entry", nargs="?")
+    mm.add_argument("--namespace", default="global")
+    mm.add_argument("--reason")
+    mm.add_argument("--by", help="the human revoking (recorded in the memory log)")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
     t = sub.add_parser("trace")
@@ -526,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                 "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
-                "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)
+                "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory}[a.cmd](a, store)
     finally:
         store.close()
 
