@@ -102,6 +102,8 @@ def check_registry(root: Path = ROOT, registry: str = REGISTRY) -> list[str]:
         tests = f.get("tests") or []
         if f.get("status") == "fixed" and not tests:
             problems.append(f"{fid}: a fixed finding needs at least one test")
+        if f.get("status") == "accepted" and not tests and not str(f.get("not_pinned", "")).strip():
+            problems.append(f"{fid}: an accepted limitation needs a pin test or a 'not_pinned' reason")
         for t in tests:
             why = dangling_test_id(str(t), root)
             if why:

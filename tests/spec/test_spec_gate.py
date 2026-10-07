@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -118,3 +119,33 @@ def test_findings_registry_is_consistent_and_a_dangling_test_id_fails(tmp_path):
     doc["findings"][0]["tests"] = ["tests/test_kernel_exploits.py::test_this_attack_test_was_deleted"]
     (root / museum.REGISTRY).write_text(yaml.safe_dump(doc), encoding="utf-8")
     assert any("dangling test id" in p for p in museum.check_registry(root))
+
+
+sealed = _load("sealed")
+
+
+def test_validation_sets_split_into_stable_disjoint_halves():
+    for name in ("claim-suite", "museum"):
+        halves = sealed.split(name)
+        assert set(halves["dev"]).isdisjoint(halves["sealed"])
+        assert sorted(halves["dev"] + halves["sealed"]) == sealed.items(name)
+        assert halves["dev"] and halves["sealed"]  # both halves exist
+    assert len(sealed.items("claim-suite")) == 51
+    assert sealed.split("honest-corpus") == {"dev": [], "sealed": []}  # not built: stated
+
+
+def test_every_sealed_look_is_ledgered_and_an_edited_look_breaks_the_chain(tmp_path):
+    root = _tree(tmp_path, "tests", "redteam")
+    (root / "redteam" / "sealed_looks.jsonl").unlink(missing_ok=True)
+    assert sealed.look("museum", by="", reason="x", root=root, run=False) == 1  # anonymous looks are refused
+    assert sealed.look("museum", by="owner", reason="milestone check", root=root, run=False) == 0
+    lines = (root / sealed.LOOKS).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2 and '"kind": "look"' in lines[0] and sealed.check_chain(root) == []
+    assert sorted(json.loads(lines[0])["items"]) == sealed.split("museum", root)["sealed"]
+    (root / sealed.LOOKS).write_text(lines[0].replace("milestone check", "nothing to see") + "\n" + lines[1] + "\n",
+                                     encoding="utf-8")
+    assert any("chain broken" in p for p in sealed.check_chain(root))
+
+
+def test_the_committed_look_ledger_is_intact():
+    assert sealed.check_chain() == []

@@ -125,6 +125,7 @@ def main() -> int:
         ("kernel strict types", [PY, "-m", "mypy", "--strict", "src/custom_harness/kernel"]),
         ("red-team registry", [PY, "scripts/museum.py", "--check-only"]),
         ("governance (two-speed Kernel)", [PY, "scripts/governance.py"]),
+        ("sealed-half look ledger", [PY, "scripts/sealed.py", "--check"]),
         ("kernel tests + 100% branch coverage", kernel_step()),
     ]
     if not fast:

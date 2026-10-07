@@ -182,3 +182,120 @@ findings:
     tests: ["tests/spec/test_spec_kernel.py::test_certify_never_evaluates_k3_to_k9_for_an_unregistered_claim"]
     museum: redteam/museum/K-3-guard.patch
     status: fixed
+  # ------------------------------------------------------------------ STATUS §C, open (not museum-able: no fix exists)
+  - id: ADAPTER-EDIT
+    title: no static rejection or test of a harness edit touching an adapter (edits cannot change Python today)
+    invariant: "§10 inv. 13"
+    capability: A1
+    tests: []
+    status: open
+  # ------------------------------------------------------------------ STATUS §D, accepted limitations (pins)
+  - id: D-PARAPHRASE
+    title: a restructured paraphrase of the code passes every copy detector (renamed copies ARE caught now)
+    invariant: "§10 inv. 5 (independent replication)"
+    capability: A0
+    tests: ["tests/spec/test_spec_limitations.py::test_d_paraphrased_copy_is_detected",
+            "tests/spec/test_spec_limitations.py::test_d_paraphrase_control_renamed_copy_is_caught_and_paraphrase_is_not"]
+    status: accepted
+  - id: D-ENCODINGS
+    title: K9 / scrubber miss re-mapped labels (other transformations than the listed encodings)
+    invariant: "§10 inv. 2; §4.3 K9"
+    capability: A2
+    tests: ["tests/spec/test_spec_limitations.py::test_d_remapped_label_run_is_a_leak",
+            "tests/spec/test_spec_limitations.py::test_d_remapped_labels_control_plain_run_is_caught"]
+    status: accepted
+  - id: D-SOCRATIC
+    title: question-shaped directives pass the Socratic filter
+    invariant: "GOAL L4.8 (question-only critic)"
+    capability: A0
+    tests: ["tests/spec/test_spec_limitations.py::test_d_question_shaped_directive_is_dropped",
+            "tests/spec/test_spec_limitations.py::test_d_socratic_control_plain_directive_is_dropped"]
+    status: accepted
+  - id: D-LOCALSANDBOX
+    title: under LocalSandbox (tests only) programs can read the host filesystem
+    invariant: "§10 inv. 1"
+    capability: A2
+    tests: ["tests/spec/test_spec_limitations.py::test_d_local_sandbox_cannot_read_host_files"]
+    status: accepted
+  - id: D-LEDGER-REWRITE
+    title: a consistent whole-chain rewrite by a store writer passes verify() (tamper-evident, not tamper-proof)
+    invariant: "§4.3 K2 (event order)"
+    capability: A4
+    tests: ["tests/spec/test_spec_limitations.py::test_d_consistent_chain_rewrite_is_detected_without_an_anchor",
+            "tests/test_kernel_integrity.py::test_external_anchor_detects_a_rewritten_or_truncated_ledger"]
+    status: accepted
+  - id: D-LEAKSCAN-PURPOSE
+    title: a peek mislabelled 'leakscan' by host code is not counted by K2 (trust boundary)
+    invariant: "§4.3 K2"
+    capability: A3
+    tests: ["tests/test_review_kernel.py::test_r1_label_read_under_a_registered_claim_on_another_target_is_peeking"]
+    status: accepted
+  - id: D-DEV-VS-HELDOUT
+    title: a program can tell dev folds from held-out runs by data size or content
+    invariant: "§10 inv. 6"
+    capability: A2
+    tests: []
+    not_pinned: "needs a full research-loop run with an adversarial program; no Kernel-level predicate exists to assert"
+    status: accepted
+  - id: D-RESOURCES
+    title: no Docker disk quota; full stdout/stderr in host memory; zip-bomb bundle member read into memory
+    invariant: "§10 inv. 7"
+    capability: A2
+    tests: ["tests/test_kernel_integrity.py::test_bundle_reads_are_bounded_and_refuse_zip_bombs"]
+    not_pinned: "the disk-quota and memory parts need real Docker and would exhaust the shared laptop; the bundle part is now bounded (docs/kernel.md §6)"
+    status: accepted
+  - id: D-TOOL-NODE
+    title: a tool node could put training rows into a prompt (inflates dev scores; held-out stays safe via K6)
+    invariant: "§10 inv. 6"
+    capability: A1
+    tests: []
+    not_pinned: "needs an evolve-loop scenario with a scripted model; not written (time); inferred risk only"
+    status: accepted
+  - id: D-INFRA-EXCLUSION
+    title: candidate-only infra exclusions rely on a sign test with an equal-exposure assumption
+    invariant: "§10 inv. 16"
+    capability: A1
+    tests: []
+    not_pinned: "statistical limitation; a single test cannot show it"
+    status: accepted
+  - id: D-ADAPTIVE-REUSE
+    title: Bonferroni over registered claims is a practical defence, not a guarantee, against adaptive test-set reuse
+    invariant: "§10 inv. 6"
+    capability: A1
+    tests: []
+    not_pinned: "statistical limitation (GOAL §16.2 freeze-then-mint is the fix)"
+    status: accepted
+  - id: D-BUNDLE-LABELS
+    title: bundles contain hidden labels and must never be agent-visible
+    invariant: "§10 inv. 2"
+    capability: A5
+    tests: []
+    not_pinned: "by design; enforced only by where bundles are stored"
+    status: accepted
+  - id: D-TRUSTED-STORE
+    title: trusted host modules hold the store (trust boundary not enforced in code)
+    invariant: "§10 inv. 3"
+    capability: A3
+    tests: []
+    not_pinned: "the fix is flowk's kerneld process boundary (§16.5.2); its tests will cover it"
+    status: accepted
+  # ------------------------------------------------------------------ found by this workstream (2026-10-07)
+  - id: KD1
+    title: a development dataset holding the held-out examples with private labels passes K6 (differential run)
+    invariant: "§4.3 K6 (targets never seen during development)"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_kd1_a_development_dataset_sharing_held_out_examples_fails_k6",
+            "tests/spec/test_spec_kernel.py::test_kd1_attack_really_certifies_today"]
+    status: open
+  - id: KD2
+    title: K7 judges risk on the subset of targets that have statistics (label still REJECTED)
+    invariant: "§4.3 K7"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_kd2_k7_fails_when_any_target_has_no_statistics"]
+    status: open
+  - id: ASOF
+    title: verify() re-derives on the current ledger, so later events make an honest certificate look forged
+    invariant: "§10 inv. 17 (STALE, not forged)"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_mr_as_of_stability_later_events_do_not_change_verify"]
+    status: open
