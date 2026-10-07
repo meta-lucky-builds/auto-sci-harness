@@ -211,6 +211,9 @@ baseline prior. This gives:
 - **Validated Discovery Score (VDS)**: the sum of information gain from confirmed risky predictions, minus penalties for
   confident misses. VDS is the main objective that L6 optimises (§6.3). It can't be gamed by safe claims (K7) or by
   hiding failures, because every pre-registration is counted, resolved or not.
+  **Correction (2026-10-07, finding F2, verified by reading `kernel/predictions.py`).** As built, p0 is measured after
+  the outcome, so a miss scores positive whenever q < p0. A hopeless tiny-δ claim at q = 0.05 earns +0.93 bits, so
+  the sentence above is FALSE today. The fix is §16.4: VDS becomes an e-process with p0 fixed at registration.
 - **Released benchmark**: the ledger plus the time-split set becomes the public benchmark for "discovered knowledge vs
   ground truth" that 2508.14111 says is missing.
 
@@ -590,7 +593,9 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 ## 10. Hard invariants (never violated; each has a test)
 
 1. No agent-written code outside the sandbox.
-2. No hidden label, grader or sealed-split artifact inside any agent-visible mount, prompt or trace.
+2. No hidden label, grader or sealed-split artifact inside any agent-visible mount, prompt or trace. This includes
+   copies that sit in the execution environment (packages or datasets bundled in the sandbox image) and truth that
+   can be regenerated from anything agent-visible (a generator's random stream or seed). §16.1.
 3. No certificate without the Kernel; no Kernel path with an LLM call.
 4. No persistent write (memory, skill, harness, weights) without evidence at the tier floor.
 5. No critic (or independent replicator) from the same model family as the proposer (author) it judges.
@@ -609,6 +614,21 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 15. Only a human approves an approval node, and an approval binds only the hashed item it names.
 16. No harness edit is accepted without passing the leave-one-family-out gate (and leave-one-domain-out once ≥ 2
     domains exist).
+
+Added 2026-10-07 (§16; each needs its test before it counts as met):
+17. Everything a verdict depends on is fixed when the claim is pre-registered: its significance level, its scoring
+    baseline p0 and its reliability requirement. Later events never change a verdict silently. They can only make a
+    certificate STALE, which is reported apart from "forged", or lead to an explicit retraction.
+18. No target-derived information reaches an agent-visible surface except as a ledgered release that K4 counts.
+    Continuous held-out values never reach the evolver.
+19. Every attack test kills its attack. Each red-team finding has a re-introduction patch that at least one test
+    fails on, and a test that has stopped exercising its attack is a gate failure.
+20. The verifier's own validation sets are used like held-out data. The honest corpus, the museum and the claim
+    suite each have a development half and a sealed half, and every look at a sealed half is ledgered.
+21. Replayed or simulated model output is never evidence. Cheap proxies (preflight, screens, cassettes) may only
+    deny or prune; they never grant.
+22. At least one check exists that no AI agent designed or can see. It is held by a human, and an attack from
+    outside the agent pipeline is run at least once per milestone.
 
 ---
 
@@ -658,6 +678,19 @@ Each milestone updates `STATUS.md` and is committed with its tests.
 6. The human-owned prohibited list and review standard for life-science protocols (biosafety / dual use) before
    any life-science adapter is approved.
 7. Adapter validation standards per evidence class (minimum fault-injection suite, golden cases, tolerances).
+8. Parameters for the §16 upgrades. The upgrades themselves are adopted; these values are still open:
+   - the slot count S_T per target and α_T (§16.4);
+   - the preflight threshold θ (§16.8);
+   - ε_max and β presets for the K3 reliability demonstration (§16.4);
+   - the δ floor for large minted test sets (§16.2);
+   - the model-call budget for salts (§16.9) and the detectability bound (≤ 0.2 at 40 + 40 presentations, or pay
+     for ≤ 0.1);
+   - drand fetch or human dice for the public beacon (§16.3);
+   - who holds the offline secret (ideally a second person);
+   - whether nondeterministic claims are allowed at all (§16.5);
+   - who rules on feature legitimacy (§16.5);
+   - the clawback policy (§16.10);
+   - adding genuinely null tasks to the real pool vs the 10–90% admission filter.
 
 ## 14. Glossary
 - **Certificate**: Kernel output stating which checks a claim passed, at what tier.
@@ -710,3 +743,222 @@ class), after the prohibited list exists.
 
 **Exit (M5):** see §11; additionally each domain's LODO gate is live, and the scorecard (§2, axis D) gains one
 hard-verifier problem per domain.
+
+---
+
+## 16. Architecture upgrade (2026-10-07): prevention before measurement, truth minted after the freeze
+
+**Where this comes from.**
+- Fifteen agents reviewed the design: four single-lens reviews, two scouts of real systems, a constraint solver, a
+  product review, five creative thinkers who debated over two rounds, and two competing evaluators who graded
+  about 95 ideas as security and alignment reviewers.
+- The texts, toy simulations and grades are summarised in `code_review/upgrade_review_2026-10-07/` (README.md indexes it).
+- **Honest status:**
+  - Every number below comes from toy simulations or from reading code. Nothing has been run on the real system.
+  - Both evaluators independently found **no breakthrough**. The real advance is an architecture: prevention in
+    front of measurement, truth created after the freeze, tests of the tests, and honest accounting throughout.
+- The items were adopted under the owner's delegation of 2026-10-07 ("incorporate the ones which upgrade"). The
+  parameters stay open (§13.8).
+
+### 16.1 Close the answer keys first (findings; their preconditions verified by reading code)
+- **BUNDLED-DATA.** The 5 real tasks are exported with scikit-learn's bundled datasets (`research/suite.py`), and
+  the candidate sandbox image ships the same labelled copies. That is 9 of 21 suite tasks.
+  - **Fix:** a candidate image with every bundled dataset removed. The full image is used only by the trusted
+    exporter. A truth scan checks the image, and a missing candidate image is refused.
+  - Fix in progress on branch `m3-fix-bundled-data`.
+- **COUPLED-PRNG.** Every synthetic generator draws features, labels and the split from one `random.Random`
+  stream with fixed seeds. That is 12 of 21 tasks.
+  - Anyone who can read the generator code can regenerate the held-out labels. In a toy, the stream state could
+    also be cloned from the features alone; whether that works on our real files is untested.
+  - **Fix:** independent keyed streams (HMAC per purpose). Seeds come from `draw()` after the freeze, and the
+    generators are treated as human-approved adapters.
+- Until both are fixed, no M2 certificate on the affected tasks is trusted.
+- Invariant 2 (§10) now names this class: truth can sit in the environment or be regenerable, not only in mounts.
+
+### 16.2 Freeze, then mint the truth (the strongest principle; a known guarantee applied systematically)
+- **What it is.** For synthetic, simulated and future targets, the held-out truth is created only after the claim,
+  edit, Kernel version or screening rule has been hashed and anchored. It is drawn from independent keyed streams.
+  The guarantee is the classic fresh-sample one, as in CASP, Procgen and LiveBench.
+- **What it removes, for those targets:**
+  - label canaries;
+  - copy-hunting;
+  - label-swap replays;
+  - the leak role of null salts;
+  - test-set wear (every target is fresh).
+- **Combined with large test sets.** Pair it with **small train / large test**: about 20k minted test rows takes the
+  minimum certifiable effect from about 0.135 to about 0.005 (computed). It is the cheapest way to more certifiable
+  signal, and it needs a δ floor (§13.8) so that trivial effects do not become certifiable.
+- **Limits:**
+  - Fixed public datasets cannot be minted. They are flagged as **retrospective targets** and keep the §16.5
+    controls.
+  - Minted claims are generator-scoped, which makes the generator family the main Goodhart surface. Families rotate
+    under LOFO.
+
+### 16.3 One commitment primitive: `draw(purpose, ...)`
+- Every choice made after pre-registration comes from one function: held-out subsample, seeds, target, gate tasks,
+  minting, salt assignment and check parameters.
+- A per-purpose table fixes the inputs:
+  - purposes whose object is frozen before the draw use a public beacon only, and can be re-run at once;
+  - salt assignment uses an offline human secret plus the beacon.
+- The secret must appear nowhere agents can read, scratchpads included; a grep check enforces this.
+- Restatement of commit-reveal; adopted because it replaces four ad-hoc mechanisms.
+
+### 16.4 Statistics fixed at registration (invariant 17)
+- **VDS as an e-process (fixes F2).** p0 is the claim's fixed level, set at registration, and K1 refuses q < p0.
+  Ville's inequality then bounds P(sup VDS >= log2 1/alpha) <= alpha under the global null. Forecasting skill is
+  scored separately against a pinned reference forecaster. Answers §13.2.
+- **Per-target alpha-account** for retrospective targets:
+  - a human opens slots for each target;
+  - each slot is tested at a fixed level, whatever the order of claims;
+  - a target retires when its slots run out.
+
+  This makes test-set wear an explicit budget and fixes R2-2 by construction. The current declared
+  `n_comparisons` bound stays until it is built.
+- **`verify` as of the certificate's ledger prefix (fixes F3).** Later events lead to STALE, never to "forged".
+- **K3 as a zero-failure reliability demonstration.** The claim declares eps_max and beta, and K3 passes only after
+  ceil(ln beta / ln(1 - eps_max)) consecutive clean replays. In the toy, a 50%-flaky program passes about 3% of the
+  time instead of 50%. Closes the R1-F3 residual.
+
+### 16.5 Information-flow prevention, in build order (invariant 18)
+1. **Hermetic, entropy-pinned sandbox.** The Kernel seeds the clock and urandom, so a program cannot leave the
+   exact-check class by behaving randomly.
+2. **Kernel process boundary ("kerneld").** Only the Kernel process mounts the store and private blobs. Host
+   modules get narrow per-claim tokens. This makes the vault the sole path to the truth, which every check below
+   assumes.
+3. **Release ledger and verdict embargo.** Every transfer of target-derived information is a typed release, and K4
+   counts the transcripts the release policy allows. The evolution score drops its continuous held-out term.
+   - This makes Bonferroni a real adaptive guarantee, provided the log is complete. The log's completeness is tested
+     by step 5.
+   - It closes F1 (simulated: 55.5% false certification at nominal 5% under continuous feedback).
+4. **Non-interference replay against the stored production output.** Re-run the frozen program with every declared
+   copy of the truth replaced, using maximally different worlds: flipped labels plus a constant world.
+   - Any change in its **decisions** fails the check. Score bytes are not compared, because float accumulation order
+     changes them for honest code.
+   - In toys this caught every evasion device built during the review (defeat device, 2% stealth leak, amplifier,
+     test-world detector), with 0 honest false alarms.
+   - Nondeterministic claims fall back to a paired McNemar dependence test, which has a printed stealth margin of
+     about 1 point.
+5. **Campaign-scope cassette replay.** Replay a whole recorded campaign with fake labels, the releases pinned and the
+   model calls served from cassettes. Any cassette miss or decision change means held-out information reached an
+   agent. This tests the release ledger's completeness at zero model calls.
+6. **What output checks cannot see.**
+   - Leak columns already in raw data: a provenance tag on each feature, a dominance screen, and a human ruling.
+   - Truth memorised in model weights: only minted, future or human-returned targets avoid it.
+7. **Transductive check (F4).** Predictions must be invariant to permuting or subsetting the other test rows. This is
+   an ML-adapter validation case.
+8. **Kernel reasons are a closed set of codes.** Free-text exception messages could carry data out of the Kernel.
+
+### 16.6 Tests of the tests (invariants 19, 20)
+- **Loophole museum plus mutation gate.**
+  - Every past finding gets a patch that re-introduces it, and at least one test must fail on it.
+  - Mutation score >= 90% on the vault, the ledger and the K2/K4/K6 code, with equivalent mutants <= 10% and each one
+    justified.
+  - The gate's Kernel test list is derived from the files, never listed by hand. It held merge-conflict markers
+    during the 2026-10-07 merge.
+- **Clean-room reference model plus metamorphic relations.**
+  - The reference model is a pure, <= 400-line model of K2/K4/K6 and the label lattice, written from this document
+    without reading `checks.py`. It is differentially tested against the Kernel on 1e5 generated ledger histories.
+  - The relations: irrelevance, permutation, renaming, fail-closed monotonicity, honest composition, twin
+    equivalence, as-of stability and arm swap.
+- **The verifier's exams wear out (the most novel item; toy evidence only).** A rule patched until it passes a
+  "0 flips on 500" screen ships every time, with a true flip rate of 0.94% against the claimed <= 0.6%. So every
+  verifier validation set gets a dev half and a sealed half, and every look is ledgered.
+- **Plan-code divergence.** The test actually executed must equal the registered test (the COMPare lesson). Make
+  this explicit in K4.
+
+### 16.7 Governance (invariant 22)
+- **The examinee writes the exam.** AI agents wrote the Kernel, its tests and its reviews. So at least one check is
+  held by a human and not visible to agents, and one attack per milestone comes from outside the agent pipeline.
+- **Two-speed Kernel.**
+  - The core (the §10 invariants and the K0-K9 pass conditions) changes only in scheduled windows, with a 7-day
+    cooling-off.
+  - The parameter list changes on evidence.
+  - Changes that only tighten checks may merge at once.
+- **Reputation may only raise scrutiny.** It never lowers it (the xz-utils lesson).
+- **Self-reported fields** (for example a dataset role not approved by a human) cap the certificate tier.
+
+### 16.8 Yield: more certified signal per model call (none of this weakens a check; invariant 21)
+- **Certifiability preflight.** The real K4/K6/K7 functions run on outcomes simulated from public numbers before
+  pre-registration, and a claim below theta is not registered. It also gives a zero-call audit of the suite before
+  the M2 exit budget is spent.
+- **Ranking and generation.**
+  - Execution is the ranker: there is no tournament by default.
+  - One call writes 2-3 scripts.
+  - Improve calls are skipped when dev racing provably cannot pass.
+  - Codex runs from an empty working directory.
+  - Estimate: 13 calls become about 5-6 per run (inferred).
+- **Tie-aware selection.** Among statistically tied candidates, pick the one with the lowest projected runtime, then
+  the smallest code. Stored out-of-fold predictions give dedup and one pre-declared exact-dev ensemble.
+- **Cassettes** for development: recorded runs become zero-call regression tests.
+- **CPU-time limits with a contention witness**, so machine load stops causing policy failures. A program that only
+  sleeps is still charged.
+- **Second model family, admitted by role exams** (unblocks invariant 5).
+  - Integrity rests on the Kernel, so a weaker critic, judge or replicator costs yield, not integrity.
+  - Candidates: a local 3-7B open-weights model, or a free official API within its terms.
+  - Admission requires a role exam on dev and public data only, with miss correlation against Codex phi < 0.8.
+
+### 16.9 Measurement, budgeted (salts)
+- **Positive salts first**, scored on whether they recover the known planted effect. They are the only defence found
+  against the "amplifier" device.
+- **Null salts** serve only as a gross-failure alarm. On real data they carry a tell, so they need genuinely null
+  tasks in the pool (§13.8).
+- A detectability exam must pass before any salt is used (d = TPR - FPR <= 0.2 at 40 + 40). Salts stay out of the L6
+  gate and out of VDS.
+- They need a model-call budget, so they are an owner decision.
+
+### 16.10 Capabilities that fall out of the architecture
+- **Bounded-null certificates in exclusion-limit form.** The sensitivity is frozen before the data, proved by a
+  positive plasmode control, and lucky limits are clipped as in physics. This turns honest negative results into a
+  product and answers §13.5. It is a K1/K7 change, built after §16.4.
+- **Claim Audit (`chh audit`).**
+  - A published sklearn-scale claim becomes a typed claim, approved by a human as faithful to the paper.
+  - It is pre-registered before fresh external data is touched, and the baseline is re-run under an identical
+    contract.
+  - The verdict is a certificate, "not confirmed" (naming the failing check), "inconclusive", or "could not run".
+  - No verdict about a named paper is published without human approval and a right of reply.
+- **Label-dependence audit of published code.** Run a pipeline twice with its test labels flipped. Changed
+  predictions show it reads test labels. Pipelines with label-dependent splits end INCONCLUSIVE.
+- **Resweep.** Re-check archived certificates when the rules change.
+  - It applies only after the rule passes a screen on the honest corpus's sealed half.
+  - Statuses are typed: STALE under a new rule, new data, uncheckable, or integrity failure.
+  - Clawback is graded and reversible, and VDS is split into provisional and seasoned.
+  - Blocked until the honest corpus exists. Resweep verdicts are releases (§16.5).
+- **Emergence rule.** Novelty may steer budget, never acceptance. Generated task families enter the evolve split
+  only.
+
+### 16.11 Not adopted (reason)
+- **Dropped:**
+  - Permuted-label leak checks and nulls: beaten by a defeat device, and blind to in-feature leaks.
+  - Seed-subset fraud proofs: reverse p-hacking (96% of honest certificates broken at 1.5 delta).
+  - Optimistic acceptance.
+  - Attempt rate as a gate or fitness term: it rejects honest edits and selects for quieter cheating.
+  - Escrowed credit, the alpha-market and credibility bankrolls: noise at our scale.
+  - Expert priors for K7: overconfidence makes K7 easier to pass.
+  - Baseline blinding: the agent can recompute the baseline.
+  - Capture-recapture as a release gate: unstable; reported as a floor only.
+  - Thresholdout, alpha-investing and Holm in an online family.
+- **Deferred as incremental for now** (the gain is real but small next to its cost):
+  - Merkle inclusion proofs;
+  - validity intervals;
+  - diverse double execution;
+  - designer-calibration ledger;
+  - Kernel reliability diagram, until salts exist;
+  - ledger-calibrated forecasts, until >= 30 resolutions exist;
+  - MAP-Elites archive, interestingness and FunSearch-lite on LP;
+  - BixBench import;
+  - certified leaderboard;
+  - copilot mode;
+  - OpenML upload-date time split (contested: useful vs a restatement);
+  - campaign world model, blind rediscovery and baseline-anchored mode.
+
+### 16.12 Remaining risks even if all of §16 is built (stated, not solved)
+- Truth memorised in model weights.
+- The Kernel certifies procedure, not meaning; claims can be true but trivial or generator-scoped.
+- Goodhart onto generator families and small LOFO pools.
+- An evaluation-aware optimiser that sandbags; detectability is bounded only at <= 0.2.
+- Correlated designers (one AI family).
+- One human acting as approver, blinder and judge.
+- Supply chain and trusted base: the image, pip packages, the Codex CLI, WSL2, SQLite.
+- Side channels.
+- About alpha*N false certificates in aggregate.
+- If honest pipelines cannot be made byte-deterministic, the strongest checks fall back to bounded-margin statistics.
