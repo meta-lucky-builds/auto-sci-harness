@@ -471,7 +471,9 @@ def test_bundle_edge_paths(tmp_path, base):
     assert rep.reproduced_label == "REJECTED"
     with zipfile.ZipFile(bundle) as zin:
         m = json.loads(zin.read("manifest.json"))
-    cert_blob = next(row for row in m["ledger"] if row[1] == "certificate")[2]
+    # THIS certificate's entry (the bundled ledger also holds earlier certificates of the same claim: picking the
+    # first certificate row would silently drop another certificate's blob and stop testing this path)
+    cert_blob = next(row for row in m["ledger"] if row[1] == "certificate" and m["cert_hash"] in row[2])[2]
     cert_blob = json.loads(cert_blob)["blob"]
     for name, drop in (("holed.zip", next(b for b in m["blobs"] if b != cert_blob)), ("nocertblob.zip", cert_blob)):
         with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / name, "w") as zout:
@@ -480,6 +482,7 @@ def test_bundle_edge_paths(tmp_path, base):
                     zout.writestr(n, zin.read(n))
         rep = reproduce_bundle(tmp_path / name, fresh)  # must report, never crash, whichever blob is missing
         assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems), rep.problems
+        assert (name == "nocertblob.zip") == ("certificate content missing from the bundle" in rep.problems), name
     with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / "nocert.zip", "w") as zout:
         m = json.loads(zin.read("manifest.json"))
         m["ledger"] = [row for row in m["ledger"] if row[1] != "certificate"]

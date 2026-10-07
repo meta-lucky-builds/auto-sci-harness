@@ -138,7 +138,7 @@ def _views(text: str) -> list[tuple[str, str]]:
         run = m.group().rstrip("=").replace("-", "+").replace("_", "/")
         for off in range(4):
             chunk = run[off:]
-            chunk = chunk[:len(chunk) - len(chunk) % 4]
+            chunk = chunk[:-1] if len(chunk) % 4 == 1 else chunk + "=" * (-len(chunk) % 4)  # keep the tail
             views.append(("base64-encoded", base64.b64decode(chunk).decode("utf-8", "ignore")))
     return views
 

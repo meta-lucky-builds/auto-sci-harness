@@ -158,6 +158,8 @@ ML_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
     ("Student-t interval covers a known mean", lambda: mean_t_interval([1.0, 2.0, 3.0], alpha=0.05).lo < 2.0
      < mean_t_interval([1.0, 2.0, 3.0], alpha=0.05).hi),
     ("planted canary is detected", lambda: bool(leak.scan_text("x CHH-CANARY-ab12 y", "t", ["CHH-CANARY-ab12"], []))),
+    ("base64-encoded planted canary is detected",  # base64 of "x CHH-CANARY-ab12 y"
+     lambda: bool(leak.scan_text("eCBDSEgtQ0FOQVJZLWFiMTIgeQ==", "t", ["CHH-CANARY-ab12"], []))),
     ("multi-column predictions are refused", lambda: _raises(lambda: parse_predictions(b"prediction\n1,2\n"))),
 )
 
