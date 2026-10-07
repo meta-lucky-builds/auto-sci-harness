@@ -10,6 +10,7 @@ Rate limits used for pacing (published guidance, conservative where it is vague)
   doi.org handle API: no published figure.                                     -> 1.0 s
   NCBI E-utilities: 3 requests/s without an API key (we send no key).          -> 0.34 s
   bioRxiv API: no published figure.                                            -> 1.0 s
+  Europe PMC (www.ebi.ac.uk): no published figure; EMBL-EBI blocks loads that hurt others. -> 1.0 s
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ from .normalize import strip_markup
 from .records import Identifier, PaperRecord
 
 PACING = {"export.arxiv.org": 3.0, "api.semanticscholar.org": 1.0, "api.openalex.org": 0.2,
-          "api.crossref.org": 1.0, "doi.org": 1.0, "eutils.ncbi.nlm.nih.gov": 0.34, "api.biorxiv.org": 1.0}
+          "api.crossref.org": 1.0, "doi.org": 1.0, "eutils.ncbi.nlm.nih.gov": 0.34, "api.biorxiv.org": 1.0,
+          "www.ebi.ac.uk": 1.0}
 # OpenAlex source id of bioRxiv, used to restrict searches to it (INFERRED from OpenAlex's source listing, not
 # verified by a live request in this build; a wrong id makes bioRxiv searches return nothing, never wrong papers).
 BIORXIV_OPENALEX_SOURCE = "S4306402567"

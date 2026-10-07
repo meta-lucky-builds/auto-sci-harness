@@ -25,7 +25,7 @@ from typing import Any, Literal, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from .normalize import authors_match, quote_support, titles_match
-from .records import LookupResult, text_as_of
+from .records import LookupResult, full_text_as_of, text_as_of
 
 
 class Resolver(Protocol):
@@ -70,7 +70,9 @@ def check_citation(c: Citation, resolver: Resolver, retrieved_ids: Collection[st
     authors: dict[str, Any] = {**unchecked, "claimed": list(c.authors)}
     texts: list[str | None] = []
     text_note = ""
+    ft_note = ""
     envelope = None
+    ft_envelope = None
     found_ids: set[str] = set()
 
     if not c.id:
@@ -105,13 +107,25 @@ def check_citation(c: Citation, resolver: Resolver, retrieved_ids: Collection[st
             if as_of is not None and not text_as_of(rec, as_of):
                 text_note = f"stored text was revised after the as-of date {as_of} (updated {rec.updated})"
             else:
-                texts = [rec.abstract, rec.full_text]
+                texts = [rec.abstract]
+                if rec.full_text_date is not None and not full_text_as_of(rec, as_of):
+                    ft_note = (f"the full text is dated {rec.full_text_date}, after the as-of date {as_of}: "
+                               f"not usable, and the quote is not in the abstract")
+                elif rec.full_text and full_text_as_of(rec, as_of):
+                    texts.append(rec.full_text)
+                    ft_envelope = rec.full_text_envelope
+                elif rec.full_text:
+                    ft_note = (f"the full text has no date to place it on or before the as-of date {as_of}: "
+                               f"not usable, and the quote is not in the abstract")
 
     quotes = []
     for q in c.quotes:
         status, reason = quote_support(q, texts)
         if status == "unchecked" and text_note:
             reason = text_note
+        # a full text exists but cannot be used as of T: absence from the abstract proves nothing (three-valued)
+        if status == "unsupported" and ft_note and quote_support(q, [])[0] == "unchecked":
+            status, reason = "unchecked", ft_note
         quotes.append({"quote": q, "status": status, "reason": reason})
 
     if retrieved_ids is None:
@@ -133,7 +147,7 @@ def check_citation(c: Citation, resolver: Resolver, retrieved_ids: Collection[st
     overall = "failed" if statuses & _BAD else "unverified" if statuses & _UNKNOWN else "verified"
     return CitationResult(key=c.key, status=overall, id=ident, title=title, year=year, authors=authors,
                           quotes=quotes, retrieval=retrieval, reasons=reasons,
-                          provenance={"envelope": envelope, "snapshot": snapshot,
+                          provenance={"envelope": envelope, "full_text_envelope": ft_envelope, "snapshot": snapshot,
                                       "as_of": as_of.isoformat() if as_of else None})
 
 
