@@ -109,8 +109,12 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
     rows and validation features: never the run workspace, which holds the full public training file and hence
     every validation label (a program reading it could score itself perfectly on dev). The workspace layout,
     file names, command line and seed are those of held-out runs (kernel.execution.run_program), so a program
-    cannot tell a dev fold from a held-out evaluation by names; it still can by data size or content (stated
-    limitation). Predictions are concatenated in fold order, which is the order of the private dev labels. The
+    cannot tell a dev fold from a held-out evaluation by names, and the fold files use the byte conventions of the
+    held-out input files (data.cv_folds). It still can by ROW COUNTS (stated limitation, not fixable without changing
+    the estimator): a fold trains on (k-1)/k of the public rows and predicts 1/k of them, so len(test)/len(train) is
+    1/(k-1) on dev but n_test/n_train held-out, and the training size differs from the profile's row count. Impact is
+    bounded: dev scores only select and forecast; evidence is the held-out runs the Kernel replays.
+    Predictions are concatenated in fold order, which is the order of the private dev labels. The
     first failing fold fails the whole evaluation; its diagnostics are returned (with "fold" set)."""
     task = _task(state)
     sb = _sb(ctx)
@@ -186,7 +190,8 @@ def setup(state, params, ctx: ModuleContext):
     # setup is a protected node, so the evolver cannot change how dev evidence is produced.
     k, split_seed = int(params.get("dev_folds", 5)), int(params.get("split_seed", 0))
     stratified = task.metric in M.CLASSIFICATION
-    folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified)
+    folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified,
+                     test_csv=_ws(ctx, f"data/{task.test_features_file}"))
     labels = [y for f in folds for y in f["labels"]]  # fold order = the order of out-of-fold predictions
     from ..kernel import EvidenceClass, Ledger
     from ..kernel.adapters import resolve
