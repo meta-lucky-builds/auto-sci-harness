@@ -33,7 +33,7 @@ from typing import Any
 from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import mean_t_interval, paired_example_interval
-from . import lp
+from . import lp, sim
 from .claim import EvidenceClass, canonical_json
 from .execution import ExecutionError, parse_predictions
 from .ledger import Entry, Ledger
@@ -196,8 +196,13 @@ LP_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
      lambda: bool(lp.bounds(canonical_json(_LP_P), canonical_json(_LP_C), Fraction(10**lp.MAX_DIGITS)))),
 )
 
+# simulated class: exact_module names the pinned simulator module (SIMULATOR, VERSION, scope_phrase, check, bounds)
+SIM = AdapterSpec(
+    name="sim", version="1", classes=frozenset({EvidenceClass.SIMULATED}), modules=("custom_harness.kernel.sim",),
+    metrics=frozenset({"sim_value"}), exact_module="custom_harness.kernel.sim")
+
 REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
-    "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS)}
+    "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS), "sim": (SIM, sim.SIM_CHECKS)}
 
 
 def validate(checks: tuple[tuple[str, Callable[[], bool]], ...]) -> list[str]:

@@ -27,6 +27,9 @@ VG_LADDER = {
     "CERTIFIED-EXACT": "exact, re-checkable certificate of the stated computation on the registered instance (VG: "
                        "executable/exact verification; says nothing about the computation's importance or whether "
                        "the instance models anything real)",
+    "CERTIFIED-SIMULATED": "re-executed, converged simulation in the named pinned simulator (VG: executable "
+                           "verification within the simulator; certifies the simulator's answer, not that the "
+                           "simulator matches reality)",
     "REJECTED": "no verification claimed",
 }
 
@@ -35,6 +38,7 @@ class Label(StrEnum):
     CERTIFIED_VALIDATED = "CERTIFIED-VALIDATED"
     CERTIFIED_INTERNAL = "CERTIFIED-INTERNAL"
     CERTIFIED_EXACT = "CERTIFIED-EXACT"  # computational class: an exact certificate re-checked by an approved adapter
+    CERTIFIED_SIMULATED = "CERTIFIED-SIMULATED"  # simulated class: holds in the named simulator only (GOAL §4.7)
     SUPPORTED = "SUPPORTED"  # judge/retrospective evidence only; not issued by Kernel v1
     REJECTED = "REJECTED"
 

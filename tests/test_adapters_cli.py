@@ -43,3 +43,17 @@ def test_research_setup_fails_fast_without_an_approved_adapter(tmp_path, rings_t
         unapproved.close()
     assert res.status == RunStatus.FAILED and "no human-approved adapter" in res.detail
     assert llm.requests == []  # failed at setup: no model call made
+
+
+def test_cli_approve_adapter_sim_runs_its_validation_and_records_the_human(capsys):
+    """The simulator adapter is usable only after this HUMAN step (invariant 13); tests never approve it elsewhere."""
+    assert main(["approve-adapter", "sim", "--approver", "alice"]) == 0
+    out = capsys.readouterr().out
+    assert "adapter sim v1" in out and '"approver": "alice"' in out
+    s = EvidenceStore(data_dir() / "store")
+    try:
+        (entry,) = Ledger(s).entries("adapter_approval")
+        assert entry.body["name"] == "sim" and entry.body["classes"] == ["simulated"]
+        assert entry.body["validation"]["failed"] == [] and entry.body["validation"]["checks"] >= 15
+    finally:
+        s.close()
