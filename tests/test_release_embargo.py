@@ -122,3 +122,29 @@ def test_export_shows_verdict_labels_only_and_records_the_release(store, tmp_pat
     assert "CERTIFIED-INTERNAL" in text  # the verdict label is shown
     assert held_mean not in text and "0.61" not in text, "a continuous held-out value reached the export"
     assert [(r["channel"], r["note"]) for r in released(store, "e-held")] == [("export", "export.run:verdict")]
+
+
+# ---------------------------------------------------------------- the gate decision bit is a pinnable release
+def test_gate_decision_is_emitted_and_pinnable(store, tmp_path):
+    from test_evolve_evidence import _gen
+    rec_ev = None
+    res, rec_ev = _gen(store, tmp_path)
+    assert res.accepted  # control: this generation is accepted on its own
+    from test_evolve import seed_spec
+    from test_evolve_evidence import CostTable, _gain, _tasks
+    pinned = Releases(None, mode="replay", pins={})
+    ev = CostTable(store, _tasks(tmp_path), seed_spec().spec_hash(), _gain, lambda a, t, s: _tokens100())
+    ev.releases = pinned
+    res2, _ = _gen(store, tmp_path, evaluator=ev)
+    assert [m.split("|")[-1].split("#")[0] for m in pinned.misses] == ["evolve.gate:decision"]
+    key = pinned.misses[0].rsplit("#", 1)[0]
+    flip = Releases(None, mode="replay", pins={key: [False]})
+    ev2 = CostTable(store, _tasks(tmp_path), seed_spec().spec_hash(), _gain, lambda a, t, s: _tokens100())
+    ev2.releases = flip
+    res3, _ = _gen(store, tmp_path, evaluator=ev2)
+    assert res3.accepted is False and flip.misses == []  # the pinned (recorded) decision bit was used
+
+
+def _tokens100():
+    from custom_harness.records import Cost
+    return Cost(prompt_tokens=100)
