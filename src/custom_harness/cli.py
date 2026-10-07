@@ -341,6 +341,42 @@ def cmd_approve_adapter(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §4.7, invariant 15): approve a Lean theorem statement (a chh-lean-statement/1 JSON file).
+    Prints exactly what is approved, registers it as an artifact and records the approval, bound to its hash. This
+    is the ONLY code path that writes a `statement_approval` ledger entry; a formal claim's K1 requires one."""
+    import hashlib
+
+    from .kernel import Kernel
+    from .kernel.formal import FormalError, hygiene, parse_statement
+    from .kernel.vault import VaultError
+    data = Path(a.file).read_bytes()
+    try:
+        st = parse_statement(data)
+    except FormalError as e:
+        raise SystemExit(f"refused: {e}") from e
+    problems = hygiene(st.source, statement=True)
+    if problems:
+        raise SystemExit("refused: " + "; ".join(problems))
+    approver = a.approver.strip()
+    if not approver:
+        raise SystemExit("refused: --approver must name a human")
+    digest = hashlib.sha256(data).hexdigest()
+    print(f"theorem {st.theorem}\n--- statement source ---\n{st.source}\n--- end ---\nstatement_hash: {digest}")
+    if a.statement_hash is not None and a.statement_hash != digest:
+        raise SystemExit(f"refused: --statement-hash {a.statement_hash} does not match the file's hash {digest}")
+    kernel = Kernel(store)
+    try:
+        kernel.vault.register_artifact(a.artifact_id, data, "lean-statement")
+    except VaultError as e:
+        raise SystemExit(f"refused: {e}") from e
+    entry = kernel.ledger.append("statement_approval", {"artifact_id": a.artifact_id, "hash": digest,
+                                                        "theorem": st.theorem, "approver": approver,
+                                                        "note": a.note or ""})
+    print(json.dumps({"approved_statement": a.artifact_id, "approver": approver, "ledger_seq": entry.seq}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -403,6 +439,13 @@ def main(argv: list[str] | None = None) -> int:
     aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
     aa.add_argument("name")
     aa.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
+    asx = sub.add_parser("approve-statement", help="HUMAN: approve a Lean theorem statement (formal claims, T0)")
+    asx.add_argument("file", help="a chh-lean-statement/1 JSON file")
+    asx.add_argument("--artifact-id", required=True, help="the artifact id formal claims will name as their subject")
+    asx.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
+    asx.add_argument("--statement-hash", default=None,
+                     help="full sha256 of the file you reviewed; refused if it differs")
+    asx.add_argument("--note", default="")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -426,7 +469,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
-                "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
+                "approve-adapter": cmd_approve_adapter, "approve-statement": cmd_approve_statement,
+                "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)
