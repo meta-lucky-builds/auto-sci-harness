@@ -112,7 +112,7 @@ class Kernel:
             if e.body.get("claim_hash") == h:
                 return e
         terms = fixed_terms(self.ledger, self.vault, claim, self.config)
-        if claim.effect.probability < terms["p0"]:
+        if claim.evidence_class == EvidenceClass.DATA and claim.effect.probability < terms["p0"]:
             raise KernelError(f"declared probability {claim.effect.probability} is below the claim's level p0 = "
                               f"{terms['p0']:.4g} (a forecast below p0 would earn VDS by failing)")
         accounts = {a.seq: a for t in claim.generalization_targets
@@ -339,13 +339,15 @@ class Kernel:
         cert = self.certificate(cert_hash)
         entry = next(e for e in self.ledger.entries("certificate") if e.body["cert_hash"] == cert_hash)
         claim, ids = Claim.model_validate(cert.claim), list(cert.evidence_ids)
-        then = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
-        if then and (cert.kernel_version != self.config.version or cert.config != asdict(self.config)):
+        better, worse = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
+        if (better or worse) and (cert.kernel_version != self.config.version or cert.config != asdict(self.config)):
             return VerifyResult("stale", (), (f"issued under Kernel {cert.kernel_version} with other rules; today's "
-                                              f"Kernel {self.config.version} re-derives differently", *then))
-        if then:
-            return VerifyResult("forged", tuple(then), ())
-        now = _differences(cert, self.certify(claim, ids, record=False))
+                                              f"Kernel {self.config.version} re-derives differently", *better, *worse))
+        if better:  # the record claims MORE than its own ledger prefix supports: forged
+            return VerifyResult("forged", tuple(better), tuple(worse))
+        # a record LESS favourable than its re-derivation (e.g. a flaky K3 that passed this time) is not a forgery
+        b_now, w_now = _differences(cert, self.certify(claim, ids, record=False))
+        now = [*worse, *(p for p in (*b_now, *w_now) if p not in worse)]
         return VerifyResult("stale" if now else "valid", (), tuple(now))
 
     def retract(self, cert_hash: str, reason: str) -> Entry:
@@ -360,11 +362,17 @@ class Kernel:
         return "retracted" if retracted else "active"
 
 
-def _differences(cert: Certificate, again: Certificate) -> list[str]:
-    problems = [f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived"
-                for k in CHECK_IDS if cert.checks[k].status != again.checks[k].status]
+def _differences(cert: Certificate, again: Certificate) -> tuple[list[str], list[str]]:
+    """(differences where the record is MORE favourable than the re-derivation, those where it is less)."""
+    better: list[str] = []
+    worse: list[str] = []
+    for k in CHECK_IDS:
+        if cert.checks[k].status != again.checks[k].status:
+            (better if again.checks[k].status == "fail" else worse).append(
+                f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived")
     if again.label != cert.label:
-        problems.append(f"label {cert.label.value} recorded, {again.label.value} re-derived")
+        (better if again.label == Label.REJECTED else worse).append(
+            f"label {cert.label.value} recorded, {again.label.value} re-derived")
     if again.tier != cert.tier:
-        problems.append(f"tier {cert.tier} recorded, {again.tier} re-derived")
-    return problems
+        (better if cert.tier < again.tier else worse).append(f"tier {cert.tier} recorded, {again.tier} re-derived")
+    return better, worse

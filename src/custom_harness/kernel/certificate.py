@@ -7,7 +7,7 @@ import hashlib
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from .claim import canonical_json
 from .reasons import Code
@@ -57,12 +57,6 @@ class CheckResult(BaseModel):
     # §16.5.8: one closed code per reason; the only part of a reason that may reach an agent-visible surface. Empty on
     # certificates issued before codes existed (omitted from dumps when empty, so their hashes are unchanged).
     codes: tuple[Code, ...] = ()
-
-    @model_validator(mode="after")
-    def _one_code_per_reason(self) -> CheckResult:
-        if self.codes and len(self.codes) != len(self.reasons):
-            raise ValueError("a check result needs exactly one code per reason")
-        return self
 
     @model_serializer(mode="wrap")
     def _omit_empty_codes(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:

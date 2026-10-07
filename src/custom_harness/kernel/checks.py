@@ -371,6 +371,8 @@ def k1_well_formed(ctx: Context) -> CheckResult:
 
 def p0_reasons(ctx: Context) -> list[str]:
     """§16.4 (F2): a forecast below the registered level p0 is refused, so a miss can never score positive."""
+    if ctx.claim.evidence_class != EvidenceClass.DATA:  # no null level: scored with LR = 1 when q < p0, not refused
+        return []
     p0 = float(fixed(ctx)["p0"])
     q = ctx.claim.effect.probability
     return [R(Code.K1_PROBABILITY_BELOW_P0, f"declared probability {q} is below the claim's registered level p0 = "

@@ -481,3 +481,22 @@ def test_kd2_k7_needs_statistics_on_every_target(world):
     assert set(ctx.stats) == {"test"}  # the attack precondition: one target has no statistics
     res = K.k7_risk(ctx)
     assert res.status == "fail" and Code.K7_NO_STATS in res.codes and "test2" in res.reasons[0]
+
+
+def test_verify_difference_direction(world):
+    """Forged = the record claims more than the re-derivation; a record claiming less is stale, not forged."""
+    from custom_harness.kernel.kernel import _differences
+
+    c, ids = _honest(world)
+    cert = world.kernel.certify(c, ids, record=False)
+    worse = cert.model_copy(update={"label": Label.REJECTED, "tier": 6, "checks": {
+        **cert.checks, "K3": cert.checks["K3"].model_copy(update={"status": "fail"})}})
+    better, less = _differences(worse, cert)
+    assert better == [] and len(less) == 3
+    better, less = _differences(cert, worse)
+    assert len(better) == 3 and less == []
+    # a formal claim below the non-statistical p0 is not refused (no null level), only scored with LR = 1
+    formal = c.model_copy(update={"evidence_class": "formal"})
+    ctx = K.Context(claim=formal, claim_hash=formal.claim_hash(), store=world.store, vault=world.vault,
+                    ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
+    assert K.p0_reasons(ctx) == []
