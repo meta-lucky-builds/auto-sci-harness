@@ -367,12 +367,26 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
         m, manifest_sha = read_run_bundle_bytes(Path(a.bundle))
     except RunBundleError as e:
         raise SystemExit(f"run bundle refused: {e}") from e
+    # a manifest is self-attested (it says which artifacts are required) unless its hash is anchored: by this store's
+    # record of the run, or by a hash the user got from where the bundle was published
     recorded = {r.get("manifest_sha256") for r in store.records("run_bundle")
                 if r.get("run_id") == m["run"]["id"] and r.get("manifest_sha256")}
+    given = getattr(a, "manifest_sha256", None)
     if recorded and manifest_sha not in recorded:
         raise SystemExit("run bundle refused: its manifest.json differs from the one recorded in this store for run "
                          f"{m['run']['id']} (edited after it was written)")
-    anchor = "matches the store's record" if recorded else "not anchored (no record of this run in this store)"
+    if given and manifest_sha != given:
+        raise SystemExit(f"run bundle refused: its manifest.json sha256 {manifest_sha} differs from the hash given")
+    if recorded:
+        anchor = "matches the store's record"
+    elif given:
+        anchor = "matches the given --manifest-sha256"
+    elif getattr(a, "allow_unanchored", False):
+        anchor = f"NOT anchored (--allow-unanchored): manifest sha256 {manifest_sha} is self-attested"
+    else:
+        raise SystemExit(f"run bundle refused: its manifest is not anchored (no record of run {m['run']['id']} in "
+                         f"this store). Pass --manifest-sha256 with the published hash, or --allow-unanchored. "
+                         f"This manifest's sha256: {manifest_sha}")
     spec = HarnessSpec.model_validate(m["spec"])
     inputs = dict((m.get("inputs") or {}).get("input") or {})
     if a.task_dir:
@@ -583,6 +597,10 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--allow-same-family", action="store_true",
                     help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
+    rb.add_argument("--manifest-sha256", default=None,
+                    help="the published sha256 of the bundle's manifest.json (needed when this store has no record)")
+    rb.add_argument("--allow-unanchored", action="store_true",
+                    help="run a bundle whose manifest is not anchored (its artifact list is then self-attested)")
     rb.add_argument("--artifact-root", action="append", default=[],
                     help="a directory to look for artifacts the bundle does not carry (repeatable; hashes are checked)")
     rb.add_argument("--docker", action="store_true")

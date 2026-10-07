@@ -24,7 +24,10 @@ of the final workspace. A workspace file over `config.LARGE_ARTIFACT_BYTES` (UNC
 required artifact is missing, when ANY artifact found has a different size or sha256, or when a `bundled` artifact is
 absent from the zip. A missing optional artifact is reported, not fatal. `chh rerun` also refuses a `manifest.json`
 whose sha256 differs from the one this store recorded when the bundle was written (a manifest that lies about a hash
-is caught here; without a record it says "not anchored").
+is caught here). Without a record, `chh rerun` REFUSES unless `--manifest-sha256 <published hash>` matches or
+`--allow-unanchored` is passed (the output then says the artifact list is self-attested): an unanchored manifest
+could have dropped a required artifact. The artifact list must also agree with the task-file hashes and the
+workspace snapshot the manifest records. Duplicate zip member names and corrupt members are refused.
 
 Claim bundles (`kernel/bundle.py`, owned by kstats) do not write `artifacts` yet: they still carry every blob. The CLI
 checks the list if present. Request posted: `mailbox/orartifact-to-kstats-01-...`.
@@ -47,8 +50,11 @@ The audit (`audit_figure`, and I6 in `research.audit`) fails a figure unless: F1
 Evidence payload, and (in the research audit) only to the run's own certified evidence; F3 the stored SVG, checked
 without trusting the script, has only whitelisted elements/attributes, every mark bound to a ref with the exact
 value, geometry, axis and ticks recomputed by the trusted renderer, and no decimal/percent/exponent number in free
-text; F4 the script re-run in a fresh sandbox produces byte-identical SVG.
+text (checked after NFKC folding: fullwidth stops, superscripts, `,` `·` decimal marks, `%`, "percent"); and the
+whole SVG must be byte-identical to what the trusted renderer produces from the figure's own data and labels, which
+pins every placement, style, viewport and element (added after an adversarial review found moved value/tick labels,
+nested viewports, extra lines and hidden marks passing); F4 the script re-run in a fresh sandbox produces byte-identical SVG.
 
-Limits: free text may carry integers; category labels are not bound to data (a script that swaps them itself is not
+Limits: free text may carry integers and number words ("ninety-nine"); category labels are not bound to data (a script that swaps them itself is not
 caught); no research-loop node produces figures yet (the audit runs when `state["figures"]` is set by trusted code;
 `figures` is reserved state).

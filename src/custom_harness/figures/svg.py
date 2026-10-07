@@ -22,9 +22,14 @@ from __future__ import annotations
 import json
 import math
 from typing import Any
-from xml.sax.saxutils import escape
+from xml.sax.saxutils import escape as _escape
 
 RENDERER = "chh-svg/1"
+
+
+def escape(text: str) -> str:
+    """Text for element content AND attribute values (quotes escaped too)."""
+    return _escape(text, {'"': "&quot;"})
 W, H = 640, 400
 LEFT, RIGHT, TOP, BOTTOM = 70, 20, 40, 60
 COLORS = ("#2a6fdb", "#e0782b", "#3a9a5b", "#b23a48", "#7a5cc0", "#6b6b6b")

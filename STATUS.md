@@ -190,6 +190,8 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 | LOFO/LODO gates (inv. 16) | main | verified: `tests/test_lofo.py` (14). Per-family non-regression; a suite without a held-out family is refused |
 | Evidence export, first-divergence diagnosis, cost term, ledger upgrades, novelty gate, decline | `m3-b3-evolve` | reported: 62 passed. Not reviewed by me. The cost default (1.0) is uncalibrated |
 | Agentic proposer, smoke run, one-mechanism rule, family-separated critic, real campaign | — | not started |
+| L2 large-artifact manifest (run bundles) | branch `or-artifact` | verified on the branch: `tests/test_run_bundle_artifacts.py` (15). `chh rerun`/`reproduce` report missing artifacts, fail closed on a missing required one or any hash difference; bundle reads capped (fixes the run-bundle half of the zip-bomb item in §D). Claim bundles (`kernel/bundle.py`) do not list omitted artifacts yet: requested from kstats. Caps and `LARGE_ARTIFACT_BYTES` UNCALIBRATED |
+| L2 figures (inv. 8 extended) | branch `or-artifact` | verified on the branch: `tests/test_figures.py` (14), `tests/test_figures_report.py` (3). Stdlib SVG (no matplotlib on host or in the sandbox image); audit I6 re-renders in a sandbox and checks bytes and plotted data. No loop node produces figures yet. See `docs/artifacts_and_figures.md` |
 
 ---
 

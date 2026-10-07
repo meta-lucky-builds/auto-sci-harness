@@ -30,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -175,6 +176,8 @@ class BoundedZip:
         if len(infos) > config.RUN_BUNDLE_MEMBERS:
             raise RunBundleError(f"bundle has {len(infos)} members, more than the cap of {config.RUN_BUNDLE_MEMBERS}")
         self.infos = {i.filename: i for i in infos}
+        if len(self.infos) != len(infos):  # the checker and an extractor could see different copies
+            raise RunBundleError("bundle has a duplicate member name: refused")
 
     def read(self, name: str) -> bytes:
         info = self.infos.get(name)
@@ -189,7 +192,10 @@ class BoundedZip:
         self.total += info.file_size
         if self.total > config.RUN_BUNDLE_TOTAL_BYTES:
             raise RunBundleError(f"bundle content exceeds the total cap of {config.RUN_BUNDLE_TOTAL_BYTES} bytes")
-        return self.z.read(info)
+        try:
+            return self.z.read(info)
+        except (zipfile.BadZipFile, zlib.error, EOFError, OSError) as e:
+            raise RunBundleError(f"bundle member {name} is corrupt: {e}") from e
 
 
 def read_run_bundle_bytes(path: Path) -> tuple[dict[str, Any], str]:
@@ -257,6 +263,21 @@ def _candidates(a: dict[str, Any], task_dir: str | None, roots: list[Path]) -> l
     return out
 
 
+def _consistency(manifest: dict[str, Any], raw: list[dict[str, Any]], rep: ArtifactReport) -> None:
+    """Every task file and every workspace file the manifest records elsewhere must be listed, with the same hash (a
+    rewritten artifact list cannot quietly drop one)."""
+    listed = {a["path"]: a["sha256"] for a in raw}
+    want = {f"task/{k}": v for k, v in (manifest.get("task_files") or {}).items()}
+    refused = set(manifest.get("refused_private_blobs") or [])
+    files = ((manifest.get("workspace_snapshot") or {}).get("files") or {})
+    want |= {f"workspace/{k}": v.get("blob") for k, v in files.items() if k not in refused and isinstance(v, dict)}
+    for path, h in sorted(want.items()):
+        if listed.get(path) != h:
+            msg = f"artifact {path} is recorded by the manifest but not listed (or listed with another hash)"
+            rep.problems.append(msg)
+            rep.fatal.append(msg)
+
+
 def check_artifacts(manifest: dict[str, Any], bundle_path: Path | None, *, blobs: BlobStore | None,
                     roots: list[Path] | tuple[Path, ...] = (), task_dir: str | None = None) -> ArtifactReport:
     """Resolve every artifact the manifest lists; see the module docstring for the rules."""
@@ -268,12 +289,16 @@ def check_artifacts(manifest: dict[str, Any], bundle_path: Path | None, *, blobs
     if not isinstance(raw, list):
         raise RunBundleError("manifest artifacts must be a list")
     task_dir = task_dir or manifest.get("task_dir")
-    zf = zipfile.ZipFile(bundle_path) if bundle_path is not None else None
+    try:
+        zf = zipfile.ZipFile(bundle_path) if bundle_path is not None else None
+    except (zipfile.BadZipFile, OSError) as e:
+        raise RunBundleError(f"not a readable zip: {e}") from e
     try:
         reader = BoundedZip(zf) if zf is not None else None
         for a in raw:
             if (not isinstance(a, dict) or a.get("status") not in STATUSES or not isinstance(a.get("sha256"), str)
-                    or not isinstance(a.get("bytes"), int) or not isinstance(a.get("path"), str)):
+                    or not isinstance(a.get("bytes"), int) or not isinstance(a.get("path"), str)
+                    or not isinstance(a.get("required"), bool) or a.get("kind") not in KINDS):
                 raise RunBundleError(f"malformed artifact entry: {a!r}")
             row = {"path": a["path"], "status": a["status"], "kind": a.get("kind"), "required": bool(a["required"]),
                    "result": "missing", "found_at": None}
@@ -310,6 +335,7 @@ def check_artifacts(manifest: dict[str, Any], bundle_path: Path | None, *, blobs
             else:
                 row["result"] = "present"
             rep.rows.append(row)
+        _consistency(manifest, raw, rep)
     finally:
         if zf is not None:
             zf.close()

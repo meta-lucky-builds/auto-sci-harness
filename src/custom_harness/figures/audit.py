@@ -30,6 +30,7 @@ import json
 import math
 import re
 import shutil
+import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -43,7 +44,10 @@ FORMAT = "chh-figure/1"
 NS = "{http://www.w3.org/2000/svg}"
 RENDERER_SOURCE = Path(S.__file__).read_bytes()
 _REF_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
-_FREE_NUMBER = re.compile(r"\d*\.\d+|\d\s*%|\d[eE][-+]?\d")
+# checked on the NFKC form (fullwidth digits/stops, superscripts and the percent sign fold to ASCII); \d also matches
+# other scripts' digits
+_FREE_NUMBER = re.compile(r"\d\s*[.,·]\s*\d|[.,·]\d|\d\s*%|\d\s*percent|\d[eE][-+−]?\d|\d\s*−\s*\d",
+                          re.IGNORECASE)
 _TAGS = {"svg", "title", "g", "line", "rect", "circle", "polyline", "text"}
 _ATTRS = {"xmlns", "width", "height", "viewBox", "data-chh-figure", "data-renderer", "class", "x", "y", "x1", "y1",
           "x2", "y2", "cx", "cy", "r", "points", "fill", "stroke", "text-anchor", "data-ref", "data-v",
@@ -136,6 +140,8 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
             problems.append(f"text inside <{tag}>: {el.text.strip()[:40]!r}")
     if problems:
         return problems
+    if root.tag != NS + "svg" or any(not str(el.tag).startswith(NS) for el in root.iter()):
+        return ["every element of a figure must be in the SVG namespace, under one <svg> root"]
     kind = root.get("data-chh-figure")
     if kind not in ("bar", "line"):
         return [f"unknown figure kind {kind!r}"]
@@ -195,12 +201,40 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
             rid = node.get("data-ref")
             if rid not in values or node.text != S.label(values[rid]):
                 problems.append(f"value label {node.text!r} (ref {rid!r}) does not match its artifact")
-        elif tag in ("text", "title") and cls != "tick":
+        elif tag == "title" or (tag == "text" and cls != "tick"):
             if tag == "text" and cls not in ("title", "label", "category", "legend"):
                 problems.append(f"<text class={cls!r}> is not allowed")
-            if _FREE_NUMBER.search(node.text or ""):
+            if _FREE_NUMBER.search(unicodedata.normalize("NFKC", node.text or "")):
                 problems.append(f"free text carries a number not bound to an artifact: {(node.text or '')[:60]!r}")
+    if not problems:
+        problems += _canonical(root, kind, text, values)
     return problems
+
+
+def _canonical(root: ET.Element, kind: str, text: str, values: dict[str, float]) -> list[str]:
+    """The stored SVG must be EXACTLY what the trusted renderer produces from the figure's own data and labels
+    (read back from it). This pins every placement, style, size and element the reader sees: moved value or tick
+    labels, nested or cropped viewports, extra lines, hidden marks, un-namespaced elements all differ."""
+    def texts(cls: str) -> list[str]:
+        return [e.text or "" for e in root.iter(NS + "text") if e.get("class") == cls]
+    title_el = root.find(NS + "title")
+    title = (title_el.text or "") if title_el is not None else ""
+    y_label = (texts("label") or [""])[0]
+    try:
+        if kind == "bar":
+            refs = [e.get("data-ref", "") for e in root.iter(NS + "rect")]
+            expect = S.bar_chart(values, list(zip(texts("category"), refs, strict=True)), title=title,
+                                 y_label=y_label)
+        else:
+            series = [(g.get("data-series", ""), [c.get("data-ref", "") for c in g.iter(NS + "circle")])
+                      for g in root.iter(NS + "g") if g.get("class") == "series"]
+            expect = S.line_chart(values, series, x_labels=texts("category"), title=title, y_label=y_label)
+    except (KeyError, TypeError, ValueError) as e:
+        return [f"the figure cannot be rebuilt by the trusted renderer from its own data: {e}"]
+    if expect != text:
+        return ["the figure is not the trusted renderer's output for its own data and labels (placement, styling, "
+                "viewport or extra elements changed)"]
+    return []
 
 
 # ------------------------------------------------------------------ F4 re-render
