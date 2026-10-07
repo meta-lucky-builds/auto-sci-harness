@@ -11,8 +11,7 @@ decisions taken under the user's delegation and why, traps learned, and pending 
 
 1. Read HANDOFF.md, then this file, then STATUS.md **on branch `m3-adapters`** (it is newer than main's).
 2. Do NOT merge anything into main before a full gate (`scripts/check.py`) passes on the merged result.
-3. Check whether the B3 worktree (evolution M4 pieces, §2) was committed by its agent; if not, its uncommitted files
-   are in `<scratchpad>/wt-b3-evolve` (that scratchpad dies with the old session: if it is gone, B3 must be redone).
+3. B3 (evolution M4 pieces) is committed and pushed on `m3-b3-evolve` (4769fd3): read its diff before merging.
 4. Human action pending (only a HUMAN may do it, never Claude): `chh approve-adapter ml --approver <name>` (and later
    `lp`), after `m3-adapters` is on main. Until then no live run can certify (K1 refuses).
 
@@ -29,7 +28,7 @@ decisions taken under the user's delegation and why, traps learned, and pending 
 | `m3-r1-kernel` | f26a4f4 | R1 review tests `tests/test_review_kernel.py` (10 fail = findings, 8 held, 1 xfail) | reproduced by me: same 10 failures |
 | `m3-r2-loop` | bc69910 | R2 review tests `tests/test_review_loop.py` (9 fail = findings, 19 held) | reproduced by me: same 9 failures |
 | `m3-b2-physical` | 4d8b8eb | physical path (already merged into m3-adapters) | see m3-adapters |
-| `m3-b3-evolve` | 0f174d3 + UNCOMMITTED | B3 agent (evolution M4: evidence export, deterministic diagnosis, cost term, ledger upgrades, novelty gate, decline) still working at handoff | unknown; review its report before merging |
+| `m3-b3-evolve` | 4769fd3 (base 0f174d3) | B3 agent (evolution M4): read-only evidence export (`evolve/export.py`: evolve-split runs only, gate/sealed only as accept/reject aggregates, whitelist views, leak-audited before rename, refuses on any match), deterministic first-divergence diagnosis (`evolve/diagnosis.py`), cost term in the gate (`cost_bound`, `max_cost_increase` default 1.0 = UNCALIBRATED), ledger upgrades (per-task, flipped/regressed by score, `regressed_unpredicted`, generation counters), novelty gate on rejected-edit signatures, decline path. ALSO FIXED A LEAK in existing code: the proposer prompt's PAST EDITS were built from raw `harness_edit` records incl. gate means and held-out-family (`lofo`) results; now whitelisted | agent ran: 22 new tests failed first and pass; with test_evolve/lofo/infra/winners_curse/fail_closed 62 passed; ruff/mypy clean; mutation checks on the export audit. Full suite NOT run. Not reviewed by me yet (diff not read). Not done: agentic proposer reading the export, smoke run, one-mechanism rule, stall/annealing, enforcing `check_claims` |
 | `worktree-agent-*` | 8d79df2 / 0e0b2b7 | approval node / LOFO agent branches (already merged into m3-adapters) | — |
 
 **Merge order (each step: merge into m3-adapters, full gate, then continue):** gateway fix → B1 → R1 fixes (on top
