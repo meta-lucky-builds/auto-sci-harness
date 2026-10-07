@@ -26,7 +26,7 @@ from custom_harness.kernel import Kernel
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.sandbox.docker import DockerUnavailable
 from custom_harness.verify.exclusion import EXCLUSION_ALPHA, count_exclusions, exclusion_asymmetry, sign_test_p
-from test_evolve import PROPOSALS, executor, seed_spec, suite  # noqa: F401
+from test_evolve import PROPOSALS, declared_seed_spec, executor, seed_spec, suite  # noqa: F401
 from test_infra import NO_WAIT, FlakyDockerLike
 
 
@@ -104,8 +104,10 @@ def test_outage_campaign_reaches_the_same_decision_with_the_rule(store, tmp_path
         llm = MockBackend(executor)
         roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
         ev = Evaluator(roles, st, factory, suite, retry=NO_WAIT)
-        res = evolve_generation(seed_spec(), suite, evaluator=ev, proposer=MockBackend([json.dumps(PROPOSALS)]),
-                                store=st, cfg=EvolveConfig(n_edits=4, race_rounds=2))
+        cfg = EvolveConfig(n_edits=4, race_rounds=2)
+        # R2-2: campaigns pre-declare their multiplicity bound (same setup as test_infra's campaign)
+        res = evolve_generation(declared_seed_spec(cfg), suite, evaluator=ev,
+                                proposer=MockBackend([json.dumps(PROPOSALS)]), store=st, cfg=cfg)
         st.close()
         return res, ev
 
