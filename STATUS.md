@@ -143,6 +143,40 @@ variance exists; Bengio & Grandvalet 2004), and dev selects the best of several 
 make the forecast optimistic; neither is corrected; the prediction ledger measures calibration. Cost: 5 sandbox
 runs per dev evaluation instead of 1, no extra model calls.
 
+### Red-team pass (2026-10-07)
+Three red-team subagents were launched on isolated copies (Kernel / research loop + sandbox / evolution + suite);
+all three were halted early by safety classifiers and produced NO verified finding (the loop and evolution agents
+left code-reading hypotheses, the Kernel agent nothing). Every finding below was then proven by hand: a PoC test
+that FAILS on the pre-fix code (run on an untouched copy) and passes after the fix (`tests/test_redteam_*.py`).
+
+| # | Finding (verified) | Fix |
+|---|---|---|
+| E3 | **Replication independence broken**: an evolvable node before `claim` wrote `profile` (unreserved) with the original code; the PROTECTED replicate prompt rendered `{{profile}}`, so the "independent" replicator saw the code (headline + 0.5 score faked). Second channel: rewriting `hypotheses` so the idea text IS the code | `profile`, `replication_refused` reserved; `certify` recomputes the brief's profile from the vault's registered training bytes and the replicate prompt renders only `replication_brief.*`; a brief containing ≥ 2 verbatim code lines (≥ 25 chars) is refused and the refusal recorded + reported |
+| E1 | Edges were unprotected: an evolvable node could be inserted between protected nodes (certify → sneak → replicate) | edges out of every protected node, and into every protected node except `claim`/`report`, must equal the parent spec's |
+| E2 | A new module node could write reserved state (module outputs were never checked, only `output_key`) | `RESERVED_WRITING_MODULES`; an edit may not add a node with such a module or switch a node to one; completeness checked by running the seed harness end to end |
+| E4 | Malformed edit paths crashed (`IndexError`/`ValueError`) instead of a rejection | every op failure becomes `EditRejected` |
+| E5 | Trusted modules crashed on malformed evolvable state (`hypotheses` as raw text made `certify` raise) | `_hypotheses()` parses it defensively in certify and the report |
+| F1 | Dev folds used other file names (`valid_X.csv`) and output path than held-out runs: a program could behave differently on dev | dev folds use the held-out layout (`in/train/…`, `in/test/…`, `out/preds.csv`), same argv and seed 0 |
+| F2 | A blank or multi-column row in a predictions file raised `IndexError` (aborting the run) or was silently truncated | `read_predictions` applies the Kernel's rule (exactly one value per row) and raises `ValueError` |
+| F4 | Near-copy check defeated by appending a comment to every line (similarity 1.0 → 0.0) | compares Python logical lines as token sequences (comments, wrapping, indentation ignored) |
+| F5 | Model text with newlines injected a fake `**Headline result**` line into the report (audit I4 re-renders identically, so it passed) | model-written ids/ideas/errors rendered as one bounded line |
+
+Open (verified, pinned by `tests/test_redteam_kernel.py`, **user decision**): K7 returns `n/a` for negative-result
+and equivalence claims and `n/a` counts as pass, so vacuous claims ("does not improve by 0.9", "within 0.9") are
+CERTIFIED-INTERNAL. The research loop makes only improvement claims, so no current run is affected.
+
+Checked and held (by test or by reading, as stated): the dev-cheating fold isolation (test); bundle reproduce has
+no zip-slip (blobs are read into the content-addressed store, never extracted; reading); Docker fold runs cannot
+persist state (read-only rootfs, per-container tmpfs, fresh workspace; reading); `/nodes/<protected>/...` paths and
+`retries/0`-style paths are rejected (test); template rendering refuses `_private*` (existing test).
+
+Not fixed, recorded as limitations (inferred unless stated): a program can still tell dev folds from held-out runs
+by data size/content; paraphrased or re-formatted code passes both copy detectors; the engine scrubber matches
+whole private values only (substrings and encodings pass), canaries/label windows are verbatim-only; the Socratic
+filter is a heuristic (question-shaped directives pass); no Docker disk quota on the workspace mount and full
+stdout/stderr captured in host memory (possible host resource exhaustion); a zip-bomb bundle member is read into
+memory.
+
 ## Done before M0 (v0 build)
 | Layer | What | Where |
 |---|---|---|

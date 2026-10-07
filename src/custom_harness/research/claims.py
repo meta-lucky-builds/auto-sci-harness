@@ -20,6 +20,7 @@ import hashlib
 import io
 import statistics
 import time
+import tokenize
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,21 @@ from .modules import _dev_labels, _require_isolation, _sb, _task
 from .task import TaskSpec
 
 _NORMAL = statistics.NormalDist()
+
+
+def _inline(text: Any, limit: int = 500) -> str:
+    """Model-written text as ONE line (whitespace collapsed, backticks removed, bounded), so it cannot start new
+    report lines (fake headings, a fake headline result) or break out of inline code spans."""
+    s = " ".join(str(text).split()).replace("`", "'")
+    return s if len(s) <= limit else s[:limit] + "…"
+
+
+def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """The hypothesis list from (evolvable, model-written) state, parsed defensively: trusted code must not crash
+    on a malformed value an evolved harness wrote; anything that is not a list of objects counts as empty."""
+    raw = state.get("hypotheses")
+    items = raw.get("hypotheses") if isinstance(raw, dict) else None
+    return [h for h in items if isinstance(h, dict)] if isinstance(items, list) else []
 
 
 def _labels(raw: bytes) -> list[str]:
@@ -141,8 +157,9 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     delta, q, lo, hi = forecast(task, state, ctx, task.effect_floor(state["baseline_dev"]),
                                 fraction=params.get("delta_fraction", 0.5), candidate_key=candidate_key,
                                 fixed_delta=fixed)
+    hid = _inline(best.get("hypothesis_id"), 80)  # model-written id: never raw in a claim statement
     who = ("an independent re-implementation (written from the claim text, without the code) of hypothesis "
-           f"{best.get('hypothesis_id')}") if p else f"the solution for hypothesis {best.get('hypothesis_id')}"
+           f"{hid}") if p else f"the solution for hypothesis {hid}"
     claim = Claim(
         kind=ClaimKind.IMPROVEMENT,
         statement=f"On task {task.id}, {who} beats the task baseline on {task.metric} by at least {delta:.4g} "
@@ -252,7 +269,7 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     h = cert.cert_hash()
     bundle_path = data_dir() / "bundles" / f"{h[:20]}.zip"
     bundle_hash = build_bundle(kernel, h, bundle_path)
-    n_hyp = len((state.get("hypotheses") or {}).get("hypotheses", []))
+    n_hyp = len(_hypotheses(state))
     checklist = fill(cert, run_costs={ctx.run_id: ctx.store.run_cost(ctx.run_id)}, models=_models_used(ctx),
                      bundle_hash=bundle_hash,
                      selection_policy=(f"{n_hyp} model-proposed hypotheses ranked by a K-way tournament; "
@@ -271,13 +288,23 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     certified = cert.label.value in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
     route = "replicate" if (certified and not p and params.get("replicate", False)) else "report"
     brief = None
+    refused = None
     if route == "replicate":  # what the replicator may see: the claim and the idea, never the code
         best = state.get("best") or {}
         root = str(best.get("root_hypothesis") or best.get("hypothesis_id", ""))
-        hyps = {h.get("id"): h for h in (state.get("hypotheses") or {}).get("hypotheses", [])}
+        hyps = {h.get("id"): h for h in _hypotheses(state)}
+        task = _task(state)
         brief = {"claim": claim.statement, "hypothesis": root,
                  "idea": hyps.get(root, {}).get("idea") or "(idea text unavailable)",
-                 "refined": str(best.get("hypothesis_id", "")).startswith("improve-")}
+                 "refined": str(best.get("hypothesis_id", "")).startswith("improve-"),
+                 # recomputed here from the vault's registered training bytes, never taken from (evolvable) state
+                 "profile": _trusted_profile(ctx, task, state["datasets"]["train"])}
+        original = ctx.store.blobs.get(best["code_ref"]).decode("utf-8", errors="replace")
+        copied = copied_code_lines(original, f"{brief['claim']}\n{brief['idea']}")
+        if copied >= 2:
+            # the idea text is model-written state an evolved harness can rewrite after the code exists
+            refused = f"replication brief contains {copied} line(s) of the original code verbatim"
+            brief, route = None, "report"
     return {"route": route,
             f"{p}certificate": {"hash": h, "label": cert.label.value, "tier": cert.tier, "failed": cert.failed(),
                             "bundle_hash": bundle_hash, "bundle_path": str(bundle_path),
@@ -286,16 +313,60 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                             "comparator_mean": _mean([r.score for r in recs if r.arm == "comparator"])
                             if recs else None},
             f"{p}checklist": checklist, f"{p}publishable": ok, f"{p}publish_blockers": blockers,
-            **({"replication_brief": brief} if brief else {})}
+            **({"replication_brief": brief} if brief else {}),
+            **({"replication_refused": refused} if refused else {})}
+
+
+def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[str, Any]:
+    import tempfile
+
+    from .data import profile
+    data = Kernel(ctx.store).vault.read_public(train_id, task.train_file)
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / task.train_file
+        p.write_bytes(data)
+        return profile(p, task.target_column)
+
+
+def copied_code_lines(code: str, text: str, min_len: int = 25) -> int:
+    """How many substantial lines of `code` (>= min_len characters after collapsing whitespace, comment lines
+    excluded) appear verbatim in `text` (whitespace collapsed). A verbatim-copy detector only: paraphrased or
+    re-formatted code is not detected (stated limitation)."""
+    hay = " ".join(text.split())
+    lines = {" ".join(ln.split()) for ln in code.splitlines()}
+    return sum(1 for ln in lines if len(ln) >= min_len and not ln.startswith("#") and ln in hay)
 
 
 # ------------------------------------------------------------------ independent replication (GOAL L4.9)
-def code_similarity(a: str, b: str) -> float:
-    """Jaccard overlap of the sets of non-trivial normalised lines (whitespace-insensitive). Cheap and
-    conservative: only flags near-copies; it says nothing about deeper (e.g. renamed) copying."""
-    def lines(s: str) -> set[str]:
+def code_lines(s: str) -> set[str]:
+    """Non-trivial logical lines of Python source as token sequences: comments, blank lines, indentation and
+    line wrapping do not matter (so padding every line with a comment, or re-wrapping, does not hide a copy).
+    Source that does not tokenize falls back to whitespace-normalised physical lines."""
+    out: set[str] = set()
+    try:
+        cur: list[str] = []
+        for tok in tokenize.generate_tokens(io.StringIO(s).readline):
+            if tok.type in (tokenize.COMMENT, tokenize.NL, tokenize.INDENT, tokenize.DEDENT, tokenize.ENCODING,
+                            tokenize.ENDMARKER):
+                continue
+            if tok.type == tokenize.NEWLINE:
+                line = " ".join(cur)
+                if len(line.replace(" ", "")) > 8:
+                    out.add(line)
+                cur = []
+            else:
+                cur.append(tok.string)
+        if cur and len("".join(cur)) > 8:
+            out.add(" ".join(cur))
+        return out
+    except (tokenize.TokenError, IndentationError, SyntaxError):
         return {" ".join(ln.split()) for ln in s.splitlines() if len(ln.strip()) > 8}
-    la, lb = lines(a), lines(b)
+
+
+def code_similarity(a: str, b: str) -> float:
+    """Jaccard overlap of the sets of non-trivial logical lines (see code_lines). Cheap and conservative: only
+    flags near-copies; it says nothing about deeper copying (renamed variables, reordered or paraphrased code)."""
+    la, lb = code_lines(a), code_lines(b)
     return len(la & lb) / len(la | lb) if la and lb else 0.0
 
 
@@ -379,9 +450,11 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
             lines += [f"**{rcert.label.value}** · certificate `{rep['hash']}`", f"- Claim: {rcert.claim['statement']}"]
             lines += [f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else "")
                       for kid, res in rcert.checks.items() if res.status == "fail"]
+        elif state.get("replication_refused"):
+            lines.append(f"Replication refused: {_inline(state['replication_refused'])}.")
         elif state.get("replica_best"):
             why = state["replica_best"].get("error") or "it did not beat the baseline on dev"
-            lines.append(f"Replication attempted; no replication claim was made ({why}).")
+            lines.append(f"Replication attempted; no replication claim was made ({_inline(why)}).")
         else:
             lines.append("No independent replication was performed.")
         lines += ["", f"**Headline result** (certified AND independently replicated): "
@@ -392,11 +465,11 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
               f"NOT evidence)", "",
               f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
     for a in state.get("attempts") or []:
-        lines.append(f"- attempt {a['n']} hypothesis={a['hypothesis_id']} dev={a['dev_score']} "
+        lines.append(f"- attempt {a['n']} hypothesis={_inline(a['hypothesis_id'], 80)} dev={a['dev_score']} "
                      f"error={'yes' if a['error'] else 'no'}")
     lines += ["", "## Hypotheses considered (model-written text, quoted; not claims)", ""]
-    for hyp in (state.get("hypotheses") or {}).get("hypotheses", []):
-        lines.append(f"> `{hyp.get('id')}`: {hyp.get('idea')}")
+    for hyp in _hypotheses(state):
+        lines.append(f"> `{_inline(hyp.get('id'), 80)}`: {_inline(hyp.get('idea'))}")
     return "\n".join(lines) + "\n"
 
 

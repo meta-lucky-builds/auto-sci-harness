@@ -64,7 +64,7 @@ DEFAULT_PROTECTED_NODES = ("setup", "claim", "confirm", "certify", "replicate", 
                            "replica_confirm", "replica_certify", "report", "audit")
 # State keys that only trusted code may write: an added node writing one could fake a claim, a candidate,
 # a certificate or an audit result (state that scoring and reporting depend on).
-RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
+RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme", "profile", "replication_refused",
                                   "claim", "claim_hash", "prereg_seq", "evidence_ids",
                                   "confirm_failures",
                                   "certificate", "checklist", "publishable", "publish_blockers", "report",
@@ -74,6 +74,21 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "replica_claim", "replica_claim_hash", "replica_prereg_seq",
                                   "replica_evidence_ids", "replica_confirm_failures", "replica_certificate",
                                   "replica_checklist", "replica_publishable", "replica_publish_blockers"})
+# Modules whose outputs include reserved keys (kept complete by test_reserved_writing_modules_are_declared, which
+# runs the seed harness and checks every module step's output keys). Existing nodes may keep using them; an edit
+# may not ADD a node with one of them, nor switch a node to one.
+RESERVED_WRITING_MODULES = frozenset({
+    "research.setup", "research.profile_data", "research.baseline_dev", "research.socratic_filter",
+    "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
+    "research.replica_dev", "research.report", "research.audit"})
+# protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
+OPEN_PROTECTED_TARGETS = ("claim", "report")
+
+
+def _edge_set(edges: list[dict[str, Any]], target: str) -> list[str]:
+    return sorted(json.dumps(e, sort_keys=True) for e in edges if e["target"] == target)
+
+
 _LEAK_PATTERNS = [re.compile(p, re.I) for p in (r"_private", r"test_y", r"/private/", r"\bprivate[/\\]")]
 
 
@@ -143,7 +158,12 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
     check_edit(edit, spec, protected_nodes)
     doc = copy.deepcopy(spec.model_dump(mode="json"))
     for op in edit.ops:
-        _apply_op(doc, op)
+        try:
+            _apply_op(doc, op)
+        except EditRejected:
+            raise
+        except (ValueError, IndexError, TypeError, KeyError) as e:  # fail closed: a malformed edit is rejected
+            raise EditRejected(f"cannot apply {op.op} at {op.path}: {type(e).__name__}: {e}") from e
     try:
         new = HarnessSpec.model_validate(doc)
     except ValidationError as e:
@@ -157,6 +177,16 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
                 raise EditRejected(f"protected node '{nid}' became unreachable")
     if spec.entry in protected_nodes and new.entry != spec.entry:
         raise EditRejected("entry must remain the protected setup node")
+    # protected wiring: edges out of a protected node, and into it (except the two protected nodes the evolvable
+    # loop routes to: claim and report), are human-only, so no evolvable node can sit between protected steps
+    old_edges, new_edges = spec.model_dump(mode="json")["edges"], new.model_dump(mode="json")["edges"]
+    for nid in protected_nodes:
+        if nid not in spec.nodes:
+            continue
+        if [e for e in new_edges if e["source"] == nid] != [e for e in old_edges if e["source"] == nid]:
+            raise EditRejected(f"edges out of protected node '{nid}' are human-only")
+        if nid not in OPEN_PROTECTED_TARGETS and _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
+            raise EditRejected(f"edges into protected node '{nid}' are human-only")
     protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
     for nid, node in new.nodes.items():
         if nid in spec.nodes and node == spec.nodes[nid]:
@@ -166,6 +196,11 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
             raise EditRejected(f"node '{nid}' would write reserved state key '{key}'")
         if getattr(node, "module", None) in protected_modules:
             raise EditRejected(f"node '{nid}' reuses a protected module outside its protected node")
+        module = getattr(node, "module", None)
+        same_module = nid in spec.nodes and getattr(spec.nodes[nid], "module", None) == module
+        if module in RESERVED_WRITING_MODULES and not same_module:
+            # a module returns whatever keys it likes; output_key checks cannot see them
+            raise EditRejected(f"node '{nid}' would add module {module!r}, which writes reserved state")
     for nid in terminal_required:
         if nid in spec.nodes:
             enders = terminal_nodes(new)

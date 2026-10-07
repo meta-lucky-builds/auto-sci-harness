@@ -156,7 +156,7 @@ nodes:
       Claim being replicated: {{replication_brief.claim}}
       Method idea: {{replication_brief.idea}}
       Task: {{task.description}}  Target column: {{task.target_column}}  Metric: {{task.metric}}
-      Data profile: {{profile}}
+      Data profile: {{replication_brief.profile}}
       Allowed libraries ONLY: {{task.allowed_libraries}} (no internet, no other packages).
       CLI contract (mandatory): python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N;
       output one column named `prediction`, one row per test row, same order; use --seed for all randomness.

@@ -29,9 +29,14 @@ def write_csv(path: Path, header: list[str], rows: list[list[str]]) -> None:
 
 
 def read_predictions(path: Path) -> list[str]:
+    """Same acceptance rule as held-out runs (kernel.execution.parse_predictions): header `prediction`, exactly one
+    value per row. Anything else is a ValueError (the attempt is routed to "fix"), never another exception."""
     header, rows = read_csv(path)
     if header != ["prediction"]:
         raise ValueError(f"predictions header must be ['prediction'], got {header[:5]}")
+    bad = next((i for i, r in enumerate(rows, start=2) if len(r) != 1), None)
+    if bad is not None:
+        raise ValueError(f"predictions file line {bad}: expected exactly one value")
     return [r[0] for r in rows]
 
 

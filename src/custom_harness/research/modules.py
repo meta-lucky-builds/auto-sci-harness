@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ..gateway import ChatRequest, Message
+from ..kernel.execution import OUT_PATH
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
@@ -66,9 +67,13 @@ def _dev_labels(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
 
 def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
                   timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
-    """Run a solution under the CLI contract in sandbox `sb` (paths relative to its workspace)."""
-    out_rel = f"out/preds_{uuid.uuid4().hex[:8]}.csv"
+    """Run a solution under the CLI contract in sandbox `sb` (paths relative to its workspace). The output path is
+    the one held-out runs use (kernel.execution.OUT_PATH), so the command line does not reveal the run kind."""
+    out_rel = OUT_PATH
     safe_path(sb.workspace, "out").mkdir(exist_ok=True)
+    stale = safe_path(sb.workspace, out_rel)
+    if stale.exists():
+        stale.unlink()
     res = sb.exec([sb.python, script, "--train", train, "--test", test,
                    "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
     info: dict[str, Any] = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
@@ -96,20 +101,25 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
 
     The program runs once per fold, each time in a FRESH sandbox whose workspace holds only that fold's training
     rows and validation features: never the run workspace, which holds the full public training file and hence
-    every validation label (a program reading it could score itself perfectly on dev). Predictions are
-    concatenated in fold order, which is the order of the private dev labels. The first failing fold fails the
-    whole evaluation; its diagnostics are returned (with "fold" set)."""
+    every validation label (a program reading it could score itself perfectly on dev). The workspace layout,
+    file names, command line and seed are those of held-out runs (kernel.execution.run_program), so a program
+    cannot tell a dev fold from a held-out evaluation by names; it still can by data size or content (stated
+    limitation). Predictions are concatenated in fold order, which is the order of the private dev labels. The
+    first failing fold fails the whole evaluation; its diagnostics are returned (with "fold" set)."""
     task = _task(state)
     sb = _sb(ctx)
     root = sb.workspace.parent / f"{sb.workspace.name}-dev" / f"{name}-{uuid.uuid4().hex[:8]}"
     preds: list[str] = []
     wall = 0.0
+    train_rel, test_rel = f"in/train/{task.train_file}", f"in/test/{task.test_features_file}"
     for k, fold in enumerate(state["dev_folds"]):
         box = sb.spawn(root / f"fold{k}")
         safe_path(box.workspace, "solution.py").write_bytes(code)
-        safe_path(box.workspace, "train.csv").write_bytes(ctx.store.blobs.get(fold["train_ref"]))
-        safe_path(box.workspace, "valid_X.csv").write_bytes(ctx.store.blobs.get(fold["valid_x_ref"]))
-        out, info = _run_solution(box, "solution.py", "train.csv", "valid_X.csv", 0, task.solution_timeout_s)
+        for rel, ref in ((train_rel, fold["train_ref"]), (test_rel, fold["valid_x_ref"])):
+            p = safe_path(box.workspace, rel)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(ctx.store.blobs.get(ref))
+        out, info = _run_solution(box, "solution.py", train_rel, test_rel, 0, task.solution_timeout_s)
         wall += info["wall_s"]
         if out is not None and len(out) != fold["n"]:
             info["stderr_tail"] += f"\n[harness] fold {k}: expected {fold['n']} predictions, got {len(out)}"

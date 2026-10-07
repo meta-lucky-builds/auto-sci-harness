@@ -153,6 +153,11 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
 - **Evolution protections** (`evolve/edits.py`): protected nodes setup, claim, confirm, certify, replicate,
   replica_dev, replica_claim, replica_confirm, replica_certify, report, audit; edits may not write
   `RESERVED_OUTPUT_KEYS` or reuse protected modules; audit must be the only terminal; sealed split never used.
+  Since the 2026-10-07 red-team pass also: edges out of protected nodes (and into them, except `claim`/`report`)
+  are frozen; new nodes may not use `RESERVED_WRITING_MODULES`; malformed ops are rejected, never crash; the
+  replicator sees only `replication_brief` (profile recomputed from the vault; briefs with verbatim code refused).
+  Red-team tests live in `tests/test_redteam_*.py`; `test_redteam_kernel.py` PINS an open gap (K7 n/a for
+  negative/equivalence claims) awaiting the user's decision.
 
 ---
 
