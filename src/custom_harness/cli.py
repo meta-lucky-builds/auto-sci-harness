@@ -13,6 +13,7 @@ import yaml
 
 from .config import data_dir
 from .gateway import Backend, MockBackend
+from .literature import cli as lit_cli
 from .runtime import Engine, HarnessSpec
 from .sandbox import LocalSandbox, Sandbox
 from .store import EvidenceStore
@@ -421,6 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("trace")
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
+    lit_cli.add_parsers(sub)
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
@@ -429,7 +431,8 @@ def main(argv: list[str] | None = None) -> int:
                 "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
-                "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)
+                "predictions": cmd_predictions, "build-suite": cmd_build_suite,
+                **lit_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 
