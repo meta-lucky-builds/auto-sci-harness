@@ -180,6 +180,9 @@ def build_map(python: str) -> None:
     print(f"mutate: coverage map built in {time.time() - t0:.0f}s", flush=True)
 
 
+KILLS: dict[str, int] = {}  # test id -> mutants it killed so far (tests that kill often run first: -x stops early)
+
+
 def _covering(mp: dict, m: Mutant) -> list[str]:
     lines = mp["lines"].get(m.file, {})
     tests: set[str] = set()
@@ -190,7 +193,7 @@ def _covering(mp: dict, m: Mutant) -> list[str]:
     if executed and not tests:  # ran only at import time (no test context): every test file may depend on it
         return list(TESTS)
     dur = mp["durations"]
-    return sorted(tests, key=lambda t: (dur.get(t.split("[")[0], dur.get(t, 99.0)), t))
+    return sorted(tests, key=lambda t: (-KILLS.get(t, 0), dur.get(t.split("[")[0], dur.get(t, 99.0)), t))
 
 
 # ------------------------------------------------------------------ running
@@ -214,10 +217,11 @@ def run_mutant(m: Mutant, tests: list[str], python: str) -> dict:
                                  check=False)
             verdict = "SURVIVED" if res.returncode == 0 else "KILLED"
             tail = (res.stdout.strip().splitlines() or [""])[-1]
+            killer = next((ln.split()[1] for ln in res.stdout.splitlines() if ln.startswith("FAILED ")), None)
         except subprocess.TimeoutExpired:
-            verdict, tail = "KILLED", "timeout"
+            verdict, tail, killer = "KILLED", "timeout", None
         return {**asdict(m), "id": m.id, "verdict": verdict, "detail": tail, "secs": round(time.time() - t0, 1),
-                "n_tests": len(tests)}
+                "n_tests": len(tests), "killer": killer}
 
 
 def report() -> int:
@@ -279,10 +283,17 @@ def main(argv: list[str] | None = None) -> int:
     elif results.exists():
         done = {json.loads(x)["id"] for x in results.read_text(encoding="utf-8").splitlines() if x.strip()}
     todo = [m for m in ms if m.id not in done]
+    if results.exists():
+        for x in results.read_text(encoding="utf-8").splitlines():
+            k = json.loads(x).get("killer") if x.strip() else None
+            if k:
+                KILLS[k] = KILLS.get(k, 0) + 1
     print(f"mutate: {len(todo)} mutants to run ({len(done)} already done)", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool, results.open("a", encoding="utf-8") as f:
         extra = list(a.tests or [])
         for r in pool.map(lambda m: run_mutant(m, extra + _covering(mp, m), sys.executable), todo):
+            if r.get("killer"):
+                KILLS[r["killer"]] = KILLS.get(r["killer"], 0) + 1
             f.write(json.dumps(r) + "\n")
             f.flush()
             print(f"{r['verdict']:9s} {r['id']} ({r.get('secs', 0)}s)", flush=True)
