@@ -182,6 +182,99 @@ findings:
     tests: ["tests/spec/test_spec_kernel.py::test_certify_never_evaluates_k3_to_k9_for_an_unregistered_claim"]
     museum: redteam/museum/K-3-guard.patch
     status: fixed
+  # ------------------------------------------------------------------ STATUS §A, loop/evolve rows (patches drafted by a sub-agent, registered and verified by assure)
+  - id: DEV-1
+    title: dev folds scored in the candidate's own sandbox, so a candidate could read the validation labels
+    invariant: "§10 inv. 2/6"
+    capability: A2
+    tests: ["tests/test_research.py::test_dev_scoring_cannot_read_the_validation_labels"]
+    museum: redteam/museum/DEV-1.patch
+    status: fixed
+  - id: DEV-2
+    title: a wired node writing dev_folds/dev_scheme was accepted
+    invariant: "§10 inv. 6"
+    capability: A1
+    tests: ["tests/test_evolve.py::test_edits_cannot_fake_kernel_state_or_duplicate_protected_modules"]
+    museum: redteam/museum/DEV-2.patch
+    status: fixed
+  - id: DEV-TIME
+    title: one 5-fold dev evaluation could run unbounded (2,423 s seen)
+    invariant: "§10 inv. 9 (cost record) / L1"
+    capability: A2
+    tests: ["tests/test_research.py::test_dev_evaluation_wall_time_is_capped_across_folds"]
+    museum: redteam/museum/DEV-TIME.patch
+    status: fixed
+  - id: E1
+    title: an evolvable node inserted between protected nodes
+    invariant: "§10 inv. 5/13"
+    capability: A1
+    tests: ["tests/test_redteam_evolve.py::test_e1_cannot_insert_a_node_between_protected_nodes"]
+    museum: redteam/museum/E1.patch
+    status: fixed
+  - id: E2
+    title: a new module node could write reserved state
+    invariant: "§10 inv. 6"
+    capability: A1
+    tests: ["tests/test_redteam_evolve.py::test_e2_new_module_node_cannot_write_reserved_state"]
+    museum: redteam/museum/E2.patch
+    status: fixed
+  - id: E3
+    title: replication independence broken through the profile channel and hypothesis text
+    invariant: "§10 inv. 5"
+    capability: A1
+    tests: ["tests/test_redteam_evolve.py::test_e3a_profile_channel_is_closed", "tests/test_redteam_evolve.py::test_e3b_idea_channel_cannot_carry_the_code"]
+    museum: redteam/museum/E3.patch
+    status: fixed
+  - id: E4
+    title: malformed edit paths crashed instead of being rejected
+    invariant: "§10 inv. 7"
+    capability: A1
+    tests: ["tests/test_redteam_evolve.py::test_e4_malformed_edit_paths_are_rejected_not_crashing"]
+    museum: redteam/museum/E4.patch
+    status: fixed
+  - id: E5
+    title: trusted modules crashed on malformed evolvable state
+    invariant: "§10 inv. 7"
+    capability: A1
+    tests: ["tests/spec/test_spec_museum_gaps.py::test_e5_trusted_module_parses_malformed_evolvable_hypotheses_without_crashing"]
+    museum: redteam/museum/E5.patch
+    status: fixed
+  - id: F1
+    title: dev folds used different file names than held-out runs
+    invariant: "§10 inv. 6"
+    capability: A2
+    tests: ["tests/test_redteam_loop.py::test_f1_dev_runs_see_the_same_input_names_as_held_out_runs"]
+    museum: redteam/museum/F1.patch
+    status: fixed
+  - id: F2
+    title: a blank or multi-column predictions row crashed the run or was truncated
+    invariant: "§10 inv. 7"
+    capability: A2
+    tests: ["tests/test_redteam_loop.py::test_f2_malformed_predictions_are_rejected_cleanly"]
+    museum: redteam/museum/F2.patch
+    status: fixed
+  - id: F4
+    title: near-copy check defeated by appending a comment to every line
+    invariant: "§10 inv. 5"
+    capability: A0
+    tests: ["tests/test_redteam_loop.py::test_f4_near_copy_check_survives_trivial_comment_padding"]
+    museum: redteam/museum/F4.patch
+    status: fixed
+  - id: F5
+    title: model text with newlines injected a fake Headline result line into the report
+    invariant: "§10 inv. 8"
+    capability: A0
+    tests: ["tests/test_redteam_loop.py::test_f5_model_text_cannot_inject_report_structure"]
+    museum: redteam/museum/F5.patch
+    status: fixed
+  - id: BUNDLED-DATA
+    title: agent code ran in a sandbox image that ships the real tasks' datasets (patch = the full image as default)
+    invariant: "§10 inv. 2 (no hidden label in the execution environment)"
+    capability: A2
+    tests: ["tests/test_bundled_data.py::test_image_policy_defaults_to_the_candidate_and_refuses_the_full_image_for_agent_code",
+            "tests/test_bundled_data.py::test_every_docker_sandbox_construction_selects_the_candidate_image_except_the_exporter"]
+    museum: redteam/museum/BUNDLED-DATA.patch
+    status: fixed
   # ------------------------------------------------------------------ STATUS §C, open (not museum-able: no fix exists)
   - id: ADAPTER-EDIT
     title: no static rejection or test of a harness edit touching an adapter (edits cannot change Python today)

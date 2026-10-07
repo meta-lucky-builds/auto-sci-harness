@@ -1,0 +1,14 @@
+diff --git a/src/custom_harness/research/data.py b/src/custom_harness/research/data.py
+index 3dc81e9..d283db1 100644
+--- a/src/custom_harness/research/data.py
++++ b/src/custom_harness/research/data.py
+@@ -34,9 +34,6 @@ def read_predictions(path: Path) -> list[str]:
+     header, rows = read_csv(path)
+     if header != ["prediction"]:
+         raise ValueError(f"predictions header must be ['prediction'], got {header[:5]}")
+-    bad = next((i for i, r in enumerate(rows, start=2) if len(r) != 1), None)
+-    if bad is not None:
+-        raise ValueError(f"predictions file line {bad}: expected exactly one value")
+     return [r[0] for r in rows]
+ 
+ 

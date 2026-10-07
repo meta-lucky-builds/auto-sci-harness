@@ -1,0 +1,18 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index fcbf631..a7c7d28 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -267,13 +267,6 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
+     # protected wiring: edges out of a protected node, and into it (except the two protected nodes the evolvable
+     # loop routes to: claim and report), are human-only, so no evolvable node can sit between protected steps
+     old_edges, new_edges = spec.model_dump(mode="json")["edges"], new.model_dump(mode="json")["edges"]
+-    for nid in protected_nodes:
+-        if nid not in spec.nodes:
+-            continue
+-        if [e for e in new_edges if e["source"] == nid] != [e for e in old_edges if e["source"] == nid]:
+-            raise EditRejected(f"edges out of protected node '{nid}' are human-only")
+-        if nid not in OPEN_PROTECTED_TARGETS and _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
+-            raise EditRejected(f"edges into protected node '{nid}' are human-only")
+     # approval nodes are human-only surfaces (invariant 15): none added, removed or changed, and their wiring (in and
+     # out) fixed, so an edit can neither bypass a human decision nor change what it routes to
+     old_appr, new_appr = _approval_nodes(spec), _approval_nodes(new)
