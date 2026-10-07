@@ -272,8 +272,9 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
   directory, never a live working tree (OR does this).
   **Compute backends** (❌; OR covers SSH, Slurm, K8s, Modal, Ray, HF Jobs): one backend interface, each backend
   declaring an **isolation class**. Only backends that meet invariant 1 (container, no secrets, network policy,
-  read-only root) may run agent-written code; any other backend runs only trusted code or needs a recorded human
-  approval.
+  read-only root) may run agent-written code. Any other backend runs trusted code only, and running trusted code
+  there needs a recorded human approval. Agent-written code is never allowed on a non-isolated backend, with or
+  without approval (invariant 1 wins; clarified 2026-10-08 after orcompute built the ambiguous earlier wording).
 - Never: run agent code on the host; mount hidden data into an agent container.
 - Done when: a corrupted blob mid-restore leaves the original workspace intact; a planted host-escape test fails. ✅
 
