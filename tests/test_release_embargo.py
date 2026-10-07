@@ -147,3 +147,33 @@ def test_gate_decision_is_emitted_and_pinnable(store, tmp_path):
 def _tokens100():
     from custom_harness.records import Cost
     return Cost(prompt_tokens=100)
+
+
+# ---------------------------------------------------------------- engine: target-derived values rendered into prompts
+def _prompt_run(store, prompt):
+    from custom_harness.gateway import MockBackend
+    from custom_harness.runtime import Engine
+    spec = HarnessSpec.model_validate({
+        "id": "p", "entry": "m", "nodes": {"m": {"kind": "module", "module": "test.release_reader"},
+                                           "ask": {"kind": "llm", "prompt": prompt, "output_key": "o"}},
+        "edges": [{"source": "m", "target": "ask"}]})
+    llm = MockBackend(["ok"])
+    res = Engine(spec, backends={"executor": llm}, store=store).run("t", {})
+    return res, llm
+
+
+@pytest.mark.parametrize("path,alphabet", [("certificate.label", "verdict_bit"),
+                                           ("certificate.subject_mean", "continuous")])
+def test_a_target_derived_value_in_a_prompt_is_a_typed_release(store, path, alphabet):
+    res, llm = _prompt_run(store, "Result: {{" + path + "}}")
+    assert res.status.value == "completed", res.detail
+    assert any(str(res.state["certificate"][path.split(".")[1]]) in m.content
+               for m in llm.requests[0].messages)  # the value really reached the prompt
+    prompts = [r for r in released(store, "t-held") if r["channel"] == "prompt"]
+    assert [(r["alphabet"], r["note"]) for r in prompts] == [(alphabet, f"prompt:ask:{path}")]
+
+
+def test_a_prompt_without_target_derived_values_releases_nothing(store):
+    res, _ = _prompt_run(store, "Say hi")
+    assert res.status.value == "completed", res.detail
+    assert [r for r in released(store, "t-held") if r["channel"] == "prompt"] == []
