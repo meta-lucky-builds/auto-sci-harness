@@ -84,6 +84,10 @@ set CHH_DATA_DIR=C:\Users\mykids\custom-harness-data
 # inspection
 chh runs | chh trace RUN_ID [--full] | chh certificates | chh ledger-verify | chh predictions | chh bundle CERT_HASH
 
+# HUMAN actions: approve the ML adapter (needed before any certificate), decide an approval node
+chh approve-adapter ml --approver <name>
+chh approve RUN_ID NODE_ID --decision approve|reject --approver <name>   # then: chh resume RUN_ID
+
 # state bundle at a stopping point (refuses a dirty tree); commit only the manifest, never the zip
 ...\python.exe scripts\snapshot_state.py C:\Users\mykids\custom-harness-data\bundles C:\Users\mykids\custom-harness-data\suites\m2 --note "..."
 ```

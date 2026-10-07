@@ -95,6 +95,12 @@ def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
         return None, info
 
 
+# Total wall time of one k-fold dev evaluation, as a multiple of the task's per-run limit (cost policy, decided
+# 2026-10-07 after a live candidate took 2423 s over 5 folds): solutions slower than ~2/k of the limit per fold
+# cannot pass dev; held-out runs keep the full per-run limit.
+DEV_TIME_FACTOR = 2.0
+
+
 def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
                  name: str) -> tuple[list[str] | None, dict[str, Any]]:
     """Out-of-fold dev predictions (k-fold cross-validation on the public training data).
@@ -111,16 +117,25 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
     root = sb.workspace.parent / f"{sb.workspace.name}-dev" / f"{name}-{uuid.uuid4().hex[:8]}"
     preds: list[str] = []
     wall = 0.0
+    budget = DEV_TIME_FACTOR * task.solution_timeout_s  # total over all folds (each fold also keeps the per-run cap)
+    over = (f"\n[harness] dev evaluation exceeded its total time budget ({DEV_TIME_FACTOR:g} x the task's "
+            f"{task.solution_timeout_s:g} s per-run limit, over {len(state['dev_folds'])} folds)")
     train_rel, test_rel = f"in/train/{task.train_file}", f"in/test/{task.test_features_file}"
     for k, fold in enumerate(state["dev_folds"]):
+        remaining = budget - wall
+        if remaining <= 0:
+            return None, {"fold": k, "wall_s": round(wall, 2), "stdout_tail": "", "stderr_tail": over.strip()}
+        timeout = min(task.solution_timeout_s, remaining)
         box = sb.spawn(root / f"fold{k}")
         safe_path(box.workspace, "solution.py").write_bytes(code)
         for rel, ref in ((train_rel, fold["train_ref"]), (test_rel, fold["valid_x_ref"])):
             p = safe_path(box.workspace, rel)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_bytes(ctx.store.blobs.get(ref))
-        out, info = _run_solution(box, "solution.py", train_rel, test_rel, 0, task.solution_timeout_s)
+        out, info = _run_solution(box, "solution.py", train_rel, test_rel, 0, timeout)
         wall += info["wall_s"]
+        if out is None and info.get("timed_out") and timeout < task.solution_timeout_s:
+            info["stderr_tail"] += over
         if out is not None and len(out) != fold["n"]:
             info["stderr_tail"] += f"\n[harness] fold {k}: expected {fold['n']} predictions, got {len(out)}"
             out = None
