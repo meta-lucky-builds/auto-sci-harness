@@ -7,9 +7,10 @@ import hashlib
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
 from .claim import canonical_json
+from .reasons import Code
 
 CHECK_IDS = ("K0", "K1", "K2", "K3", "K4", "K5", "K6", "K7", "K8", "K9")
 CHECK_NAMES = {
@@ -51,8 +52,24 @@ class CheckResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: Literal["pass", "fail", "n/a"]
-    reasons: tuple[str, ...] = ()  # why it failed (or why n/a)
+    reasons: tuple[str, ...] = ()  # why it failed (or why n/a): human-readable detail, stays with the certificate
     observations: tuple[str, ...] = ()  # facts recorded while checking (numbers, notes)
+    # §16.5.8: one closed code per reason; the only part of a reason that may reach an agent-visible surface. Empty on
+    # certificates issued before codes existed (omitted from dumps when empty, so their hashes are unchanged).
+    codes: tuple[Code, ...] = ()
+
+    @model_validator(mode="after")
+    def _one_code_per_reason(self) -> CheckResult:
+        if self.codes and len(self.codes) != len(self.reasons):
+            raise ValueError("a check result needs exactly one code per reason")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_codes(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("codes"):
+            doc.pop("codes", None)
+        return doc
 
 
 class Assumption(BaseModel):
@@ -82,11 +99,15 @@ class Certificate(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)  # the Kernel configuration that was applied
     # the domain adapters (name, version, content hash, approval ledger seq) this certificate relied on (GOAL §4.4)
     adapters: tuple[dict[str, Any], ...] = ()
+    # §16.7: fields the certificate relies on that only the claimant (or its pipeline) reported, never a human; any
+    # entry caps the tier (KernelConfig.self_reported_tier_cap)
+    self_reported: tuple[str, ...] = ()
 
     def cert_hash(self) -> str:
         doc = self.model_dump(mode="json")
-        if not doc["adapters"]:
-            del doc["adapters"]  # omitted when empty: certificates issued before the field existed keep their hash
+        for key in ("adapters", "self_reported"):  # omitted when empty: older certificates keep their hash
+            if not doc[key]:
+                del doc[key]
         return hashlib.sha256(canonical_json(doc)).hexdigest()
 
     def failed(self) -> list[str]:
