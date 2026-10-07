@@ -8,12 +8,16 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib
 import io
 import json
 import math
 import statistics
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from fractions import Fraction
+from types import MappingProxyType
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -24,11 +28,11 @@ from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
 from . import adapters
-from .certificate import CheckResult
-from .claim import SUPPORTED_KINDS, Claim, ClaimKind
+from .certificate import CHECK_IDS, CheckResult
+from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
 from .execution import ExecRecord, ExecutionError
 from .ledger import Entry, Ledger, verify_chain
-from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, Vault, VaultError
+from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRecord, Vault, VaultError
 
 _NORMAL = statistics.NormalDist()
 PEEKING_PURPOSES = frozenset({"develop", "audit"})
@@ -77,6 +81,7 @@ class Context:
     stats: dict[str, TargetStats] = field(default_factory=dict)
     prereg: Entry | None = None
     adapter: dict[str, Any] | None = None  # the approved adapter K1 resolved for this claim
+    certificates: list[ArtifactRecord] = field(default_factory=list)  # computational: certificate artifacts (K0)
 
     @property
     def sign(self) -> float:
@@ -180,6 +185,8 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(f"claim kind {c.kind.value!r} is not checkable by Kernel v{cfg.version}")
     if not c.effect.min_effect > 0:  # finiteness is enforced by the Claim model itself
         reasons.append("minimum effect must be a finite number > 0")
+    if c.value is not None:
+        reasons.append("only computed_value claims carry an exact value")
     if c.metric.id not in M.METRICS:
         reasons.append(f"metric {c.metric.id!r} is not registered")
     elif M.HIGHER_IS_BETTER[c.metric.id] != c.metric.higher_is_better:
@@ -566,3 +573,171 @@ ALL_CHECKS: dict[str, Any] = {
     "K4": k4_statistics, "K5": k5_comparator, "K6": k6_held_out, "K7": k7_risk, "K8": k8_background,
     "K9": k9_leaks,
 }
+
+
+# ================================================================== computational class (exact certificates, T1)
+# The claim: "the exact value of the computation on the registered instance (subject) is `value`". The certificate
+# is a registered artifact, linked to the claim by a PROOF evidence record (Kernel.record_certificate); the approved
+# adapter's exact checker re-checks it from the stored bytes. Nothing here is domain-specific: the adapter is.
+def k0_computational(ctx: Context) -> CheckResult:
+    reasons: list[str] = []
+    arts = ctx.vault.artifacts()
+    ref = ctx.claim.subject
+    reg = arts.get(ref.artifact_id)
+    if reg is None or reg.hash != ref.hash:
+        reasons.append(f"problem instance {ref.artifact_id!r} is not registered with hash {ref.hash[:12]}")
+    elif not _blob_ok(ctx.store, ref.hash):
+        reasons.append("problem instance bytes missing or corrupted")
+    if len(ctx.evidence_ids) != 1:
+        reasons.append(f"a computational claim rests on exactly one certificate record, got {len(ctx.evidence_ids)}")
+    for eid in ctx.evidence_ids:
+        try:
+            ev = ctx.store.get_evidence(eid)
+            if ev.kind != EvidenceKind.PROOF:
+                raise ValueError(f"kind {ev.kind} is not a certificate record")
+            rec = CertificateRecord.model_validate(ctx.store.blobs.get_json(ev.payload_ref))
+            if rec.claim_hash != ctx.claim_hash:
+                raise ValueError("record belongs to a different claim")
+            art = arts.get(rec.artifact_id)
+            if art is None or art.hash != rec.hash:
+                raise ValueError(f"certificate artifact {rec.artifact_id!r} is not registered with hash "
+                                 f"{rec.hash[:12]}")
+            if not _blob_ok(ctx.store, rec.hash):
+                raise ValueError("certificate bytes missing or corrupted")
+        except (KeyError, ValueError, OSError, ValidationError, json.JSONDecodeError) as e:
+            reasons.append(f"evidence {eid}: {type(e).__name__}: {str(e)[:200]}")
+            continue
+        ctx.certificates.append(art)
+    return _result(reasons, [f"{len(ctx.certificates)}/{len(ctx.evidence_ids)} certificate records resolved"])
+
+
+def _exact_spec(ctx: Context) -> adapters.AdapterSpec | None:
+    return adapters.REGISTRY[ctx.adapter["name"]][0] if ctx.adapter is not None else None
+
+
+def k1_computational(ctx: Context) -> CheckResult:
+    c, reasons = ctx.claim, []
+    if c.kind != ClaimKind.COMPUTED_VALUE:
+        reasons.append(f"a computational claim must be of kind 'computed_value', not {c.kind.value!r}")
+    if exact_value(c.value) is None:
+        reasons.append(f"value {c.value!r} must be an exact rational in lowest terms, 'p' or 'p/q' (no decimals, "
+                       f"no floats)")
+    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
+    reasons += why
+    spec = _exact_spec(ctx)
+    if spec is not None and spec.exact_module is None:
+        reasons.append(f"adapter {spec.name!r} declares no exact certificate checker")
+    elif spec is not None and importlib.import_module(str(spec.exact_module)).HIGHER_IS_BETTER != \
+            c.metric.higher_is_better:
+        reasons.append(f"metric {c.metric.id!r} direction does not match the adapter")
+    if c.comparator != c.subject:
+        reasons.append("a computed value has no comparator: by convention the comparator must be the subject (the "
+                       "problem instance)")
+    if c.development or c.generalization_targets or c.scope.datasets:
+        reasons.append("a computational claim uses no datasets: development, generalization targets and scope "
+                       "datasets must be empty")
+    if c.analysis_plan != AnalysisPlan(seeds=()):
+        reasons.append("the analysis plan must be empty (no seeds, defaults): an exact certificate replaces statistics")
+    e = c.effect
+    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
+        reasons.append("effect fields other than the declared probability must be 0 (the claimed value is `value`)")
+    if not 0 < e.probability < 1:
+        reasons.append("declared probability must be strictly between 0 and 1")
+    if c.risk.prior_probability is not None:
+        reasons.append("risk prior must be unset: K7 does not apply to computational claims")
+    return _result(reasons)
+
+
+def k2_computational(ctx: Context) -> CheckResult:
+    """K2 as for data claims (chain, registration, instance registered first), and the certificate artifact must be
+    registered AFTER the claim: the value is predicted, and the prediction ledger scores it, before it is computed."""
+    base = k2_preregistered(ctx)
+    reasons = list(base.reasons)
+    if ctx.prereg is not None:
+        seq = ctx.prereg.seq
+        reasons += [f"certificate artifact {a.artifact_id!r} was registered before the pre-registration (ledger seq "
+                    f"{a.seq} < {seq})" for a in ctx.certificates if a.seq < seq]
+    return _result(reasons, list(base.observations))
+
+
+def _exact_inputs(ctx: Context) -> tuple[Any, bytes, bytes, Fraction] | list[str]:
+    spec, value = _exact_spec(ctx), exact_value(ctx.claim.value)
+    module = spec.exact_module if spec is not None else None
+    reasons = []
+    if module is None:
+        reasons.append("no approved adapter with an exact certificate checker (see K1)")
+    if value is None:
+        reasons.append("the claimed value is not an exact rational (see K1)")
+    if len(ctx.certificates) != 1:
+        reasons.append("no single resolved certificate (see K0)")
+    if module is None or value is None or reasons:
+        return reasons
+    return (importlib.import_module(module), ctx.store.blobs.get(ctx.claim.subject.hash),
+            ctx.store.blobs.get(ctx.certificates[0].hash), value)
+
+
+def k3_computational(ctx: Context) -> CheckResult:
+    """The adapter's exact checker re-checks the certificate from the stored bytes (deterministic: no re-run)."""
+    got = _exact_inputs(ctx)
+    if isinstance(got, list):
+        return _result(got)
+    module, problem, cert, value = got
+    return _result(list(module.check(problem, cert, value)), [f"certificate re-checked exactly by {module.__name__}"])
+
+
+def k8_computational(ctx: Context) -> CheckResult:
+    """The adapter's registered sanity bounds (dimensions, number sizes, the claimed value included)."""
+    got = _exact_inputs(ctx)
+    if isinstance(got, list):
+        return _result(got)
+    module, problem, cert, value = got
+    return _result(list(module.bounds(problem, cert, value)))
+
+
+def k9_computational(ctx: Context) -> CheckResult:
+    """No canary token and no private file's bytes in the problem instance or the certificate."""
+    datasets = ctx.vault.datasets()
+    canaries = [x for x in (ctx.vault.canary(d) for d in datasets) if x]
+    private = {f.blob: f"{d}/{n}" for d, rec in datasets.items() for n, f in rec.files.items() if f.private}
+    reasons: list[str] = []
+    scanned = [("problem instance", ctx.claim.subject.hash), *(("certificate", a.hash) for a in ctx.certificates)]
+    for role, digest in scanned:
+        if digest in private:
+            reasons.append(f"{role} IS a private file ({private[digest]})")
+        reasons += leak.scan_text(ctx.store.blobs.get(digest).decode("utf-8", errors="ignore"), role, canaries, [])
+    return _result(reasons, [f"scanned the instance and {len(ctx.certificates)} certificate(s) for "
+                             f"{len(canaries)} canary token(s) and {len(private)} private file(s)"])
+
+
+COMPUTATIONAL_CHECKS: dict[str, Any] = {
+    "K0": k0_computational, "K1": k1_computational, "K2": k2_computational, "K3": k3_computational,
+    "K8": k8_computational, "K9": k9_computational,
+}
+
+# HUMAN-OWNED (L9), like KernelConfig: which checks apply to each evidence class. None = the check applies and must
+# pass; a string = the check does not apply to the class, and is the reason recorded on the certificate. No claim can
+# change it. A class absent from the table gets every check (fail closed: without an approved adapter, K1 rejects it).
+CHECK_APPLICABILITY: Mapping[EvidenceClass, Mapping[str, str | None]] = MappingProxyType({
+    EvidenceClass.DATA: MappingProxyType(dict.fromkeys(CHECK_IDS)),
+    EvidenceClass.COMPUTATIONAL: MappingProxyType({
+        "K0": None, "K1": None, "K2": None, "K3": None,
+        "K4": "n/a (computational): an exact certificate replaces statistics; there is no sampling, no seeds and no "
+              "multiplicity to correct",
+        "K5": "n/a (computational): no comparator; the claim states the exact value of one computation on one "
+              "registered instance",
+        "K6": "n/a (computational): no held-out data; an exact certificate holds for the stated instance, not for a "
+              "sample of a population",
+        "K7": "n/a (computational): correctness is proven exactly; triviality/importance are not judged by the "
+              "Kernel (GOAL §4.6)",
+        "K8": None, "K9": None}),
+})
+_CHECKS_BY_CLASS: Mapping[EvidenceClass, dict[str, Any]] = MappingProxyType({
+    EvidenceClass.COMPUTATIONAL: COMPUTATIONAL_CHECKS})
+
+
+def applicability(evidence_class: EvidenceClass) -> Mapping[str, str | None]:
+    return CHECK_APPLICABILITY.get(evidence_class, CHECK_APPLICABILITY[EvidenceClass.DATA])
+
+
+def checks_for(evidence_class: EvidenceClass) -> dict[str, Any]:
+    return _CHECKS_BY_CLASS.get(evidence_class, ALL_CHECKS)

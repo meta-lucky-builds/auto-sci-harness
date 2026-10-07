@@ -290,7 +290,7 @@ recorded as invariant 5 NOT MET in every run, report and certificate checklist, 
   coverage and contains no LLM call. ✅ both (`tests/test_kernel_suite.py`, `scripts/check.py` coverage gate,
   `tests/test_kernel_quality.py` import-closure test). v1 deviations are listed in STATUS.md.
 
-### Domain adapters (🟡 M3: registry, evidence classes, K1 enforcement and the ML adapter built 2026-10-07; Lean / solver / simulator adapters not yet; §4.7)
+### Domain adapters (🟡 M3: registry, evidence classes, K1 enforcement and the ML adapter built 2026-10-07; exact-solver adapter: class-aware check table + `lp` certificate checker (T1) built 2026-10-07, no solver wrapper yet (certificates come from outside); Lean / simulator adapters not yet; §4.7)
 A domain adapter is everything domain-specific the Kernel and the loop need, as a **human-approved, fixed verifier
 layer**: claim-scope vocabulary, data formats and readers, registered metrics with direction and range, background
 invariants for K8 (units/dimensions, conservation laws, physical bounds), tool wrappers (Lean, solvers with

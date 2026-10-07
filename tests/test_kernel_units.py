@@ -731,3 +731,251 @@ def test_infrastructure_outage_during_certification_issues_no_certificate(tmp_pa
         assert w.kernel.certify(claim, ids).label == Label.CERTIFIED_INTERNAL  # the retry judges the claim
     finally:
         w.close()
+
+
+# ------------------------------------------------------------------ M3: computational evidence class (exact LP adapter)
+# maximise x1 + x2  s.t.  2 x1 + x2 <= 4,  x1 + 3 x2 <= 5,  x >= 0: optimum 13/5 at x = (7/5, 6/5), dual y = (2/5, 1/5)
+LP_PROBLEM = {"format": "chh-lp/1", "sense": "max", "c": ["1", "1"], "A": [["2", "1"], ["1", "3"]], "b": ["4", "5"]}
+LP_CERT = {"format": "chh-lp-certificate/1", "x": ["7/5", "6/5"], "y": ["2/5", "1/5"]}
+
+
+@pytest.fixture()
+def lpw(tmp_path):
+    w = World(tmp_path / "lp", seed=11, n_train=30, n_test=30)
+    w.kernel.approve_adapter("lp", approver="test-world")
+    yield w
+    w.close()
+
+
+def lp_claim(w: World, *, value: str | None = "13/5", problem: dict | None = None, artifact_id: str = "lp-instance",
+             **changes) -> Claim:
+    data = canonical_json(problem or LP_PROBLEM)
+    ref = ArtifactRef(artifact_id=artifact_id, hash=w.vault.register_artifact(artifact_id, data, "problem").hash)
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {artifact_id} is {value}", subject=ref,
+                comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
+                effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
+                scope=Scope(datasets=()), development=(), generalization_targets=(),
+                analysis_plan=AnalysisPlan(seeds=()), resolve_by=time.time() + 86400).model_dump(mode="json")
+    doc |= {"kind": "computed_value", "evidence_class": "computational", "value": value}
+    claim = Claim.model_validate(doc)
+    return variant(claim, **changes) if changes else claim
+
+
+def lp_cert_artifact(w: World, claim: Claim, cert: dict | None = None, raw: bytes | None = None) -> str:
+    import hashlib
+    data = raw if raw is not None else canonical_json(LP_CERT if cert is None else {**LP_CERT, **cert})
+    aid = f"cert-{claim.claim_hash()[:10]}-{hashlib.sha256(data).hexdigest()[:10]}"
+    return w.vault.register_artifact(aid, data, "certificate").artifact_id
+
+
+def lp_certify(w: World, claim: Claim, cert: dict | None = None, raw: bytes | None = None) -> Certificate:
+    w.kernel.preregister(claim)
+    eid = w.kernel.record_certificate(claim, lp_cert_artifact(w, claim, cert, raw))
+    return w.kernel.certify(claim, [eid])
+
+
+def test_lp_claim_certifies_at_t1_with_the_lp_adapter_and_table_reasons(lpw):
+    from custom_harness.kernel import EvidenceClass
+    claim = lp_claim(lpw)
+    cert = lp_certify(lpw, claim)
+    assert cert.label == Label.CERTIFIED_EXACT, {k: v.reasons for k, v in cert.checks.items() if v.status != "pass"}
+    assert cert.tier == int(Tier.T1_EXECUTABLE) and "exact" in cert.vg_ladder
+    assert [k for k in CHECK_IDS if cert.checks[k].status == "pass"] == ["K0", "K1", "K2", "K3", "K8", "K9"]
+    table = K.CHECK_APPLICABILITY[EvidenceClass.COMPUTATIONAL]
+    for kid in ("K4", "K5", "K6", "K7"):  # n/a, with the reason taken from the human-owned table
+        assert cert.checks[kid].status == "n/a" and cert.checks[kid].reasons == (table[kid],)
+    assert "exact certificate replaces statistics" in table["K4"]
+    assert "triviality/importance are not judged by the Kernel (GOAL §4.6)" in table["K7"]
+    (used,) = cert.adapters
+    assert used["name"] == "lp" and used["approver"] == "test-world"
+    assert "exact:lp_optimum" in cert.verifier_ids
+    assert any(a.tested_by is None and "instance" in a.text for a in cert.assumptions)
+    assert lpw.kernel.verify(cert.cert_hash()) == []
+    assert b'"value":"13/5"' in claim.canonical() and b'"evidence_class":"computational"' in claim.canonical()
+
+
+def test_lp_planted_faults_are_rejected_by_the_right_check(lpw):
+    faults = {  # certificate change -> (failing checks, reason)
+        "infeasible primal": ({"x": ["2", "1"]}, ["K3"], "primal infeasible"),
+        "infeasible dual": ({"y": ["1/5", "1/5"]}, ["K3"], "dual infeasible"),
+        "duality gap": ({"x": ["1", "1"]}, ["K3"], "duality gap"),
+        "float-encoded value": ({"x": [1.4, 1.2]}, ["K3", "K8"], "exact rational string"),
+        "wrong dimensions": ({"x": ["7/5", "6/5", "0"]}, ["K3", "K8"], "dimension"),
+    }
+    for name, (change, failed, why) in faults.items():
+        cert = lp_certify(lpw, lp_claim(lpw), change)
+        assert cert.label == Label.REJECTED and cert.failed() == failed, (name, cert.failed())
+        assert why in reasons(cert.checks["K3"]), (name, cert.checks["K3"])
+    wrong = lp_certify(lpw, lp_claim(lpw, value="3"))  # a correct certificate, but not of the claimed value
+    assert wrong.failed() == ["K3"] and "differs from the claimed value 3" in reasons(wrong.checks["K3"])
+    for bad in ("2.6", "26/10", "-0", "1/0", None):  # float-encoded or non-canonical claimed values
+        cert = lp_certify(lpw, lp_claim(lpw, value=bad))
+        assert cert.label == Label.REJECTED and "K1" in cert.failed(), bad
+        assert "exact rational" in reasons(cert.checks["K1"]), (bad, cert.checks["K1"])
+        assert "see K1" in reasons(cert.checks["K3"])
+    huge = {**LP_PROBLEM, "A": [*LP_PROBLEM["A"], ["1", "0"]], "b": [*LP_PROBLEM["b"], "1" + "0" * 120]}
+    cert = lp_certify(lpw, lp_claim(lpw, problem=huge, artifact_id="lp-huge"), {"y": ["2/5", "1/5", "0"]})
+    assert cert.failed() == ["K8"] and "exceed 100 digits" in reasons(cert.checks["K8"])
+
+
+def test_lp_provenance_order_and_leak_faults(lpw):
+    claim = lp_claim(lpw)
+    lpw.kernel.preregister(claim)
+    assert lpw.kernel.certify(claim, []).failed() == ["K0", "K3", "K8"]  # no certificate at all
+    early = lp_claim(lpw, statement="registered after its certificate")
+    aid = lp_cert_artifact(lpw, early)  # the certificate exists BEFORE the claim is pre-registered
+    lpw.kernel.preregister(early)
+    cert = lpw.kernel.certify(early, [lpw.kernel.record_certificate(early, aid)])
+    assert cert.failed() == ["K2"] and "registered before the pre-registration" in reasons(cert.checks["K2"])
+    other = lp_claim(lpw, statement="another claim")
+    foreign = lpw.kernel.record_certificate(other, lp_cert_artifact(lpw, other))
+    cert = lpw.kernel.certify(claim, [foreign])
+    assert "K0" in cert.failed() and "different claim" in reasons(cert.checks["K0"])
+    ok_id = lpw.kernel.record_certificate(claim, lp_cert_artifact(lpw, claim))
+    assert "exactly one certificate" in reasons(lpw.kernel.certify(claim, [ok_id, ok_id]).checks["K0"])
+    ghost = Evidence(kind=EvidenceKind.PROOF, tier=Tier.T1_EXECUTABLE, verifier_id="x", produced_by_run=None,
+                     payload_ref=lpw.store.blobs.put_json({"claim_hash": claim.claim_hash(), "artifact_id": "nope",
+                                                           "hash": "0" * 64}))
+    lpw.store.add_evidence(ghost)
+    metric = Evidence(kind=EvidenceKind.METRIC, tier=Tier.T1_EXECUTABLE, verifier_id="x", produced_by_run=None,
+                      payload_ref=lpw.store.blobs.put_json({}))
+    lpw.store.add_evidence(metric)
+    for eid, why in ((ghost.id, "is not registered"), (metric.id, "not a certificate record"), ("ev_none", "KeyError")):
+        assert why in reasons(lpw.kernel.certify(claim, [eid]).checks["K0"]), why
+    with pytest.raises(KernelError, match="not registered"):
+        lpw.kernel.record_certificate(claim, "no-such-artifact")
+    lost = lp_claim(lpw, statement="its certificate bytes are lost")
+    lpw.kernel.preregister(lost)
+    lost_aid = lp_cert_artifact(lpw, lost, {"comment": "lost"})
+    lost_id = lpw.kernel.record_certificate(lost, lost_aid)
+    lpw.store.blobs._path(lpw.vault.artifacts()[lost_aid].hash).unlink()
+    assert "missing or corrupted" in reasons(lpw.kernel.certify(lost, [lost_id]).checks["K0"])
+    bogus = ArtifactRef(artifact_id="lp-instance", hash="0" * 64).model_dump()
+    unknown = variant(claim, subject=bogus, comparator=bogus)
+    lpw.kernel.preregister(unknown)
+    k0 = reasons(lpw.kernel.certify(unknown, [ok_id]).checks["K0"])
+    assert "problem instance 'lp-instance' is not registered with hash 000000000000" in k0
+    gone = lp_claim(lpw, problem={**LP_PROBLEM, "comment": "gone"}, artifact_id="lp-gone")
+    gone_id = lpw.kernel.record_certificate(gone, lp_cert_artifact(lpw, gone))
+    lpw.store.blobs._path(gone.subject.hash).unlink()
+    lpw.kernel.preregister(gone)
+    assert "problem instance bytes missing or corrupted" in reasons(lpw.kernel.certify(gone, [gone_id]).checks["K0"])
+    canary = lpw.vault.canary("test")
+    leaky = lp_certify(lpw, lp_claim(lpw, statement="leaky"), {"comment": f"solved with {canary}"})
+    assert leaky.failed() == ["K9"] and "canary token found in certificate" in reasons(leaky.checks["K9"])
+    labels = lpw.store.blobs.get(lpw.vault.dataset("test").files["test_y.csv"].blob)
+    stolen = lp_certify(lpw, lp_claim(lpw, statement="stolen"), raw=labels)
+    assert "certificate IS a private file (test/test_y.csv)" in reasons(stolen.checks["K9"])
+    unregistered = lp_claim(lpw, statement="never registered")
+    cert = lpw.kernel.certify(unregistered, [lpw.kernel.record_certificate(unregistered, aid)])
+    assert cert.failed() == ["K2", "K3", "K8", "K9"] and cert.checks["K4"].status == "n/a"
+
+
+def test_lp_claim_well_formedness(lpw, base):
+    claim = lp_claim(lpw)
+    lpw.kernel.preregister(claim)
+    other = ArtifactRef(artifact_id="x", hash="0" * 64)
+    cases = {
+        "comparator must be the subject": {"comparator": other.model_dump()},
+        "uses no datasets": {"generalization_targets": ["test"]},
+        "analysis plan must be empty": {"analysis_plan__seeds": [0, 1, 2]},
+        "effect fields other than the declared probability must be 0": {"effect__min_effect": 0.1},
+        "declared probability": {"effect__probability": 1.0},
+        "risk prior must be unset": {"risk__prior_probability": 0.5},
+        "kind 'computed_value'": {"kind": "improvement"},
+        "direction does not match the adapter": {"metric__higher_is_better": False},
+        "no registered adapter serves evidence class 'computational' with metric 'lp_min'": {"metric__id": "lp_min"},
+    }
+    for why, change in cases.items():
+        bad = variant(claim, **change)
+        lpw.kernel.preregister(bad)
+        assert why in reasons(lpw.kernel.certify(bad, []).checks["K1"]), (why, bad)
+    w, c, ids = base
+    k1 = reasons(w.kernel.certify(variant(c, value="1"), ids, record=False).checks["K1"])
+    assert "only computed_value claims carry an exact value" in k1
+    k1 = reasons(w.kernel.certify(variant(c, kind="computed_value"), ids, record=False).checks["K1"])
+    assert "'computed_value' is not checkable" in k1
+    assert b'"value"' not in c.canonical() and "value" not in c.model_dump(mode="json")  # data hashes unchanged
+
+
+def test_computational_claim_without_an_approved_lp_adapter_fails_k1(tmp_path):
+    w = World(tmp_path / "noapp", seed=12, n_train=30, n_test=30)  # approves only the ML adapter
+    try:
+        cert = lp_certify(w, lp_claim(w))
+        assert cert.label == Label.REJECTED and "K1" in cert.failed() and cert.adapters == ()
+        assert "adapter 'lp'" in reasons(cert.checks["K1"]) and "no human approval" in reasons(cert.checks["K1"])
+    finally:
+        w.close()
+
+
+def test_n_a_outside_the_table_fails_closed(lpw, base, monkeypatch):
+    from custom_harness.kernel import CheckResult, EvidenceClass
+    from custom_harness.kernel import adapters as A
+    assert set(K.applicability(EvidenceClass.DATA).values()) == {None}  # every check applies to data claims
+    assert K.applicability(EvidenceClass.SIMULATED) == K.applicability(EvidenceClass.DATA)  # unknown: all apply
+    w, c, ids = base
+    na = lambda ctx: CheckResult(status="n/a", reasons=("planted",))  # noqa: E731
+    monkeypatch.setitem(K.ALL_CHECKS, "K7", na)
+    assert w.kernel.certify(c, ids, record=False).label == Label.REJECTED
+    monkeypatch.setitem(K.COMPUTATIONAL_CHECKS, "K3", na)
+    claim = lp_claim(lpw)
+    assert lp_certify(lpw, claim).label == Label.REJECTED
+    monkeypatch.undo()
+    no_exact = A.AdapterSpec("lp", "1", frozenset({EvidenceClass.COMPUTATIONAL}), ("custom_harness.kernel.lp",),
+                             frozenset({"lp_optimum"}))
+    monkeypatch.setitem(A.REGISTRY, "lp", (no_exact, A.LP_CHECKS))
+    lpw.kernel.approve_adapter("lp", approver="test-world")
+    cert = lpw.kernel.certify(claim, [])
+    assert "declares no exact certificate checker" in reasons(cert.checks["K1"])
+    assert "no approved adapter with an exact certificate checker" in reasons(cert.checks["K3"])
+
+
+def test_lp_adapter_validation_and_checker(lpw):
+    from fractions import Fraction
+
+    from custom_harness.kernel import adapters as A
+    from custom_harness.kernel import lp
+    assert A.validate(A.LP_CHECKS) == [] and len(A.LP_CHECKS) >= 8
+    assert A.adapter_hash(A.ML) == "71694bb1ca60010f9ea241073c89255f5f0937bc1f215b7797e088ca8e363fca"  # unchanged
+    p, cert = canonical_json(LP_PROBLEM), canonical_json(LP_CERT)
+    assert lp.check(p, cert, Fraction(13, 5)) == [] and lp.bounds(p, cert, Fraction(13, 5)) == []
+    no_b = {k: v for k, v in LP_PROBLEM.items() if k != "b"}
+    malformed = {
+        "not JSON": (b"{", cert), "not a chh-lp/1": (canonical_json([1]), cert),
+        "unexpected keys": (canonical_json({**LP_PROBLEM, "extra": "1"}), cert),
+        "missing keys": (canonical_json(no_b), cert),
+        "sense must be 'max'": (canonical_json({**LP_PROBLEM, "sense": "min"}), cert),
+        "'c' must be a list": (canonical_json({**LP_PROBLEM, "c": "1"}), cert),
+        "at least one variable": (canonical_json({**LP_PROBLEM, "c": [], "A": [[], []]}), cert),
+        "'A' must be a list": (canonical_json({**LP_PROBLEM, "A": {}}), cert),
+        "exact rational string": (canonical_json({**LP_PROBLEM, "b": ["4", True]}), cert),
+        "larger than": (b" " * (lp.MAX_BYTES + 1), cert),
+        "not a chh-lp-certificate/1": (p, canonical_json({**LP_CERT, "format": "chh-lp/1"})),
+    }
+    for why, (prob, cer) in malformed.items():
+        assert any(why in r for r in lp.check(prob, cer, Fraction(1))), why
+        assert lp.bounds(prob, cer, Fraction(1)) != [], why
+    assert any("x[0] = -1 < 0" in r for r in lp.check(p, canonical_json({**LP_CERT, "x": ["-1", "0"]}), Fraction(-1)))
+    assert any("y[1] = -1 < 0" in r for r in lp.check(p, canonical_json({**LP_CERT, "y": ["1", "-1"]}), Fraction(-1)))
+    wide = canonical_json({**LP_PROBLEM, "c": ["0"] * (lp.MAX_DIM + 1), "A": [], "b": []})
+    zero = canonical_json({**LP_CERT, "x": ["0"] * (lp.MAX_DIM + 1), "y": []})
+    assert "exceed the registered bound" in lp.bounds(wide, zero, Fraction(0))[0]
+    assert lp.check(wide, zero, Fraction(0)) == []
+    assert lp.parse_rational("-3/4") == Fraction(-3, 4)
+    for bad in ("0.5", "1e3", " 1", "1/-2", "+1", "1/0", 2):
+        with pytest.raises(ValueError):
+            lp.parse_rational(bad)
+
+
+def test_lp_certificate_bundle_reproduces_by_rechecking_the_certificate(lpw, tmp_path, monkeypatch):
+    from custom_harness.kernel import lp
+    cert = lp_certify(lpw, lp_claim(lpw))
+    path = tmp_path / "lp.zip"
+    build_bundle(lpw.kernel, cert.cert_hash(), path)
+    fresh = lambda: SandboxReplayer(lambda key: LocalSandbox(tmp_path / "rp" / key, i_understand_no_isolation=True))  # noqa: E731
+    rep = reproduce_bundle(path, fresh)
+    assert rep.reproduced and rep.reproduced_label == "CERTIFIED-EXACT", rep.problems
+    assert rep.certificate is not None and rep.certificate.checks["K3"].status == "pass"
+    monkeypatch.setattr(lp, "check", lambda *a: ["planted: the checker now rejects"])  # reproduction must re-check
+    rep = reproduce_bundle(path, fresh)
+    assert not rep.reproduced and any(p.startswith("K3: pass originally, fail now") for p in rep.problems)
