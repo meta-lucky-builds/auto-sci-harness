@@ -70,6 +70,14 @@ class ArtifactRecord(_Model):
     seq: int = 0
 
 
+class CertificateRecord(_Model):
+    """Evidence payload of a computational claim: the registered artifact that holds its exact certificate."""
+
+    claim_hash: str
+    artifact_id: str
+    hash: str  # blob hash of the certificate bytes, as registered
+
+
 def dataset_hash(files: dict[str, FileRef]) -> str:
     return hashlib.sha256(canonical_json({k: v.model_dump() for k, v in sorted(files.items())})).hexdigest()
 

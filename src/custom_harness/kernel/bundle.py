@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..records import Evidence, Run, RunStatus, TraceStep
+from ..records import Evidence, EvidenceKind, Run, RunStatus, TraceStep
 from ..store.evidence import EvidenceStore
 from .certificate import CHECK_IDS, Certificate
 from .checks import KernelConfig, Replayer
@@ -36,6 +36,7 @@ from .claim import Claim, canonical_json
 from .execution import ExecRecord
 from .kernel import Kernel
 from .ledger import Entry, verify_chain
+from .vault import CertificateRecord
 
 FORMAT = "chh-bundle/1"
 
@@ -60,7 +61,11 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         evidence.append(ev.model_dump(mode="json"))
         blobs.add(ev.payload_ref)
         try:
-            rec = ExecRecord.model_validate(store.blobs.get_json(ev.payload_ref))
+            doc = store.blobs.get_json(ev.payload_ref)
+            if ev.kind == EvidenceKind.PROOF:  # a computational claim's certificate: its artifact bytes travel along
+                blobs.add(CertificateRecord.model_validate(doc).hash)
+                continue
+            rec = ExecRecord.model_validate(doc)
         except (ValueError, OSError):
             continue
         blobs |= {rec.preds_ref, rec.artifact_hash} | {r.blob for r in rec.inputs.values()}

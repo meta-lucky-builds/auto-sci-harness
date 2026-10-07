@@ -1,0 +1,46 @@
+# physical_v1: the physical / empirical claim path up to the Kernel boundary (GOAL section 4.7, M3).
+#
+#   draft -> screen (human-owned prohibited list; a match is REFUSED and never reaches approval)
+#         -> prereg (protocol artifact + claim, BEFORE approval)
+#         -> protocol_review (approval node: PAUSED until `chh approve RUN protocol_review ...`, then `chh resume RUN`)
+#         -> humans execute; `chh return-data RUN --file F --attest "<who, where, when>"` registers the data
+#         -> data_received (approval node: a human confirms receipt of exactly that dataset; then `chh resume RUN`)
+#         -> check_returned (fails closed if no data was registered) -> certify (Kernel; refuses at K1 today)
+#
+# Every node here is human-only for the evolver (approval nodes and physical.* modules, evolve/edits.py).
+# Run: chh run examples/physical_v1.yaml --input protocol_file=examples/physical/bracket_protocol.yaml --task bracket
+id: physical_v1
+description: physical-claim protocol -> prohibited screen -> pre-registration -> human approval -> human-returned data -> Kernel check
+entry: draft
+max_steps: 30
+nodes:
+  draft: {kind: module, module: physical.draft}
+  screen: {kind: module, module: physical.screen}
+  prereg: {kind: module, module: physical.prereg}
+  protocol_review:
+    kind: approval
+    item_key: physical_item
+    prompt: >-
+      Approve this protocol and claim for human execution? You are the real biosafety / dual-use / ethics screen;
+      the keyword screen it passed is coarse. Check the procedure, safety notes, measurements and analysis plan.
+  data_received:
+    kind: approval
+    item_key: physical_data_item
+    prompt: >-
+      Confirm that the measurements for this protocol were returned with `chh return-data` and that the attestation
+      is truthful. Approving does not certify anything; the Kernel then checks the data.
+  check_returned: {kind: module, module: physical.check_returned}
+  certify: {kind: module, module: physical.certify}
+  refused: {kind: module, module: physical.refused}
+edges:
+  - {source: draft, target: screen}
+  - {source: screen, target: refused, when: {key: physical_screen.refused, op: eq, value: true}}
+  - {source: screen, target: prereg}
+  - {source: prereg, target: protocol_review}
+  - {source: protocol_review, target: data_received, when: {key: protocol_review_decision, op: eq, value: approved}}
+  - {source: protocol_review, target: refused}
+  - {source: data_received, target: check_returned, when: {key: data_received_decision, op: eq, value: approved}}
+  - {source: data_received, target: refused}
+  - {source: check_returned, target: certify}
+  - {source: certify, target: END}
+  - {source: refused, target: END}

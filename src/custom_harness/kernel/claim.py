@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from enum import StrEnum
+from fractions import Fraction
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 
 class ClaimKind(StrEnum):
@@ -22,6 +24,8 @@ class ClaimKind(StrEnum):
     EQUIVALENCE = "equivalence"  # |subject - comparator| < min_effect
     SCALING_LAW = "scaling_law"  # declared in the language; not checkable by Kernel v1
     REDISCOVERY = "rediscovery"  # declared in the language; not checkable by Kernel v1
+    # computational class only: "the exact value of the computation on the registered instance (subject) is `value`"
+    COMPUTED_VALUE = "computed_value"
 
 
 SUPPORTED_KINDS = frozenset({ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT, ClaimKind.NEGATIVE_RESULT,
@@ -99,6 +103,16 @@ class Claim(_Model):
     risk: Risk = Field(default_factory=Risk)
     resolve_by: float  # epoch seconds; an unresolved prediction past this is scored as a miss
     evidence_class: EvidenceClass = EvidenceClass.DATA
+    # computed_value claims only: the claimed exact value, a rational "p" or "p/q" in lowest terms (never a float).
+    # Omitted from every dump when unset, so data claims, their pre-registrations and certificates keep their bytes.
+    value: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_value(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if doc.get("value") is None:
+            doc.pop("value", None)
+        return doc
 
     def canonical(self) -> bytes:
         doc = self.model_dump(mode="json")
@@ -108,6 +122,18 @@ class Claim(_Model):
 
     def claim_hash(self) -> str:
         return hashlib.sha256(self.canonical()).hexdigest()
+
+
+_EXACT = re.compile(r"-?(0|[1-9][0-9]*)(/[1-9][0-9]*)?")
+
+
+def exact_value(text: str | None) -> Fraction | None:
+    """The claimed exact value, or None unless `text` is a rational in lowest terms ("3", "-13/5"; not "2.6",
+    "26/10", "-0", "1/0"): one spelling per value, so equal claims hash equally and nothing is rounded."""
+    if text is None or _EXACT.fullmatch(text) is None or len(text) > 1000:
+        return None
+    value = Fraction(text)
+    return value if str(value) == text else None
 
 
 def canonical_json(obj: Any) -> bytes:

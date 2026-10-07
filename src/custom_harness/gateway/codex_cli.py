@@ -27,6 +27,7 @@ from .base import (
     ChatResponse,
     Message,
     redact,
+    request_fault,
     schema_instruction,
     to_strict_schema,
 )
@@ -109,12 +110,15 @@ class CodexCLIBackend(Backend):
                 elif ev.get("type") == "item.completed" and ev.get("item", {}).get("type") == "agent_message":
                     text_from_events = ev["item"].get("text")
                 elif ev.get("type") in ("turn.failed", "error"):
-                    raise BackendError(redact(f"codex error event: {line[:2000]}"), transient=_transient(line))
+                    harness_fault = request_fault(line)
+                    raise BackendError(redact(f"codex error event: {line[:2000]}"),
+                                       transient=_transient(line) and not harness_fault, infra=not harness_fault)
 
             text = out_file.read_text(encoding="utf-8") if out_file.exists() else text_from_events
             if proc.returncode != 0 or text is None:
+                harness_fault = request_fault(proc.stderr)
                 raise BackendError(redact(f"codex exec failed (rc={proc.returncode}): {proc.stderr[-2000:]}"),
-                                   transient=_transient(proc.stderr))
+                                   transient=_transient(proc.stderr) and not harness_fault, infra=not harness_fault)
 
         cost = Cost(prompt_tokens=int(usage.get("input_tokens", 0)),
                     completion_tokens=int(usage.get("output_tokens", 0))

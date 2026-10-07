@@ -56,6 +56,31 @@ def approval_item_hash(item: Any) -> str:
                                      ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def approval_decision(store: EvidenceStore, run_id: str, node_id: str, item_hash: str) -> dict[str, Any] | None:
+    """Latest intact human decision for exactly (run_id, node_id, item_hash), appended to the ledger after the
+    engine paused this run at this node for this item (so nothing that ran before the pause can pre-plant it).
+    Module-level so trusted host commands (e.g. `chh return-data`) apply exactly the engine's rule."""
+    ledger = Ledger(store)
+    want = {"run_id": run_id, "node_id": node_id, "item_hash": item_hash}
+    requests = {e.seq for e in ledger.entries("approval_request") if e.intact() and e.body == want}
+    paused_at = [s.output.get("request_seq") for s in store.trace(run_id)
+                 if s.node_id == node_id and s.output.get("awaiting_approval") is True
+                 and s.output.get("item_hash") == item_hash]
+    valid = [q for q in paused_at if isinstance(q, int) and q in requests]
+    if not valid:
+        return None
+    first = min(valid)
+    for e in reversed(ledger.entries("approval")):
+        b = e.body
+        if (e.seq > first and e.intact() and all(b.get(k) == v for k, v in want.items())
+                and b.get("decision") in APPROVAL_DECISIONS
+                and isinstance(b.get("approver"), str) and b["approver"].strip()):
+            note = b.get("note")
+            return {"decision": b["decision"], "item_hash": item_hash, "approver": b["approver"],
+                    "note": note if isinstance(note, str) else "", "ledger_seq": e.seq}
+    return None
+
+
 def paused_approval(store: EvidenceStore, run_id: str) -> dict[str, Any] | None:
     """The pause a PAUSED run is waiting on: its last trace step's output plus node id and checkpoint state
     (None if the last step is not an approval pause)."""
@@ -459,27 +484,7 @@ class Engine:
         return {"approval": decision}, None, False
 
     def _approval_decision(self, run_id: str, node_id: str, item_hash: str) -> dict[str, Any] | None:
-        """Latest intact human decision for exactly (run_id, node_id, item_hash), appended to the ledger after the
-        engine paused this run at this node for this item (so nothing that ran before the pause can pre-plant it)."""
-        ledger = Ledger(self.store)
-        want = {"run_id": run_id, "node_id": node_id, "item_hash": item_hash}
-        requests = {e.seq for e in ledger.entries("approval_request") if e.intact() and e.body == want}
-        paused_at = [s.output.get("request_seq") for s in self.store.trace(run_id)
-                     if s.node_id == node_id and s.output.get("awaiting_approval") is True
-                     and s.output.get("item_hash") == item_hash]
-        valid = [q for q in paused_at if isinstance(q, int) and q in requests]
-        if not valid:
-            return None
-        first = min(valid)
-        for e in reversed(ledger.entries("approval")):
-            b = e.body
-            if (e.seq > first and e.intact() and all(b.get(k) == v for k, v in want.items())
-                    and b.get("decision") in APPROVAL_DECISIONS
-                    and isinstance(b.get("approver"), str) and b["approver"].strip()):
-                note = b.get("note")
-                return {"decision": b["decision"], "item_hash": item_hash, "approver": b["approver"],
-                        "note": note if isinstance(note, str) else "", "ledger_seq": e.seq}
-        return None
+        return approval_decision(self.store, run_id, node_id, item_hash)
 
     def _attempt(self, node, state: dict[str, Any], run_id: str):
         """Execute a node with the transient-infra retry policy.
