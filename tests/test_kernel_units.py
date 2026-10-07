@@ -936,7 +936,9 @@ def test_lp_adapter_validation_and_checker(lpw):
     from custom_harness.kernel import adapters as A
     from custom_harness.kernel import lp
     assert A.validate(A.LP_CHECKS) == [] and len(A.LP_CHECKS) >= 8
-    assert A.adapter_hash(A.ML) == "71694bb1ca60010f9ea241073c89255f5f0937bc1f215b7797e088ca8e363fca"  # unchanged
+    # unchanged by the LP adapter; re-pinned 2026-10-07 when verify/leak.py (an ML adapter module) gained encoded-leak
+    # detection: an ML verifier change changes the hash on purpose, so the ML adapter must be re-approved (invariant 13)
+    assert A.adapter_hash(A.ML) == "32e413e3efb986757526888e302e4acbcadba361f35dcb6507338a1cca8e8bed"
     p, cert = canonical_json(LP_PROBLEM), canonical_json(LP_CERT)
     assert lp.check(p, cert, Fraction(13, 5)) == [] and lp.bounds(p, cert, Fraction(13, 5)) == []
     no_b = {k: v for k, v in LP_PROBLEM.items() if k != "b"}
