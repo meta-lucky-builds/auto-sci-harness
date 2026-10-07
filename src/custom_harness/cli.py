@@ -85,6 +85,95 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0 if res.status == "completed" else 1
 
 
+APPROVAL_ITEM_PRINT_CHARS = 20_000
+
+
+def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §4.7): register the measurements humans returned for an APPROVED physical protocol, with an
+    attestation. Refused unless the run is paused at the data gate, the exact protocol was approved by a human
+    (engine rule), the protocol passes the prohibited screen, the data match the protocol, and nothing was registered
+    for it before. The data become a `future` dataset; the attestation is recorded but remains untested."""
+    import hashlib
+
+    from .kernel import DatasetRole, Kernel
+    from .research.physical import Protocol, check_measurements, screen
+    from .runtime.engine import approval_decision, approval_item_hash, paused_approval
+    pause = paused_approval(store, a.run_id)
+    if pause is None or pause.get("node_id") != "data_received":
+        raise SystemExit(f"run {a.run_id} is not paused at the data gate (data_received)")
+    state = pause["state"]
+    item = state.get("physical_item")
+    if not isinstance(item, dict):
+        raise SystemExit("the paused run carries no physical protocol")
+    decision = approval_decision(store, a.run_id, "protocol_review", approval_item_hash(item))
+    if decision is None or decision["decision"] != "approved":
+        raise SystemExit("the protocol was not approved by a human; no data can be registered for it")
+    protocol = Protocol.model_validate(item["protocol"])
+    if screen(protocol):
+        raise SystemExit("the protocol matches a prohibited category")
+    if not a.attest.strip():
+        raise SystemExit("an attestation (who, where, when) is required")
+    data = Path(a.file).read_bytes()
+    problems = check_measurements(protocol, data)
+    if problems:
+        raise SystemExit("returned data refused: " + "; ".join(problems[:10]))
+    vault = Kernel(store).vault
+    if item["dataset_id"] in vault.datasets():
+        raise SystemExit(f"data for this protocol are already registered ({item['dataset_id']})")
+    provenance = {"protocol_hash": item["protocol_hash"], "claim_hash": item["claim_hash"], "run_id": a.run_id,
+                  "attestation": a.attest, "attestation_sha256": hashlib.sha256(a.attest.encode()).hexdigest(),
+                  "data_sha256": hashlib.sha256(data).hexdigest(), "approved_protocol_seq": decision["ledger_seq"]}
+    vault.register_dataset(item["dataset_id"], DatasetRole.FUTURE,
+                           public={"provenance.json": json.dumps(provenance, sort_keys=True).encode()},
+                           private={protocol.measurements.filename: data})
+    print(json.dumps({"registered": item["dataset_id"], "data_sha256": provenance["data_sha256"],
+                      "next": f"chh approve {a.run_id} data_received --decision approve --approver <you>"}))
+    return 0
+
+
+def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Record a human decision for the item a PAUSED run is waiting on (GOAL invariant 15). This is the ONLY code
+    path that writes an "approval" ledger entry. It does not resume the run: `chh resume RUN_ID` does."""
+    from .kernel import Ledger
+    from .records import RunStatus
+    from .runtime import ApprovalNode
+    from .runtime.engine import approval_item_hash, paused_approval
+    from .runtime.template import lookup
+    status, _ = store.run_status(a.run_id)
+    if status != RunStatus.PAUSED:
+        raise SystemExit(f"refused: run {a.run_id} is {status.value}, not paused")
+    pause = paused_approval(store, a.run_id)
+    if pause is None or pause["node_id"] != a.node_id:
+        at = pause["node_id"] if pause else "?"
+        raise SystemExit(f"refused: run {a.run_id} is not paused at node '{a.node_id}' (paused at '{at}')")
+    run = store.get_run(a.run_id)
+    node = HarnessSpec.model_validate(store.harness_spec(run.harness_hash)).nodes.get(a.node_id)
+    if not isinstance(node, ApprovalNode):
+        raise SystemExit(f"refused: node '{a.node_id}' is not an approval node")
+    approver = a.approver.strip()
+    if not approver:
+        raise SystemExit("refused: --approver must name a human")
+    item = lookup(pause["state"], node.item_key)  # recomputed from the paused checkpoint, never trusted from the trace
+    item_hash = approval_item_hash(item)
+    if item_hash != pause.get("item_hash"):
+        raise SystemExit(f"refused: the checkpointed item hashes to {item_hash}, the pause recorded "
+                         f"{pause.get('item_hash')}; store inconsistent")
+    text = json.dumps(item, indent=1, ensure_ascii=False, sort_keys=True)
+    if len(text) > APPROVAL_ITEM_PRINT_CHARS:
+        text = text[:APPROVAL_ITEM_PRINT_CHARS] + f"\n...[{len(text) - APPROVAL_ITEM_PRINT_CHARS} chars not shown]"
+    print(f"run {a.run_id} node {a.node_id}: {node.prompt}")
+    print(f"item ({node.item_key}):\n{text}")
+    print(f"item_hash: {item_hash}")
+    if a.item_hash is not None and a.item_hash != item_hash:
+        raise SystemExit(f"refused: --item-hash {a.item_hash} does not match the item hash {item_hash}")
+    decision = {"approve": "approved", "reject": "rejected"}[a.decision]
+    entry = Ledger(store).append("approval", {"run_id": a.run_id, "node_id": a.node_id, "item_hash": item_hash,
+                                              "decision": decision, "approver": approver, "note": a.note or ""})
+    print(json.dumps({"recorded": decision, "approver": approver, "ledger_seq": entry.seq,
+                      "next": f"chh resume {a.run_id}"}))
+    return 0
+
+
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
@@ -234,6 +323,24 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0 if res.status == "completed" else 1
 
 
+def cmd_approve_adapter(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §4.7, invariant 13): approve a domain adapter's current content after its validation passes.
+    The approval names the approver and is recorded in the hash-chained ledger."""
+    from .kernel import AdapterError, Kernel
+    from .kernel.adapters import REGISTRY, adapter_hash
+    if a.name not in REGISTRY:
+        raise SystemExit(f"unknown adapter {a.name!r}; known: {sorted(REGISTRY)}")
+    spec, checks = REGISTRY[a.name]
+    print(f"adapter {spec.name} v{spec.version}: classes {sorted(spec.classes)}, modules {list(spec.modules)}")
+    print(f"content hash {adapter_hash(spec)}; running {len(checks)} validation checks")
+    try:
+        entry = Kernel(store).approve_adapter(a.name, approver=a.approver)
+    except AdapterError as e:
+        raise SystemExit(f"NOT approved: {e}") from e
+    print(json.dumps({"approved": a.name, "approver": a.approver, "ledger_seq": entry.seq}))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -265,7 +372,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
-    rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure)")
+    rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure) "
+                                         "or a run paused at an approval node")
     rr.add_argument("run_id")
     rr.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
     rr.add_argument("--allow-same-family", action="store_true",
@@ -273,6 +381,17 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rd = sub.add_parser("return-data", help="HUMAN: register measurements returned for an approved physical protocol")
+    rd.add_argument("run_id")
+    rd.add_argument("--file", required=True)
+    rd.add_argument("--attest", required=True, help="who measured it, where, when (recorded; untested)")
+    ap = sub.add_parser("approve", help="record a human approve/reject for a run paused at an approval node")
+    ap.add_argument("run_id")
+    ap.add_argument("node_id")
+    ap.add_argument("--decision", required=True, choices=["approve", "reject"])
+    ap.add_argument("--approver", required=True, help="the human taking this decision")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--item-hash", default=None, help="full sha256 of the item you reviewed; refused if it differs")
     rb = sub.add_parser("rerun", help="re-run a per-run Reproducibility Bundle (same spec, inputs, seed)")
     rb.add_argument("bundle")
     rb.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
@@ -281,6 +400,9 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
     rb.add_argument("--docker", action="store_true")
     rb.add_argument("--dev-sandbox", action="store_true")
+    aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
+    aa.add_argument("name")
+    aa.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -302,7 +424,9 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "resume": cmd_resume, "rerun": cmd_rerun, "evolve": cmd_evolve, "runs": cmd_runs,
+        return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
+                "rerun": cmd_rerun,
+                "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)

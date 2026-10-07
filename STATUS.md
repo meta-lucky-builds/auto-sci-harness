@@ -181,6 +181,20 @@ filter is a heuristic (question-shaped directives pass); no Docker disk quota on
 stdout/stderr captured in host memory (possible host resource exhaustion); a zip-bomb bundle member is read into
 memory.
 
+## M3 / M4 pieces built 2026-10-07 (in parallel worktrees, merged, one full gate)
+| GOAL item | Built | Proof (tests; new tests shown to fail first) |
+|---|---|---|
+| Evidence classes + domain adapters (M3, §4.7, invariant 13) | `Claim.evidence_class` (formal / computational / data / simulated / physical; default `data` omitted from the claim hash, so old hashes are unchanged); `kernel/adapters.py`: fixed registry, adapter identity = content hash of its source modules, fault-injection validation (9 checks for the ML adapter), approval recorded in the ledger (`adapter_approval`, names the human) only after validation passes; K1 fails a claim unless an approved adapter whose CURRENT content matches serves its class and metric; certificates record the adapter (`adapters`, omitted from the hash when empty); bundles carry approvals so reproduction re-checks the adapter on the reproducing machine; `chh approve-adapter NAME --approver WHO` (HUMAN action); research `setup` fails before any model call without an approved adapter. Kernel v1.1. | `test_k1_requires_a_human_approved_unchanged_adapter_for_the_evidence_class`, `test_adapter_content_change_after_approval_invalidates_it`, `test_adapter_approval_refuses_unknown_anonymous_or_failing_adapters`, `test_evidence_class_and_adapters_keep_old_hashes_stable`, `tests/test_adapters_cli.py`; the bundle tamper test now also tampers the approval entry (and was fixed: it located the entry by position and had silently become a no-op) |
+| Approval node (M3, invariant 15) | subagent-built, reviewed: `ApprovalNode` (kind `approval`), run status PAUSED, item bound by sha256 of canonical JSON, decisions only from ledger `approval` entries written by `chh approve` and only AFTER an engine-recorded `approval_request` for that exact (run, node, item); planted state values discarded; missing item fails closed; `chh resume` continues; evolution cannot add/remove/modify approval nodes or their edges, `_approval`/`_decision` keys reserved; PAUSED scores 0. Trust boundary: trusted modules have store access (not enforced in code) | `tests/test_approval.py` (12) |
+| Leave-one-family-out / leave-one-domain-out gates (M4 piece, invariant 16) | subagent-built, reviewed: `SuiteTask.family/domain`; `load_suite` and `evolve_generation` refuse a suite without a held-out family (and without a held-out domain once ≥ 2 domains); acceptance = pooled gate AND per-held-out-family/domain non-regression (paired Student-t lower bound ≥ −ε, < 2 valid units fails closed); per-family results and OOD drop in the candidate record and `harness_edit` ledger; builder default holds out `spirals` | `tests/test_lofo.py` (14) |
+| Physical-claim path up to the Kernel (M3, §4.7, invariants 14-15) | `research/physical.py` + `examples/physical_v1.yaml`: typed protocol; human-owned prohibited-category screen (`policy_prohibited.yaml`, generic categories, a coarse first line: the human reviewer is the real screen); protocol + claim pre-registered BEFORE review; approval node on the exact protocol; `chh return-data` (HUMAN) registers attested data as a `future` dataset only for an approved protocol and only if columns, types and replicates match; a second approval node confirms receipt; receipt confirmed without data fails closed; the Kernel is asked and refuses at K1 (no physical adapter), certificate not recorded so the prediction stays pending; `physical.*` nodes are human-only for the evolver. Built by me after the subagent was stopped by a safety classifier | `tests/test_physical.py` (7) |
+| Dev-time cap (found in live run `run_f1bff8ab659f48e6`: one 5-fold dev evaluation took 2423 s) | a dev evaluation's total wall time ≤ 2 × the task's per-run limit, each fold keeps the per-run limit; exceeding it fails the attempt with a clear message (routes to fix) | `test_dev_evaluation_wall_time_is_capped_across_folds` |
+
+**Operational consequences (honest):** (1) live runs can certify only after a HUMAN runs `chh approve-adapter ml
+--approver <name>` (I must not approve on the user's behalf); (2) the live suite's `suite.yaml` must be regenerated
+with a held-out family before evolution can load it (data unchanged); (3) the 2× dev-time cap rejects solutions
+slower than ~2/5 of the per-run limit per fold.
+
 ## Done before M0 (v0 build)
 | Layer | What | Where |
 |---|---|---|
@@ -222,6 +236,17 @@ memory.
     (baseline 22/24, every candidate 24/24), so it fell back to the 0.02 floor. **Changed 2026-10-07 (user
     decision):** the dev estimate is now 5-fold cross-validation (see "M2 changes after the first live run").
     Not yet validated live.
+- **Second live run of research_v1** (2026-10-07, `run_f1bff8ab659f48e6`, wine_knn_unscaled, Codex in all roles with
+  the recorded override: invariant 5 NOT MET; code of commit a499a6f, i.e. 5-fold CV but BEFORE the dev-time cap and
+  the adapter requirement). Completed, 33 steps, 13 Codex calls, 207,195 input + 27,333 output tokens, 8,077 s wall
+  (inflated: five agents and test suites shared the machine). CV worked as intended: baseline dev accuracy 0.645 over
+  124 out-of-fold predictions (the 24-row split had shown 0.917), best candidate 0.984, claimed minimum effect 0.133
+  (was the 0.02 floor). Certificate **REJECTED**: the claimed candidate (h4, a tuned 3-model ensemble whose dev
+  evaluation took 2,258 s) produced no predictions in one of its three held-out runs (K4: subject seeds [0, 1] ≠
+  [0, 1, 2]) and in the Kernel's re-execution (K3); K6/K7 had no statistics. K9 and audit I1–I5 passed (no false
+  leak flag). Interpretation (inferred, not run): under the dev-time cap built afterwards h4 would have failed dev
+  (2,258 s > 1,200 s budget) and the fast h2 (dev 0.976, 62 s) would have been claimed; the timeouts were partly
+  caused by machine load.
 - Finding for M1 (K4): the seed CI was [+0.607, +0.607]. The generated solution ignores the seed, so the seed check
   was degenerate and the evidence rested on the test-example bootstrap alone. K4 must detect zero seed variance
   and say so instead of counting it as a passed check.
@@ -257,6 +282,18 @@ memory.
   claims on any target sharing examples into the Bonferroni family (`checks.shared_examples`, exact text match:
   re-formatted copies are not detected). The old evidence store (registrations of the old, leaky suite) was
   archived as `store-v1`; a fresh store starts with the new suite.
+- **OPEN (found 2026-10-07 by integrity reviews R1/R2, each reproduced by me; tests in `tests/test_review_*.py` on
+  branches m3-r1-kernel / m3-r2-loop; fixes in progress):** R1-F1 a label read under a registered claim on ANOTHER
+  target escapes K2 and K4; R1-F2 the sampled re-execution seed can be steered with records on non-target datasets;
+  R1-F3 repeated certification can shop for a lucky replay of a flaky program; R1-F4 byte-identical private labels
+  under different datasets are not counted in the Bonferroni family; R1-F5 an adapter's hash ignores modules its
+  modules import (the ML adapter depends on kernel.vault and sandbox.base); R1-F6 `non_regression` raises on NaN;
+  R2-1 a role-rebinding edit (author nodes run as `replicator`/`judge`) keeps invariant 5 "met" on paper and earns
+  replication credit and a headline; R2-2 evolution scores depend on evaluation ORDER through the Kernel's growing
+  multiplicity family (identical harnesses scored 1.0 vs 0.5); R2-3 request-caused backend errors (e.g. context
+  length) are classified as infrastructure, so an edit can turn its own failures into excluded units; R2-4 the
+  generation label ignores the fresh re-measure evidence; R2-5 an edit can render the unfiltered critic output
+  (`critique_raw`) into prompts.
 - **Dev honesty depends on the harness spec:** every public training row is now a dev example, and the run
   workspace holds the public training file. A `tool` node (an allowed edit type) could put training rows into a
   prompt, letting a model write a lookup-table solution that inflates the dev score. Held-out integrity is not

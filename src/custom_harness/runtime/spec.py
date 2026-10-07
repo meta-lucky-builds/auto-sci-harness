@@ -64,7 +64,23 @@ class ModuleNode(_Strict):
     params: dict[str, Any] = Field(default_factory=dict)
 
 
-Node = Annotated[LLMNode | ToolNode | ModuleNode, Field(discriminator="kind")]
+class ApprovalNode(_Strict):
+    """A step only a human can complete (GOAL §5 L0, invariant 15). The run goes PAUSED until a decision for
+    exactly (run, node, sha256 of the canonical JSON of state[item_key]) is in the ledger, written by
+    `chh approve`. The engine writes the outcome to `<node_id>_approval` (and `<node_id>_decision`); edges route on
+    it, e.g. key `review_approval.decision` eq `approved`. Not an evolution surface (evolve/edits.py)."""
+
+    kind: Literal["approval"] = "approval"
+    item_key: str  # dotted path into run state: the item the human approves
+    prompt: str = ""  # shown to the approver
+
+
+def approval_state_keys(node_id: str) -> tuple[str, str]:
+    """State keys only the engine writes for an approval node."""
+    return f"{node_id}_approval", f"{node_id}_decision"
+
+
+Node = Annotated[LLMNode | ToolNode | ModuleNode | ApprovalNode, Field(discriminator="kind")]
 
 
 class ContextPolicy(_Strict):

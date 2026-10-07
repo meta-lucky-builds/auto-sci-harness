@@ -112,13 +112,16 @@ def _csv(rows: list[list[str]]) -> bytes:
 
 
 class World:
-    def __init__(self, root: Path, seed: int = 0, n_train: int = 240, n_test: int = 240):
+    def __init__(self, root: Path, seed: int = 0, n_train: int = 240, n_test: int = 240,
+                 approve_adapters: bool = True):
         self.root = Path(root)
         self.store = EvidenceStore(self.root / "store")
         self.replayer = SandboxReplayer(lambda key: LocalSandbox(self.root / "replay" / key,
                                                                  i_understand_no_isolation=True))
         self.kernel = Kernel(self.store, replayer=self.replayer)
         self.vault = self.kernel.vault
+        if approve_adapters:  # the test world's stand-in for the human approval of the ML adapter
+            self.kernel.approve_adapter("ml", approver="test-world")
         rng = random.Random(seed)
         header = ["x1", "x2", "n1", "label"]
         train = [_sample(rng) for _ in range(n_train)]

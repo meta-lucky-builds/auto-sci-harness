@@ -1,0 +1,33 @@
+# HUMAN-OWNED prohibited-categories list for physical / empirical protocols (GOAL section 4.7, section 13 item 6).
+#
+# A protocol whose text matches ANY pattern below is REFUSED before it can reach an approval node (fail closed);
+# the matched category is recorded. Changing this file is a human decision (it is not part of any HarnessSpec, so
+# the evolver cannot edit it).
+#
+# HONEST LIMIT: keyword screening is a COARSE FIRST LINE. Paraphrase evades it and benign text that uses a listed
+# phrase is refused. The human reviewer at the approval node (`chh approve`) is the real biosafety / dual-use /
+# ethics screen. The list is deliberately generic: category names and broad phrases only, nothing operational.
+#
+# Matching: protocol text is NFKC-normalised, lower-cased, and every run of non-alphanumeric characters becomes one
+# space. Patterns are regular expressions on that text, written in lower case with single spaces.
+version: 1
+categories:
+  - id: dangerous_pathogens
+    description: work with regulated/select agents or enhancing any pathogen's harmful properties
+    patterns: ['\bselect agents?\b', '\bgain of function\b', '\bpathogen enhancement\b', '\bpandemic potential\b']
+  - id: toxins
+    description: producing, purifying or scaling up biological or chemical toxins
+    patterns: ['\btoxins? (production|synthesis|purification)\b']
+  - id: weapons
+    description: chemical, biological, radiological, nuclear or explosive weapons and their agents
+    patterns: ['\bchemical weapons?\b', '\bbiological weapons?\b', '\bnerve agents?\b', '\bradiological dispersal\b',
+               '\bexplosives? (synthesis|manufacture)\b', '\bweapons? grade\b']
+  - id: human_subjects
+    # no ethics-approval process exists yet (GOAL section 13 item 6): refused outright
+    description: research on human subjects or identifiable human data
+    patterns: ['\bhuman (subjects?|participants?|volunteers?)\b', '\bclinical trials?\b', '\bpatients?\b',
+               '\bidentifiable (personal|health) (data|information)\b']
+  - id: vertebrate_animals
+    # no animal-ethics process exists yet: refused outright
+    description: experiments on live vertebrate animals
+    patterns: ['\b(live|living) (animals?|vertebrates?)\b', '\bin vivo\b', '\banimal models?\b']

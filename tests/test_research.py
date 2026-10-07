@@ -304,6 +304,24 @@ def test_tasks_sharing_data_share_held_out_ids_and_canary(store, tmp_path, rings
         register_task(ctx, load_task(twin), twin)
 
 
+SLEEPY = SIGN_RULE.replace("a = p.parse_args()", "a = p.parse_args()\nimport time; time.sleep(1.5)")
+
+
+def test_dev_evaluation_wall_time_is_capped_across_folds(store, tmp_path, rings_task, monkeypatch):
+    """Live run run_f1bff8ab659f48e6: one candidate's 5-fold dev evaluation took 2423 s, because each fold may use the
+    task's full per-run limit (5x the pre-CV cost). The total is now capped at 2x the per-run limit; each fold keeps
+    the per-run limit as its own ceiling. Here: limit 2 s, 1.5 s per fold -> folds 1-2 fit, fold 3 hits the cap."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    spec_file = rings_task / "task.yaml"
+    doc = yaml.safe_load(spec_file.read_text())
+    doc["solution_timeout_s"] = 2
+    spec_file.write_text(yaml.safe_dump(doc))
+    res = _run_with_impl(store, tmp_path, rings_task, SLEEPY)
+    att = next(a for a in res.state["attempts"] if a["hypothesis_id"] == "h_radius")
+    assert att["dev_score"] is None and "total time budget" in (att["error"] or ""), att
+    assert att["wall_s"] < 6.0, att  # 5 folds x 1.5 s would be 7.5 s
+
+
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):
     monkeypatch.delenv("CHH_ALLOW_UNISOLATED", raising=False)
     spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))

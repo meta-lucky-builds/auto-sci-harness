@@ -68,9 +68,14 @@ class Certificate(BaseModel):
     issued_at: float
     vg_ladder: str
     config: dict[str, Any] = Field(default_factory=dict)  # the Kernel configuration that was applied
+    # the domain adapters (name, version, content hash, approval ledger seq) this certificate relied on (GOAL §4.4)
+    adapters: tuple[dict[str, Any], ...] = ()
 
     def cert_hash(self) -> str:
-        return hashlib.sha256(canonical_json(self.model_dump(mode="json"))).hexdigest()
+        doc = self.model_dump(mode="json")
+        if not doc["adapters"]:
+            del doc["adapters"]  # omitted when empty: certificates issued before the field existed keep their hash
+        return hashlib.sha256(canonical_json(doc)).hexdigest()
 
     def failed(self) -> list[str]:
         return [k for k in CHECK_IDS if self.checks[k].status == "fail"]

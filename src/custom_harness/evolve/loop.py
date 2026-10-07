@@ -2,8 +2,10 @@
 
 parent evaluated on evolve split -> diagnose -> propose typed edits -> static checks ->
 race candidates on evolve split -> RE-MEASURE the race winner and the parent on fresh runs (fresh seeds,
-same evolve tasks) -> gate on (fresh evolve evidence, gate split) -> record lineage (incl. rejects),
-harness-science ledger and proposer calibration.
+same evolve tasks) -> gate on (fresh evolve evidence, gate split) -> leave-one-family-out (and, with >= 2 domains,
+leave-one-domain-out) non-regression on EACH held-out family/domain -> record lineage (incl. rejects),
+harness-science ledger (incl. per-group results and OOD drop, key "lofo") and proposer calibration.
+A campaign without a held-out family (/domain) is refused (GOAL invariant 16, fail closed).
 
 Why re-measure (CR P0-2, winner's curse): the race picks the candidate with the best observed mean, so
 its race data are biased upward; reusing them as acceptance evidence inflates false accepts. The gate
@@ -15,6 +17,7 @@ The sealed split is never touched here (PLAN E3).
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,9 +27,9 @@ from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
-from .evaluate import RunOutcome, SandboxFactory, SuiteTask, run_harness
+from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
 from .propose import diagnose, propose_edits
-from .selection import Unit, gate, paired_sample, race
+from .selection import PairedSample, Unit, gate, non_regression, paired_sample, race
 
 
 @dataclass
@@ -115,6 +118,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         raise ValueError("need at least one evolve task and one gate task")
     if {u[0] for u in evolve_units} & {u[0] for u in gate_units}:
         raise ValueError("a task id appears in both the evolve and the gate split")
+    # fail closed (GOAL invariant 16): no campaign without a held-out family (and domain, once >= 2 exist)
+    heldout_families, heldout_domains = check_held_out(tasks)
     fresh_seeds = cfg.remeasure_seeds if cfg.remeasure_seeds is not None else tuple(s + 1000 for s in cfg.seeds)
     if not fresh_seeds or set(fresh_seeds) & set(cfg.seeds):
         raise ValueError("remeasure_seeds must be non-empty and disjoint from seeds")
@@ -165,27 +170,54 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                                    lambda u: evaluator.score(parent, u))
             d = gate(evolve_s, gate_s, non_regression_eps=cfg.non_regression_eps,
                      require_evolve_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
-            decision = d.reason
+            lofo = _lofo(tasks, heldout_families, heldout_domains, cfg,
+                         lambda us: paired_sample(us, lambda u: evaluator.score(spec, u),
+                                                  lambda u: evaluator.score(parent, u)))
+            ok = d.accepted and lofo["passed"]
+            decision = d.reason if not d.accepted or ok else "rejected: " + lofo["reason"]
             gate_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in gate_units]
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in gate_labels) else "MECHANICAL"
-            records.append({"status": "accepted" if d.accepted else "rejected_gate", "candidate": best,
+            records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
                             "loop_label": loop_label,
                             "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
-                            "gate": d.gate})
+                            "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
             store.append_record("harness_edit", {
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
-                "rationale": edit.rationale, "accepted": d.accepted, "decision": d.reason,
+                "rationale": edit.rationale, "accepted": ok, "decision": decision,
+                "pooled_gate_accepted": d.accepted, "lofo": lofo,
                 "predicted_delta": edit.predicted.expected_delta, "actual_evolve_delta": d.evolve["mean_diff"],
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
                 "clusters_claimed": edit.predicted.failure_clusters_fixed})
-            if d.accepted:
+            if ok:
                 accepted_spec, accepted = spec, True
     for r in records:
         store.append_record("lineage", {"parent": parent_hash, **r})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
                             evaluator.calls - calls_before, fixed_k, loop_label)
+
+
+def _lofo(tasks: list[SuiteTask], families: list[str], domains: list[str], cfg: EvolveConfig,
+          sample: Callable[[list[Unit]], PairedSample]) -> dict[str, Any]:
+    """Leave-one-family-out / leave-one-domain-out gate (GOAL §5 L6.8): non-regression on EACH held-out family and
+    domain separately, over its gate units (same fresh outcomes as the pooled gate). `ood_drop` = mean paired
+    difference per held-out group (negative = the candidate is worse out of distribution)."""
+    out: dict[str, Any] = {"families": {}, "domains": {}, "ood_drop": {}}
+    failed = []
+    for kind, names, attr in (("family", families, "family"), ("domain", domains, "domain")):
+        for name in names:
+            units = [(t.task_id, s) for t in tasks if t.split == "gate" and getattr(t, attr) == name
+                     for s in cfg.seeds]
+            r = non_regression(sample(units), non_regression_eps=cfg.non_regression_eps,
+                               max_excluded_frac=cfg.max_excluded_frac)
+            out["families" if kind == "family" else "domains"][name] = r
+            out["ood_drop"][f"{kind}:{name}"] = r["mean_diff"]
+            if not r["passed"]:
+                failed.append(f"held-out {kind} {name}: {r['reason']}")
+    out["passed"] = not failed
+    out["reason"] = "; ".join(failed) if failed else "every held-out family/domain non-regressing"
+    return out
 
 
 def proposer_calibration(store: EvidenceStore) -> dict[str, float]:

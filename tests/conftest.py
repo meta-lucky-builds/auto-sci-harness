@@ -13,6 +13,8 @@ def _isolated_data_dir(tmp_path, monkeypatch):
 
 @pytest.fixture
 def store(tmp_path):
+    from custom_harness.kernel import Kernel
     s = EvidenceStore(tmp_path / "store")
+    Kernel(s).approve_adapter("ml", approver="pytest")  # test stand-in for the human approval of the ML adapter
     yield s
     s.close()

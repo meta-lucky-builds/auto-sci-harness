@@ -226,7 +226,7 @@ may say. A claim is certified at the strongest tier its available tools support,
 | **Simulated** | a design meets a spec in FEM/CFD/circuit/molecular-dynamics/systems-biology simulation | a pinned simulator (version, solver settings, mesh/step convergence evidence) inside an adapter | T1/T2 **within the simulator** | the claim holds **in simulator S (version, config)**; the scope names S; "simulation matches reality" is listed as an UNTESTED assumption; never relabelled as physical |
 | **Physical / empirical** | a compound's effect in cells; a prototype's measured strength | none inside the system: **protocol → approval node → human execution → returned data → Kernel check** | T3 | the returned data support the pre-registered claim under the pre-registered analysis; data provenance is a human ATTESTATION (untested by the system) |
 
-Physical/empirical claims are **never certified as done by the system**. The only route: (1) the claim, the protocol
+Physical/empirical claims are **never certified as done by the system**. (Path built up to the Kernel boundary 2026-10-07, 🟡: no physical adapter yet, so K1 refuses.) The only route: (1) the claim, the protocol
 and the analysis plan are pre-registered (K2); (2) an **approval node** pauses the run until a named human approves
 the protocol, including a biosafety / dual-use and ethics screen; categories on the human-owned prohibited list are
 refused outright and never reach approval; (3) humans execute; (4) the returned data are registered in the vault
@@ -246,7 +246,7 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
 **Runtime** (🟡) — typed `HarnessSpec` (JSON Schema) interpreted as a graph.
 - Must: full trace per step; checkpoint per step; `fork(step, state_patch)`; **`resume(run_id)` after crash** (CR P0-4) ✅;
   **MapNode fan-out** with per-branch persisted outputs, deterministic ids and declared reducers (LangGraph); **Approval
-  node** (❌, **brought forward to M3**): the run goes PAUSED with the exact item to approve (e.g. a physical-claim
+  node** (✅ 2026-10-07, M3, brought forward): the run goes PAUSED with the exact item to approve (e.g. a physical-claim
   protocol, §4.7) pinned by hash; only a human action through L9 (CLI first) records approve/reject with the
   approver's identity in the ledger and resumes the run; no model, module or evolved node can approve, and an
   approval binds only the hashed item it names; transient-only retry policy that charges every attempt ✅; unmatched
@@ -290,7 +290,7 @@ recorded as invariant 5 NOT MET in every run, report and certificate checklist, 
   coverage and contains no LLM call. ✅ both (`tests/test_kernel_suite.py`, `scripts/check.py` coverage gate,
   `tests/test_kernel_quality.py` import-closure test). v1 deviations are listed in STATUS.md.
 
-### Domain adapters (❌, M3: the core/adapter split; §4.7)
+### Domain adapters (🟡 M3: registry, evidence classes, K1 enforcement and the ML adapter built 2026-10-07; Lean / solver / simulator adapters not yet; §4.7)
 A domain adapter is everything domain-specific the Kernel and the loop need, as a **human-approved, fixed verifier
 layer**: claim-scope vocabulary, data formats and readers, registered metrics with direction and range, background
 invariants for K8 (units/dimensions, conservation laws, physical bounds), tool wrappers (Lean, solvers with
@@ -380,7 +380,7 @@ Pipeline per generation:
 7. **Smoke run**: one task through the real loop.
 8. **Race** ✅ (paired CI successive halving) → **re-measure the winner on fresh seeds and units** (CR P0-2) → **gate** ✅
    on the never-shown split, with a unit-alignment check and a cost term (RRSI).
-   **Leave-one-family-out / leave-one-domain-out gates** (❌, M4): the campaign's gate split contains at least one
+   **Leave-one-family-out / leave-one-domain-out gates** (✅ built 2026-10-07, M4 piece; no real campaign yet): the campaign's gate split contains at least one
    ENTIRE task family (and, once ≥ 2 domains have adapters, at least one entire domain) that never appears in the
    evolve split nor in any evolver-visible export; a candidate is accepted only if, on EACH held-out family/domain
    separately, the paired-CI lower bound of its difference to the parent is ≥ −ε (non-regression), in addition to the

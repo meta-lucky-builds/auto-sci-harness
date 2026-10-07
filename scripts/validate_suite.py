@@ -16,6 +16,7 @@ from pathlib import Path
 
 import yaml
 
+from custom_harness.evolve.evaluate import held_out
 from custom_harness.kernel.execution import DEFAULT_ARGV, run_program
 from custom_harness.research.suite import check_split_isolation
 from custom_harness.research.task import load_task
@@ -46,6 +47,12 @@ def main() -> int:
     suite = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
     isolation = check_split_isolation(suite["tasks"])
     print(json.dumps({"split_isolation_problems": isolation}), flush=True)
+    # leave-one-family/domain-out gate (GOAL invariant 16): the evolution entry point refuses a suite without one
+    entries = [(t["split"], t.get("family") or "") for t in suite["tasks"]]
+    heldout = held_out(entries) if all(f for _s, f in entries) else []
+    print(json.dumps({"held_out_families": heldout,
+                      "held_out_domains": held_out((t["split"], t.get("domain", "ml")) for t in suite["tasks"])}),
+          flush=True)
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         for i, t in enumerate(suite["tasks"]):
@@ -77,8 +84,9 @@ def main() -> int:
             bad += bool(problems)
             print(json.dumps({"task": t["id"], "split": t["split"], "metric": task.metric, "n_test": len(y),
                               **{k: round(v, 4) for k, v in scores.items()}, "problems": problems}), flush=True)
-    print(json.dumps({"tasks": len(suite["tasks"]), "unusable": bad, "split_isolation_problems": len(isolation)}))
-    return 1 if bad or isolation else 0
+    print(json.dumps({"tasks": len(suite["tasks"]), "unusable": bad, "split_isolation_problems": len(isolation),
+                      "held_out_families": len(heldout)}))
+    return 1 if bad or isolation or not heldout else 0
 
 
 if __name__ == "__main__":

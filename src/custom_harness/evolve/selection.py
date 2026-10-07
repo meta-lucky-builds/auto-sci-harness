@@ -142,6 +142,27 @@ def _as_sample(x: PairedSample | list[float]) -> PairedSample:
     return PairedSample([("_", i) for i in range(len(x))], list(x), [])
 
 
+def non_regression(sample: PairedSample, *, non_regression_eps: float = 0.0, max_excluded_frac: float = 0.25,
+                   min_units: int = 2, n_boot: int = 4000) -> dict:
+    """Leave-one-family/domain-out check on ONE held-out group: the same Student-t interval as the gate split's,
+    lower bound >= -eps. Fails closed on non-finite differences, too many infra exclusions, or fewer than
+    `min_units` valid paired units (non-regression cannot be shown). `mean_diff` is the group's OOD drop."""
+    m, lo, hi = paired_ci(sample.diffs, seed=2, n_boot=n_boot)
+    out = {"n": len(sample.diffs), "excluded": len(sample.excluded), "mean_diff": m, "lo": lo, "hi": hi}
+    if not all(math.isfinite(d) for d in sample.diffs):
+        reason = "non-finite score difference (fail closed)"
+    elif sample.excluded_frac > max_excluded_frac:
+        reason = (f"{len(sample.excluded)}/{sample.n_units} units excluded for infrastructure failures "
+                  f"(> {max_excluded_frac:.0%})")
+    elif len(sample.diffs) < min_units:
+        reason = f"only {len(sample.diffs)} valid paired units (< {min_units}): non-regression cannot be shown"
+    elif not lo >= -non_regression_eps:
+        reason = f"possible regression (CI lo={lo:.4g} < -{non_regression_eps})"
+    else:
+        return out | {"passed": True, "reason": "non-regressing"}
+    return out | {"passed": False, "reason": reason}
+
+
 def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], *,
          non_regression_eps: float = 0.0, require_evolve_ci: bool = True, max_excluded_frac: float = 0.25,
          min_units: int = 2, n_boot: int = 4000) -> GateDecision:

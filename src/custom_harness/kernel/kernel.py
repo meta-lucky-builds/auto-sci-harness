@@ -15,6 +15,7 @@ from ..errors import InfraError
 from ..records import Evidence, EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..tiers import Tier
+from . import adapters
 from .certificate import CHECK_IDS, VG_LADDER, Assumption, Certificate, CheckResult, Label
 from .checks import ALL_CHECKS, Context, KernelConfig, Replayer, is_external
 from .claim import Claim
@@ -46,6 +47,10 @@ class Kernel:
         self.clock = clock
 
     # ------------------------------------------------------------------ pre-registration
+    def approve_adapter(self, name: str, approver: str) -> Entry:
+        """Human approval of a domain adapter's current content (CLI: `chh approve-adapter`); validation must pass."""
+        return adapters.approve(self.ledger, name, approver)
+
     def preregister(self, claim: Claim) -> Entry:
         """Commit the claim (and its analysis plan) to the ledger. Idempotent per claim hash."""
         h = claim.claim_hash()
@@ -112,7 +117,8 @@ class Kernel:
             verifier_ids=("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
                           "stats:paired-t-seeds", "stats:bca-examples"),
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),
-            vg_ladder=VG_LADDER.get(label.value, VG_LADDER["REJECTED"]), config=asdict(self.config))
+            vg_ladder=VG_LADDER.get(label.value, VG_LADDER["REJECTED"]), config=asdict(self.config),
+            adapters=(ctx.adapter,) if ctx.adapter else ())
         if not record:
             return cert
         blob = self.store.blobs.put_json(cert.model_dump(mode="json"))

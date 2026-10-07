@@ -13,6 +13,7 @@ from custom_harness.errors import InfraError, infra_cause, is_transient
 from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate, race
 from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import BackendError, MockBackend
+from custom_harness.kernel import Kernel
 from custom_harness.records import RunStatus
 from custom_harness.runtime import END, Condition, Edge, Engine, HarnessSpec, LLMNode, ModuleNode, register
 from custom_harness.runtime.engine import RetryPolicy
@@ -150,6 +151,7 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
     def campaign(sub, factory):
         from custom_harness.store import EvidenceStore
         st = EvidenceStore(tmp_path / sub)
+        Kernel(st).approve_adapter("ml", approver="pytest")  # test stand-in for the human adapter approval
         llm = MockBackend(executor)
         roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
         ev = Evaluator(roles, st, factory, suite, retry=NO_WAIT)

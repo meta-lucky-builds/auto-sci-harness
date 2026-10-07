@@ -23,6 +23,7 @@ from ..store.evidence import EvidenceStore
 from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
+from . import adapters
 from .certificate import CheckResult
 from .claim import SUPPORTED_KINDS, Claim, ClaimKind
 from .execution import ExecRecord, ExecutionError
@@ -42,7 +43,7 @@ class Replayer(Protocol):
 class KernelConfig:
     """Human-owned policy (L9). Not part of any claim, so a claimant cannot relax it."""
 
-    version: str = "1.0"
+    version: str = "1.1"  # 1.1: domain adapters (K1), evidence classes, shared-example checks (K4/K6), K7 fail-closed
     min_seeds: int = 3
     max_alpha: float = 0.2
     min_boot: int = 1000
@@ -75,6 +76,7 @@ class Context:
     labels: dict[str, list[str]] = field(default_factory=dict)  # target -> labels
     stats: dict[str, TargetStats] = field(default_factory=dict)
     prereg: Entry | None = None
+    adapter: dict[str, Any] | None = None  # the approved adapter K1 resolved for this claim
 
     @property
     def sign(self) -> float:
@@ -182,6 +184,9 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(f"metric {c.metric.id!r} is not registered")
     elif M.HIGHER_IS_BETTER[c.metric.id] != c.metric.higher_is_better:
         reasons.append(f"metric {c.metric.id!r} direction does not match the registry")
+    # GOAL §4.7 / invariant 13: only a human-approved adapter, unchanged since its approval, may check this class
+    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
+    reasons += why
     if c.subject.hash == c.comparator.hash:
         reasons.append("subject and comparator are the same artifact")
     targets, dev = set(c.generalization_targets), set(c.development)
