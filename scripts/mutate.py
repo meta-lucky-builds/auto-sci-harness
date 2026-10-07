@@ -41,7 +41,8 @@ TARGETS: dict[str, tuple[str, ...] | None] = {  # file -> function names (None =
     f"{KDIR}/checks.py": ("k2_preregistered", "k4_statistics", "_criterion", "k6_held_out", "related_targets",
                           "shared_examples", "is_external"),
 }
-TESTS = ["tests/test_kernel_units.py", "tests/test_kernel_bundle.py", "tests/test_kernel_suite.py",
+TESTS = ["tests/spec/test_spec_mutants.py", "tests/test_kernel_units.py",
+         "tests/test_kernel_bundle.py", "tests/test_kernel_suite.py",
          "tests/test_kernel_exploits.py", "tests/test_kernel_integrity.py", "tests/test_kernel_sim.py",
          "tests/test_kernel_formal.py", "tests/test_kernel_quality.py", "tests/test_review_kernel.py",
          "tests/test_redteam_kernel.py", "tests/spec/test_spec_kernel.py", "tests/spec/test_spec_gate.py"]
@@ -220,7 +221,12 @@ def run_mutant(m: Mutant, tests: list[str], python: str) -> dict:
 
 
 def report() -> int:
-    res = [json.loads(x) for x in (OUT / "results.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    latest: dict[str, dict] = {}  # a re-run (--only) supersedes the earlier result of the same mutant
+    for x in (OUT / "results.jsonl").read_text(encoding="utf-8").splitlines():
+        if x.strip():
+            r = json.loads(x)
+            latest[r["id"]] = r
+    res = list(latest.values())
     eq = (yaml.safe_load(EQUIV.read_text(encoding="utf-8")) or {}).get("equivalent", []) if EQUIV.exists() else []
     eq_ids = {e["id"] for e in eq if str(e.get("reason", "")).strip()}
     valid = [r for r in res if r["verdict"] != "INVALID"]
@@ -251,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--only", nargs="*", help="mutant ids (re-run these, appending to results)")
+    ap.add_argument("--tests", nargs="*", help="with --only: run these extra tests too (e.g. a test written to "
+                    "kill a survivor, not yet in the coverage map)")
     a = ap.parse_args(argv)
     if a.map:
         build_map(sys.executable)
@@ -273,7 +281,8 @@ def main(argv: list[str] | None = None) -> int:
     todo = [m for m in ms if m.id not in done]
     print(f"mutate: {len(todo)} mutants to run ({len(done)} already done)", flush=True)
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool, results.open("a", encoding="utf-8") as f:
-        for r in pool.map(lambda m: run_mutant(m, _covering(mp, m), sys.executable), todo):
+        extra = list(a.tests or [])
+        for r in pool.map(lambda m: run_mutant(m, extra + _covering(mp, m), sys.executable), todo):
             f.write(json.dumps(r) + "\n")
             f.flush()
             print(f"{r['verdict']:9s} {r['id']} ({r.get('secs', 0)}s)", flush=True)

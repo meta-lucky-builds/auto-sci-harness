@@ -283,6 +283,17 @@ Test files: R1 = `tests/test_review_kernel.py` on `m3-r1-kernel` (10 fail = find
 
 ---
 
+### E. §16.6/§16.7 tests of the tests (workstream assure, branch `s16-assure`, 2026-10-07/08)
+| Item | State | Label |
+|---|---|---|
+| Findings registry `redteam/findings.yaml` (id, invariant, capability A0-A5, tests, museum patch, status); gate check for dangling test ids (`museum.py --check-only` in `check.py --fast`) | built | verified (`tests/spec/test_spec_gate.py`) |
+| Loophole museum: 37 re-introduction patches (Kernel, loop, evolve, sandbox rows of §A/§B) | built; 37/37 KILLED, 37/37 CONTROL-OK | verified (`scripts/museum.py`). Two first-run survivors (K-3 guard, E5) showed tests that had stopped attacking; new tests kill them |
+| New Kernel findings from the clean-room differential run: KD1 (dev data sharing held-out rows passes K6), KD3 (target input carrying its labels is CERTIFIED-VALIDATED), KD2 (K7 on a subset, label-safe), ASOF (verify vs later events) | OPEN, pinned by strict xfails; reported to kstats | verified |
+| Clean-room reference model `tests/spec/kernel_model.py` (sub-agent, did not read checks.py) + triage layer + differential test + 8 MRs | built | verified on ~500 generated histories in total (not 1e5) |
+| Mutation tool `scripts/mutate.py` (stdlib AST) on vault, ledger, K2/K4/K6 | built; baseline in the assure report | see report |
+| Derived Kernel test list + gate self-test; two-speed governance check; sealed halves with a hash-chained look ledger | built | verified |
+| Human-held check and outside attack per milestone (inv. 22) | procedure only (`docs/governance.md`) | NOT MET: needs owner |
+
 ## Live runs (details in liverun1.md)
 - **Pre-M0 and post-M0 runs** on rings (easy synthetic): pipeline proven. The latest, `run_e305a0283a074fbb`,
   scored 0.958 vs 0.351 with the audit passing; 9 calls, 154k input tokens.
