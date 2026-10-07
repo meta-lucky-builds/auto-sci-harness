@@ -170,6 +170,13 @@ def _preflight(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, claim:
                                   family_size=family, seeds=plan.seeds, n_boot=plan.n_boot, kind=claim.kind))
 
 
+def declared_probability(q: float, alpha: float, n_comparisons: int) -> float:
+    """The declared probability may not be below the claim's level p0 = alpha / n_comparisons (GOAL §16.4, F2:
+    the Kernel refuses q < p0 at pre-registration). Raising a low forecast to p0 only makes the forecast more
+    confident in success, so a miss is scored more harshly by the prediction ledger, never less."""
+    return max(q, alpha / max(1, n_comparisons))
+
+
 @register("research.claim")
 def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """params: seeds, alpha, n_comparisons, delta_fraction; prefix (state-key prefix, "" or "replica_");
@@ -202,7 +209,9 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         subject=ArtifactRef(artifact_id=subject.artifact_id, hash=subject.hash),
         comparator=ArtifactRef(artifact_id=baseline.artifact_id, hash=baseline.hash),
         metric=MetricRef(id=task.metric, higher_is_better=task.higher_is_better),
-        effect=Effect(min_effect=delta, predicted_lo=lo, predicted_hi=hi, probability=q),
+        effect=Effect(min_effect=delta, predicted_lo=lo, predicted_hi=hi,
+                      probability=declared_probability(q, params.get("alpha", 0.05),
+                                                       int(params.get("n_comparisons", 1)))),
         scope=Scope(datasets=(ids["train"], ids["test"])), development=(ids["train"],),
         generalization_targets=(ids["test"],),
         # n_comparisons: the PRE-DECLARED size of the multiplicity family on this test set. K4 uses

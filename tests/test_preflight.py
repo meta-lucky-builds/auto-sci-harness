@@ -161,3 +161,10 @@ def test_ensemble_wrapper_reproduces_the_stored_vote(tmp_path):
                     "--out", str(tmp_path / "out" / "preds.csv"), "--seed", "0"], check=True)
     got = (tmp_path / "out" / "preds.csv").read_text().split()[1:]
     assert got == vote(outs) and len(set(got)) > 1
+
+
+def test_declared_probability_is_never_below_the_claim_level():
+    from custom_harness.research.claims import declared_probability
+    assert declared_probability(0.05, 0.2, 1) == 0.2  # alpha 0.2 with a low forecast would be refused at prereg
+    assert declared_probability(0.05, 0.2, 4) == 0.05
+    assert declared_probability(0.9, 0.05, 1) == 0.9
