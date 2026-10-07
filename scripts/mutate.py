@@ -182,8 +182,12 @@ def build_map(python: str) -> None:
 def _covering(mp: dict, m: Mutant) -> list[str]:
     lines = mp["lines"].get(m.file, {})
     tests: set[str] = set()
+    executed = False
     for ln in range(m.line, m.end_line + 1):
+        executed |= str(ln) in lines
         tests |= set(lines.get(str(ln), []))
+    if executed and not tests:  # ran only at import time (no test context): every test file may depend on it
+        return list(TESTS)
     dur = mp["durations"]
     return sorted(tests, key=lambda t: (dur.get(t.split("[")[0], dur.get(t, 99.0)), t))
 
