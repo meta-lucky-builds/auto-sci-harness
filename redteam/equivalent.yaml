@@ -1,0 +1,6 @@
+# Equivalent mutants (GOAL §16.6: each one justified; must stay <= 10% of all mutants). Ids are file:line:col:operator
+# as printed by scripts/mutate.py. A reason must say why NO test could distinguish the mutant, not why it is harmless.
+equivalent:
+  - id: "src/custom_harness/kernel/vault.py:195:108:int+1"
+    reason: "truncation length of the claim hash inside an error MESSAGE ([:12] -> [:13]); the refusal itself is
+      unchanged. Distinguishable only by asserting the exact message text, which would pin wording, not behaviour."
