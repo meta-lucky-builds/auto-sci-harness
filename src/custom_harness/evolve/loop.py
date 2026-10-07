@@ -40,6 +40,7 @@ from .diagnosis import check_claims
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
 from .export import proposer_view
+from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
 from .selection import PairedSample, Unit, cost_bound, gate, non_regression, paired_sample, race
 
@@ -91,6 +92,9 @@ class Evaluator:
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
                  campaign_budget: Budget | None = None):
+        sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
+        if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
+            raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
         self.tasks = {t.task_id: t for t in tasks}
         self.budget_per_run = budget_per_run
@@ -112,9 +116,13 @@ class Evaluator:
                 if self.campaign_budget is not None:
                     self.campaign_budget.check()
                 self.calls += 1
+                since = last_prereg_seq(self.store)
                 out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
                                   store=self.store, sandbox_factory=self.sandbox_factory,
                                   budget_limits=self.budget_per_run, retry=self.retry)
+                # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
+                # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
+                check_run(self.store, since)
                 if self.campaign_budget is not None:
                     try:
                         self.campaign_budget.charge(out.cost)
@@ -234,8 +242,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
             at_risk = set(edit.predicted.tasks_at_risk)
             claims = check_claims(edit, digest)
-            gate_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in gate_units]
-            loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in gate_labels) else "MECHANICAL"
+            # every unit the acceptance decision rested on, BOTH arms: the fresh evolve re-measurement and the gate
+            # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
+            used_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in fresh_units + gate_units]
+            loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in used_labels) else "MECHANICAL"
             records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
                             "loop_label": loop_label,
                             "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,

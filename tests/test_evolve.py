@@ -97,10 +97,19 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
     factory = lambda key: LocalSandbox(tmp_path / "sb" / key, i_understand_no_isolation=True)  # noqa: E731
     ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store, factory, suite)
     proposer = MockBackend([json.dumps(PROPOSALS)])
-    parent = seed_spec()
+    cfg = EvolveConfig(n_edits=4, race_rounds=2)
+    # R2-2: a campaign pre-declares its multiplicity bound on the (protected) claim nodes, set by the human author of
+    # the seed spec; the driver computes and checks the same bound (check_campaign), the Evaluator enforces it
+    from custom_harness.evolve.multiplicity import check_campaign, runs_per_task_bound
+    per_task = runs_per_task_bound(generations=1, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds),
+                                   n_fresh_seeds=len(cfg.seeds), infra_retries=cfg.infra_retries)
+    doc = seed_spec().model_dump(mode="json")
+    for nid in ("claim", "replica_claim"):
+        doc["nodes"][nid]["params"]["n_comparisons"] = 2 * per_task
+    parent = HarnessSpec.model_validate(doc)
+    assert check_campaign(parent, store, [t.task_dir for t in suite], runs_per_task=per_task) == 2 * per_task
 
-    res = evolve_generation(parent, suite, evaluator=ev, proposer=proposer, store=store,
-                            cfg=EvolveConfig(n_edits=4, race_rounds=2))
+    res = evolve_generation(parent, suite, evaluator=ev, proposer=proposer, store=store, cfg=cfg)
 
     assert res.accepted, res.decision
     assert res.new_parent.nodes["run"].params["max_fixes"] == 2

@@ -157,9 +157,16 @@ def _score_completed(state: dict) -> tuple[float, bool]:
     return 0.5 * verified + 0.5 * replicated + 0.5 * max(-1.0, min(1.0, rel)), verified
 
 
+# Capability for the one-shot sealed-split evaluation (finalize.py): run_harness refuses a sealed task without it.
+_SEALED_ACCESS = object()
+
+
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
-                budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None) -> RunOutcome:
+                budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
+                sealed_access: object | None = None) -> RunOutcome:
+    if task.split == "sealed" and sealed_access is not _SEALED_ACCESS:  # invariant 6: sealed only via finalize
+        raise ValueError(f"task {task.task_id} is in the sealed split: only `chh finalize` (a human action) runs it")
     try:
         sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
     except InfraError as e:  # e.g. Docker daemon down before the run even started

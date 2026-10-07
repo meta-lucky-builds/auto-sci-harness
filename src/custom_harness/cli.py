@@ -341,6 +341,36 @@ def cmd_approve_adapter(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_finalize(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §5 L6.12, invariant 6): evaluate the frozen final harness on the sealed split, ONCE. The
+    decision (approver, spec hash, sealed tasks) is recorded in the hash-chained ledger before any sealed run; a
+    second finalize of any of these sealed tasks is refused. Claude and models never run this command."""
+    import custom_harness.research  # noqa: F401
+
+    from .evolve.driver import load_suite
+    from .evolve.finalize import FinalizeRefused, finalize
+    if not a.approver.strip():
+        raise SystemExit("refused: --approver must name the human taking this one-shot decision")
+    spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
+    baseline = (HarnessSpec.model_validate(yaml.safe_load(Path(a.baseline).read_text(encoding="utf-8")))
+                if a.baseline else None)
+    backends = {}
+    for binding in a.role:
+        role, _, kind = binding.partition("=")
+        backends[role] = _backend(kind)
+    if a.allow_same_family:
+        os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
+    tag = f"finalize-{spec.id}-{int(time.time())}"
+    try:
+        summary = finalize(spec, load_suite(Path(a.suite)), approver=a.approver, backends=backends, store=store,
+                           sandbox_factory=_sandbox_factory(a, data_dir() / "sandboxes" / tag),
+                           seeds=tuple(a.seeds), baseline=baseline)
+    except FinalizeRefused as e:
+        raise SystemExit(f"refused: {e}") from e
+    print(json.dumps(summary, indent=1, default=str))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -403,6 +433,17 @@ def main(argv: list[str] | None = None) -> int:
     aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
     aa.add_argument("name")
     aa.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
+    fz = sub.add_parser("finalize", help="HUMAN: one-shot evaluation of the frozen final harness on the sealed split")
+    fz.add_argument("spec")
+    fz.add_argument("--suite", required=True)
+    fz.add_argument("--approver", required=True, help="the human taking this one-shot decision (ledgered)")
+    fz.add_argument("--baseline", help="spec to compare against on the same sealed units (paired)")
+    fz.add_argument("--seeds", type=int, nargs="+", default=[0])
+    fz.add_argument("--role", action="append", default=[], help="role=backend for harness runs")
+    fz.add_argument("--allow-same-family", action="store_true",
+                    help="override invariant 5 (judge/replicator family); recorded as NOT MET")
+    fz.add_argument("--docker", action="store_true")
+    fz.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; trusted code only)")
     rp = sub.add_parser("reproduce", help="re-check a Reproducibility Bundle on this machine")
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
@@ -426,7 +467,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
-                "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
+                "approve-adapter": cmd_approve_adapter, "finalize": cmd_finalize, "evolve": cmd_evolve,
+                "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)

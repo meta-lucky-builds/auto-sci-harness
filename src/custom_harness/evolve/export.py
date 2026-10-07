@@ -59,11 +59,16 @@ FORMAT = "chh-evidence-export/1"
 POLICY = ("evolve-split runs only; gate/sealed outcomes only as aggregate accept/reject decisions; no bundles, blobs, "
           "workspaces, private values, canaries or task private directories")
 
-# whitelists: only these fields of a ledger/lineage record are proposer-visible
+# whitelists: only these fields of a ledger/lineage record are proposer-visible. NOT `loop_label`: it is computed
+# from the certificate labels of the GATE runs (all CERTIFIED-VALIDATED or not), a per-split gate outcome beyond
+# the accept/reject bit.
 _EDIT_VIEW = ("at", "parent", "candidate", "type", "rationale", "accepted", "predicted_delta", "actual_evolve_delta",
-              "race_evolve_delta", "loop_label", "clusters_claimed", "claims_check", "signature")
+              "race_evolve_delta", "clusters_claimed", "claims_check", "signature")
 _LINEAGE_VIEW = ("parent", "status", "candidate", "edit", "reason", "problem", "race", "survived", "evolve_fresh",
-                 "signature", "claims_check", "loop_label", "rejected_on")
+                 "signature", "claims_check", "rejected_on")
+# generation_stats: counters over lineage statuses only (loop._counters)
+_STATS_VIEW = ("parent", "proposed", "malformed", "declined", "rejected_novelty", "rejected_static",
+               "no_op_or_duplicate", "accepted", "rejected_gate", "raced", "pruned", "gated", "yield")
 _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying bundle; private state blob
 _HEX = re.compile(r"^[0-9a-f]{16,128}$")
 _MAX_PRIVATE_SCAN = 1024 * 1024  # private files above this are matched by hash only
@@ -97,13 +102,22 @@ def proposer_view(rec: dict[str, Any], evolve_ids: set[str]) -> dict[str, Any]:
     and per-task attribution restricted to EVOLVE tasks."""
     out = {k: rec[k] for k in _EDIT_VIEW if k in rec}
     out["rejected_on"] = _rejected_on(rec)
+    # a task is shown only if it is an evolve task NOW and was one when the record was written (per_task carries the
+    # split at the time): a task rotated from an earlier campaign's gate split into this evolve split must not carry
+    # that gate result along. Without per_task the split at the time is unknown: nothing is shown (fail closed).
+    raw = rec.get("per_task")
+    per_task: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    was_evolve = {t for t, r in per_task.items() if isinstance(r, dict) and r.get("split") == "evolve"}
     for k in ("flipped", "regressed", "regressed_unpredicted"):
         if isinstance(rec.get(k), list):
-            out[k] = [t for t in rec[k] if t in evolve_ids]
-    if isinstance(rec.get("per_task"), dict):
-        out["per_task"] = {t: r for t, r in rec["per_task"].items()
-                           if t in evolve_ids and isinstance(r, dict) and r.get("split") == "evolve"}
+            out[k] = [t for t in rec[k] if t in evolve_ids and t in was_evolve]
+    if per_task:
+        out["per_task"] = {t: r for t, r in per_task.items() if t in evolve_ids and t in was_evolve}
     return out
+
+
+def stats_view(rec: dict[str, Any]) -> dict[str, Any]:
+    return {k: rec[k] for k in _STATS_VIEW if k in rec}
 
 
 def lineage_view(rec: dict[str, Any]) -> dict[str, Any]:
@@ -200,7 +214,7 @@ def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], ev
     lineage = store.records("lineage")
     put("lineage.json", [lineage_view(r) for r in lineage])
     put("ledger.json", [proposer_view(r, evolve_ids) for r in store.records("harness_edit")])
-    put("generation_stats.json", store.records("generation_stats"))
+    put("generation_stats.json", [stats_view(r) for r in store.records("generation_stats")])
     # candidates: every spec named by the lineage or run by an exported run, with its parent and edits
     cands: dict[str, dict[str, Any]] = {h: {"hash": h, "parent": None, "edits": []} for h in spec_hashes}
     for r in lineage:
