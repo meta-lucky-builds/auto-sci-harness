@@ -89,8 +89,14 @@ RESERVED_WRITING_MODULES = frozenset({
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
 
+HUMAN_ONLY_MODULE_PREFIXES = ("physical.",)  # the physical-claim path (GOAL §4.7): screen, prereg, data checks
+
+
 def _approval_nodes(spec: HarnessSpec) -> set[str]:
-    return {nid for nid, node in spec.nodes.items() if node.kind == "approval"}
+    """Human-only nodes: approval nodes and nodes of the physical-claim path; none may be added, removed, changed or
+    re-wired by an edit."""
+    return {nid for nid, node in spec.nodes.items()
+            if node.kind == "approval" or str(getattr(node, "module", "")).startswith(HUMAN_ONLY_MODULE_PREFIXES)}
 
 
 def _edge_set(edges: list[dict[str, Any]], target: str) -> list[str]:

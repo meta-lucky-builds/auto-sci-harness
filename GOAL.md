@@ -226,7 +226,7 @@ may say. A claim is certified at the strongest tier its available tools support,
 | **Simulated** | a design meets a spec in FEM/CFD/circuit/molecular-dynamics/systems-biology simulation | a pinned simulator (version, solver settings, mesh/step convergence evidence) inside an adapter | T1/T2 **within the simulator** | the claim holds **in simulator S (version, config)**; the scope names S; "simulation matches reality" is listed as an UNTESTED assumption; never relabelled as physical |
 | **Physical / empirical** | a compound's effect in cells; a prototype's measured strength | none inside the system: **protocol → approval node → human execution → returned data → Kernel check** | T3 | the returned data support the pre-registered claim under the pre-registered analysis; data provenance is a human ATTESTATION (untested by the system) |
 
-Physical/empirical claims are **never certified as done by the system**. The only route: (1) the claim, the protocol
+Physical/empirical claims are **never certified as done by the system**. (Path built up to the Kernel boundary 2026-10-07, 🟡: no physical adapter yet, so K1 refuses.) The only route: (1) the claim, the protocol
 and the analysis plan are pre-registered (K2); (2) an **approval node** pauses the run until a named human approves
 the protocol, including a biosafety / dual-use and ethics screen; categories on the human-owned prohibited list are
 refused outright and never reach approval; (3) humans execute; (4) the returned data are registered in the vault
