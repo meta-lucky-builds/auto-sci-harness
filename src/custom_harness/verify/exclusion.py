@@ -14,8 +14,9 @@ Being exact and discrete, the rule fires on symmetric random outages with probab
 alpha = 0.01 it needs at least 7 candidate-only losses (and none on the parent) to fire.
 
 Assumption (stated): equal exposure. If the parent's runs are cached from an earlier time window and outages are
-clustered in time, one-arm losses are not exchangeable; the rule then errs either way with unknown size. Wiring into
-the gate is a change in evolve/selection.py + evolve/loop.py (see tests/test_exclusion_asymmetry.py).
+clustered in time, one-arm losses are not exchangeable; the rule then errs either way with unknown size.
+Wired (2026-10-07): evolve/selection.py (paired_sample per-arm counts, exclusion_check) + evolve/loop.py (fail
+closed, recorded as `exclusions`, rejected_on "exclusion_asymmetry"); tests/test_exclusion_asymmetry.py.
 """
 
 from __future__ import annotations

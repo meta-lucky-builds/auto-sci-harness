@@ -6,6 +6,8 @@ so task difficulty cancels out.
 A score of None means the unit was EXCLUDED (infrastructure failure, see errors.py). Such a unit is
 dropped from BOTH arms of the pair, never scored as 0; the number of exclusions is reported and the
 gate fails closed when too many units were excluded to trust the comparison (CR P0-1, P0-5).
+Exclusions are also counted PER ARM (`PairedSample.arms`); `exclusion_check` fails the comparison closed when the
+units lost on the candidate only exceed what outages hitting both arms alike explain (verify/exclusion.py).
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
 from ..records import Cost
+from ..verify.exclusion import EXCLUSION_ALPHA, ExclusionCounts, exclusion_asymmetry, sign_test_p
 from ..verify.stats import mean_t_interval
 
 Unit = tuple[str, int]  # (task_id, seed)
@@ -28,6 +31,8 @@ class PairedSample:
     units: list[Unit]
     diffs: list[float]
     excluded: list[Unit] = field(default_factory=list)
+    # per-arm exclusion counts (verify/exclusion.py); None when the sample was not built by paired_sample
+    arms: ExclusionCounts | None = None
 
     @property
     def n_units(self) -> int:
@@ -45,13 +50,34 @@ def paired_sample(units: list[Unit], candidate: Callable[[Unit], Score], parent:
     if len(set(units)) != len(units):
         raise ValueError("duplicate units in a paired comparison")
     diffs, excluded = [], []
+    c_only = p_only = both = 0
     for u in units:
         c, p = candidate(u), parent(u)
+        c_only += c is None and p is not None
+        p_only += p is None and c is not None
+        both += c is None and p is None
         if c is None or p is None:
             excluded.append(u)
             continue
         diffs.append(c - p)
-    return PairedSample(list(units), diffs, excluded)
+    return PairedSample(list(units), diffs, excluded, ExclusionCounts(c_only, p_only, both))
+
+
+def exclusion_check(*samples: PairedSample, alpha: float = EXCLUSION_ALPHA) -> dict:
+    """Candidate-only exclusion rule (verify/exclusion.py) over the units of `samples` (disjoint unit sets, e.g. the
+    fresh evolve re-measurement and the gate split): one-sided exact sign test on the units lost on exactly one arm.
+    Fails closed when a sample carries no per-arm counts. `passed` False = the candidate must not be accepted."""
+    if any(s.arms is None for s in samples):
+        return {"candidate_only": None, "parent_only": None, "both": None, "p": None, "passed": False,
+                "reason": "per-arm exclusion counts missing (fail closed)"}
+    c = sum(s.arms.candidate_only for s in samples if s.arms is not None)
+    p = sum(s.arms.parent_only for s in samples if s.arms is not None)
+    b = sum(s.arms.both for s in samples if s.arms is not None)
+    why = exclusion_asymmetry(c, p, alpha=alpha)
+    out = {"candidate_only": c, "parent_only": p, "both": b, "p": sign_test_p(c, p), "alpha": alpha}
+    if why is not None:
+        return out | {"passed": False, "reason": why}
+    return out | {"passed": True, "reason": "per-arm exclusions consistent with random outages"}
 
 
 def paired_ci(diffs: list[float], *, n_boot: int = 4000, alpha: float = 0.05, seed: int = 0

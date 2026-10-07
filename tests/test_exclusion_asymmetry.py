@@ -8,9 +8,11 @@ arm, random outages hit the candidate's and the parent's runs alike, so the cand
 given m one-arm losses. If P(X >= candidate-only) <= alpha (one-sided exact sign test, alpha = 0.01) the exclusions
 are asymmetric beyond what random outages explain, and the comparison fails closed (the candidate is not accepted).
 
-Wiring: the gate lives in evolve/selection.py (another agent's area); these tests apply the rule through a
-monkeypatched gate exactly as the proposed production patch would, and prove both properties: the adversarial
-candidate is rejected, and test_infra.py's outage campaign still reaches the clean campaign's decision."""
+Wiring (2026-10-07): paired_sample counts exclusions per arm, evolve/loop.py applies `exclusion_check` to the fresh
+evolve re-measurement + gate split and fails the candidate closed, recording `exclusions` and
+`rejected_on="exclusion_asymmetry"` in the lineage and the harness_edit ledger. These tests go through the
+production loop and prove both properties: the adversarial candidate is rejected (it was accepted before), and
+test_infra.py's outage campaign still reaches the clean campaign's decision."""
 
 import json
 import random
@@ -19,8 +21,7 @@ import pytest
 
 import custom_harness.research  # noqa: F401
 from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate
-from custom_harness.evolve import loop as evolve_loop
-from custom_harness.evolve.selection import PairedSample, paired_sample
+from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel import Kernel
 from custom_harness.sandbox import LocalSandbox
@@ -70,32 +71,12 @@ def test_selective_candidate_exclusions_pass_the_current_gate_but_not_the_rule()
     assert exclusion_asymmetry(counts.candidate_only, counts.parent_only) is not None
 
 
-def _wire_rule(monkeypatch, log):
-    """The proposed production patch, applied by monkeypatching evolve/loop.py: count exclusions per arm while
-    building each paired sample, and fail the gate closed when the evolve+gate exclusions are asymmetric."""
-    def counted_sample(units, candidate, parent):
-        c_scores, p_scores = {u: candidate(u) for u in units}, {u: parent(u) for u in units}
-        s = paired_sample(units, c_scores.__getitem__, p_scores.__getitem__)
-        s.arm_counts = count_exclusions(units, c_scores.__getitem__, p_scores.__getitem__)  # type: ignore[attr-defined]
-        return s
-
-    def ruled_gate(evolve_s: PairedSample, gate_s: PairedSample, **kw):
-        d = gate(evolve_s, gate_s, **kw)
-        c = sum(s.arm_counts.candidate_only for s in (evolve_s, gate_s))
-        p = sum(s.arm_counts.parent_only for s in (evolve_s, gate_s))
-        why = exclusion_asymmetry(c, p)
-        log.append((c, p, why))
-        if why and d.accepted:
-            d.accepted, d.reason = False, why
-        return d
-    monkeypatch.setattr(evolve_loop, "paired_sample", counted_sample)
-    monkeypatch.setattr(evolve_loop, "gate", ruled_gate)
-
-
 def test_outage_campaign_reaches_the_same_decision_with_the_rule(store, tmp_path, suite, monkeypatch):  # noqa: F811
-    """test_infra.py's M0 campaign (Docker outages on both arms), rerun with the rule wired in."""
-    log: list = []
-    _wire_rule(monkeypatch, log)
+    """test_infra.py's M0 campaign (Docker outages on both arms), run through the production loop with the rule wired
+    in (evolve/loop.py). Until 2026-10-07 this test monkeypatched the rule in; that version also predates R2-2 (it
+    used an undeclared seed spec, which the Evaluator now stops with MultiplicityDrift)."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    stores: dict = {}
 
     def campaign(sub, factory):
         from custom_harness.store import EvidenceStore
@@ -105,9 +86,9 @@ def test_outage_campaign_reaches_the_same_decision_with_the_rule(store, tmp_path
         roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
         ev = Evaluator(roles, st, factory, suite, retry=NO_WAIT)
         cfg = EvolveConfig(n_edits=4, race_rounds=2)
-        # R2-2: campaigns pre-declare their multiplicity bound (same setup as test_infra's campaign)
         res = evolve_generation(declared_seed_spec(cfg), suite, evaluator=ev,
                                 proposer=MockBackend([json.dumps(PROPOSALS)]), store=st, cfg=cfg)
+        stores[sub] = [r["exclusions"] for r in st.records("harness_edit")]
         st.close()
         return res, ev
 
@@ -122,6 +103,87 @@ def test_outage_campaign_reaches_the_same_decision_with_the_rule(store, tmp_path
 
     FlakyDockerLike.count = 0
     flaky, ev = campaign("flaky", outage_factory)
-    assert ev.infra_failures > 0 and log, "outages and the gate both happened"
-    assert flaky.accepted == clean.accepted and flaky.decision == clean.decision, (log, flaky.decision)
+    assert ev.infra_failures > 0 and stores["flaky"], "outages and the gate both happened"
+    assert all(e["passed"] for e in stores["clean"] + stores["flaky"]), stores
+    assert flaky.accepted == clean.accepted and flaky.decision == clean.decision, (stores, flaky.decision)
     assert flaky.new_parent.spec_hash() == clean.new_parent.spec_hash()
+
+
+# ------------------------------------------------------------------ the rule wired into the REAL evolution loop
+class ScriptedEvaluator:
+    """The Evaluator interface evolve_generation uses (outcome / score / calls / cache), with scripted RunOutcomes
+    instead of research runs, so a campaign can have enough units for the rule to have power. Everything else is
+    the production loop: proposal parsing, static checks, race, fresh re-measurement, gate, LOFO, cost, ledger.
+
+    Parent: 0.5 (+ a small per-seed spread) on every unit. Candidate: 0.1 better on the units it keeps; on the units
+    where `cand_hidden(seed)` it reports INFRA_FAILED (score None), i.e. it turns those units into "infrastructure
+    failures". `parent_down(seed)` makes the parent's run of a unit an infrastructure failure (an outage)."""
+
+    def __init__(self, parent_hash, cand_hidden, parent_down=lambda s: False):
+        self.parent_hash, self.cand_hidden, self.parent_down = parent_hash, cand_hidden, parent_down
+        self.cache: dict = {}
+        self.calls = 0
+        self.infra_failures = 0
+
+    def outcome(self, spec, unit):
+        from custom_harness.evolve.evaluate import RunOutcome
+        from custom_harness.records import Cost, RunStatus
+        key = (spec.spec_hash(), unit[0], unit[1])
+        if key not in self.cache:
+            self.calls += 1
+            task, seed = unit
+            is_parent = key[0] == self.parent_hash
+            down = self.parent_down(seed) if is_parent else self.cand_hidden(seed)
+            score = None if down else 0.5 + 0.01 * (seed % 3) + (0.0 if is_parent else 0.1 + 0.001 * (seed % 5))
+            status = RunStatus.INFRA_FAILED.value if down else RunStatus.COMPLETED.value
+            self.infra_failures += down
+            self.cache[key] = RunOutcome(task, f"run_{len(self.cache)}", seed, score, False, status,
+                                         Cost(prompt_tokens=100, completion_tokens=10))
+        return self.cache[key]
+
+    def score(self, spec, unit):
+        return self.outcome(spec, unit).score
+
+
+def _hiding_campaign(store, tmp_path, cand_hidden, parent_down=lambda s: False):
+    from custom_harness.evolve import SuiteTask
+    tasks = [SuiteTask("e0", tmp_path, "evolve", family="A"), SuiteTask("e1", tmp_path, "evolve", family="A"),
+             SuiteTask("g0", tmp_path, "gate", family="H"), SuiteTask("g1", tmp_path, "gate", family="H")]
+    parent = seed_spec()
+    ev = ScriptedEvaluator(parent.spec_hash(), cand_hidden, parent_down)
+    proposal = {"edits": [PROPOSALS["edits"][0]]}  # a valid edit (max_fixes 0 -> 2)
+    res = evolve_generation(parent, tasks, evaluator=ev, proposer=MockBackend([json.dumps(proposal)]), store=store,
+                            cfg=EvolveConfig(seeds=tuple(range(8)), n_edits=1, race_rounds=2))
+    return res, ev
+
+
+def test_real_loop_rejects_a_candidate_that_hides_its_bad_units_as_infra_failures(store, tmp_path):
+    """16 fresh evolve units + 16 gate units; the candidate turns seeds = 0 mod 4 (2 per task: 4/16 = 25% per split,
+    within the gate's exclusion cap) into infrastructure failures. Before the rule this candidate was ACCEPTED."""
+    res, ev = _hiding_campaign(store, tmp_path, cand_hidden=lambda s: s % 4 == 0)
+    assert ev.infra_failures > 0
+    gated = [c for c in res.candidates if c["status"] in ("accepted", "rejected_gate")]
+    assert len(gated) == 1 and gated[0]["pooled_gate_accepted"] is True, gated  # the statistics alone accept it
+    assert not res.accepted, res.decision
+    assert "exclusions asymmetric" in res.decision and res.new_parent.spec_hash() == seed_spec().spec_hash()
+    excl = gated[0]["exclusions"]
+    assert (excl["candidate_only"], excl["parent_only"], excl["passed"]) == (8, 0, False), excl
+    assert gated[0]["rejected_on"] == "exclusion_asymmetry"
+    ledger = store.records("harness_edit")[-1]
+    assert ledger["accepted"] is False and ledger["decision"] == res.decision
+    assert ledger["exclusions"] == excl and ledger["rejected_on"] == "exclusion_asymmetry"
+    # the proposer sees the stage only, never the per-arm counts (they include gate units)
+    from custom_harness.evolve.export import proposer_view
+    view = proposer_view(ledger, {"e0", "e1"})
+    assert view["rejected_on"] == "exclusion_asymmetry" and "exclusions" not in view
+    lineage = [r for r in store.records("lineage") if r.get("status") == "rejected_gate"]
+    assert lineage and lineage[-1]["exclusions"] == excl
+
+
+def test_real_loop_still_accepts_with_symmetric_outages(store, tmp_path):
+    """Positive control: outages on BOTH arms (candidate seeds = 0 mod 8, parent seeds = 4 mod 8: 4 vs 4 one-arm
+    losses) are what random outages look like; the candidate is still accepted and the counts are recorded."""
+    res, _ = _hiding_campaign(store, tmp_path, cand_hidden=lambda s: s % 8 == 0, parent_down=lambda s: s % 8 == 4)
+    assert res.accepted, res.decision
+    excl = next(c for c in res.candidates if c["status"] == "accepted")["exclusions"]
+    assert (excl["candidate_only"], excl["parent_only"], excl["passed"]) == (4, 4, True), excl

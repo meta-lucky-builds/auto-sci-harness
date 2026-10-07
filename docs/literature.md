@@ -44,6 +44,14 @@ the log re-parses that envelope with the named source and the entry's window and
 exactly, so edited entries, entries copied from another session, and lookup responses passed off as searches are
 integrity errors. Results with no stored envelope cannot be logged. No session given -> nothing is verified.
 
+## Audit I3 (research/claims.py: `citation_audit`)
+When the run state has `citations` (a list of `Citation` dicts), the audit checks them with
+`offline_client(SnapshotStore($CHH_DATA_DIR/literature), state["literature_snapshot"])` against
+`RetrievalLog(store, session=run_id).retrieved_ids()`; I3 = `i3_verdict(...)["I3"]`, details in
+`audit["citations"]`. No citations -> "n/a". No/unknown snapshot, malformed citations or a log integrity error ->
+I3 False. `passed` requires I3 True or "n/a". Both keys are reserved state (evolve/edits.py). Not built yet: the
+research.literature node that searches, cites and freezes the snapshot during a run.
+
 ## Retrieval loop
 `RetrievalLoop(client, log, max_rounds=N, published_from=..., published_to=...)`: one window fixed at
 construction (read-only; defaults to end at the client's T; `published_to` later than T is refused, also by
