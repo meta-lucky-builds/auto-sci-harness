@@ -165,7 +165,7 @@ class _ScratchWorld:
                 self.vault.read(self.target, "test_y.csv", purpose="evaluate", claim_hash=self.h, arm=arm, seed=seed)
                 ref = self.claim.subject if arm == "subject" else self.claim.comparator
                 self.records.append((f"sim-{arm}-{seed}", ExecRecord(
-                    claim_hash=self.h, arm=arm, artifact_hash=ref.hash,  # type: ignore[arg-type]
+                    claim_hash=self.h, arm=arm, artifact_hash=ref.hash,
                     inputs={"test": InputRef(dataset_id=self.target, file="test_X.csv", blob=blob)},
                     target=self.target, label_file="test_y.csv", seed=seed, env={"sandbox": "preflight simulation"},
                     limits={"timeout_s": 1.0}, preds_ref="simulated", metric=inp.metric, score=0.0,
