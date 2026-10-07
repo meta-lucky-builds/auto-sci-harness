@@ -88,7 +88,7 @@ def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
 def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
     if status == RunStatus.INFRA_FAILED:
         return None, False
-    if status != RunStatus.COMPLETED:
+    if status != RunStatus.COMPLETED:  # incl. PAUSED: a run waiting for a human decision earns no credit
         return 0.0, False
     try:
         return _score_completed(state)

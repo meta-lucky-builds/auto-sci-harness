@@ -1,6 +1,7 @@
 """The Kernel ledger: an append-only, hash-chained log of everything whose ORDER matters (GOAL §4.3 K2).
 
-Entry kinds: register_dataset, register_artifact, prereg, data_access, certificate, bundle, retraction.
+Entry kinds: register_dataset, register_artifact, prereg, data_access, certificate, bundle, retraction,
+approval_request, approval.
 Each entry's hash covers (seq, kind, body, prev, at), and `prev` is the previous entry's hash, so editing,
 deleting or reordering any entry breaks every later hash. This makes tampering EVIDENT, not impossible:
 whoever controls the database can rewrite the whole chain. Publishing the head hash (e.g. in a bundle or
@@ -18,7 +19,10 @@ from ..store.evidence import EvidenceStore, LedgerRow
 from .claim import canonical_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
-                   "retraction"})
+                   "retraction",
+                   # approval node (runtime/engine.py): the engine records each pause; only `chh approve` records
+                   # a human decision
+                   "approval_request", "approval"})
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:

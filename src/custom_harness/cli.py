@@ -85,6 +85,52 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0 if res.status == "completed" else 1
 
 
+APPROVAL_ITEM_PRINT_CHARS = 20_000
+
+
+def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Record a human decision for the item a PAUSED run is waiting on (GOAL invariant 15). This is the ONLY code
+    path that writes an "approval" ledger entry. It does not resume the run: `chh resume RUN_ID` does."""
+    from .kernel import Ledger
+    from .records import RunStatus
+    from .runtime import ApprovalNode
+    from .runtime.engine import approval_item_hash, paused_approval
+    from .runtime.template import lookup
+    status, _ = store.run_status(a.run_id)
+    if status != RunStatus.PAUSED:
+        raise SystemExit(f"refused: run {a.run_id} is {status.value}, not paused")
+    pause = paused_approval(store, a.run_id)
+    if pause is None or pause["node_id"] != a.node_id:
+        at = pause["node_id"] if pause else "?"
+        raise SystemExit(f"refused: run {a.run_id} is not paused at node '{a.node_id}' (paused at '{at}')")
+    run = store.get_run(a.run_id)
+    node = HarnessSpec.model_validate(store.harness_spec(run.harness_hash)).nodes.get(a.node_id)
+    if not isinstance(node, ApprovalNode):
+        raise SystemExit(f"refused: node '{a.node_id}' is not an approval node")
+    approver = a.approver.strip()
+    if not approver:
+        raise SystemExit("refused: --approver must name a human")
+    item = lookup(pause["state"], node.item_key)  # recomputed from the paused checkpoint, never trusted from the trace
+    item_hash = approval_item_hash(item)
+    if item_hash != pause.get("item_hash"):
+        raise SystemExit(f"refused: the checkpointed item hashes to {item_hash}, the pause recorded "
+                         f"{pause.get('item_hash')}; store inconsistent")
+    text = json.dumps(item, indent=1, ensure_ascii=False, sort_keys=True)
+    if len(text) > APPROVAL_ITEM_PRINT_CHARS:
+        text = text[:APPROVAL_ITEM_PRINT_CHARS] + f"\n...[{len(text) - APPROVAL_ITEM_PRINT_CHARS} chars not shown]"
+    print(f"run {a.run_id} node {a.node_id}: {node.prompt}")
+    print(f"item ({node.item_key}):\n{text}")
+    print(f"item_hash: {item_hash}")
+    if a.item_hash is not None and a.item_hash != item_hash:
+        raise SystemExit(f"refused: --item-hash {a.item_hash} does not match the item hash {item_hash}")
+    decision = {"approve": "approved", "reject": "rejected"}[a.decision]
+    entry = Ledger(store).append("approval", {"run_id": a.run_id, "node_id": a.node_id, "item_hash": item_hash,
+                                              "decision": decision, "approver": approver, "note": a.note or ""})
+    print(json.dumps({"recorded": decision, "approver": approver, "ledger_seq": entry.seq,
+                      "next": f"chh resume {a.run_id}"}))
+    return 0
+
+
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
@@ -265,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
-    rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure)")
+    rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure) "
+                                         "or a run paused at an approval node")
     rr.add_argument("run_id")
     rr.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
     rr.add_argument("--allow-same-family", action="store_true",
@@ -273,6 +320,13 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    ap = sub.add_parser("approve", help="record a human approve/reject for a run paused at an approval node")
+    ap.add_argument("run_id")
+    ap.add_argument("node_id")
+    ap.add_argument("--decision", required=True, choices=["approve", "reject"])
+    ap.add_argument("--approver", required=True, help="the human taking this decision")
+    ap.add_argument("--note", default="")
+    ap.add_argument("--item-hash", default=None, help="full sha256 of the item you reviewed; refused if it differs")
     rb = sub.add_parser("rerun", help="re-run a per-run Reproducibility Bundle (same spec, inputs, seed)")
     rb.add_argument("bundle")
     rb.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
@@ -302,7 +356,8 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "resume": cmd_resume, "rerun": cmd_rerun, "evolve": cmd_evolve, "runs": cmd_runs,
+        return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "rerun": cmd_rerun,
+                "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite}[a.cmd](a, store)
