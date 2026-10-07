@@ -11,6 +11,8 @@ Inputs this file is built on (read them only if a detail is needed):
 - `../autoresearch_survey/00_SYNTHESIS.md` — 36 sources, first-principles model, 12 novel ideas (cited **S§n**).
 - `code_review/00_CODE_REVIEW_SYNTHESIS.md` — the public code of 27 of those systems, read line by line (cited **CR§n**).
 - Two surveys: arXiv 2508.14111 (Agentic Science) and arXiv 2608.05179 (the "Verification Gap" audit) (cited **VG**).
+- alphaXiv/OpenResearch, docs, skills and part of the Rust code read 2026-10-07 (cited **OR**; comparison and
+  evidence labels in `code_review/openresearch.md`).
 
 ---
 
@@ -66,6 +68,9 @@ data. The harness evolves; the adapters do not.
 | Fail-open defaults (Adaptive reveal gate, SciDER rank fallback 0.5, Robin parse-error strings, AI-Sci "missing = 0") | Everything fails closed. Parse failure means reject. A missing date means unrevealed. An infrastructure failure means excluded, not scored. |
 | Prompt-only invariants ("do not hard-code", "keep held-out separate") | Every invariant is enforced in code and covered by a test. Prompts only explain the rules. |
 | Fabricated numbers in reports (MatAgent) | Reports are generated from the claim graph; every number resolves to an artifact, and the audit recomputes it. |
+| Good experiment discipline stated only in prompts: "never edit a node a run has answered", "identical run command and environment on every node" (OR: no enforcing code found) | The rules are adopted and enforced in code: answered nodes are immutable, the run contract is identical across nodes, and every repair attempt is ledgered (L4.7). |
+| Repair-until-it-works loops with no record of how many attempts preceded the result (OR) | Every attempt on a node is counted; repairs are allowed only before a node has produced any metric. |
+| Cited paper IDs recalled from model memory (OR forbids it in a prompt) | A citation counts only if its ID appears in this run's recorded retrieval log (L4.3), in addition to resolving. |
 | Strong pieces exist but are scattered (Meta-Harness proposer workspace, AutoSaddler diagnosis, RRSI critic + budget, ScienceIDE fault injection, ScienceFlow restore, SoL-Pi ObservationPack, AutoOPT comparator, Feynman retrieval…) | We reimplement the best version of each inside one typed, gated core (§5). |
 
 ### 1.3 From the two papers (VG)
@@ -260,7 +265,12 @@ it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as 
 - Must: Docker, gVisor when available, network off plus allowlist, caps dropped, non-root, read-only root, no secrets ✅.
   Snapshots: content-addressed, **preflight all blobs → archive live workspace → restore → rollback on failure**; keep
   modes and symlinks; fingerprint-skip unchanged files (ScienceFlow, CR P0-3) ✅; host-side workspace access refuses
-  links/escapes ✅; per-campaign cloud-GPU backend.
+  links/escapes ✅; per-campaign cloud-GPU backend. Every run executes a snapshot of a recorded revision in its own
+  directory, never a live working tree (OR does this).
+  **Compute backends** (❌; OR covers SSH, Slurm, K8s, Modal, Ray, HF Jobs): one backend interface, each backend
+  declaring an **isolation class**. Only backends that meet invariant 1 (container, no secrets, network policy,
+  read-only root) may run agent-written code; any other backend runs only trusted code or needs a recorded human
+  approval.
 - Never: run agent code on the host; mount hidden data into an agent container.
 - Done when: a corrupted blob mid-restore leaves the original workspace intact; a planted host-escape test fails. ✅
 
@@ -273,7 +283,9 @@ recorded as invariant 5 NOT MET in every run, report and certificate checklist, 
 - Must: budgets in neutral units **persisted across crash and fork** plus a wall-clock unit (✅ per run; campaign-level
   to do); provider outages uncharged ✅ (ScienceFlow); **infrastructure failure vs policy failure** classification, with
   infra-failed units excluded from paired comparisons and retried ✅ (AutoSaddler, ScienceIDE; CR P0-1); evaluation allocator (racing, successive halving, value of
-  information); LLM controllers may only downgrade (deny, shrink, kill-with-code-checked-evidence).
+  information), driven **per completion**: it wakes on the first finished unit, re-reads the store as the source of
+  truth, acts on every newly finished unit and refills the slot, with no batch barrier (OR); LLM controllers may only
+  downgrade (deny, shrink, kill-with-code-checked-evidence).
 - Done when: a Docker outage mid-campaign changes no accept/reject decision. ✅
 
 ### L2 Evidence store & reporting (🟡)
@@ -281,6 +293,12 @@ recorded as invariant 5 NOT MET in every run, report and certificate checklist, 
   (VG) (✅ per certified claim; ✅ per run since 2026-10-07, `chh rerun`); **reporting checklist** auto-filled (seeds, traces, selection
   policy, human-in-the-loop points, cost) ✅ (Kernel `checklist.py`; wiring into reports is M2); Postgres
   backend for campaigns; read-only **evidence filesystem export** for the proposer (L6).
+  **Large artifacts** (weights, optimizer states, datasets): the bundle lists each omitted artifact with its path,
+  size, sha256 and status (bundled / referenced / available locally). `reproduce` reports any that are missing
+  instead of skipping them silently (OR demo manifest).
+  **Figures** are rendered by a script stored next to them. Every plotted value resolves to an artifact, and the
+  audit re-renders the figure (invariant 8 extended to figures; OR keeps scripts next to figures but does not
+  check them).
 - Done when: `chh reproduce <bundle>` on a clean machine reproduces a headline claim. ✅ (tested with the original
   store deleted; a real headline claim from the research loop comes with M2)
 
@@ -333,9 +351,15 @@ Stages (each a node with a contract, all evolvable):
    ranks by (best available verifier tier) × value × feasibility.
 2. **Data profiling** (✅ roles, outliers, association ranking, redundancy, flags; no multi-table key graph yet): full-file profile plus outliers, cardinality, key graph, column roles; **ideation is
    conditioned on it** (SciDER promised this, its code doesn't do it).
-3. **Literature** (❌): arXiv / Semantic Scholar / OpenAlex / Crossref with pacing and fallback, query splitting
-   (Feynman, Robin); dated snapshots plus cache; citation check = ID resolution (resolves / doesn't / lookup failed) +
-   title/year/author match + **quote-span support** → K0/I3.
+3. **Literature** (❌): arXiv / Semantic Scholar / OpenAlex / Crossref, plus **PubMed and bioRxiv** for the
+   life-science scope and full-text keyword search where the terms of service allow it (OR). Pacing and fallback,
+   query splitting (Feynman, Robin), dated snapshots plus cache.
+   - **Retrieval discipline** (OR, enforced here in code): one publication window per retrieval loop, inherited by
+     every follow-up call. Under time-split the window ends at the cutoff T and is never widened. A hard cap on
+     follow-up rounds. Deduplication by id, then DOI/arXiv id, then normalised title.
+   - **Citation check:** retrieval provenance (the cited ID appeared in this run's recorded retrieval log), plus ID
+     resolution (resolves / doesn't / lookup failed), plus title/year/author match, plus **quote-span support**
+     → K0/I3.
 4. **Hypotheses** (🟡): diverse proposers; forced distance-3 cross-domain inspiration; literature-mined mechanisms;
    topic quotas; diversity measured by error correlation, not vendor count (SDE r>0.8).
 5. **Tournament** (✅): shuffled K-way rounds → BT; add both-order pairwise mode, BT CIs, Improve-weakest and Combine
@@ -344,6 +368,20 @@ Stages (each a node with a contract, all evolvable):
 7. **Experiment tree** (🟡 draft/debug/improve + dev racing; no snapshot backtracking or revivable dead-ends yet): draft / debug / **improve** nodes, code-scored seeded selection, dev racing against dev
    overfitting, stop when certified; tune → creative → ablation curriculum (AI-Sci v2, done properly); exact backtracking
    via snapshots; revivable dead-ends with a persistence rule (P(improvement) > θ).
+   **Node lifecycle and tree shape** (❌; design from OR, which states it only in prompts; here it is code):
+   - A node is *provisional* until a run produces its metric, then it is **immutable**: content-hashed, and edits
+     are refused, so a new idea becomes a child.
+   - The **run contract** (command, environment, data inputs, budget) is identical across nodes. Only the
+     committed code/config diff differs; a run with a different contract is refused. This is K5's "identical
+     conditions" applied inside the tree.
+   - **Repairs:** fixing an implementation failure (crash, OOM, timeout, missing dependency) is allowed only while
+     the node is provisional. Every attempt is ledgered and counts toward the selection record, and repairs are
+     capped.
+   - **Rounds:** a round is a small set of sibling options for ONE decision. The next round descends from the
+     round's winner only after that winner is confirmed by dev racing and a fresh re-measure (OR promotes on one
+     run).
+   - **Shape diagnostics:** "flat fan" (everything off the root) and "noodle" (single-child chains) are detected
+     and logged in the run report.
 8. **Socratic critic** (✅ question-only enforced in code; answers citing evidence not yet checked): questions only, answers must cite evidence (AHOIS).
 9. **Replication agent** (✅, novel; same model family as the author today): re-implements from the claim text without access to the code; agreement is
    required for CERTIFIED headline claims.
@@ -545,6 +583,7 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 | ResearchBench / SDE | Research-judgment evaluation | Scorecard E |
 | LangGraph | Checkpoint, resume, fan-out, interrupts | L0 |
 | VG audit (2608.05179) | Verification ladder, reporting checklist, mechanical vs validated | Kernel tiers, L2, §6.1 |
+| OpenResearch (alphaXiv) | Experiment-tree lifecycle and shape, fixed run contract, per-completion loop, compute backends, PubMed/bioRxiv/full-text retrieval with fixed windows, large-artifact manifest, figure scripts, delegation hygiene, bring-your-coding-agent front-ends | L4.7, L1, L0, L4.3, L2, §15, gateway |
 
 ---
 
@@ -659,6 +698,9 @@ node. (2) The user fixes the domain list, the prohibited list and the review sta
 **Parallelism and isolation.** Domains proceed in parallel, each in its own branch/worktree and sandbox; one writer
 per branch; the Kernel core and existing adapters are read-only to all of them. Merging requires: the full gate green,
 the adapter's validation suite green, the red-team report attached, and the human approval recorded.
+Delegation briefs are self-contained and state exactly which compute and model-quota spends the helper may make;
+everything else is forbidden. Helpers cannot spawn helpers, the number in flight is capped, and a helper never
+receives a branch another session holds (OR's delegation rules, enforced here by the driver, not by the prompt).
 
 **First candidates (to be confirmed by the user):** engineering: structural/thermal FEM with mesh-convergence
 evidence (simulated class), circuit/ODE models with exact solvers (computational); life sciences: computational
