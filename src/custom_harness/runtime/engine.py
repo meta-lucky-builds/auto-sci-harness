@@ -7,11 +7,23 @@ Executes a HarnessSpec as a graph. Guarantees:
   module/tool step (unchanged files are reused by fingerprint); LLM steps cannot touch it and reuse
   the previous snapshot;
 - budgets are enforced by deterministic code before and after every step (PLAN P7);
-- LLM contracts (output JSON schemas) are validated in code, with bounded retries.
+- LLM contracts (output JSON schemas) are validated in code, with bounded retries;
+- approval nodes (GOAL §5 L0, invariant 15) pause the run (PAUSED) until a human decision for exactly
+  (run, node, item hash) is in the ledger.
+
+Approval trust boundary (stated honestly). The engine reads decisions ONLY from ledger entries of kind "approval",
+which only `chh approve` writes; values in run state are discarded and overwritten. To stop code that runs before
+the pause from pre-planting a decision, a decision counts only if its ledger seq is later than an
+"approval_request" entry the engine appended when it paused at that node for that exact item (and recorded in the
+pause's trace step). Module nodes, however, are TRUSTED Python with full store access: a malicious module could
+forge trace rows and ledger entries alike. That is not prevented in code; it is prevented by modules being
+human-written, registry-only code that no evolved edit can add (evolve/edits.py). LLM output and evolved spec edits
+cannot approve.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,13 +38,37 @@ import jsonschema
 from ..budget import Budget, BudgetExceeded
 from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
+from ..kernel.ledger import Ledger
 from ..policy import model_policy
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
 from .modules import ModuleContext, get_module
-from .spec import END, Condition, HarnessSpec, LLMNode, ModuleNode, ToolNode
+from .spec import END, ApprovalNode, Condition, HarnessSpec, LLMNode, ModuleNode, ToolNode, approval_state_keys
 from .template import lookup, render
+
+APPROVAL_DECISIONS = ("approved", "rejected")
+
+
+def approval_item_hash(item: Any) -> str:
+    """sha256 of the canonical JSON of the item an approval binds to (raises TypeError if not JSON)."""
+    return hashlib.sha256(json.dumps(item, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def paused_approval(store: EvidenceStore, run_id: str) -> dict[str, Any] | None:
+    """The pause a PAUSED run is waiting on: its last trace step's output plus node id and checkpoint state
+    (None if the last step is not an approval pause)."""
+    steps = store.trace(run_id)
+    if not steps:
+        return None
+    last = steps[-1]
+    if last.checkpoint_ref is None or last.output.get("awaiting_approval") is not True:
+        return None
+    cp = store.blobs.get_json(last.checkpoint_ref)
+    if cp.get("next") != last.node_id:
+        return None
+    return {**last.output, "node_id": last.node_id, "state": cp["state"]}
 
 
 class ContractError(ValueError):
@@ -202,7 +238,8 @@ class Engine:
     def resume(self, run_id: str, *, force: bool = False) -> RunResult:
         """Continue a run that was interrupted, in this process (GOAL L0, CR P0-4).
 
-        Resumable: RUNNING (the process died, e.g. kill -9), FAILED by an engine crash, INFRA_FAILED.
+        Resumable: RUNNING (the process died, e.g. kill -9), FAILED by an engine crash, INFRA_FAILED, PAUSED (at an
+        approval node: it is re-entered and pauses again unless a human decision for its item is in the ledger).
         Never resumable: COMPLETED, and genuine harness failures (FAILED by the harness, STEP_LIMIT,
         BUDGET_EXCEEDED) -- resuming those would let a harness retry its own failure.
 
@@ -215,7 +252,7 @@ class Engine:
         run = self.store.get_run(run_id)
         if run.harness_hash != self.spec_hash:
             raise ValueError("resume needs the exact harness spec the run started with")
-        resumable = (status == RunStatus.RUNNING or status == RunStatus.INFRA_FAILED
+        resumable = (status in (RunStatus.RUNNING, RunStatus.INFRA_FAILED, RunStatus.PAUSED)
                      or (status == RunStatus.FAILED and detail.startswith("engine crash")))
         if not resumable:
             raise ValueError(f"run {run_id} is {status.value} ({detail[:120]}); not resumable")
@@ -328,25 +365,38 @@ class Engine:
 
             node = self.spec.nodes[node_id]
             t0 = time.time()
-            self._cursor = (run_id, index)
-            out, cost, prov, error, infra = self._attempt(node, state, run_id)
-            self._cursor = None
-            if infra is None:
+            paused = False
+            if isinstance(node, ApprovalNode):
+                out, error, paused = self._approval(node_id, node, state, run_id)
+                cost, prov, infra = Cost(), None, None
                 state["_last_error"] = error
-                if error is None:
-                    key = getattr(node, "output_key", None)
-                    if key is not None:
-                        state[key] = out.get("value")
-                    else:
-                        state.update(out)  # module nodes return a dict of state updates
+            else:
+                self._cursor = (run_id, index)
+                out, cost, prov, error, infra = self._attempt(node, state, run_id)
+                self._cursor = None
+                if infra is None:
+                    state["_last_error"] = error
+                    if error is None:
+                        key = getattr(node, "output_key", None)
+                        if key is not None:
+                            state[key] = out.get("value")
+                        else:
+                            state.update(out)  # module nodes return a dict of state updates
 
             # An infra failure is not the harness's doing: never route it through the harness's error
-            # edges. Stop, and checkpoint so that a resume retries this same node.
-            next_node = node_id if infra is not None else self._next(node_id, state)
+            # edges. Stop, and checkpoint so that a resume retries this same node. A pause checkpoints the same
+            # way (resume re-enters the approval node); an approval node that cannot read its item fails the run
+            # (fail closed: error edges cannot route around a missing approval item).
+            if infra is not None or paused:
+                next_node: str | None = node_id
+            elif isinstance(node, ApprovalNode) and error is not None:
+                next_node = None
+            else:
+                next_node = self._next(node_id, state)
             workspace_ref = None
             if self.sandbox is not None:
-                if isinstance(node, LLMNode):
-                    workspace_ref = self._ws_ref  # LLM steps cannot touch the workspace
+                if isinstance(node, (LLMNode, ApprovalNode)):
+                    workspace_ref = self._ws_ref  # LLM and approval steps cannot touch the workspace
                 elif not (isinstance(node, ToolNode) and not node.snapshot_after):
                     workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
                 self._ws_ref = workspace_ref
@@ -368,6 +418,9 @@ class Engine:
                 status, detail = RunStatus.BUDGET_EXCEEDED, str(e)
                 break
 
+            if paused:
+                status, detail = RunStatus.PAUSED, f"awaiting approval of {node_id} item {out['item_hash'][:12]}"
+                break
             if infra is not None:
                 status, detail = RunStatus.INFRA_FAILED, f"infrastructure failure at '{node_id}': {error}"
                 break
@@ -383,6 +436,50 @@ class Engine:
 
         self.store.set_run_status(run_id, status, detail)
         return RunResult(run_id, status, state, detail, steps=index - start_index, cost=total)
+
+    def _approval(self, node_id: str, node: ApprovalNode, state: dict[str, Any],
+                  run_id: str) -> tuple[dict[str, Any], str | None, bool]:
+        """Apply the human decision for this exact item, or pause. Returns (trace output, error, paused).
+        Whatever is in state under the node's outcome keys is discarded first: nothing in state can approve."""
+        for k in approval_state_keys(node_id):
+            state.pop(k, None)
+        try:
+            item_hash = approval_item_hash(lookup(state, node.item_key))
+        except (KeyError, TypeError, ValueError) as e:
+            return {}, f"approval item '{node.item_key}' unavailable: {type(e).__name__}: {e}", False
+        decision = self._approval_decision(run_id, node_id, item_hash)
+        if decision is None:
+            req = Ledger(self.store).append("approval_request",
+                                            {"run_id": run_id, "node_id": node_id, "item_hash": item_hash})
+            return ({"awaiting_approval": True, "item_hash": item_hash, "request_seq": req.seq,
+                     "item_key": node.item_key, "prompt": node.prompt}, None, True)
+        outcome_key, decision_key = approval_state_keys(node_id)
+        state[outcome_key] = decision
+        state[decision_key] = decision["decision"]
+        return {"approval": decision}, None, False
+
+    def _approval_decision(self, run_id: str, node_id: str, item_hash: str) -> dict[str, Any] | None:
+        """Latest intact human decision for exactly (run_id, node_id, item_hash), appended to the ledger after the
+        engine paused this run at this node for this item (so nothing that ran before the pause can pre-plant it)."""
+        ledger = Ledger(self.store)
+        want = {"run_id": run_id, "node_id": node_id, "item_hash": item_hash}
+        requests = {e.seq for e in ledger.entries("approval_request") if e.intact() and e.body == want}
+        paused_at = [s.output.get("request_seq") for s in self.store.trace(run_id)
+                     if s.node_id == node_id and s.output.get("awaiting_approval") is True
+                     and s.output.get("item_hash") == item_hash]
+        valid = [q for q in paused_at if isinstance(q, int) and q in requests]
+        if not valid:
+            return None
+        first = min(valid)
+        for e in reversed(ledger.entries("approval")):
+            b = e.body
+            if (e.seq > first and e.intact() and all(b.get(k) == v for k, v in want.items())
+                    and b.get("decision") in APPROVAL_DECISIONS
+                    and isinstance(b.get("approver"), str) and b["approver"].strip()):
+                note = b.get("note")
+                return {"decision": b["decision"], "item_hash": item_hash, "approver": b["approver"],
+                        "note": note if isinstance(note, str) else "", "ledger_seq": e.seq}
+        return None
 
     def _attempt(self, node, state: dict[str, Any], run_id: str):
         """Execute a node with the transient-infra retry policy.
@@ -577,4 +674,5 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _kind(node) -> StepKind:
-    return {"llm": StepKind.LLM, "tool": StepKind.TOOL, "module": StepKind.MODULE}[node.kind]
+    return {"llm": StepKind.LLM, "tool": StepKind.TOOL, "module": StepKind.MODULE,
+            "approval": StepKind.APPROVAL}[node.kind]

@@ -76,6 +76,7 @@ class StepKind(StrEnum):
     TOOL = "tool"
     MODULE = "module"
     CONTROL = "control"
+    APPROVAL = "approval"
 
 
 class TraceStep(Frozen):
@@ -102,6 +103,9 @@ class RunStatus(StrEnum):
     # The environment failed (sandbox daemon, provider outage) after retries: the run says nothing about
     # the harness, so evaluation excludes it instead of scoring it (errors.py, CR P0-1).
     INFRA_FAILED = "infra_failed"
+    # Waiting at an approval node for a human decision (`chh approve`, then `chh resume`). Neither completed nor
+    # failed: evaluation scores it 0 (no credit without the human step), it is not an infrastructure failure.
+    PAUSED = "paused"
 
 
 class Run(Frozen):

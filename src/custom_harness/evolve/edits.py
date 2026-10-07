@@ -75,6 +75,9 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "replica_claim", "replica_claim_hash", "replica_prereg_seq",
                                   "replica_evidence_ids", "replica_confirm_failures", "replica_certificate",
                                   "replica_checklist", "replica_publishable", "replica_publish_blockers"})
+# Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
+# so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
+RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
 # Modules whose outputs include reserved keys (kept complete by test_reserved_writing_modules_are_declared, which
 # runs the seed harness and checks every module step's output keys). Existing nodes may keep using them; an edit
 # may not ADD a node with one of them, nor switch a node to one.
@@ -84,6 +87,10 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.replica_dev", "research.report", "research.audit"})
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
+
+
+def _approval_nodes(spec: HarnessSpec) -> set[str]:
+    return {nid for nid, node in spec.nodes.items() if node.kind == "approval"}
 
 
 def _edge_set(edges: list[dict[str, Any]], target: str) -> list[str]:
@@ -144,6 +151,8 @@ def check_edit(edit: Edit, spec: HarnessSpec, protected_nodes: tuple[str, ...] =
         parts = _split(o.path)
         if parts[0] == "nodes" and len(parts) > 1 and parts[1] in protected_nodes:
             raise EditRejected(f"node '{parts[1]}' is protected (verifier/audit/setup changes are human-only)")
+        if parts[0] == "nodes" and len(parts) > 1 and parts[1] in _approval_nodes(spec):
+            raise EditRejected(f"approval node '{parts[1]}' is human-only")
         if parts[0] == "edges":
             # an edge edit must not disconnect protected nodes: checked after application
             pass
@@ -188,12 +197,25 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
             raise EditRejected(f"edges out of protected node '{nid}' are human-only")
         if nid not in OPEN_PROTECTED_TARGETS and _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
             raise EditRejected(f"edges into protected node '{nid}' are human-only")
+    # approval nodes are human-only surfaces (invariant 15): none added, removed or changed, and their wiring (in and
+    # out) fixed, so an edit can neither bypass a human decision nor change what it routes to
+    old_appr, new_appr = _approval_nodes(spec), _approval_nodes(new)
+    if new_appr != old_appr:
+        raise EditRejected(f"approval nodes are human-only: {sorted(old_appr ^ new_appr)} added or removed")
+    for nid in old_appr:
+        if new.nodes[nid] != spec.nodes[nid]:
+            raise EditRejected(f"approval node '{nid}' is human-only")
+        if [e for e in new_edges if e["source"] == nid] != [e for e in old_edges if e["source"] == nid]:
+            raise EditRejected(f"edges out of approval node '{nid}' are human-only")
+        if _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
+            raise EditRejected(f"edges into approval node '{nid}' are human-only")
     protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
     for nid, node in new.nodes.items():
         if nid in spec.nodes and node == spec.nodes[nid]:
             continue  # unchanged nodes were already accepted
         key = getattr(node, "output_key", None)
-        if key is not None and (key in RESERVED_OUTPUT_KEYS or key.startswith("_")):
+        if key is not None and (key in RESERVED_OUTPUT_KEYS or key.startswith("_")
+                                or key.endswith(RESERVED_OUTPUT_SUFFIXES)):
             raise EditRejected(f"node '{nid}' would write reserved state key '{key}'")
         if getattr(node, "module", None) in protected_modules:
             raise EditRejected(f"node '{nid}' reuses a protected module outside its protected node")
