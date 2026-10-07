@@ -9,7 +9,7 @@
     audit    -> I1 certificate resolves and matches the run state, I2 comparator integrity (K5),
                 I3 citations (literature check on the run's frozen snapshot + retrieval log; n/a without),
                 I4 report re-renders byte-identically + every score recomputed from stored predictions,
-                I5 leak and canary scan
+                I5 leak and canary scan, I6 figures re-render from certified evidence (n/a without)
 
 All of these nodes are protected from automatic harness edits (evolve/edits.py).
 """
@@ -657,6 +657,11 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
                       f"model family): {'yes' if headline(state) else 'no'}", ""]
     else:
         lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
+    if state.get("figures"):  # GOAL L2: each figure is audited (I6); listed with the hash of its figure.json
+        lines += ["## Figures", ""]
+        lines += [f"- `{_inline(f.get('dir'))}` (figure.json sha256 `{_inline(f.get('meta_sha256'))}`)"
+                  if isinstance(f, dict) else f"- malformed figure entry {_inline(f)}" for f in state["figures"]]
+        lines.append("")
     lines += [f"## Exploration log (dev estimate: {_dev_scheme_text(state)} on public training data; "
               f"NOT evidence)", "",
               f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
@@ -680,8 +685,8 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
 def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """I1 certificate resolves and the run state agrees with the ledger; I2 comparator integrity (K5);
     I3 citations (`citation_audit`: "n/a" without citations); I4 the report re-renders byte-identically from
-    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan.
-    passed = I1, I2, I4, I5 True and I3 True or "n/a" (anything else fails closed)."""
+    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan; I6 figures
+    (`_figure_audit`). passed = I1, I2, I4, I5 True and I3, I6 True or "n/a" (anything else fails closed)."""
     task = _task(state)
     res: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "I5": True, "problems": []}
     cites = citation_audit(state, ctx.run_id)
@@ -715,9 +720,22 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
                       extra_texts={"report": state.get("report", "")})
     for problem in leak["problems"]:
         fail("I5", problem)
+    figs = _figure_audit(state, ctx)
+    res["I6"] = figs["I6"]
+    res["problems"].extend(figs["problems"])
     res["passed"] = (all(res[k] is True for k in ("I1", "I2", "I4", "I5"))
-                     and (res["I3"] is True or res["I3"] == "n/a"))
+                     and (res["I3"] is True or res["I3"] == "n/a") and (res["I6"] is True or res["I6"] == "n/a"))
     return {"audit": res}
+
+
+def _figure_audit(state: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
+    """Audit I6 (invariant 8 extended to figures, GOAL L2; figures/audit.py): every figure in `figures` re-renders
+    byte-identically in a fresh sandbox from the run's CERTIFIED evidence only, and its plotted data match. No
+    figures -> "n/a"; anything else fails closed."""
+    from ..figures import audit_figures
+    allowed = {str(e) for e in [*(state.get("evidence_ids") or []), *(state.get("replica_evidence_ids") or [])]}
+    root = data_dir() / "sandboxes" / f"figure-audit-{ctx.run_id}-{time.time_ns()}"
+    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed)
 
 
 def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:
