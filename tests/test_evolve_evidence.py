@@ -147,7 +147,8 @@ def test_export_has_evolve_runs_only_and_aggregate_gate_decisions(store, tmp_pat
     # certificate summary: label, failed checks, reasons; never the bundle path
     certs = json.loads((out / "certificates.json").read_text(encoding="utf-8"))
     assert certs[0]["label"] == "REJECTED" and certs[0]["failed"] == ["K7"]
-    assert "success probability" in certs[0]["reasons"]["K7"][0]
+    # verdict embargo (GOAL §16.5.3): reason TEXT quotes held-out statistics, so it is withheld; check ids stay
+    assert certs[0]["reasons"]["K7"] == "<embargoed until the target retires>"
     assert "bundle_path" not in text and "bundles/cccc.zip" not in text
     # scores of the exported runs
     scores = json.loads((out / "scores.json").read_text(encoding="utf-8"))
