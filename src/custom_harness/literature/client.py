@@ -25,13 +25,24 @@ from pydantic import BaseModel
 
 from .http import HttpxTransport, LiteratureError, PacedTransport, Pacer, Transport, fetch
 from .normalize import title_key
-from .records import LookupResult, PaperRecord, earliest_date, latest_date, parse_identifier, visible_as_of
+from .records import LookupResult, PaperRecord, earliest_date, in_window, latest_date, parse_identifier
 from .snapshot import OfflineTransport, RecordingTransport, SnapshotStore
 from .sources import ALL_SOURCES, PACING, DoiResolver, Source
 
 DOI_ORDER = ("crossref", "openalex", "semanticscholar")
+BIORXIV_DOI_ORDER = ("biorxiv", "crossref", "openalex", "semanticscholar")
 ARXIV_ORDER = ("arxiv", "semanticscholar")
-SEARCH_ORDER = ("openalex", "crossref", "semanticscholar", "arxiv")
+PMID_ORDER = ("pubmed",)
+AUTHORITY = {"arxiv": "arxiv", "pmid": "pubmed"}  # DOIs: doi.org (DoiResolver)
+SEARCH_ORDER = ("openalex", "crossref", "semanticscholar", "arxiv")  # pubmed / biorxiv on request
+
+
+def _lookup_order(kind: str, value: str) -> tuple[str, ...]:
+    if kind == "arxiv":
+        return ARXIV_ORDER
+    if kind == "pmid":
+        return PMID_ORDER
+    return BIORXIV_DOI_ORDER if value.startswith("10.1101/") else DOI_ORDER
 MAX_SUBQUERIES = 6
 
 
@@ -40,9 +51,12 @@ class SearchResult(BaseModel):
     subqueries: list[str]
     records: list[PaperRecord]
     errors: list[dict[str, str]]
-    excluded_after_as_of: int
+    excluded_after_as_of: int      # outside the window's end (as of T, or published_to)
     complete: bool  # False if any subquery got no answer from any source: the result list is NOT exhaustive
     as_of: str | None = None
+    excluded_before_window: int = 0
+    window: tuple[str | None, str | None] = (None, None)  # effective publication window [from, to]
+    retrievals: list[dict[str, Any]] = []  # per answered subquery: {subquery, source, envelope} (provenance)
 
 
 def split_query(query: str, max_terms: int = 8, max_parts: int = MAX_SUBQUERIES) -> list[str]:
@@ -62,9 +76,26 @@ def split_query(query: str, max_terms: int = 8, max_parts: int = MAX_SUBQUERIES)
     return out
 
 
-def _dedup_key(rec: PaperRecord) -> str:
-    ids = sorted(rec.ids())
-    return ids[0] if ids else "title:" + " ".join(title_key(rec.title))
+class Deduper:
+    """A record is a duplicate if ANY of its keys was seen: source id, then DOI / arXiv id / PMID, then the
+    normalised title. All keys of every record offered (duplicates included) are remembered, so chains merge."""
+
+    def __init__(self) -> None:
+        self.seen: set[str] = set()
+
+    @staticmethod
+    def keys(rec: PaperRecord) -> set[str]:
+        keys = {f"src:{rec.source}:{rec.source_id}"} | rec.ids()
+        tk = title_key(rec.title)
+        if tk:
+            keys.add("title:" + " ".join(tk))
+        return keys
+
+    def add(self, rec: PaperRecord) -> bool:
+        keys = self.keys(rec)
+        new = not (keys & self.seen)
+        self.seen |= keys
+        return new
 
 
 class LiteratureClient:
@@ -96,19 +127,19 @@ class LiteratureClient:
             return LookupResult(identifier=key, status=status, reason=reason, record=record, attempts=attempts)
 
         record: PaperRecord | None = None
-        arxiv_says_absent = False
-        for name in DOI_ORDER if ident.kind == "doi" else ARXIV_ORDER:
+        authority_says_absent = False
+        authority = AUTHORITY.get(ident.kind)
+        for name in _lookup_order(ident.kind, ident.value):
             src = self.sources[name]
             try:
-                resp = self._get(*src.lookup_request(ident))
-                rec = src.parse_lookup(resp)
+                rec, resp = src.lookup(self._get, ident)
             except LiteratureError as e:
                 attempts.append({"source": name, "outcome": "error", "detail": str(e)[:300]})
                 continue
             if rec is None:
                 attempts.append({"source": name, "outcome": "not_found", "envelope": resp.envelope})
-                if name == "arxiv":  # the authority for arXiv ids
-                    arxiv_says_absent = True
+                if name == authority:  # arXiv for arXiv ids, PubMed for PMIDs
+                    authority_says_absent = True
                     break
                 continue
             if key not in rec.ids():
@@ -129,10 +160,11 @@ class LiteratureClient:
                     return result("lookup_failed", f"publication date {record.published!r} cannot be placed on or "
                                                    f"before the as-of date {self.as_of}", record)
             return result("resolves", f"{record.source} returned a record with this identifier", record)
-        if ident.kind == "arxiv":
-            if arxiv_says_absent:
-                return result("does_not_resolve", "arXiv has no paper with this id")
-            return result("lookup_failed", "arXiv could not be queried and no other source returned this id")
+        if authority is not None:
+            label = {"arxiv": "arXiv", "pubmed": "PubMed"}[authority]
+            if authority_says_absent:
+                return result("does_not_resolve", f"{label} has no paper with this id")
+            return result("lookup_failed", f"{label} could not be queried and no other source returned this id")
         exists = self._doi_exists(ident.value, attempts)
         if exists is False:
             return result("does_not_resolve", "doi.org: no such DOI is registered")
@@ -152,39 +184,57 @@ class LiteratureClient:
         return exists
 
     # ------------------------------------------------------------------ search
-    def search(self, query: str, limit: int = 10, sources: Sequence[str] | None = None) -> SearchResult:
+    def window(self, published_from: date | None = None, published_to: date | None = None
+               ) -> tuple[date | None, date | None]:
+        """The effective publication window. It can be narrowed but never extended past `as_of` (T)."""
+        end = published_to
+        if self.as_of is not None:
+            if end is not None and end > self.as_of:
+                raise ValueError(f"published_to {end} is later than the as-of date {self.as_of}: windows never widen")
+            end = end or self.as_of
+        if published_from is not None and end is not None and published_from > end:
+            raise ValueError(f"empty publication window: {published_from} > {end}")
+        return published_from, end
+
+    def search(self, query: str, limit: int = 10, sources: Sequence[str] | None = None, *,
+               published_from: date | None = None, published_to: date | None = None) -> SearchResult:
+        start, end = self.window(published_from, published_to)
         subs = split_query(query)
         order = list(sources or SEARCH_ORDER)
         records: list[PaperRecord] = []
         errors: list[dict[str, str]] = []
-        seen: set[str] = set()
-        excluded, complete = 0, True
+        retrievals: list[dict[str, Any]] = []
+        dedup = Deduper()
+        excluded, before, complete = 0, 0, True
         for sub in subs:
             got: list[PaperRecord] | None = None
             for name in order:
                 src = self.sources[name]
                 try:
-                    resp = self._get(*src.search_request(sub, limit))
-                    got = [r.model_copy(update={"envelope": resp.envelope}) for r in src.parse_search(resp)]
+                    recs, resp = src.search(self._get, sub, limit)
                 except LiteratureError as e:
                     errors.append({"subquery": sub, "source": name, "error": str(e)[:300]})
                     continue
+                got = [r.model_copy(update={"envelope": resp.envelope}) for r in recs]
+                retrievals.append({"subquery": sub, "source": name, "envelope": resp.envelope})
                 break
             if got is None:
                 complete = False
                 continue
             for rec in got:
-                k = _dedup_key(rec)
-                if k in seen:
+                if not dedup.add(rec):
                     continue
-                seen.add(k)
-                if self.as_of is not None and not visible_as_of(rec, self.as_of):
+                if not in_window(rec, None, end):
                     excluded += 1
                     continue
+                if not in_window(rec, start, None):
+                    before += 1
+                    continue
                 records.append(rec)
+        iso = (start.isoformat() if start else None, end.isoformat() if end else None)
         return SearchResult(query=query, subqueries=subs, records=records, errors=errors,
-                            excluded_after_as_of=excluded, complete=complete,
-                            as_of=self.as_of.isoformat() if self.as_of else None)
+                            excluded_after_as_of=excluded, excluded_before_window=before, complete=complete,
+                            as_of=self.as_of.isoformat() if self.as_of else None, window=iso, retrievals=retrievals)
 
 
 # ------------------------------------------------------------------ factories

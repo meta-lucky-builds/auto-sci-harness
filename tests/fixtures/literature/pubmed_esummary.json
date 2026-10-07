@@ -1,0 +1,33 @@
+{
+  "header": {"type": "esummary", "version": "0.3"},
+  "result": {
+    "uids": ["31000001", "35000002"],
+    "31000001": {
+      "uid": "31000001",
+      "pubdate": "2019 Apr",
+      "epubdate": "2019 Feb 11",
+      "source": "Ex J Crit Care",
+      "authors": [
+        {"name": "García A", "authtype": "Author", "clusterid": ""},
+        {"name": "Li W", "authtype": "Author", "clusterid": ""},
+        {"name": "Example Sepsis Consortium", "authtype": "CollectiveName", "clusterid": ""}
+      ],
+      "title": "Serum Marker X Predicts Sepsis Mortality in Adults.",
+      "articleids": [
+        {"idtype": "pubmed", "idtypen": 1, "value": "31000001"},
+        {"idtype": "doi", "idtypen": 3, "value": "10.5555/lit.2019.300"}
+      ],
+      "sortpubdate": "2019/04/01 00:00"
+    },
+    "35000002": {
+      "uid": "35000002",
+      "pubdate": "2025 Jan 20",
+      "epubdate": "",
+      "source": "Ex J Crit Care",
+      "authors": [{"name": "Okoye C", "authtype": "Author", "clusterid": ""}],
+      "title": "Serum Marker X Revisited in Paediatric Sepsis.",
+      "articleids": [{"idtype": "pubmed", "idtypen": 1, "value": "35000002"}],
+      "sortpubdate": "2025/01/20 00:00"
+    }
+  }
+}

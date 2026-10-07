@@ -11,6 +11,7 @@ import pytest
 from custom_harness.cli import main
 from custom_harness.config import data_dir
 from custom_harness.literature.client import LiteratureClient
+from custom_harness.literature.retrieval import RetrievalLog
 from custom_harness.literature.snapshot import RecordingTransport, SnapshotStore
 from lit_world import world
 
@@ -20,7 +21,9 @@ def _record(as_of=date(2026, 1, 1)) -> str:
     c = LiteratureClient(RecordingTransport(world(), store), sleep=lambda s: None, max_attempts=2)
     for i in ("10.5555/lit.2021.001", "10.5555/lit.2019.042", "2403.01234", "2501.00077"):
         c.lookup(i)
-    c.search("sparse gradient routing tabular", limit=5)
+    log = RetrievalLog(store, "s1")
+    log.record_search(c.search("sparse gradient routing tabular", limit=5))
+    log.record_search(c.search("calibrated early stopping", limit=5, sources=["arxiv"]))
     return store.freeze(as_of)
 
 
@@ -36,11 +39,12 @@ GOOD = {"key": "a", "id": "10.5555/lit.2021.001", "title": "Sparse Gradient Rout
 
 def test_cite_check_offline_passes_and_fails(tmp_path, capsys):
     snap = _record()
-    assert main(["cite-check", _cites(tmp_path, [GOOD]), "--snapshot", snap]) == 0
+    assert main(["cite-check", _cites(tmp_path, [GOOD]), "--snapshot", snap, "--session", "s1"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["I3"] is True and out["snapshot"] == snap and out["as_of"] == "2026-01-01"
+    assert out["session"] == "s1"
     assert main(["cite-check", _cites(tmp_path, [GOOD, {**GOOD, "key": "b", "year": 2020}]),
-                 "--snapshot", snap]) == 1
+                 "--snapshot", snap, "--session", "s1"]) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["I3"] is False and out["counts"]["failed"] == 1
 
@@ -49,10 +53,32 @@ def test_cite_check_as_of_earlier_date_hides_future_papers(tmp_path, capsys):
     snap = _record()
     future = {"key": "f", "id": "2501.00077", "title": "Routing Tokens Through Learned Sparse Experts at Scale",
               "year": 2025}
-    assert main(["cite-check", _cites(tmp_path, [future]), "--snapshot", snap]) == 0
+    assert main(["cite-check", _cites(tmp_path, [future]), "--snapshot", snap, "--session", "s1"]) == 0
     capsys.readouterr()
-    assert main(["cite-check", _cites(tmp_path, [future]), "--snapshot", snap, "--as-of", "2024-12-31"]) == 1
+    assert main(["cite-check", _cites(tmp_path, [future]), "--snapshot", snap, "--session", "s1",
+                 "--as-of", "2024-12-31"]) == 1
     assert json.loads(capsys.readouterr().out)["counts"]["failed"] == 1
+
+
+def test_cite_check_without_a_session_verifies_nothing(tmp_path, capsys):
+    snap = _record()
+    assert main(["cite-check", _cites(tmp_path, [GOOD]), "--snapshot", snap]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["counts"]["unverified"] == 1 and out["session"] is None
+    assert main(["cite-check", _cites(tmp_path, [GOOD]), "--snapshot", snap, "--session", "other"]) == 1
+
+
+def test_lit_search_logs_into_a_session_with_a_fixed_window(capsys):
+    snap = _record()
+    assert main(["lit-search", "sparse gradient routing tabular", "--limit", "5", "--snapshot", snap,
+                 "--session", "s2", "--published-from", "2022-01-01"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert [p["doi"] for p in out["records"]] == ["10.5555/lit.2025.009"] and out["window"] == ["2022-01-01",
+                                                                                                "2026-01-01"]
+    store = SnapshotStore(data_dir() / "literature")
+    assert RetrievalLog(store, "s2").retrieved_ids() == {"doi:10.5555/lit.2025.009"}
+    with pytest.raises(SystemExit, match="never widen"):
+        main(["lit-search", "x", "--snapshot", snap, "--published-to", "2027-01-01"])
 
 
 def test_cite_check_refuses_a_later_as_of_than_the_snapshot(tmp_path):

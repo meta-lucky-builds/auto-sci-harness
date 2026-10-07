@@ -38,8 +38,13 @@ def client(tr=None, **kw):
     return LiteratureClient(tr if tr is not None else world(), sleep=nosleep, max_attempts=2, **kw)
 
 
-def check(cit: dict, **kw):
-    return check_citation(Citation(**cit), client(**kw))
+# retrieval provenance is tested in test_literature_retrieval.py; here every cited paper counts as retrieved
+RETRIEVED = frozenset({"doi:10.5555/lit.2021.001", "doi:10.5555/lit.2019.042", "arxiv:2403.01234",
+                       "arxiv:2501.00077", "doi:10.5555/lit.2025.077"})
+
+
+def check(cit: dict, retrieved=RETRIEVED, **kw):
+    return check_citation(Citation(**cit), client(**kw), retrieved)
 
 
 # ------------------------------------------------------------------ honest citations
@@ -150,7 +155,7 @@ def test_lookup_failure_is_unverified_never_verified():
                         (f"{S2}/DOI:10.5555/lit.2021.001", {"fields": S2_FIELDS}),
                         (f"{HDL}/10.5555/lit.2021.001", None)]:
         tr.set(url, params, r(503, "down"))
-    res = check_citation(Citation(**A), client(tr))
+    res = check_citation(Citation(**A), client(tr), RETRIEVED)
     assert res.status == "unverified" and res.id["status"] == "lookup_failed"
     assert res.title["status"] == "unchecked" and res.quotes[0]["status"] == "unchecked"
 
@@ -161,7 +166,7 @@ def test_a_bad_quote_fails_even_when_the_lookup_failed():
     tr.set(f"{OA}/doi:10.5555/lit.2021.001", None, r(503, "down"))
     tr.set(f"{S2}/DOI:10.5555/lit.2021.001", {"fields": S2_FIELDS}, r(503, "down"))
     tr.set(f"{HDL}/10.5555/lit.2021.001", None, r(503, "down"))
-    res = check_citation(Citation(**{**A, "quotes": ["accuracy ... boosting over"]}), client(tr))
+    res = check_citation(Citation(**{**A, "quotes": ["accuracy ... boosting over"]}), client(tr), RETRIEVED)
     assert res.status == "failed"
 
 
@@ -174,7 +179,7 @@ def test_poisoned_cache_entry_never_verifies(tmp_path):
     with open(store.index_path, "a", encoding="utf-8", newline="") as f:
         f.write(json.dumps({"key": request_key(f"{CR}/10.5555/lit.2021.001", {}), "digest": poison}) + "\n")
     snap = store.freeze(date(2026, 1, 1))
-    res = check_citation(Citation(**{**A, "quotes": []}), client(OfflineTransport(store, snap)))
+    res = check_citation(Citation(**{**A, "quotes": []}), client(OfflineTransport(store, snap)), RETRIEVED)
     assert res.status == "unverified" and res.id["status"] == "lookup_failed"
     assert any("integrity" in a.get("detail", "") for a in res.id["attempts"])
 
@@ -182,9 +187,9 @@ def test_poisoned_cache_entry_never_verifies(tmp_path):
 def test_snapshot_replay_gives_the_same_verdicts(tmp_path):
     store = SnapshotStore(tmp_path / "lit", clock=lambda: datetime(2026, 10, 7, tzinfo=UTC))
     cits = [Citation(**A), Citation(**B), Citation(**{**A, "key": "bad", "year": 2020})]
-    live = [c.model_dump() for c in check_citations(cits, client(RecordingTransport(world(), store)))]
+    live = [c.model_dump() for c in check_citations(cits, client(RecordingTransport(world(), store)), RETRIEVED)]
     snap = store.freeze(date(2026, 1, 1))
-    off = [c.model_dump() for c in check_citations(cits, client(OfflineTransport(store, snap)))]
+    off = [c.model_dump() for c in check_citations(cits, client(OfflineTransport(store, snap)), RETRIEVED)]
     assert [x["status"] for x in off] == ["verified", "verified", "failed"]
     for a, b in zip(live, off, strict=True):
         assert a["status"] == b["status"] and a["provenance"]["envelope"] == b["provenance"]["envelope"]

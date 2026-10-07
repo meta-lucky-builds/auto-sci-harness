@@ -9,16 +9,17 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-_DOI = re.compile(r"^10\.\d{4,9}/[!-~]+$")  # printable ASCII only: no homoglyphs, no spaces
-_ARXIV_NEW = re.compile(r"^(\d{4}\.\d{4,5})(v\d+)?$")
-_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/\d{7})(v\d+)?$")
+_DOI = re.compile(r"^10\.[0-9]{4,9}/[!-~]+$")  # printable ASCII only: no homoglyphs, no spaces
+_ARXIV_NEW = re.compile(r"^([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?$")
+_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?$")
 _DOI_PREFIX = re.compile(r"^(?:doi:|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
+_PMID = re.compile(r"^(?:pmid:?\s*|https?://pubmed\.ncbi\.nlm\.nih\.gov/)([1-9][0-9]{0,8})/?$", re.IGNORECASE)
 _ARXIV_PREFIX = re.compile(r"^(?:arxiv:|https?://(?:export\.)?arxiv\.org/abs/)", re.IGNORECASE)
 
 
 class Identifier(BaseModel):
     model_config = ConfigDict(frozen=True)
-    kind: Literal["doi", "arxiv"]
+    kind: Literal["doi", "arxiv", "pmid"]
     value: str
 
     def __str__(self) -> str:
@@ -26,19 +27,25 @@ class Identifier(BaseModel):
 
 
 def parse_identifier(raw: str) -> Identifier:
-    """Normalise a DOI or arXiv id; raise ValueError if it is not one (fail closed: a malformed id never resolves)."""
+    """Normalise a DOI, arXiv id or PMID (ASCII digits only); raise ValueError if it is not one
+    (fail closed: a malformed id never resolves)."""
     s = (raw or "").strip()
     if _DOI_PREFIX.match(s) or s.startswith("10."):
         v = _DOI_PREFIX.sub("", s).strip()
         if _DOI.match(v):
             return Identifier(kind="doi", value=v.lower())
         raise ValueError(f"malformed DOI: {raw!r}")
+    if re.match(r"^(?:pmid|https?://pubmed)", s, re.IGNORECASE):
+        m = _PMID.match(s)
+        if m:
+            return Identifier(kind="pmid", value=m.group(1))
+        raise ValueError(f"malformed PMID: {raw!r}")
     v = _ARXIV_PREFIX.sub("", s).strip()
     for pat in (_ARXIV_NEW, _ARXIV_OLD):
         m = pat.match(v)
         if m:
             return Identifier(kind="arxiv", value=m.group(1))
-    raise ValueError(f"not a DOI or arXiv identifier: {raw!r}")
+    raise ValueError(f"not a DOI, arXiv id or PMID: {raw!r}")
 
 
 class PaperRecord(BaseModel):
@@ -51,6 +58,7 @@ class PaperRecord(BaseModel):
     title: str
     doi: str | None = None
     arxiv_id: str | None = None
+    pmid: str | None = None
     authors: tuple[str, ...] = ()
     published: str | None = None
     updated: str | None = None
@@ -66,6 +74,8 @@ class PaperRecord(BaseModel):
             out.add(f"doi:{self.doi.lower()}")
         if self.arxiv_id:
             out.add(f"arxiv:{self.arxiv_id}")
+        if self.pmid:
+            out.add(f"pmid:{self.pmid}")
         return out
 
 
@@ -79,7 +89,7 @@ class LookupResult(BaseModel):
     attempts: list[dict[str, Any]] = []
 
 
-_DATE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[T ].*)?$")
+_DATE = re.compile(r"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:[T ].*)?$")
 
 
 def latest_date(s: str | None) -> date | None:
@@ -121,3 +131,13 @@ def text_as_of(rec: PaperRecord, as_of: date) -> bool:
         return True
     u = latest_date(rec.updated)
     return u is not None and u <= as_of
+
+
+def in_window(rec: PaperRecord, start: date | None, end: date | None) -> bool:
+    """Provably published inside [start, end] (fail closed: an unknown or too-coarse date is outside)."""
+    if start is None and end is None:
+        return True
+    first, last = earliest_date(rec.published), latest_date(rec.published)
+    if first is None or last is None:
+        return False
+    return (start is None or first >= start) and (end is None or last <= end)

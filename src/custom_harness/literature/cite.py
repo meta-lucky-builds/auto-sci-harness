@@ -6,7 +6,9 @@ A citation is VERIFIED only if every check passes:
   year     is one the record itself gives,
   authors  (optional) the claimed authors are an in-order prefix of the record's authors,
   quotes   every quoted span occurs verbatim (normalised, whole tokens, contiguous) in the stored abstract/full text
-           that was available as of T.
+           that was available as of T,
+  retrieval the cited paper appeared in a logged SEARCH result of the same session (retrieval.RetrievalLog);
+           without that record (or with no log given) the citation is at best unverified.
 FAILED if anything is positively wrong (id does not resolve, a mismatch, an unsupported quote).
 UNVERIFIED otherwise (lookup failed, a required field missing, no stored text for a quote). I3 passes only if
 every citation is verified.
@@ -16,7 +18,7 @@ This module imports no network code: it takes any resolver with `lookup(raw) -> 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import date
 from typing import Any, Literal, Protocol
 
@@ -50,15 +52,16 @@ class CitationResult(BaseModel):
     year: dict[str, Any]
     authors: dict[str, Any]
     quotes: list[dict[str, Any]]
+    retrieval: dict[str, Any]
     reasons: list[str]
     provenance: dict[str, Any]
 
 
 _BAD = {"does_not_resolve", "mismatch", "unsupported"}
-_UNKNOWN = {"lookup_failed", "missing", "unchecked"}
+_UNKNOWN = {"lookup_failed", "missing", "unchecked", "not_retrieved"}
 
 
-def check_citation(c: Citation, resolver: Resolver) -> CitationResult:
+def check_citation(c: Citation, resolver: Resolver, retrieved_ids: Collection[str] | None = None) -> CitationResult:
     as_of = getattr(resolver, "as_of", None)
     snapshot = getattr(getattr(resolver, "transport", None), "snapshot_id", None)
     unchecked = {"status": "unchecked"}
@@ -68,6 +71,7 @@ def check_citation(c: Citation, resolver: Resolver) -> CitationResult:
     texts: list[str | None] = []
     text_note = ""
     envelope = None
+    found_ids: set[str] = set()
 
     if not c.id:
         ident: dict[str, Any] = {"status": "missing", "value": None, "reason": "no DOI or arXiv identifier given"}
@@ -76,6 +80,7 @@ def check_citation(c: Citation, resolver: Resolver) -> CitationResult:
         ident = {"status": lr.status, "value": c.id, "normalised": lr.identifier, "reason": lr.reason,
                  "source": lr.record.source if lr.record else None, "attempts": lr.attempts}
         rec = lr.record if lr.status == "resolves" else None
+        found_ids = {lr.identifier} | (rec.ids() if rec is not None else set())
         if rec is not None:
             envelope = rec.envelope
             if c.title is None:
@@ -109,7 +114,17 @@ def check_citation(c: Citation, resolver: Resolver) -> CitationResult:
             reason = text_note
         quotes.append({"quote": q, "status": status, "reason": reason})
 
-    parts = [("id", ident), ("title", title), ("year", year), ("authors", authors)]
+    if retrieved_ids is None:
+        retrieval: dict[str, Any] = {"status": "unchecked", "reason": "no retrieval log of this session was given"}
+    elif not found_ids:
+        retrieval = {"status": "unchecked", "reason": "no identifier to look for in the retrieval log"}
+    elif found_ids & set(retrieved_ids):
+        retrieval = {"status": "match", "ids": sorted(found_ids & set(retrieved_ids))}
+    else:
+        retrieval = {"status": "not_retrieved",
+                     "reason": "no search of this session returned this paper (it did not come from retrieval)"}
+
+    parts = [("id", ident), ("title", title), ("year", year), ("authors", authors), ("retrieval", retrieval)]
     parts += [(f"quote {i + 1}", q) for i, q in enumerate(quotes)]
     reasons = [f"{name}: {p['status']}" + (f" ({p['reason']})" if p.get("reason") else "")
                for name, p in parts if p["status"] in _BAD | _UNKNOWN]
@@ -117,13 +132,14 @@ def check_citation(c: Citation, resolver: Resolver) -> CitationResult:
     overall: Literal["verified", "failed", "unverified"]
     overall = "failed" if statuses & _BAD else "unverified" if statuses & _UNKNOWN else "verified"
     return CitationResult(key=c.key, status=overall, id=ident, title=title, year=year, authors=authors,
-                          quotes=quotes, reasons=reasons,
+                          quotes=quotes, retrieval=retrieval, reasons=reasons,
                           provenance={"envelope": envelope, "snapshot": snapshot,
                                       "as_of": as_of.isoformat() if as_of else None})
 
 
-def check_citations(citations: Sequence[Citation], resolver: Resolver) -> list[CitationResult]:
-    return [check_citation(c, resolver) for c in citations]
+def check_citations(citations: Sequence[Citation], resolver: Resolver,
+                    retrieved_ids: Collection[str] | None = None) -> list[CitationResult]:
+    return [check_citation(c, resolver, retrieved_ids) for c in citations]
 
 
 def i3_verdict(results: Sequence[CitationResult]) -> dict[str, Any]:

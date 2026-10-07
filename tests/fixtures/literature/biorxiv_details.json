@@ -1,0 +1,37 @@
+{
+  "messages": [{"status": "ok", "count": 2}],
+  "collection": [
+    {
+      "doi": "10.1101/2023.05.01.538000",
+      "title": "Single-Cell Atlas of the Regenerating Zebrafish Fin",
+      "authors": "Ndlovu, T.; Berg, A.",
+      "author_corresponding": "Thandi Ndlovu",
+      "author_corresponding_institution": "Example Institute",
+      "date": "2023-05-01",
+      "version": "1",
+      "type": "new results",
+      "license": "cc_by",
+      "category": "developmental biology",
+      "jatsxml": "https://www.biorxiv.org/content/early/2023/05/01/2023.05.01.538000.source.xml",
+      "abstract": "We profile regenerating zebrafish fins at single-cell resolution.",
+      "published": "NA",
+      "server": "bioRxiv"
+    },
+    {
+      "doi": "10.1101/2023.05.01.538000",
+      "title": "Single-Cell Atlas of the Regenerating Zebrafish Fin",
+      "authors": "Ndlovu, T.; Berg, A.; Sato, K.",
+      "author_corresponding": "Thandi Ndlovu",
+      "author_corresponding_institution": "Example Institute",
+      "date": "2023-09-10",
+      "version": "2",
+      "type": "new results",
+      "license": "cc_by",
+      "category": "developmental biology",
+      "jatsxml": "https://www.biorxiv.org/content/early/2023/09/10/2023.05.01.538000.source.xml",
+      "abstract": "We profile regenerating zebrafish fins at single-cell resolution and identify a transient progenitor state that is lost when Wnt signalling is blocked.",
+      "published": "NA",
+      "server": "bioRxiv"
+    }
+  ]
+}

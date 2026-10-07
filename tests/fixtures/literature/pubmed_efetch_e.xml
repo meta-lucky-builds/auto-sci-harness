@@ -1,0 +1,41 @@
+<?xml version="1.0" ?>
+<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">
+<PubmedArticleSet>
+<PubmedArticle>
+  <MedlineCitation Status="MEDLINE" Owner="NLM" IndexingMethod="Manual">
+    <PMID Version="1">31000001</PMID>
+    <Article PubModel="Print-Electronic">
+      <Journal>
+        <JournalIssue CitedMedium="Internet">
+          <Volume>12</Volume>
+          <Issue>4</Issue>
+          <PubDate><Year>2019</Year><Month>Apr</Month></PubDate>
+        </JournalIssue>
+        <Title>Example Journal of Critical Care</Title>
+      </Journal>
+      <ArticleTitle>Serum Marker X Predicts Sepsis Mortality in <i>Adults</i>.</ArticleTitle>
+      <Abstract>
+        <AbstractText Label="BACKGROUND" NlmCategory="BACKGROUND">Early risk stratification in sepsis remains poor.</AbstractText>
+        <AbstractText Label="RESULTS" NlmCategory="RESULTS">In 1,204 adults, serum marker X above 40 ng/mL was associated with a hazard ratio of 2.1 for 28-day mortality. The association did not hold in patients under 30.</AbstractText>
+      </Abstract>
+      <AuthorList CompleteYN="Y">
+        <Author ValidYN="Y"><LastName>García</LastName><ForeName>Ana</ForeName><Initials>A</Initials></Author>
+        <Author ValidYN="Y"><LastName>Li</LastName><ForeName>Wei</ForeName><Initials>W</Initials></Author>
+        <Author ValidYN="Y"><CollectiveName>Example Sepsis Consortium</CollectiveName></Author>
+      </AuthorList>
+      <Language>eng</Language>
+      <ArticleDate DateType="Electronic"><Year>2019</Year><Month>02</Month><Day>11</Day></ArticleDate>
+    </Article>
+  </MedlineCitation>
+  <PubmedData>
+    <History>
+      <PubMedPubDate PubStatus="pubmed"><Year>2019</Year><Month>2</Month><Day>12</Day></PubMedPubDate>
+    </History>
+    <PublicationStatus>ppublish</PublicationStatus>
+    <ArticleIdList>
+      <ArticleId IdType="pubmed">31000001</ArticleId>
+      <ArticleId IdType="doi">10.5555/lit.2019.300</ArticleId>
+    </ArticleIdList>
+  </PubmedData>
+</PubmedArticle>
+</PubmedArticleSet>

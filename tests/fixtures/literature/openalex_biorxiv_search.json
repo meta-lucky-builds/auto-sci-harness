@@ -1,0 +1,20 @@
+{
+  "meta": {"count": 1, "db_response_time_ms": 22, "page": 1, "per_page": 5, "groups_count": null},
+  "results": [
+    {
+      "id": "https://openalex.org/W4366000123",
+      "doi": "https://doi.org/10.1101/2023.05.01.538000",
+      "title": "Single-Cell Atlas of the Regenerating Zebrafish Fin",
+      "display_name": "Single-Cell Atlas of the Regenerating Zebrafish Fin",
+      "publication_year": 2023,
+      "publication_date": "2023-05-01",
+      "ids": {"openalex": "https://openalex.org/W4366000123", "doi": "https://doi.org/10.1101/2023.05.01.538000"},
+      "authorships": [
+        {"author_position": "first", "author": {"id": "https://openalex.org/A5100000001", "display_name": "Thandi Ndlovu"}, "institutions": []}
+      ],
+      "primary_location": {"source": {"id": "https://openalex.org/S4306402567", "display_name": "bioRxiv (Cold Spring Harbor Laboratory)"}},
+      "abstract_inverted_index": null,
+      "relevance_score": 40.2
+    }
+  ]
+}

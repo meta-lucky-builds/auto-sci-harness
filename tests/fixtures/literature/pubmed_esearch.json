@@ -1,0 +1,8 @@
+{
+  "header": {"type": "esearch", "version": "0.3"},
+  "esearchresult": {
+    "count": "2", "retmax": "5", "retstart": "0",
+    "idlist": ["31000001", "35000002"],
+    "translationset": [], "querytranslation": "serum[All Fields] AND marker[All Fields] AND sepsis[All Fields]"
+  }
+}

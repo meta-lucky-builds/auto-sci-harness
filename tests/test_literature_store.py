@@ -60,7 +60,8 @@ def test_identifiers_normalise(raw, kind, value):
 
 
 @pytest.mark.parametrize("raw", ["", "not an id", "10.55/x", "10.5555/", "10.5555/litа2021", "2403.123",
-                                 "10.5555/a b", "arXiv:", "doi:"])
+                                 "10.5555/a b", "arXiv:", "doi:",
+                                 "10.555٥/x", "2403.0123٤", "hep-th/990100١"])  # non-ASCII digits
 def test_malformed_identifiers_are_refused(raw):
     with pytest.raises(ValueError):
         parse_identifier(raw)

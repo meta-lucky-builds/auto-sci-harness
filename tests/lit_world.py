@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from custom_harness.literature.http import HttpResponse, LiteratureError
-from custom_harness.literature.sources import S2_FIELDS
+from custom_harness.literature.sources import BIORXIV_OPENALEX_SOURCE, S2_FIELDS
 
 FIX = Path(__file__).parent / "fixtures" / "literature"
 CR = "https://api.crossref.org/works"
@@ -16,6 +16,8 @@ OA = "https://api.openalex.org/works"
 S2 = "https://api.semanticscholar.org/graph/v1/paper"
 AX = "https://export.arxiv.org/api/query"
 HDL = "https://doi.org/api/handles"
+EU = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+BX = "https://api.biorxiv.org/details/biorxiv"
 OA_404 = "<!doctype html>\n<html lang=en>\n<title>404 Not Found</title>\n<h1>Not Found</h1>\n"
 
 
@@ -82,4 +84,21 @@ def world() -> Router:
         key(AX, {"id_list": "2403.99999", "max_results": "1"}): r(200, fx("arxiv_empty.xml")),
         key(AX, {"search_query": "all:calibrated AND all:early AND all:stopping", "start": "0", "max_results": "5"}):
             r(200, fx("arxiv_search.xml")),
+        # PubMed (E-utilities; the authority on PMIDs)
+        key(f"{EU}/efetch.fcgi", {"db": "pubmed", "id": "31000001", "retmode": "xml"}):
+            r(200, fx("pubmed_efetch_e.xml")),
+        key(f"{EU}/efetch.fcgi", {"db": "pubmed", "id": "39999999", "retmode": "xml"}):
+            r(200, fx("pubmed_efetch_empty.xml")),
+        key(f"{EU}/esearch.fcgi", {"db": "pubmed", "term": "serum marker sepsis", "retmax": "5", "retmode": "json"}):
+            r(200, fx("pubmed_esearch.json")),
+        key(f"{EU}/esummary.fcgi", {"db": "pubmed", "id": "31000001,35000002", "retmode": "json"}):
+            r(200, fx("pubmed_esummary.json")),
+        # bioRxiv (details API by DOI; search through OpenAlex restricted to the bioRxiv source)
+        key(f"{BX}/10.1101/2023.05.01.538000/na/json"): r(200, fx("biorxiv_details.json")),
+        key(f"{BX}/10.1101/2099.01.01.000001/na/json"):
+            r(200, '{"messages":[{"status":"no posts found"}],"collection":[]}'),
+        key(f"{HDL}/10.1101/2099.01.01.000001"): r(404, '{"responseCode":100,"handle":"10.1101/2099.01.01.000001"}'),
+        key(OA, {"search": "zebrafish fin regeneration", "per-page": "5",
+                 "filter": f"primary_location.source.id:{BIORXIV_OPENALEX_SOURCE}"}):
+            r(200, fx("openalex_biorxiv_search.json")),
     })
