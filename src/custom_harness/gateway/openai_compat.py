@@ -12,7 +12,7 @@ import time
 import httpx
 
 from ..records import AccessMode, Cost
-from .base import Backend, BackendError, ChatRequest, ChatResponse, redact, to_strict_schema
+from .base import Backend, BackendError, ChatRequest, ChatResponse, redact, request_fault, to_strict_schema
 
 
 class OpenAICompatBackend(Backend):
@@ -51,9 +51,9 @@ class OpenAICompatBackend(Backend):
             raise BackendError(redact(f"{self.name}: {e}"), transient=True) from e
         wall = time.time() - t0
         if r.status_code != 200:
-            transient = r.status_code in (408, 409, 429) or r.status_code >= 500
-            # 400/422: the request (e.g. a harness-authored schema) was rejected -> the harness's fault
-            infra = r.status_code not in (400, 422)
+            # 400/413/422 or a request-caused message (e.g. context length): the harness's fault, never infra
+            infra = r.status_code not in (400, 413, 422) and not request_fault(r.text)
+            transient = infra and (r.status_code in (408, 409, 429) or r.status_code >= 500)
             raise BackendError(redact(f"{self.name}: HTTP {r.status_code}: {r.text[:2000]}"),
                                transient=transient, infra=infra)
         data = r.json()

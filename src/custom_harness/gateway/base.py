@@ -56,6 +56,17 @@ class Backend(ABC):
                           mode=self.mode, training_on_outputs=self.training_on_outputs)
 
 
+# A provider error CAUSED BY THE REQUEST (the harness authored it: an oversized prompt, an invalid request) is the
+# harness's fault, never infrastructure: classifying it as infra would let a harness turn its own failures into
+# excluded evaluation units (integrity review R2-3, 2026-10-07).
+_REQUEST_FAULT = re.compile(r"context.?length|context window|maximum context|prompt is too long|too many tokens|"
+                            r"request too large|payload too large|invalid.?request|\b413\b", re.IGNORECASE)
+
+
+def request_fault(text: str) -> bool:
+    return bool(_REQUEST_FAULT.search(text or ""))
+
+
 def to_strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Convert a JSON schema to OpenAI strict structured-output form.
 
