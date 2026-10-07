@@ -290,14 +290,21 @@ json.dump(out, open("export.json", "w"))
 
 
 def export_real(sandbox_factory: Callable[[Path], object], work: Path) -> dict[str, dict]:
-    """Run the exporter inside the sandbox image (scikit-learn's bundled datasets; no network)."""
+    """Run the exporter inside the FULL sandbox image (scikit-learn's bundled datasets; no network). Trusted code only:
+    agent code runs in the candidate image, which has no bundled datasets (sandbox.docker.CANDIDATE_IMAGE)."""
     sb = sandbox_factory(work)
     (work / "export.py").write_text(_EXPORT, encoding="utf-8")
     res = sb.exec([sb.python, "export.py", json.dumps({k: v[0] for k, v in REAL.items()})],  # type: ignore[attr-defined]
                   timeout_s=600)
-    if res.returncode != 0:
-        raise RuntimeError(f"dataset export failed in the sandbox: {res.stderr[-1500:]}")
-    return json.loads((work / "export.json").read_text(encoding="utf-8"))
+    try:
+        if res.returncode != 0:
+            raise RuntimeError(f"dataset export failed in the sandbox: {res.stderr[-1500:]}")
+        return json.loads((work / "export.json").read_text(encoding="utf-8"))
+    finally:  # export.json is every labelled row of every real dataset: never leave that copy next to the suite
+        for f in ("export.json", "export.py"):
+            (work / f).unlink(missing_ok=True)
+        if work.is_dir() and not any(work.iterdir()):
+            work.rmdir()
 
 
 def real_task(name: str, data: dict, seed: int, *, baseline: str | None = None, task_id: str | None = None,
