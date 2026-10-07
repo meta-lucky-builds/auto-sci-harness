@@ -143,9 +143,9 @@ def test_suite_loading_accepts_isolated_splits(tmp_path):
 
 def test_real_task_builder_shapes_and_repair_metadata():
     data = {"columns": ["a", "b"], "X": [[float(i), float(i % 3)] for i in range(50)], "y": [i % 2 for i in range(50)]}
-    t = real_task("wine", data, seed=1)
+    t = real_task("wine", data, key=b"k" * 32)
     assert t.metric == "accuracy" and len(t.train) == 35 and len(t.test) == 15 and t.family == "real"
-    r = real_task("wine", data, seed=1, task_id="wine_knn_unscaled", defect="x", baseline="code")
+    r = real_task("wine", data, key=b"k" * 32, task_id="wine_knn_unscaled", defect="x", baseline="code")
     assert r.family == "repair" and r.defect == "x" and r.baseline == "code"
     assert set(REPAIRS) and all(spec[0] in REAL for spec in REPAIRS.values())
     assert sys.version_info >= (3, 12)
