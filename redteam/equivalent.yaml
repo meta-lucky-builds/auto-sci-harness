@@ -4,3 +4,11 @@ equivalent:
   - id: "src/custom_harness/kernel/vault.py:195:108:int+1"
     reason: "truncation length of the claim hash inside an error MESSAGE ([:12] -> [:13]); the refusal itself is
       unchanged. Distinguishable only by asserting the exact message text, which would pin wording, not behaviour."
+  - id: "src/custom_harness/kernel/ledger.py:116:74:int+1"
+    reason: "how many chain problems are quoted inside the AnchorError MESSAGE ([:3] -> [:4]); the refusal is
+      unchanged."
+  - id: "src/custom_harness/kernel/ledger.py:144:101:int+1"
+    reason: "length of the head-hash prefix quoted in a problem MESSAGE ([:16] -> [:17]); the detection is unchanged."
+  - id: "src/custom_harness/kernel/ledger.py:121:45:bool-flip"
+    reason: "key order inside one JSON anchor line (sort_keys True -> False); every reader (check_anchors) parses the
+      line as JSON, so no behaviour depends on it. Not killed by pinning the byte format on purpose."

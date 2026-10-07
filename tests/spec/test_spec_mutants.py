@@ -74,6 +74,6 @@ def test_an_unreadable_anchor_line_is_a_problem_not_a_crash(tmp_path):
         path = tmp_path / "anchor.jsonl"
         path.write_text("not json at all\n", encoding="utf-8")
         problems = check_anchors(led.entries(), path)
-        assert len(problems) == 1 and "unreadable" in problems[0], problems
+        assert len(problems) == 1 and problems[0].startswith("anchor line 1 unreadable"), problems  # locates it
     finally:
         store.close()
