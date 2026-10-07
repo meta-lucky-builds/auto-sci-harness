@@ -1,16 +1,22 @@
-"""Prediction ledger scoring: calibration and the Validated Discovery Score (GOAL §4.5).
+"""Prediction ledger scoring: calibration, the Validated Discovery Score and forecasting skill (GOAL §4.5, §16.4).
 
 Every pre-registration is a prediction: "with probability q, this claim will be certified on its held-out
 targets". It resolves when a certificate for the claim is issued (outcome = certified or not; the latest
 certificate wins), or EXPIRES as a miss when resolve_by passes with no certificate, so hiding failures by
 never certifying them does not help.
 
-Score (log scoring rule, relative to a baseline probability p0):
-    information gain = log2(q / p0)            if the claim was certified
-                     = log2((1 - q) / (1 - p0)) otherwise
-p0 = the no-effect probability measured by K7 at resolution (or the declared prior, or 0.5 when neither
-exists). Confident misses cost more than cautious ones; safe claims (p0 high) earn little.
-VDS = sum of information gains over resolved and expired predictions.
+VDS as an e-process (§16.4, fixes F2). p0 is FIXED AT REGISTRATION (the prereg entry's `fixed.p0`): an upper bound on
+P(certified | no effect), the claim's registered level. The Kernel refuses q < p0. Each resolved prediction scores
+    LR = q / p0                  if the claim was certified
+       = (1 - q) / (1 - p0)      otherwise,         information gain = log2 LR.
+If P(certified | past, global null) <= p0 and q >= p0, then E[LR | past] <= 1, so 2^VDS is a nonnegative
+supermartingale under the global null "no registered claim has a real effect", and Ville's inequality gives
+P(sup VDS >= log2(1/alpha)) <= alpha (`ville_threshold`). A miss never scores positive. A legacy prediction with q < p0
+scores 0 either way (LR = 1). Assumption: K4's tests are not anti-conservative (they hold their level).
+
+Skill is reported separately: log2 of the probability the system gave the observed outcome over the probability the
+pinned reference forecaster gave it (`fixed.p_ref`, the Laplace base rate of certificates resolved before the
+registration). VDS says whether the system produces real effects; skill whether it knows which claims will hold.
 """
 
 from __future__ import annotations
@@ -28,14 +34,28 @@ _CLAMP = 1e-6
 class PredictionScore:
     claim_hash: str
     q: float  # declared probability of certification
-    p0: float  # baseline probability
+    p0: float  # baseline probability, fixed at registration
     outcome: bool | None  # None = unresolved and not yet expired
     expired: bool
     info_gain_bits: float | None
+    skill_bits: float | None = None  # vs the pinned reference forecaster
 
 
 def _clamp(p: float) -> float:
     return min(1 - _CLAMP, max(_CLAMP, p))
+
+
+def _registered_p0(body: dict[str, Any]) -> tuple[float, float]:
+    """(p0, p_ref) frozen in the prereg entry. A pre-registration made before they were recorded gets the same terms
+    from its registered claim alone: p0 = alpha / n_comparisons for data claims, else 0.5; p_ref = 0.5."""
+    fixed = body.get("fixed")
+    if isinstance(fixed, dict):
+        return float(fixed["p0"]), float(fixed["p_ref"])
+    claim = body["claim"]
+    plan = claim.get("analysis_plan", {})
+    if claim.get("evidence_class", "data") == "data":
+        return float(plan.get("alpha", 0.05)) / max(1, int(plan.get("n_comparisons", 1))), 0.5
+    return 0.5, 0.5
 
 
 def score_predictions(ledger: Ledger, now: float) -> list[PredictionScore]:
@@ -51,22 +71,31 @@ def score_predictions(ledger: Ledger, now: float) -> list[PredictionScore]:
         seen.add(h)
         claim = e.body["claim"]
         q = _clamp(float(claim["effect"]["probability"]))
-        prior = claim.get("risk", {}).get("prior_probability")
+        p0, p_ref = (_clamp(x) for x in _registered_p0(e.body))
         res = latest.get(h)
         expired = res is None and now > float(claim["resolve_by"])
         if res is None and not expired:
-            out.append(PredictionScore(h, q, _clamp(prior if prior is not None else 0.5), None, False, None))
+            out.append(PredictionScore(h, q, p0, None, False, None))
             continue
         outcome = bool(res["outcome"]) if res is not None else False
-        p_null = res.get("p_null") if res is not None else None
-        p0 = _clamp(p_null if p_null is not None else (prior if prior is not None else 0.5))
-        gain = math.log2(q / p0) if outcome else math.log2((1 - q) / (1 - p0))
-        out.append(PredictionScore(h, q, p0, outcome, expired, gain))
+        q_lr = max(q, p0)  # q < p0 (only on legacy entries): LR = 1, never a positive score
+        gain = math.log2(q_lr / p0) if outcome else math.log2((1 - q_lr) / (1 - p0))
+        skill = math.log2(q / p_ref) if outcome else math.log2((1 - q) / (1 - p_ref))
+        out.append(PredictionScore(h, q, p0, outcome, expired, gain, skill))
     return out
 
 
 def vds(scores: list[PredictionScore]) -> float:
     return sum(s.info_gain_bits for s in scores if s.info_gain_bits is not None)
+
+
+def skill(scores: list[PredictionScore]) -> float:
+    return sum(s.skill_bits for s in scores if s.skill_bits is not None)
+
+
+def ville_threshold(alpha: float) -> float:
+    """VDS at or above this many bits rejects the global null at level alpha (Ville's inequality)."""
+    return math.log2(1 / alpha)
 
 
 def calibration(scores: list[PredictionScore], bins: int = 5) -> dict[str, object]:

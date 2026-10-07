@@ -105,6 +105,15 @@ class Code(StrEnum):
     K9_PATH = "K9_PATH"
 
 
+class Refusal(ValueError):
+    """A refusal whose message the Kernel wrote itself (fixed text plus ids, never data read from evidence): the
+    only exception whose message may appear in a reason."""
+
+
+class UncodedReason(TypeError):
+    """A check produced a reason without a closed code."""
+
+
 class Reason(str):
     """A reason text tagged with its closed code."""
 
@@ -114,6 +123,11 @@ class Reason(str):
         obj = super().__new__(cls, text)
         obj.code = Code(code)
         return obj
+
+
+def R(code: Code, text: str) -> str:  # short: used at every reason site
+    """A coded reason, typed as plain str so reason lists stay list[str]."""
+    return Reason(code, text)
 
 
 def coded(code: Code, texts: list[str] | tuple[str, ...]) -> list[str]:
@@ -126,7 +140,7 @@ def codes_of(reasons: list[str] | tuple[str, ...]) -> tuple[Code, ...]:
     out = []
     for r in reasons:
         if not isinstance(r, Reason):
-            raise TypeError("uncoded Kernel reason")
+            raise UncodedReason("uncoded Kernel reason")
         out.append(r.code)
     return tuple(out)
 
@@ -142,3 +156,8 @@ def exception_name(e: BaseException) -> str:
     the output is a closed set, so not even a crafted class name leaves the Kernel."""
     name = type(e).__name__
     return name if name in _KNOWN_ERRORS else "Exception"
+
+
+def describe(e: BaseException) -> str:
+    """A Kernel-written refusal's own text; any other exception by its (closed) type name only."""
+    return str(e) if isinstance(e, Refusal) else exception_name(e)
