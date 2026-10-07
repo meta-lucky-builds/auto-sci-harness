@@ -19,7 +19,7 @@ from custom_harness.runtime import END, Condition, Edge, Engine, HarnessSpec, LL
 from custom_harness.runtime.engine import RetryPolicy
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.sandbox.docker import DockerSandbox, DockerUnavailable, docker_available
-from test_evolve import PROPOSALS, executor, seed_spec, suite  # noqa: F401
+from test_evolve import PROPOSALS, declared_seed_spec, executor, seed_spec, suite  # noqa: F401
 
 NO_WAIT = RetryPolicy(max_attempts=3, backoff_s=0.0)
 
@@ -155,8 +155,10 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
         llm = MockBackend(executor)
         roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
         ev = Evaluator(roles, st, factory, suite, retry=NO_WAIT)
-        res = evolve_generation(seed_spec(), suite, evaluator=ev, proposer=MockBackend([json.dumps(PROPOSALS)]),
-                                store=st, cfg=EvolveConfig(n_edits=4, race_rounds=2))
+        cfg = EvolveConfig(n_edits=4, race_rounds=2)
+        # R2-2: campaigns pre-declare their multiplicity bound (Evaluator raises MultiplicityDrift otherwise)
+        res = evolve_generation(declared_seed_spec(cfg), suite, evaluator=ev,
+                                proposer=MockBackend([json.dumps(PROPOSALS)]), store=st, cfg=cfg)
         st.close()
         return res, ev
 
