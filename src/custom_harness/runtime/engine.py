@@ -540,6 +540,8 @@ class Engine:
                 raise ValueError("tool node requires a sandbox")
             cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
+            if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
+                raise ValueError(f"tool command exceeded a sandbox limit: {res.limit_exceeded}")
             return {"value": res.model_dump()}, Cost(wall_s=res.wall_s), None
         if isinstance(node, ModuleNode):
             fn = get_module(node.module)

@@ -22,7 +22,7 @@ from ..kernel.execution import OUT_PATH
 from ..runtime import register
 from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
-from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
+from ..sandbox.base import Sandbox, WorkspaceEscape, check_mount, protect_path, safe_path
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
 from ..verify.ranking import bradley_terry, rankings_to_wins
@@ -174,6 +174,10 @@ def setup(state, params, ctx: ModuleContext):
     _require_isolation(ctx)
     task_dir = Path(state["input"]["task_dir"]).resolve()
     task = load_task(task_dir)
+    # the hidden labels must never be inside the agent's mount (invariant 2): protect the task's private files for
+    # every sandbox created from now on, and refuse the run's own workspace if it overlaps them
+    protect_path(task_dir / "private")
+    check_mount(_sb(ctx).workspace)
     _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
     for name in (task.train_file, task.test_features_file):
         shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
