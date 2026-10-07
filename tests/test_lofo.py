@@ -39,8 +39,9 @@ class TableEvaluator(Evaluator):
         if key not in self.cache:
             self.calls += 1
             arm = "parent" if spec.spec_hash() == self.parent_hash else "cand"
+            # equal cost in both arms: the cost term (test_evolve_evidence.py) passes, fail closed without cost data
             self.cache[key] = RunOutcome(unit[0], "", unit[1], self._score(arm, unit[0], unit[1]), False,
-                                         "completed", Cost(), [])
+                                         "completed", Cost(prompt_tokens=100), [])
         return self.cache[key]
 
 

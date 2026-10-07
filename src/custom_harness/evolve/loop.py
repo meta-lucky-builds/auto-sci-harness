@@ -7,6 +7,14 @@ leave-one-domain-out) non-regression on EACH held-out family/domain -> record li
 harness-science ledger (incl. per-group results and OOD drop, key "lofo") and proposer calibration.
 A campaign without a held-out family (/domain) is refused (GOAL invariant 16, fail closed).
 
+M4 pieces (GOAL §5 L6.3/6.6/6.8/6.10): the diagnosis carries first-divergence causal signatures from evolve-split
+runs; each edit's cited cluster/divergence ids are checked against it (`claims_check`); an edit whose normalised
+signature equals a previously REJECTED one (static or gate) is refused before any evaluation (novelty gate); the
+proposer may decline (recorded, not an error); acceptance also needs the cost term (candidate cost on the paired gate
+units <= (1 + max_cost_increase) x parent, fail closed without cost data); the ledger records per-task
+flipped/regressed lists, `regressed_unpredicted` and the generation's yield/prune counters (`generation_stats`).
+The proposer sees past edits only through `proposer_view` (export.py): gate/held-out details never reach it.
+
 Why re-measure (CR P0-2, winner's curse): the race picks the candidate with the best observed mean, so
 its race data are biased upward; reusing them as acceptance evidence inflates false accepts. The gate
 only ever sees evolve evidence the selection step did not look at.
@@ -16,6 +24,8 @@ The sealed split is never touched here (PLAN E3).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -26,10 +36,16 @@ from ..gateway import Backend
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
+from .diagnosis import check_claims
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
-from .propose import diagnose, propose_edits
-from .selection import PairedSample, Unit, gate, non_regression, paired_sample, race
+from .export import proposer_view
+from .propose import diagnose, propose
+from .selection import PairedSample, Unit, cost_bound, gate, non_regression, paired_sample, race
+
+# lineage statuses whose edit signature the novelty gate refuses to see again (GOAL §5 L6.6, HarnessX "reverted").
+# Race losers are NOT included: they were eliminated on a few evolve units, never judged by the gate.
+REJECTED_STATUSES = ("rejected_static", "rejected_gate")
 
 
 @dataclass
@@ -46,6 +62,10 @@ class EvolveConfig:
     infra_retries: int = 1  # fresh re-runs of a unit whose run failed for infrastructure reasons
     protected_nodes: tuple[str, ...] = DEFAULT_PROTECTED_NODES
     budget_per_run: dict[str, float | None] | None = None
+    # cost term (GOAL §5 L6.8, RRSI): candidate total cost on the paired gate units <= (1 + this) x parent's.
+    # 1.0 = at most twice the parent's cost: a provisional default, not calibrated on a real campaign.
+    max_cost_increase: float = 1.0
+    cost_metric: str = "tokens"  # "tokens" (prompt + completion), "wall_s" or "usd" (selection.COST_METRICS)
 
 
 @dataclass
@@ -60,6 +80,8 @@ class GenerationResult:
     # GOAL §6.1: VALIDATED only if the gate decision rested entirely on CERTIFIED-VALIDATED evidence (external or
     # future data); otherwise the generation optimised an internal metric: MECHANICAL
     loop_label: str = "MECHANICAL"
+    # yield/prune counters of this generation (also appended as a `generation_stats` record)
+    counters: dict[str, Any] = field(default_factory=dict)
 
 
 class Evaluator:
@@ -129,37 +151,53 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
 
     parent_outcomes = [evaluator.outcome(parent, u) for u in evolve_units]
     parent_scores = {u: o.score for u, o in zip(evolve_units, parent_outcomes, strict=True)}
-    digest = diagnose(parent_outcomes, store)
-    ledger = store.records("harness_edit")
+    evolve_ids = {t.task_id for t in tasks if t.split == "evolve"}
+    # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
+    # outcomes never feed the diagnosis, which the proposer reads
+    references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
+    digest = diagnose(parent_outcomes, store, references=references)
+    ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
-    edits, problems, _ = propose_edits(proposer, parent, digest, ledger, n_edits=cfg.n_edits,
-                                       protected=cfg.protected_nodes)
+    proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+    edits, problems = proposal.edits, proposal.problems
+    rejected_before = rejected_signatures(store)
     candidates: dict[str, tuple[Edit, HarnessSpec]] = {}
     records: list[dict[str, Any]] = [{"status": "malformed", "problem": p} for p in problems]
+    if proposal.decline is not None:
+        records.append({"status": "declined", "reason": proposal.decline})
     for edit in edits:
+        sig = edit_signature(edit)
+        base = {"edit": edit.model_dump(), "signature": sig, "claims_check": check_claims(edit, digest)}
+        if sig in rejected_before:
+            records.append({"status": "rejected_novelty", **base,
+                            "reason": "identical (normalised) to a previously rejected edit"})
+            continue
         try:
             spec = apply_edit(parent, edit, cfg.protected_nodes)
         except EditRejected as e:
-            records.append({"status": "rejected_static", "edit": edit.model_dump(), "reason": str(e)})
+            records.append({"status": "rejected_static", **base, "reason": str(e)})
             continue
         h = spec.spec_hash()
         if h == parent_hash or h in candidates:
-            records.append({"status": "no_op_or_duplicate", "edit": edit.model_dump()})
+            records.append({"status": "no_op_or_duplicate", **base})
             continue
         candidates[h] = (edit, spec)
         store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=parent_hash)
 
-    accepted_spec, accepted, decision = parent, False, "no valid candidates"
+    accepted_spec, accepted = parent, False
+    decision = f"proposer declined: {proposal.decline}" if proposal.decline is not None else "no valid candidates"
+    survivors: list[Any] = []
     loop_label = "MECHANICAL"
     fixed_k = 0
     if candidates:
         rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
                   parent_scores, rounds=cfg.race_rounds, keep=1)
         fixed_k = rr.evaluations_fixed_k
+        survivors = list(rr.survivors)
         for h, (edit, _) in candidates.items():
             st = rr.stats.get(h, {})
             records.append({"status": "raced", "candidate": h, "edit": edit.model_dump(), "race": st,
-                            "survived": h in rr.survivors})
+                            "survived": h in rr.survivors, "signature": edit_signature(edit)})
         if rr.survivors:
             best = str(rr.survivors[0])
             edit, spec = candidates[best]
@@ -173,14 +211,36 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             lofo = _lofo(tasks, heldout_families, heldout_domains, cfg,
                          lambda us: paired_sample(us, lambda u: evaluator.score(spec, u),
                                                   lambda u: evaluator.score(parent, u)))
-            ok = d.accepted and lofo["passed"]
-            decision = d.reason if not d.accepted or ok else "rejected: " + lofo["reason"]
+            # cost term on the gate units valid in BOTH arms (an infra-excluded unit has no comparable cost)
+            valid_gate = [u for u in gate_units
+                          if evaluator.score(spec, u) is not None and evaluator.score(parent, u) is not None]
+            cost = cost_bound(valid_gate, lambda u: evaluator.outcome(spec, u).cost,
+                              lambda u: evaluator.outcome(parent, u).cost,
+                              max_increase=cfg.max_cost_increase, metric=cfg.cost_metric)
+            ok = d.accepted and lofo["passed"] and cost["passed"]
+            rejected_on: str | None
+            if not d.accepted:
+                decision = d.reason
+                rejected_on = "evolve" if d.reason.startswith("evolve") else "held_out_gate"
+            elif not lofo["passed"]:
+                decision, rejected_on = "rejected: " + lofo["reason"], "held_out_gate"
+            elif not cost["passed"]:
+                decision, rejected_on = "rejected: " + cost["reason"], "cost"
+            else:
+                decision, rejected_on = d.reason, None
+            per_task = _per_task(fresh_units + gate_units, tasks, lambda u: evaluator.score(spec, u),
+                                 lambda u: evaluator.score(parent, u))
+            flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
+            regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
+            at_risk = set(edit.predicted.tasks_at_risk)
+            claims = check_claims(edit, digest)
             gate_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in gate_units]
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in gate_labels) else "MECHANICAL"
             records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
                             "loop_label": loop_label,
                             "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
-                            "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo})
+                            "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo, "cost": cost,
+                            "rejected_on": rejected_on, "signature": edit_signature(edit), "claims_check": claims})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
             store.append_record("harness_edit", {
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
@@ -189,13 +249,68 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "predicted_delta": edit.predicted.expected_delta, "actual_evolve_delta": d.evolve["mean_diff"],
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
-                "clusters_claimed": edit.predicted.failure_clusters_fixed})
+                "clusters_claimed": edit.predicted.failure_clusters_fixed, "claims_check": claims,
+                "cost": cost, "rejected_on": rejected_on, "signature": edit_signature(edit),
+                "per_task": per_task, "flipped": flipped, "regressed": regressed,
+                "tasks_at_risk": sorted(at_risk), "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
             if ok:
                 accepted_spec, accepted = spec, True
     for r in records:
         store.append_record("lineage", {"parent": parent_hash, **r})
+    counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
+                         n_survivors=len(survivors))
+    store.append_record("generation_stats", {"parent": parent_hash, **counters})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
-                            evaluator.calls - calls_before, fixed_k, loop_label)
+                            evaluator.calls - calls_before, fixed_k, loop_label, counters)
+
+
+def edit_signature(edit: Edit) -> str:
+    """Normalised edit signature for the novelty gate: the edit type plus its ops sorted by (path, op, value), each
+    value in canonical JSON (dict key order irrelevant). Rationale and predictions are not part of it: the same
+    change re-worded is the same change."""
+    ops = sorted((o.path, o.op, json.dumps(o.value, sort_keys=True, default=str)) for o in edit.ops)
+    return hashlib.sha256(json.dumps([edit.type.value, ops]).encode()).hexdigest()
+
+
+def rejected_signatures(store: EvidenceStore) -> set[str]:
+    """Signatures of every edit the lineage records as rejected (static or gate). Records written before signatures
+    existed are re-signed from their stored edit; an unreadable one is skipped (it cannot be compared)."""
+    out: set[str] = set()
+    for r in store.records("lineage"):
+        if r.get("status") not in REJECTED_STATUSES:
+            continue
+        if r.get("signature"):
+            out.add(r["signature"])
+        elif isinstance(r.get("edit"), dict):
+            try:
+                out.add(edit_signature(Edit.model_validate(r["edit"])))
+            except ValueError:
+                continue
+    return out
+
+
+def _per_task(units: list[Unit], tasks: list[SuiteTask], cand: Callable[[Unit], float | None],
+              parent: Callable[[Unit], float | None]) -> dict[str, dict[str, Any]]:
+    """Per-task attribution (L6.10): mean paired difference over the task's valid units (fresh evolve + gate)."""
+    split = {t.task_id: t.split for t in tasks}
+    diffs: dict[str, list[float]] = {}
+    for u in units:
+        c, p = cand(u), parent(u)
+        diffs.setdefault(u[0], [])
+        if c is not None and p is not None:
+            diffs[u[0]].append(c - p)
+    return {t: {"split": split.get(t), "n": len(d), "mean_diff": sum(d) / len(d) if d else None}
+            for t, d in sorted(diffs.items())}
+
+
+def _counters(records: list[dict[str, Any]], *, n_proposed: int, n_raced: int, n_survivors: int) -> dict[str, Any]:
+    """Yield/prune counters of one generation (L6.10). yield = accepted / proposed; pruned = raced - race survivors."""
+    count = {s: sum(r["status"] == s for r in records) for s in (
+        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "accepted",
+        "rejected_gate")}
+    gated = count["accepted"] + count["rejected_gate"]
+    return {"proposed": n_proposed, **count, "raced": n_raced, "pruned": n_raced - n_survivors, "gated": gated,
+            "yield": count["accepted"] / n_proposed if n_proposed else 0.0}
 
 
 def _lofo(tasks: list[SuiteTask], families: list[str], domains: list[str], cfg: EvolveConfig,
