@@ -195,12 +195,9 @@ def test_planted_host_escape_from_container_fails(store, tmp_path):
         f"os.symlink({labels.as_posix()!r}, a.out)\n"   # absolute host path to the hidden labels
     )
     from custom_harness.research.modules import _run_solution
-    from custom_harness.runtime.modules import ModuleContext
     sb = DockerSandbox(tmp_path / "ws")
     (sb.workspace / "evil.py").write_text(evil)
-    (sb.workspace / "dev").mkdir()
-    ctx = ModuleContext(run_id="r", store=store, backends={}, budget=None, sandbox=sb)
-    preds, info = _run_solution(ctx, "evil.py", "dev/train.csv", "dev/valid_X.csv", 0, 120)
+    preds, info = _run_solution(sb, "evil.py", "train.csv", "valid_X.csv", 0, 120)
     assert preds is None and "escape_attempt" in info  # refused, recorded as the agent's failure
     assert "label" not in json.dumps(info)
     m = store.blobs.get_json(take_snapshot(sb.workspace, store.blobs))  # must not crash

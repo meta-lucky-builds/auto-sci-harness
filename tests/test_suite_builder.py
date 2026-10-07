@@ -4,15 +4,19 @@ and repair tasks need the sandbox image (scripts/validate_suite.py checks all 21
 from __future__ import annotations
 
 import csv
+import dataclasses
 import io
 import sys
 from collections import Counter
 from pathlib import Path
 
+import pytest
 import yaml
 
+from custom_harness.evolve.driver import load_suite
 from custom_harness.kernel.execution import DEFAULT_ARGV, run_program
-from custom_harness.research.suite import REAL, REPAIRS, SYNTHETIC, build_suite, real_task
+from custom_harness.research import suite as suite_mod
+from custom_harness.research.suite import REAL, REPAIRS, SYNTHETIC, build_suite, real_task, rings, write_task
 from custom_harness.research.task import load_task
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.verify import metrics as M
@@ -43,6 +47,66 @@ def test_synthetic_suite_is_well_formed_and_baselines_run(tmp_path):
                                   seed=0, timeout_s=120)
         assert preds is not None and len(preds) == len(y), (t["id"], diag)
         M.score(task.metric, y, preds)  # scorable
+
+
+def _fake_real_data() -> dict[str, dict]:
+    """Host-side stand-ins for the sandbox export: distinct rows per dataset (offset k), so datasets never collide."""
+    out = {}
+    for k, name in enumerate(sorted(suite_mod.REAL)):
+        out[name] = {"columns": ["a", "b"], "X": [[float(k * 1000 + i), float(i % 7)] for i in range(60)],
+                     "y": [float(i % 3) for i in range(60)]}
+    return out
+
+
+def _base_dataset(task_id: str) -> str:
+    """Derived independently of the builder: a repair task re-splits REPAIRS[id][0]; '<name>-real' splits <name>."""
+    if task_id in REPAIRS:
+        return REPAIRS[task_id][0]
+    return task_id.removesuffix("-real")
+
+
+@pytest.mark.parametrize("drop", [None, "iris"])
+def test_tasks_from_one_dataset_share_a_split(tmp_path, monkeypatch, drop):
+    """Live finding 2026-10-06: every held-out example of a real-data task is public in its repair variant (same
+    base dataset, different split). The pairs shared a split only by luck of the cyclic assignment; removing one
+    real dataset (here iris, which has no repair variant) shifts the pattern and used to split every pair."""
+    if drop:
+        monkeypatch.setattr(suite_mod, "REAL", {k: v for k, v in suite_mod.REAL.items() if k != drop})
+    path = build_suite(tmp_path / "s", real_data=_fake_real_data())
+    tasks = yaml.safe_load(path.read_text(encoding="utf-8"))["tasks"]
+    splits: dict[str, set[str]] = {}
+    for t in tasks:
+        splits.setdefault(_base_dataset(t["id"]), set()).add(t["split"])
+    assert {k: v for k, v in splits.items() if len(v) > 1} == {}
+    assert set(Counter(t["split"] for t in tasks)) == {"evolve", "gate", "sealed"}
+    assert len(load_suite(path)) == len(tasks)  # the evolution entry point accepts it
+
+
+def _two_task_suite(tmp_path, *, share_rows: bool, sources: tuple[str | None, str | None]) -> Path:
+    a = rings(1, 120)
+    b = dataclasses.replace(a, task_id="rings-copy") if share_rows else rings(2, 120)
+    entries = []
+    for spec, split, source in ((a, "evolve", sources[0]), (b, "gate", sources[1])):
+        d = write_task(spec, tmp_path)
+        entries.append({"id": spec.task_id, "dir": str(d), "split": split, **({"source": source} if source else {})})
+    p = tmp_path / "suite.yaml"
+    p.write_text(yaml.safe_dump({"tasks": entries}), encoding="utf-8")
+    return p
+
+
+def test_suite_loading_refuses_examples_shared_across_splits(tmp_path):
+    """Content-based, whatever the declared sources say: the same rows under two ids in two splits."""
+    with pytest.raises(ValueError, match="share 120 example row"):
+        load_suite(_two_task_suite(tmp_path, share_rows=True, sources=("a", "b")))
+
+
+def test_suite_loading_refuses_a_task_without_source(tmp_path):
+    with pytest.raises(ValueError, match="no `source`"):
+        load_suite(_two_task_suite(tmp_path, share_rows=False, sources=("rings-s1", None)))
+
+
+def test_suite_loading_accepts_isolated_splits(tmp_path):
+    assert len(load_suite(_two_task_suite(tmp_path, share_rows=False, sources=("rings-s1", "rings-s2")))) == 2
 
 
 def test_real_task_builder_shapes_and_repair_metadata():

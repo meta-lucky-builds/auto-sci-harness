@@ -92,13 +92,16 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
 # ------------------------------------------------------------------ claim (pre-registration)
 def forecast(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, floor: float, fraction: float,
              candidate_key: str = "best", fixed_delta: float | None = None) -> tuple[float, float, float, float]:
-    """(min effect, probability, predicted lo, predicted hi) from the dev split.
+    """(min effect, probability, predicted lo, predicted hi) from the dev estimate: out-of-fold predictions of
+    k-fold cross-validation on the public training data, paired with the baseline's out-of-fold predictions.
 
-    The claimed minimum effect is max(task floor, fraction x the dev 90% lower bound): the claim asserts what the
-    dev evidence supports, with a margin, instead of the weakest bound (which K7 rightly rejects as trivially
-    safe). The probability is P(held-out effect >= that minimum) under a normal model of the dev estimate.
-    Dev picked the best of several candidates, so this forecast is optimistic by construction; the prediction
-    ledger measures exactly that (calibration). It is not corrected here."""
+    The claimed minimum effect is max(task floor, fraction x the lower bound of a two-sided 90% paired BCa
+    interval over dev examples): the claim asserts what the dev evidence supports, with a margin, instead of the
+    weakest bound (which K7 rightly rejects as trivially safe). The probability is P(held-out effect >= that
+    minimum) under a normal model of the dev estimate. Two known optimistic biases, NOT corrected here and
+    measured by the prediction ledger (calibration): dev picked the best of several candidates (winner's
+    curse), and the bootstrap resamples out-of-fold examples as if independent, ignoring the variance between
+    the k fitted models (no unbiased estimator of k-fold CV variance exists; Bengio & Grandvalet 2004)."""
     best = state[candidate_key]
     labels = _dev_labels(state, ctx)
     ref_s, ref_b = best.get("dev_preds_ref"), state.get("baseline_dev_preds_ref")
@@ -155,7 +158,8 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         # keeps certification strictness constant during the campaign (no drift against later candidates).
         analysis_plan=AnalysisPlan(seeds=tuple(params.get("seeds", (0, 1, 2))), alpha=params.get("alpha", 0.05),
                                    n_comparisons=int(params.get("n_comparisons", 1))),
-        assumptions=("the dev split drawn from the public training data is representative of the held-out data",),
+        assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
+                     "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
     entry = kernel.preregister(claim)
     return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
@@ -220,6 +224,12 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
 
 
 # ------------------------------------------------------------------ certify
+def _dev_scheme_text(state: dict[str, Any]) -> str:
+    d = state.get("dev_scheme") or {}
+    return (f"{'stratified ' if d.get('stratified') else ''}{d.get('k', '?')}-fold cross-validation "
+            f"(split seed {d.get('seed', '?')}, {d.get('n', '?')} examples)")
+
+
 def _models_used(ctx: ModuleContext) -> list[str]:
     seen: set[str] = set()
     for step in ctx.store.trace(ctx.run_id):
@@ -246,8 +256,9 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     checklist = fill(cert, run_costs={ctx.run_id: ctx.store.run_cost(ctx.run_id)}, models=_models_used(ctx),
                      bundle_hash=bundle_hash,
                      selection_policy=(f"{n_hyp} model-proposed hypotheses ranked by a K-way tournament; "
-                                       f"candidates scored on a dev split carved from the public training data; "
-                                       f"the best dev candidate became the single pre-registered claim of this run")
+                                       f"candidates scored by {_dev_scheme_text(state)} on the public training "
+                                       f"data (out-of-fold predictions); the best dev candidate became the single "
+                                       f"pre-registered claim of this run")
                      if not p else ("independent replication: a separate model call re-implemented the "
                                     "certified hypothesis from the claim text without seeing its code; the "
                                     "replica was checked on dev, then pre-registered at the same minimum effect"),
@@ -290,9 +301,10 @@ def code_similarity(a: str, b: str) -> float:
 
 @register("research.replica_dev")
 def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
-    """Run the replicator's code (written WITHOUT the original code) on the dev split. It becomes a replication
-    candidate only if it works and beats the baseline on dev; otherwise the replication fails honestly."""
-    from .modules import _better, _run_solution, _score, _ws
+    """Score the replicator's code (written WITHOUT the original code) by the same cross-validation as every
+    candidate. It becomes a replication candidate only if it works and beats the baseline on dev; otherwise the
+    replication fails honestly."""
+    from .modules import _better, _dev_predict, _score, _ws
     _require_isolation(ctx)
     task = _task(state)
     code = (state.get("replica_impl") or {}).get("code", "")
@@ -306,7 +318,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
                 "route": "report"}
     _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
     labels = _dev_labels(state, ctx)
-    preds, info = _run_solution(ctx, "replica.py", "dev/train.csv", "dev/valid_X.csv", 0, task.solution_timeout_s)
+    preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
     cand = {"hypothesis_id": f"replication-of-{(state.get('best') or {}).get('hypothesis_id')}", "dev_score": s,
             "similarity_to_original": round(similarity, 3),
@@ -375,8 +387,9 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", f"**Headline result** (certified AND independently replicated): "
                       f"{'yes' if headline(state) else 'no'}", ""]
     else:
-        lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev split.", ""]
-    lines += ["## Exploration log (dev split; NOT evidence)", "",
+        lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
+    lines += [f"## Exploration log (dev estimate: {_dev_scheme_text(state)} on public training data; "
+              f"NOT evidence)", "",
               f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
     for a in state.get("attempts") or []:
         lines.append(f"- attempt {a['n']} hypothesis={a['hypothesis_id']} dev={a['dev_score']} "

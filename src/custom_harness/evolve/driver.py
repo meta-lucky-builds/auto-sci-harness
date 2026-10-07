@@ -2,9 +2,10 @@
 
 Suite file (YAML):
     tasks:
-      - {id: rings-a, dir: C:/.../rings-a, split: evolve}
-      - {id: rings-b, dir: C:/.../rings-b, split: gate}
-      - {id: rings-c, dir: C:/.../rings-c, split: sealed}   # never used here
+      - {id: rings-a, dir: C:/.../rings-a, split: evolve, source: rings-a}
+      - {id: rings-b, dir: C:/.../rings-b, split: gate, source: rings-b}
+      - {id: rings-c, dir: C:/.../rings-c, split: sealed, source: rings-c}   # never used here
+`source` = the base dataset; loading refuses a suite where a source, or any example row, spans two splits.
 """
 
 from __future__ import annotations
@@ -32,6 +33,11 @@ def load_suite(path: Path) -> list[SuiteTask]:
     bad = [t for t in tasks if t.split not in ("evolve", "gate", "sealed")]
     if bad:
         raise ValueError(f"invalid split for {bad[0].task_id}")
+    # fail closed: the gate/sealed splits mean nothing if their examples are public in another split
+    from ..research.suite import check_split_isolation
+    problems = check_split_isolation(doc["tasks"])
+    if problems:
+        raise ValueError("suite splits are not isolated: " + "; ".join(problems))
     return tasks
 
 

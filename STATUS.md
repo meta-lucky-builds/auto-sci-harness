@@ -128,6 +128,21 @@ profiler called continuous features "IDs — do not use" (role logic fixed and t
 bundle lacked the certificate blob (now reported); the E6 exploit test was flaky by design (rewritten to be
 deterministic in outcome).
 
+### M2 changes after the first live run (2026-10-07)
+| Change | Built | Proof (test; each shown to FAIL on the previous code) |
+|---|---|---|
+| Dev estimate = k-fold cross-validation (user decision; claim policy) | `research.setup` (protected) builds k = 5 folds over the public training file (`data.cv_folds`: seeded shuffle, round-robin; stratified by class for accuracy/f1_macro); every training row is a dev example exactly once; out-of-fold predictions are concatenated in fold order; the claim forecast, dev racing and replica check use them unchanged (paired BCa over dev examples). The profile is now computed on the full public training file. | `test_dev_estimate_covers_every_public_training_row_once` (old code: 80 of 400 rows); `test_cv_folds_partition_the_training_rows`, `test_cv_folds_refuse_bad_k_and_missing_target` |
+| Dev runs isolated per fold | each fold runs in a FRESH sandbox holding only that fold's training rows and validation features (`modules._dev_predict`); the baseline's dev runs use the vault-registered baseline bytes (= the held-out comparator) | `test_dev_scoring_cannot_read_the_validation_labels`: a candidate copying labels out of the workspace's training file scored **1.0 on noisy rings on the old code** (a real dev-cheating loophole; held-out was never affected) and ~1/3 now |
+| New state keys protected | `dev_folds`, `dev_scheme` added to `RESERVED_OUTPUT_KEYS` | `test_edits_cannot_fake_kernel_state…` now wires the sneak node into the graph (an unwired node was refused for being a terminal, so the old test proved nothing for unreserved keys) with a positive control; a wired `dev_folds` writer was ACCEPTED on the old code |
+| Outage during certification issued a REJECTED certificate (found while fixing `test_infra` after CV) | `Kernel.certify` re-raises `InfraError` instead of counting it as a failed check: no certificate is recorded, the engine's transient retry re-runs certification. `test_infra`'s fake Docker now makes spawned boxes flaky too (like `DockerSandbox.spawn`); before, CV moved every program into spawned boxes and the outage path silently stopped being exercised (the test failed honestly) | `test_infrastructure_outage_during_certification_issues_no_certificate` (old code: no InfraError, a certificate was recorded) |
+| Suite split isolation (user decision) | see Known limitations, "Held-out examples shared across suite tasks" | `test_tasks_from_one_dataset_share_a_split[iris]` (old code splits all four pairs), `test_suite_loading_refuses_examples_shared_across_splits`, `test_suite_loading_refuses_a_task_without_source` |
+
+Statistical caveats of the CV dev estimate (stated in `claims.forecast`): the bootstrap resamples out-of-fold
+examples as if independent, ignoring the variance between the k fitted models (no unbiased estimator of k-fold CV
+variance exists; Bengio & Grandvalet 2004), and dev selects the best of several candidates (winner's curse). Both
+make the forecast optimistic; neither is corrected; the prediction ledger measures calibration. Cost: 5 sandbox
+runs per dev evaluation instead of 1, no extra model calls.
+
 ## Done before M0 (v0 build)
 | Layer | What | Where |
 |---|---|---|
@@ -166,8 +181,9 @@ deterministic in outcome).
     (`research/modules.py` `_dev_labels`), so no predictions blob can share their ref. Test
     `test_perfect_dev_predictions_are_not_a_leak` fails without the fix (verified by stashing it) and passes with it.
   - K7 rejection is correct: the claim rule (δ = max(floor, ½ × dev 90% lower bound)) had almost no dev information
-    (baseline 22/24, every candidate 24/24), so it fell back to the 0.02 floor. Changing the dev estimate (e.g.
-    cross-validation) is a claim-policy decision pending with the user.
+    (baseline 22/24, every candidate 24/24), so it fell back to the 0.02 floor. **Changed 2026-10-07 (user
+    decision):** the dev estimate is now 5-fold cross-validation (see "M2 changes after the first live run").
+    Not yet validated live.
 - Finding for M1 (K4): the seed CI was [+0.607, +0.607]. The generated solution ignores the seed, so the seed check
   was degenerate and the evidence rested on the test-example bootstrap alone. K4 must detect zero seed variance
   and say so instead of counting it as a passed check.
@@ -189,11 +205,21 @@ deterministic in outcome).
   and its repair variant are re-splits of the same base dataset. Every test example of `wine-real` (54/54),
   `breast_cancer-real` (171/171), `digits-real` (540/540) and `diabetes-real` (133/133) appears in the paired repair
   task's public test or TRAIN file (e.g. 38 of wine-real's 54 hidden test labels are public in
-  `wine_knn_unscaled/public/train.csv`). Today each pair sits in the same split, but only by luck of the cyclic split
-  assignment (`research/suite.py`), which does not group tasks by base dataset. The Kernel identifies held-out sets
-  by dataset id and exact bytes, so K6 ("never used") and the Bonferroni family cannot see overlapping examples under
-  different ids. Single runs are unaffected (a run sees only its own task); cross-task paths (evolution, future
-  memory) are not. Fix options pending with the user.
+  `wine_knn_unscaled/public/train.csv`). Each pair sat in the same split only by luck of the cyclic assignment.
+  **Fixed 2026-10-07 (user decision: option A):** every suite task records its `source` (base dataset);
+  `assign_splits` keeps a source in one split; `check_split_isolation` refuses a missing source, a source spanning
+  splits, and (content-based, whatever the declared sources) any example row shared by tasks of different splits;
+  `build_suite` and `load_suite` fail closed on it, `validate_suite.py` reports it. The live suite's `suite.yaml`
+  was annotated with sources (backup `suite.pre-source.yaml`, sha256 5eff7015…); splits unchanged (verified for all
+  21 tasks); 0 isolation problems. **Still open (option B, before M3):** the Kernel identifies held-out sets by
+  dataset id and exact bytes, so K6 ("never used") and the Bonferroni family cannot see overlapping examples
+  under different ids; the row check matches exact text only (re-formatted copies are not detected).
+- **Dev honesty depends on the harness spec:** every public training row is now a dev example, and the run
+  workspace holds the public training file. A `tool` node (an allowed edit type) could put training rows into a
+  prompt, letting a model write a lookup-table solution that inflates the dev score. Held-out integrity is not
+  affected (confirmation runs in fresh sandboxes without the labels; K6 would reject the claim), but dev
+  selection, dev racing and forecasts would be corrupted. Under `LocalSandbox` (tests only) a program can also
+  read the host filesystem; only Docker's mount isolation protects dev and held-out runs.
 - **Invariant 10 not implemented:** runs and loops carry no MECHANICAL / VALIDATED label (GOAL §6.1).
 - Kernel v1 deviations from GOAL §4: untested assumptions are listed, not yet tier-lowering; label SUPPORTED is
   never issued (no judge/retrospective evidence yet); kinds scaling_law/rediscovery are typed but rejected (K1);

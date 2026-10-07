@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from custom_harness.kernel.execution import DEFAULT_ARGV, run_program
+from custom_harness.research.suite import check_split_isolation
 from custom_harness.research.task import load_task
 from custom_harness.sandbox.docker import DockerSandbox
 from custom_harness.verify import metrics as M
@@ -43,6 +44,8 @@ def labels(path: Path) -> list[str]:
 
 def main() -> int:
     suite = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    isolation = check_split_isolation(suite["tasks"])
+    print(json.dumps({"split_isolation_problems": isolation}), flush=True)
     bad = 0
     with tempfile.TemporaryDirectory() as tmp:
         for i, t in enumerate(suite["tasks"]):
@@ -74,8 +77,8 @@ def main() -> int:
             bad += bool(problems)
             print(json.dumps({"task": t["id"], "split": t["split"], "metric": task.metric, "n_test": len(y),
                               **{k: round(v, 4) for k, v in scores.items()}, "problems": problems}), flush=True)
-    print(json.dumps({"tasks": len(suite["tasks"]), "unusable": bad}))
-    return 1 if bad else 0
+    print(json.dumps({"tasks": len(suite["tasks"]), "unusable": bad, "split_isolation_problems": len(isolation)}))
+    return 1 if bad or isolation else 0
 
 
 if __name__ == "__main__":

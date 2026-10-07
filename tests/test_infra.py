@@ -130,6 +130,11 @@ class FlakyDockerLike(LocalSandbox):
 
     count = 0
 
+    def spawn(self, workspace):
+        # like DockerSandbox.spawn: fresh boxes (dev folds, held-out runs, Kernel re-execution) share the daemon,
+        # so they share its outages
+        return FlakyDockerLike(workspace, i_understand_no_isolation=True)
+
     def exec(self, command, timeout_s=600, env=None):
         FlakyDockerLike.count += 1
         if FlakyDockerLike.count % 11 in (5, 6):

@@ -64,7 +64,8 @@ DEFAULT_PROTECTED_NODES = ("setup", "claim", "confirm", "certify", "replicate", 
                            "replica_confirm", "replica_certify", "report", "audit")
 # State keys that only trusted code may write: an added node writing one could fake a claim, a candidate,
 # a certificate or an audit result (state that scoring and reporting depend on).
-RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "claim", "claim_hash", "prereg_seq", "evidence_ids",
+RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
+                                  "claim", "claim_hash", "prereg_seq", "evidence_ids",
                                   "confirm_failures",
                                   "certificate", "checklist", "publishable", "publish_blockers", "report",
                                   "report_ref", "audit", "best", "attempts", "n_attempts", "baseline_dev",

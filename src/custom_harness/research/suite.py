@@ -115,6 +115,13 @@ class TaskSpecFiles:
     baseline: str
     family: str
     defect: str | None = None
+    # the base dataset the rows were drawn from; tasks re-split from the same data share examples (a repair task
+    # and its real-data task), so they must share a split. None = generated independently (the task id).
+    source: str | None = None
+
+    @property
+    def data_source(self) -> str:
+        return self.source or self.task_id
 
 
 def _csv(rows: list[list[str]]) -> bytes:
@@ -298,10 +305,70 @@ def real_task(name: str, data: dict, seed: int, *, baseline: str | None = None, 
     return TaskSpecFiles(task_id or f"{name}-real", f"{name.replace('_', ' ').title()} (real data)", desc, metric,
                          target, header, tr, te,
                          baseline or _fill(CENTROID if is_cls else MEAN, target),
-                         "repair" if defect else "real", defect)
+                         "repair" if defect else "real", defect, source=name)
 
 
 # ---------------------------------------------------------------- the suite
+_PATTERN = ("evolve", "gate", "evolve", "sealed", "evolve")
+
+
+def source_of(task_id: str) -> str:
+    """The base dataset of a task built by this module (used to annotate suites written before `source` existed)."""
+    if task_id in REPAIRS:
+        return REPAIRS[task_id][0]
+    if task_id.endswith("-real") and task_id.removesuffix("-real") in REAL:
+        return task_id.removesuffix("-real")
+    return task_id
+
+
+def assign_splits(specs: list[TaskSpecFiles]) -> dict[str, str]:
+    """~60/20/20 evolve/gate/sealed, cycled over tasks ordered by family so every split mixes families; then every
+    task takes the split of the first task (in that order) drawn from the same base dataset, so examples shared
+    by re-splits of one dataset can never sit in two splits (a gate/sealed label would be public elsewhere)."""
+    ordered = sorted(specs, key=lambda t: (t.family, t.task_id))
+    proposed = {s.task_id: _PATTERN[i % len(_PATTERN)] for i, s in enumerate(ordered)}
+    first: dict[str, str] = {}
+    for s in ordered:
+        first.setdefault(s.data_source, proposed[s.task_id])
+    return {s.task_id: first[s.data_source] for s in ordered}
+
+
+def _example_rows(task_dir: Path) -> set[str]:
+    """Every example's feature values (train rows without the target, and test rows) as normalised text."""
+    from .task import load_task  # local import: task.py is light, but keep this module importable on its own
+
+    task = load_task(task_dir)
+    rows: set[str] = set()
+    with open(task_dir / "public" / task.train_file, newline="", encoding="utf-8") as f:
+        train = list(csv.reader(f))
+    ti = train[0].index(task.target_column)
+    rows |= {",".join(v for j, v in enumerate(r) if j != ti) for r in train[1:] if r}
+    with open(task_dir / "public" / task.test_features_file, newline="", encoding="utf-8") as f:
+        rows |= {",".join(r) for r in list(csv.reader(f))[1:] if r}
+    return rows
+
+
+def check_split_isolation(entries: list[dict]) -> list[str]:
+    """Problems that would let one split see another split's examples: a missing source, a source spread over
+    several splits, or (by content, whatever the declared sources say) an example row present in tasks of two
+    different splits. Compares public files only; exact text match, so re-formatted copies are not detected."""
+    problems = [f"task {e.get('id')} has no `source` (base dataset)" for e in entries if not e.get("source")]
+    by_source: dict[str, set[str]] = {}
+    for e in entries:
+        if e.get("source"):
+            by_source.setdefault(e["source"], set()).add(e["split"])
+    problems += [f"source {s} spans splits {sorted(sp)}" for s, sp in sorted(by_source.items()) if len(sp) > 1]
+    rows = {e["id"]: _example_rows(Path(e["dir"])) for e in entries}
+    for i, a in enumerate(entries):
+        for b in entries[i + 1:]:
+            if a["split"] != b["split"]:
+                shared = len(rows[a["id"]] & rows[b["id"]])
+                if shared:
+                    problems.append(f"{a['id']} ({a['split']}) and {b['id']} ({b['split']}) share {shared} "
+                                    f"example row(s)")
+    return problems
+
+
 def build_suite(out: Path, *, real_data: dict[str, dict] | None) -> Path:
     """Write every task and suite.yaml. real_data=None builds the synthetic families only."""
     out = Path(out)
@@ -311,12 +378,14 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None) -> Path:
         for tid, (name, model, defect) in REPAIRS.items():
             specs.append(real_task(name, real_data[name], seed=11, task_id=tid, defect=defect,
                                    baseline=_fill(_SK, "target", model)))
-    # ~60/20/20 evolve/gate/sealed, cycled over tasks ordered by family so every split mixes families
-    pattern = ("evolve", "gate", "evolve", "sealed", "evolve")
+    splits = assign_splits(specs)
     entries = []
-    for i, s in enumerate(sorted(specs, key=lambda t: (t.family, t.task_id))):
+    for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
         d = write_task(s, out)
-        entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": pattern[i % len(pattern)],
-                        "family": s.family, **({"defect": s.defect} if s.defect else {})})
+        entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
+                        "family": s.family, "source": s.data_source, **({"defect": s.defect} if s.defect else {})})
+    problems = check_split_isolation(entries)
+    if problems:  # fail closed: never write a suite whose splits leak into each other
+        raise ValueError("suite splits are not isolated: " + "; ".join(problems))
     (out / "suite.yaml").write_text(yaml.safe_dump({"tasks": entries}, sort_keys=False), encoding="utf-8")
     return out / "suite.yaml"

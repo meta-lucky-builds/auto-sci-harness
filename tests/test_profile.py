@@ -6,7 +6,9 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
-from custom_harness.research.data import profile, write_csv
+import pytest
+
+from custom_harness.research.data import cv_folds, profile, write_csv
 
 
 def _write(tmp: Path, header, rows) -> Path:
@@ -52,3 +54,47 @@ def test_regression_association_imbalance_and_outliers(tmp_path):
     imb = [["1", "a"] for _ in range(95)] + [["2", "b"] for _ in range(5)]
     q = profile(_write(tmp_path, ["f", "label"], imb), "label")
     assert any("class imbalance" in f for f in q["flags"])
+
+
+# ---------------------------------------------------------------- cross-validation folds (dev estimate)
+def _rows(n: int, n_classes: int = 3) -> list[list[str]]:
+    rng = random.Random(1)
+    # imbalanced labels, so stratification has something to do
+    return [[f"{rng.random():.6f}", str(min(n_classes - 1, int(rng.random() ** 2 * n_classes)))] for _ in range(n)]
+
+
+def _parse(data: bytes) -> list[list[str]]:
+    return [line.split(",") for line in data.decode("utf-8").splitlines()]
+
+
+@pytest.mark.parametrize("stratify", [False, True])
+def test_cv_folds_partition_the_training_rows(tmp_path, stratify):
+    rows = _rows(103)
+    folds = cv_folds(_write(tmp_path, ["x", "y"], rows), "y", 5, seed=3, stratify=stratify)
+    assert len(folds) == 5
+    valid = [i for f in folds for i in f["rows"]]
+    assert sorted(valid) == list(range(103))  # every row is a validation row exactly once
+    assert max(len(f["rows"]) for f in folds) - min(len(f["rows"]) for f in folds) <= 1
+    for f in folds:
+        train = _parse(f["train"])
+        vx = _parse(f["valid_x"])
+        assert train[0] == ["x", "y"] and vx[0] == ["x"]  # target never in the validation features
+        assert train[1:] == [rows[i] for i in range(103) if i not in set(f["rows"])]  # exactly the other folds
+        assert vx[1:] == [[rows[i][0]] for i in f["rows"]] and f["labels"] == [rows[i][1] for i in f["rows"]]
+    if stratify:  # per class, fold counts differ by at most one
+        for c in {r[1] for r in rows}:
+            counts = [sum(1 for y in f["labels"] if y == c) for f in folds]
+            assert max(counts) - min(counts) <= 1, (c, counts)
+    again = cv_folds(_write(tmp_path, ["x", "y"], rows), "y", 5, seed=3, stratify=stratify)
+    assert [f["rows"] for f in again] == [f["rows"] for f in folds]  # deterministic given the seed
+    other = cv_folds(_write(tmp_path, ["x", "y"], rows), "y", 5, seed=4, stratify=stratify)
+    assert [f["rows"] for f in other] != [f["rows"] for f in folds]  # and the seed matters
+
+
+def test_cv_folds_refuse_bad_k_and_missing_target(tmp_path):
+    p = _write(tmp_path, ["x", "y"], _rows(4))
+    for k in (1, 5):
+        with pytest.raises(ValueError, match="k="):
+            cv_folds(p, "y", k, seed=0, stratify=False)
+    with pytest.raises(ValueError, match="target column"):
+        cv_folds(p, "z", 2, seed=0, stratify=False)

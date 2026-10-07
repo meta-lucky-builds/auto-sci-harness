@@ -26,7 +26,7 @@ from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
 from ..verify.ranking import bradley_terry, rankings_to_wins
 from ..verify.stats import paired_example_interval
-from .data import dev_split, profile, read_predictions
+from .data import cv_folds, profile, read_predictions
 from .task import TaskSpec, load_task
 
 
@@ -64,17 +64,17 @@ def _dev_labels(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
     return ctx.store.blobs.get_json(state["_private_dev_labels_ref"])[_DEV_LABELS_KEY]
 
 
-def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: int,
+def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
                   timeout_s: float) -> tuple[list[str] | None, dict[str, Any]]:
+    """Run a solution under the CLI contract in sandbox `sb` (paths relative to its workspace)."""
     out_rel = f"out/preds_{uuid.uuid4().hex[:8]}.csv"
-    _ws(ctx, "out").mkdir(exist_ok=True)
-    sb = _sb(ctx)
+    safe_path(sb.workspace, "out").mkdir(exist_ok=True)
     res = sb.exec([sb.python, script, "--train", train, "--test", test,
                    "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s)
     info: dict[str, Any] = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
             "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:]}
     try:
-        out = _ws(ctx, out_rel)
+        out = safe_path(sb.workspace, out_rel)
     except WorkspaceEscape as e:
         # the agent's code planted a link where its output should be: a failed attempt by the agent,
         # recorded (and later flagged by the leak audit), never followed
@@ -88,6 +88,42 @@ def _run_solution(ctx: ModuleContext, script: str, train: str, test: str, seed: 
     except ValueError as e:
         info["stderr_tail"] += f"\n[harness] invalid predictions file: {e}"
         return None, info
+
+
+def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
+                 name: str) -> tuple[list[str] | None, dict[str, Any]]:
+    """Out-of-fold dev predictions (k-fold cross-validation on the public training data).
+
+    The program runs once per fold, each time in a FRESH sandbox whose workspace holds only that fold's training
+    rows and validation features: never the run workspace, which holds the full public training file and hence
+    every validation label (a program reading it could score itself perfectly on dev). Predictions are
+    concatenated in fold order, which is the order of the private dev labels. The first failing fold fails the
+    whole evaluation; its diagnostics are returned (with "fold" set)."""
+    task = _task(state)
+    sb = _sb(ctx)
+    root = sb.workspace.parent / f"{sb.workspace.name}-dev" / f"{name}-{uuid.uuid4().hex[:8]}"
+    preds: list[str] = []
+    wall = 0.0
+    for k, fold in enumerate(state["dev_folds"]):
+        box = sb.spawn(root / f"fold{k}")
+        safe_path(box.workspace, "solution.py").write_bytes(code)
+        safe_path(box.workspace, "train.csv").write_bytes(ctx.store.blobs.get(fold["train_ref"]))
+        safe_path(box.workspace, "valid_X.csv").write_bytes(ctx.store.blobs.get(fold["valid_x_ref"]))
+        out, info = _run_solution(box, "solution.py", "train.csv", "valid_X.csv", 0, task.solution_timeout_s)
+        wall += info["wall_s"]
+        if out is not None and len(out) != fold["n"]:
+            info["stderr_tail"] += f"\n[harness] fold {k}: expected {fold['n']} predictions, got {len(out)}"
+            out = None
+        if out is None:
+            return None, {**info, "fold": k, "wall_s": round(wall, 2)}
+        preds += out
+    return preds, {"fold": None, "wall_s": round(wall, 2), "stdout_tail": "", "stderr_tail": ""}
+
+
+def _baseline_code(state: dict[str, Any], ctx: ModuleContext) -> bytes:
+    """The baseline exactly as registered in the vault: the dev comparator is byte-identical to the held-out one."""
+    from ..kernel import Kernel
+    return ctx.store.blobs.get(Kernel(ctx.store).vault.artifacts()[state["datasets"]["baseline"]].hash)
 
 
 def _score(task: TaskSpec, y_true: list[str], preds: list[str] | None) -> float | None:
@@ -117,11 +153,19 @@ def setup(state, params, ctx: ModuleContext):
     for name in (task.train_file, task.test_features_file):
         shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
     shutil.copy2(task_dir / task.baseline_file, _ws(ctx, "baseline.py"))
-    labels = dev_split(_ws(ctx, f"data/{task.train_file}"), task.target_column, task.dev_fraction,
-                       seed=params.get("split_seed", 0), out_dir=_ws(ctx, "dev"))
+    # Dev estimate = k-fold cross-validation over the public training file (params: dev_folds, split_seed).
+    # setup is a protected node, so the evolver cannot change how dev evidence is produced.
+    k, split_seed = int(params.get("dev_folds", 5)), int(params.get("split_seed", 0))
+    stratified = task.metric in M.CLASSIFICATION
+    folds = cv_folds(_ws(ctx, f"data/{task.train_file}"), task.target_column, k, split_seed, stratified)
+    labels = [y for f in folds for y in f["labels"]]  # fold order = the order of out-of-fold predictions
     from .claims import register_task  # local import: claims.py builds on the helpers in this module
     datasets = register_task(ctx, task, task_dir)
     return {"task": task.model_dump(), "datasets": datasets,
+            "dev_scheme": {"kind": "kfold", "k": k, "seed": split_seed, "stratified": stratified,
+                           "n": len(labels)},
+            "dev_folds": [{"train_ref": ctx.store.blobs.put(f["train"]),
+                           "valid_x_ref": ctx.store.blobs.put(f["valid_x"]), "n": len(f["labels"])} for f in folds],
             # per-run canary: lives only in private state; if it ever shows up in a prompt, a response,
             # the trace or the workspace, private state leaked (checked by the audit, I5)
             "_private_canary": new_canary(),
@@ -131,7 +175,8 @@ def setup(state, params, ctx: ModuleContext):
 
 @register("research.profile_data")
 def profile_data(state, params, ctx):
-    return {"profile": profile(_ws(ctx, "dev/train.csv"), _task(state).target_column)}
+    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it)."""
+    return {"profile": profile(_ws(ctx, f"data/{_task(state).train_file}"), _task(state).target_column)}
 
 
 @register("research.baseline_dev")
@@ -139,11 +184,11 @@ def baseline_dev(state, params, ctx):
     _require_isolation(ctx)
     task = _task(state)
     labels = _dev_labels(state, ctx)
-    preds, info = _run_solution(ctx, "baseline.py", "dev/train.csv", "dev/valid_X.csv", 0,
-                                task.solution_timeout_s)
+    preds, info = _dev_predict(ctx, state, _baseline_code(state, ctx), "baseline")
     s = _score(task, labels, preds)
     if s is None:
-        raise RuntimeError(f"baseline failed on dev split: {info['stderr_tail'][-500:]}")
+        raise RuntimeError(f"baseline failed in cross-validation (fold {info.get('fold')}): "
+                           f"{info['stderr_tail'][-500:]}")
     return {"baseline_dev": s, "baseline_dev_preds_ref": ctx.store.blobs.put_json(preds)}
 
 
@@ -237,7 +282,7 @@ def next_hypothesis(state, params, ctx):
 
 def _dev_better(task: TaskSpec, labels: list[str], new_preds: list[str], best_preds: list[str]) -> bool:
     """Dev racing: a refinement replaces the incumbent only if a paired dev interval says it is better
-    (one-sided 90%), not merely because its dev score is higher (repeated selection on one dev split
+    (one-sided 90%), not merely because its dev score is higher (repeated selection on one dev estimate
     overfits it)."""
     iv = paired_example_interval(M.METRICS[task.metric], labels, [new_preds], [best_preds],
                                  higher_is_better=task.higher_is_better, alpha=0.2, n_boot=1000)
@@ -246,15 +291,14 @@ def _dev_better(task: TaskSpec, labels: list[str], new_preds: list[str], best_pr
 
 @register("research.run_candidate")
 def run_candidate(state, params, ctx):
-    """Write the implemented code, run it on the dev split, score, and decide the route
-    deterministically (PLAN P7): fix | next | verify | give_up."""
+    """Write the implemented code, score it by cross-validation on the public training data, and decide the
+    route deterministically (PLAN P7): fix | next | verify | give_up."""
     _require_isolation(ctx)
     task = _task(state)
     code = (state.get("impl") or {}).get("code", "")
-    _ws(ctx, "solution.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "solution.py").write_text(code, encoding="utf-8")  # kept in the run workspace for the record/audit
     labels = _dev_labels(state, ctx)
-    preds, info = _run_solution(ctx, "solution.py", "dev/train.csv", "dev/valid_X.csv", 0,
-                                task.solution_timeout_s)
+    preds, info = _dev_predict(ctx, state, code.encode("utf-8"), f"attempt{state.get('n_attempts', 0) + 1}")
     s = _score(task, labels, preds)
     error = None
     if s is None:

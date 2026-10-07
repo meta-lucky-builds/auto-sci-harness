@@ -3,6 +3,7 @@
 import json
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,78 @@ def test_perfect_dev_predictions_are_not_a_leak(store, tmp_path, rings_task, mon
     assert redacted == [], f"perfect predictions redacted as private at steps {redacted}"
     assert res.state["audit"]["I5"] is True, res.state["audit"]
     assert "K9" not in res.state["certificate"]["failed"], res.state["certificate"]
+
+
+# A dishonest solution: if the full public training file is reachable from its working directory, it copies the
+# validation labels out of it (features -> label lookup); otherwise it predicts a constant.
+CHEAT_DEV = '''
+import argparse, csv, os
+p = argparse.ArgumentParser()
+for k in ("--train", "--test", "--out"): p.add_argument(k)
+p.add_argument("--seed", type=int)
+a = p.parse_args()
+def load(path):
+    with open(path, newline="") as f:
+        r = list(csv.reader(f))
+    return r[0], r[1:]
+th, trows = load(a.test)
+lookup = {}
+if os.path.exists(os.path.join("data", "train.csv")):
+    h, rows = load(os.path.join("data", "train.csv"))
+    yi = h.index("label")
+    lookup = {tuple(v for j, v in enumerate(r) if j != yi): r[yi] for r in rows}
+with open(a.out, "w", newline="") as f:
+    w = csv.writer(f); w.writerow(["prediction"])
+    for r in trows: w.writerow([lookup.get(tuple(r), "0")])
+'''
+
+
+def _run_with_impl(store, tmp_path, task, code):
+    def llm_fn(req):
+        text = req.messages[-1].content
+        if "Implement this hypothesis" in text and "h_radius" in text:
+            return json.dumps({"code": code, "notes": "x"})
+        return scripted_llm(req)
+
+    spec = HarnessSpec.model_validate(yaml.safe_load(SPEC.read_text()))
+    llm = MockBackend(llm_fn)
+    return Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm}, store=store,
+                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
+        "rings", {"task_dir": str(task)})
+
+
+def test_dev_scoring_cannot_read_the_validation_labels(store, tmp_path, rings_task, monkeypatch):
+    """Red-team finding 2026-10-07: dev scoring ran candidates INSIDE the run workspace, next to the full public
+    training file (which holds every dev label). A candidate reading it scored itself perfectly on dev (held-out
+    stayed safe: confirmation uses fresh sandboxes), corrupting selection, dev racing and the claim forecast.
+    Dev runs now happen per fold in fresh sandboxes holding only that fold's inputs. (With LocalSandbox a program
+    could still walk the host filesystem; only Docker's mount isolation closes that, as for held-out runs.)"""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    res = _run_with_impl(store, tmp_path, rings_task, CHEAT_DEV)
+    assert res.status == RunStatus.COMPLETED, res.detail
+    cheat = [a for a in res.state["attempts"] if a["hypothesis_id"] == "h_radius"]
+    assert cheat and cheat[0]["error"] is None  # it ran
+    # noisy rings: no honest rule is perfect; ~1/3 is the constant-"0" fallback
+    assert cheat[0]["dev_score"] < 0.6, cheat[0]
+
+
+def test_dev_estimate_covers_every_public_training_row_once(store, tmp_path, rings_task, monkeypatch):
+    """Live run run_cd99288e65ba4a4f: a 24-row dev split (20%) carried so little information that the claim fell
+    back to the 0.02 floor and K7 correctly rejected it as trivially safe. The dev estimate now uses k-fold
+    cross-validation: every public training row is a dev example exactly once."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
+    res = _run_with_impl(store, tmp_path, rings_task, KNN_RADIUS)
+    assert res.status == RunStatus.COMPLETED, res.detail
+    lines = (rings_task / "public" / "train.csv").read_text().splitlines()
+    yi = lines[0].split(",").index("label")
+    train_labels = [line.split(",")[yi] for line in lines[1:] if line]
+    dev = store.blobs.get_json(res.state["_private_dev_labels_ref"])["private_dev_labels"]
+    assert len(dev) == len(train_labels) == 400
+    assert Counter(dev) == Counter(train_labels)
+    preds = store.blobs.get_json(res.state["best"]["dev_preds_ref"])
+    assert len(preds) == len(dev)  # one out-of-fold prediction per dev example
 
 
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):

@@ -1,4 +1,4 @@
-"""Deterministic data handling on the host: CSV IO, dev split, data profiling (SciDER-style, PLAN L4.2)."""
+"""Deterministic data handling on the host: CSV IO, cross-validation folds, data profiling (SciDER-style, PLAN L4.2)."""
 
 from __future__ import annotations
 
@@ -35,21 +35,44 @@ def read_predictions(path: Path) -> list[str]:
     return [r[0] for r in rows]
 
 
-def dev_split(train_csv: Path, target: str, fraction: float, seed: int, out_dir: Path) -> list[str]:
-    """Split public train into dev/train.csv + dev/valid_X.csv. Returns the held-back valid labels
-    (kept on the host only)."""
+def _csv_bytes(header: list[str], rows: list[list[str]]) -> bytes:
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow(header)
+    w.writerows(rows)
+    return buf.getvalue().encode("utf-8")
+
+
+def cv_folds(train_csv: Path, target: str, k: int, seed: int, stratify: bool) -> list[dict[str, Any]]:
+    """K-fold cross-validation over the public training file (the dev estimate, GOAL L4.7).
+
+    Rows are shuffled with `seed`, then dealt round-robin to the k folds (stratified: dealt class by class, so
+    every fold's class counts differ by at most one). Each fold is {"train": csv bytes of every OTHER fold's rows
+    (with the target), "valid_x": csv bytes of this fold's rows without the target, "labels": this fold's
+    target values, "rows": their 0-based indices in the file}; validation rows keep their file order. Every row
+    is a validation row in exactly one fold. The labels stay on the host (they are the private dev labels)."""
     header, rows = read_csv(train_csv)
     if target not in header:
         raise ValueError(f"target column '{target}' not in {train_csv}")
+    if not 2 <= k <= len(rows):
+        raise ValueError(f"need 2 <= k <= number of rows ({len(rows)}), got k={k}")
     ti = header.index(target)
     idx = list(range(len(rows)))
     random.Random(seed).shuffle(idx)
-    n_valid = max(1, int(len(rows) * fraction))
-    valid, train = idx[:n_valid], idx[n_valid:]
-    write_csv(out_dir / "train.csv", header, [rows[i] for i in train])
-    x_header = [h for h in header if h != target]
-    write_csv(out_dir / "valid_X.csv", x_header, [[v for j, v in enumerate(rows[i]) if j != ti] for i in valid])
-    return [rows[i][ti] for i in valid]
+    if stratify:
+        groups: dict[str, list[int]] = {}
+        for i in idx:
+            groups.setdefault(rows[i][ti], []).append(i)
+        idx = [i for label in sorted(groups) for i in groups[label]]
+    fold_of = {i: n % k for n, i in enumerate(idx)}
+    x_header = [h for j, h in enumerate(header) if j != ti]
+    folds = []
+    for f in range(k):
+        valid = [i for i in range(len(rows)) if fold_of[i] == f]
+        folds.append({"train": _csv_bytes(header, [rows[i] for i in range(len(rows)) if fold_of[i] != f]),
+                      "valid_x": _csv_bytes(x_header, [[v for j, v in enumerate(rows[i]) if j != ti] for i in valid]),
+                      "labels": [rows[i][ti] for i in valid], "rows": valid})
+    return folds
 
 
 def _as_float(v: str) -> float | None:

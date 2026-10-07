@@ -6,6 +6,7 @@ import math
 from collections import Counter
 
 HIGHER_IS_BETTER = {"accuracy": True, "f1_macro": True, "rmse": False, "mae": False}
+CLASSIFICATION = frozenset({"accuracy", "f1_macro"})  # metrics over class labels (stratify folds on these)
 
 
 def _num(xs: list[str]) -> list[float]:

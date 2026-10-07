@@ -585,3 +585,31 @@ def test_test_set_reuse_is_multiplicity_not_peeking(tmp_path):
     w.kernel.preregister(third)
     assert "K2" in w.kernel.certify(third, w.evaluate_all(third)).failed()
     w.close()
+
+
+def test_infrastructure_outage_during_certification_issues_no_certificate(tmp_path, monkeypatch):
+    """Found 2026-10-07: a check that raises is a FAILED check (fail closed), so a Docker outage during K3's
+    re-execution turned into an immutable REJECTED certificate for an honest claim: an infrastructure failure
+    scored as a policy failure (GOAL L1). An outage must issue no certificate at all; certification is then
+    retried and judges the claim on its merits."""
+    from custom_harness.errors import InfraError
+    from custom_harness.kernel import Kernel
+
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    w = World(tmp_path / "w")
+    try:
+        claim = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.3)
+        w.kernel.preregister(claim)
+        ids = w.evaluate_all(claim)
+
+        class DaemonDown:
+            def replay(self, record, vault):
+                raise InfraError("Cannot connect to the Docker daemon", transient=True)
+
+        before = len(w.kernel.ledger.entries("certificate"))
+        with pytest.raises(InfraError):
+            Kernel(w.store, replayer=DaemonDown()).certify(claim, ids)
+        assert len(w.kernel.ledger.entries("certificate")) == before  # nothing recorded
+        assert w.kernel.certify(claim, ids).label == Label.CERTIFIED_INTERNAL  # the retry judges the claim
+    finally:
+        w.close()

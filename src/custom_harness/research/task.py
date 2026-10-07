@@ -33,7 +33,6 @@ class TaskSpec(BaseModel):
     test_features_file: str = "test_X.csv"
     test_labels_file: str = "test_y.csv"
     baseline_file: str = "baseline.py"
-    dev_fraction: float = 0.2
     solution_timeout_s: float = 900
     allowed_libraries: list[str] = ["numpy", "pandas", "scikit-learn", "scipy", "torch"]
     # Minimum effect (metric units, positive = better) a claim on this task must assert. None = default:

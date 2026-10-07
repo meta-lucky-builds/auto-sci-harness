@@ -156,10 +156,22 @@ def test_edits_cannot_fake_kernel_state_or_duplicate_protected_modules():
     """An evolved harness must not be able to write the state that scoring and reporting trust, nor run a
     second copy of a protected step outside its protected position."""
     spec = seed_spec()
-    for key in ("certificate", "claim", "best", "audit", "_private_canary"):
+    # The sneak node is WIRED into the graph (hypothesize -> sneak -> tournament), so the only possible reason to
+    # refuse it is the key it writes; an unwired node would be refused anyway (not a terminal), proving nothing.
+    i = next(n for n, e in enumerate(spec.model_dump(mode="json")["edges"]) if e["source"] == "hypothesize")
+
+    def sneak(key: str) -> Edit:
+        return Edit(type=EditType.HOP, rationale="x", ops=[
+            EditOp(op="add", path="/nodes/sneak", value={"kind": "llm", "prompt": "p", "output_key": key}),
+            EditOp(op="replace", path=f"/edges/{i}/target", value="sneak"),
+            EditOp(op="add", path="/edges/-", value={"source": "sneak", "target": "tournament"})])
+
+    apply_edit(spec, sneak("notes"))  # positive control: the same wiring with a harmless key is accepted
+    # dev_folds: an added node replacing the folds (e.g. with training files that contain the validation rows)
+    # would let candidates score themselves perfectly on dev; dev_scheme is reported in the checklist
+    for key in ("certificate", "claim", "best", "audit", "_private_canary", "dev_folds", "dev_scheme"):
         with pytest.raises(EditRejected, match=r"reserved state key|private data"):
-            apply_edit(spec, Edit(type=EditType.HOP, rationale="x", ops=[
-                EditOp(op="add", path="/nodes/sneak", value={"kind": "llm", "prompt": "p", "output_key": key})]))
+            apply_edit(spec, sneak(key))
     with pytest.raises(EditRejected, match="protected module"):
         apply_edit(spec, Edit(type=EditType.HOP, rationale="x", ops=[
             EditOp(op="add", path="/nodes/certify2", value={"kind": "module", "module": "research.certify"})]))

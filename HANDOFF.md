@@ -139,8 +139,15 @@ The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A 
   confirm (fresh sandboxes, vault reads, idempotent) → certify (bundle, checklist, route) → replicate (claim+idea, no
   code) → replica_dev (near-copy refusal) → replica_claim/confirm/certify (same δ) → report (from the ledger only) →
   audit (I1 state vs ledger for both certificates, I2 K5, I4 byte-identical re-render + recomputed scores, I5 leaks).
-- **Claim rule**: δ = max(task floor, ½ × dev 90% lower bound); q = P(held-out effect ≥ δ) from dev, clamped to
-  [0.05, 0.95]. Learned the hard way: claiming the weakest bound (floor 0.02) gets correctly rejected by K7.
+- **Claim rule**: δ = max(task floor, ½ × lower bound of the two-sided 90% paired BCa dev interval); q =
+  P(held-out effect ≥ δ) from dev, clamped to [0.05, 0.95]. Learned the hard way: claiming the weakest bound
+  (floor 0.02) gets correctly rejected by K7 (first live run: a 24-row dev split gave no information).
+- **Dev estimate (since 2026-10-07)**: 5-fold cross-validation on the public training file, set in the protected
+  `setup` node (`dev_folds`, `split_seed`); each fold runs in a fresh sandbox with only its own inputs
+  (`modules._dev_predict`); out-of-fold predictions in fold order pair with the private dev labels. Before this,
+  dev runs shared the run workspace with the full training file (a demonstrated dev-cheating loophole).
+- **Suite splits**: tasks carry `source`; `load_suite`/`build_suite` refuse a source or any example row spanning
+  two splits (`research/suite.py: check_split_isolation`).
 - **Evolution score** (`evolve/evaluate.py`): 0.5·certified + 0.5·replicated + 0.5·clip(relative held-out
   improvement, −1, 1); None if infra failed; 0 if the run failed or the audit failed. Range [−0.5, 1.5].
 - **Evolution protections** (`evolve/edits.py`): protected nodes setup, claim, confirm, certify, replicate,

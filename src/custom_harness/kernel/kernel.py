@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 
+from ..errors import InfraError
 from ..records import Evidence, EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..tiers import Tier
@@ -87,6 +88,10 @@ class Kernel:
                 continue
             try:
                 results[kid] = ALL_CHECKS[kid](ctx)
+            except InfraError:
+                # the environment broke (e.g. Docker down during K3 re-execution): issue NO certificate, so the
+                # claim is judged on a retry instead of being rejected for an outage (infra != policy, GOAL L1)
+                raise
             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
                 results[kid] = CheckResult(status="fail", reasons=(f"check raised {type(e).__name__}: {e}",))
         ok = all(r.status in ("pass", "n/a") for r in results.values())
