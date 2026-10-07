@@ -92,7 +92,7 @@ class ExportResult:
 def _rejected_on(rec: dict[str, Any]) -> str | None:
     if rec.get("accepted"):
         return None
-    if rec.get("rejected_on") in ("evolve", "held_out_gate", "cost"):
+    if rec.get("rejected_on") in ("evolve", "held_out_gate", "cost", "exclusion_asymmetry"):
         return str(rec["rejected_on"])
     return "evolve" if str(rec.get("decision", "")).startswith("evolve") else "held_out_gate"
 

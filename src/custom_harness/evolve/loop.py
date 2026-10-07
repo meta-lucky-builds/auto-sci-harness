@@ -42,7 +42,16 @@ from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run
 from .export import proposer_view
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
-from .selection import PairedSample, Unit, cost_bound, gate, non_regression, paired_sample, race
+from .selection import (
+    PairedSample,
+    Unit,
+    cost_bound,
+    exclusion_check,
+    gate,
+    non_regression,
+    paired_sample,
+    race,
+)
 
 # lineage statuses whose edit signature the novelty gate refuses to see again (GOAL §5 L6.6, HarnessX "reverted").
 # Race losers are NOT included: they were eliminated on a few evolve units, never judged by the gate.
@@ -216,6 +225,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                                    lambda u: evaluator.score(parent, u))
             d = gate(evolve_s, gate_s, non_regression_eps=cfg.non_regression_eps,
                      require_evolve_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
+            # candidate-only exclusions over the acceptance evidence (fresh evolve + gate units; the LOFO groups are
+            # subsets of the gate units, the race is selection only and its parent runs predate the candidates')
+            excl = exclusion_check(evolve_s, gate_s)
             lofo = _lofo(tasks, heldout_families, heldout_domains, cfg,
                          lambda us: paired_sample(us, lambda u: evaluator.score(spec, u),
                                                   lambda u: evaluator.score(parent, u)))
@@ -225,9 +237,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             cost = cost_bound(valid_gate, lambda u: evaluator.outcome(spec, u).cost,
                               lambda u: evaluator.outcome(parent, u).cost,
                               max_increase=cfg.max_cost_increase, metric=cfg.cost_metric)
-            ok = d.accepted and lofo["passed"] and cost["passed"]
+            ok = d.accepted and lofo["passed"] and cost["passed"] and excl["passed"]
             rejected_on: str | None
-            if not d.accepted:
+            if not excl["passed"]:  # the comparison itself is untrustworthy: checked first (fail closed)
+                decision, rejected_on = "rejected: " + excl["reason"], "exclusion_asymmetry"
+            elif not d.accepted:
                 decision = d.reason
                 rejected_on = "evolve" if d.reason.startswith("evolve") else "held_out_gate"
             elif not lofo["passed"]:
@@ -250,7 +264,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                             "loop_label": loop_label,
                             "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
                             "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo, "cost": cost,
-                            "rejected_on": rejected_on, "signature": edit_signature(edit), "claims_check": claims})
+                            "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
+                            "claims_check": claims})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
             store.append_record("harness_edit", {
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
@@ -260,7 +275,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
                 "clusters_claimed": edit.predicted.failure_clusters_fixed, "claims_check": claims,
-                "cost": cost, "rejected_on": rejected_on, "signature": edit_signature(edit),
+                "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
                 "per_task": per_task, "flipped": flipped, "regressed": regressed,
                 "tasks_at_risk": sorted(at_risk), "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
             if ok:

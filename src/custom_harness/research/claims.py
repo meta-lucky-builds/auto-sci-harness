@@ -7,6 +7,7 @@
     certify  -> the Evidence Kernel issues the certificate (K0-K9, with re-execution); bundle + checklist
     report   -> rendered ONLY from the ledger and the evidence store (never from mutable run state)
     audit    -> I1 certificate resolves and matches the run state, I2 comparator integrity (K5),
+                I3 citations (literature check on the run's frozen snapshot + retrieval log; n/a without),
                 I4 report re-renders byte-identically + every score recomputed from stored predictions,
                 I5 leak and canary scan
 
@@ -678,10 +679,16 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
 @register("research.audit")
 def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """I1 certificate resolves and the run state agrees with the ledger; I2 comparator integrity (K5);
-    I3 citations (n/a until the literature module exists); I4 the report re-renders byte-identically from
-    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan."""
+    I3 citations (`citation_audit`: "n/a" without citations); I4 the report re-renders byte-identically from
+    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan.
+    passed = I1, I2, I4, I5 True and I3 True or "n/a" (anything else fails closed)."""
     task = _task(state)
     res: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "I5": True, "problems": []}
+    cites = citation_audit(state, ctx.run_id)
+    res["I3"] = cites["I3"]
+    res["problems"].extend(cites["problems"])
+    if cites["I3"] != "n/a":
+        res["citations"] = cites
 
     def fail(key: str, msg: str) -> None:
         res[key] = False
@@ -708,8 +715,43 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
                       extra_texts={"report": state.get("report", "")})
     for problem in leak["problems"]:
         fail("I5", problem)
-    res["passed"] = all(res[k] is True for k in ("I1", "I2", "I4", "I5"))
+    res["passed"] = (all(res[k] is True for k in ("I1", "I2", "I4", "I5"))
+                     and (res["I3"] is True or res["I3"] == "n/a"))
     return {"audit": res}
+
+
+def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:
+    """Audit I3 (docs/literature.md): the run's `citations` checked with an OFFLINE client on the run's frozen
+    snapshot `literature_snapshot` (an id in $CHH_DATA_DIR/literature) against the run's RetrievalLog (session = run
+    id), I3 = i3_verdict(...)["I3"]. No citations -> "n/a". Anything that prevents the check (no or unknown snapshot,
+    malformed citations, a retrieval-log integrity error) -> I3 False (fail closed). Both keys are reserved state
+    (evolve/edits.py), so only trusted nodes can set them."""
+    raw = state.get("citations")
+    if raw is None or raw == []:
+        return {"I3": "n/a", "problems": []}
+    from pydantic import ValidationError
+
+    from ..literature.cite import Citation, check_citations, i3_verdict
+    from ..literature.client import offline_client
+    from ..literature.http import LiteratureError
+    from ..literature.retrieval import RetrievalLog
+    from ..literature.snapshot import SnapshotStore
+    snap = state.get("literature_snapshot")
+    out: dict[str, Any] = {"I3": False, "snapshot": snap if isinstance(snap, str) else None, "session": session}
+    try:
+        if not isinstance(raw, list):
+            raise ValueError(f"citations must be a list, got {type(raw).__name__}")
+        cites = [Citation.model_validate(c) for c in raw]
+        if not isinstance(snap, str) or not snap:
+            raise ValueError("no frozen literature snapshot (literature_snapshot) for the cited papers")
+        lit = SnapshotStore(data_dir() / "literature")
+        client = offline_client(lit, snap)
+        retrieved = RetrievalLog(lit, session).retrieved_ids()
+        verdict = i3_verdict(check_citations(cites, client, retrieved))
+    except (ValueError, ValidationError, LiteratureError, OSError) as e:
+        return out | {"problems": [f"I3: citations cannot be checked (fail closed): {e}"]}
+    return out | {"I3": verdict["I3"], "problems": verdict["problems"], "counts": verdict["counts"],
+                  "results": verdict["results"], "as_of": client.as_of.isoformat() if client.as_of else None}
 
 
 def _audit_certificate(state: dict[str, Any], p: str, ctx: ModuleContext, kernel: Kernel, ids: dict[str, str],

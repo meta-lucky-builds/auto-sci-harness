@@ -267,8 +267,10 @@ Test files: R1 = `tests/test_review_kernel.py` on `m3-r1-kernel` (10 fail = find
 - A `tool` node (an allowed edit type) could put training rows into a prompt, which would inflate dev scores.
   Held-out results stay safe (K6 would reject).
 - Under `LocalSandbox` (tests only) programs can read the host filesystem.
-- A candidate-only infra exclusion is not counted against the candidate. Doing so would conflict with the M0 outage
-  test.
+- Candidate-only infra exclusions (wired 2026-10-07, m3-wire): the loop fails a candidate closed when the units lost
+  on the candidate only (fresh evolve + gate) exceed random outages by a one-sided exact sign test, alpha 0.01
+  (>= 7 one-sided losses needed). Limits: assumes equal exposure of both arms; race data are not counted (selection
+  only; the parent's race runs predate the candidates'). The M0 outage test still reaches the clean decision.
 - Dataset roles (external/future) are trusted from the registrant. They should become a human-approved action.
 - Adaptive test-set reuse: Bonferroni over the claims registered on a target is a practical defence, not a
   guarantee. Sealed `finalize` is the strong form.
@@ -315,8 +317,9 @@ Test files: R1 = `tests/test_review_kernel.py` on `m3-r1-kernel` (10 fail = find
 - Resume recovers model-call spend of a killed step, not its sandbox time.
 - The Codex CLI wrote code for older scikit-learn APIs twice in run 2. The sandbox's library versions are not in
   the implement prompt.
-- Subscription mode is slow and quota-bound. SQLite only. I3 (citation check) is n/a until the literature module
-  exists (M7).
+- Subscription mode is slow and quota-bound. SQLite only. I3 (citation check) is wired into the audit
+  (2026-10-07) but n/a in every run until a research.literature node writes `citations` / `literature_snapshot`
+  (not built).
 
 ---
 

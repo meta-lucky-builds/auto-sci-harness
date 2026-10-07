@@ -75,7 +75,9 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "n_improves", "critique", "replication_brief", "replica_impl", "replica_best",
                                   "replica_claim", "replica_claim_hash", "replica_prereg_seq",
                                   "replica_evidence_ids", "replica_confirm_failures", "replica_certificate",
-                                  "replica_checklist", "replica_publishable", "replica_publish_blockers"})
+                                  "replica_checklist", "replica_publishable", "replica_publish_blockers",
+                                  # audit I3 inputs (research/claims.py: citation_audit)
+                                  "citations", "literature_snapshot"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
