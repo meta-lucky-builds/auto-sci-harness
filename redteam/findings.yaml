@@ -175,3 +175,10 @@ findings:
     tests: ["tests/test_kernel_integrity.py::test_k2_lists_leakscan_reads_but_counts_reproduce_reads_as_peeking"]
     museum: redteam/museum/K2-TWO-RUN.patch
     status: fixed
+  - id: K-3-guard
+    title: the Kernel's own "never evaluate an unregistered claim" guard removed (the vault layer still refuses)
+    invariant: "§4.3 K2; defence in depth for K-3 (a survivor of the first museum run)"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_certify_never_evaluates_k3_to_k9_for_an_unregistered_claim"]
+    museum: redteam/museum/K-3-guard.patch
+    status: fixed

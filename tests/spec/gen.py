@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import kernel_model as model
+import model_triage
 from history import ApproveRole, Artifact, Certify, ClaimSpec, Dataset, Event, History, Prereg, Read, Record
 from hypothesis import strategies as st
 from real_kernel import fresh
@@ -109,8 +110,7 @@ class Disagreement:
 
 
 def model_verdict(history: History, c: ClaimSpec, records: tuple[Record, ...]) -> model.Verdict:
-    registered = any(isinstance(e, Prereg) and e.claim.key == c.key for e in history)
-    return model.certify(history, c.key, records) if registered else model.certify_unregistered(history, c, records)
+    return model_triage.verdict(history, c, records)
 
 
 def run(script: list[Event]) -> tuple[History, list[Disagreement], int]:
@@ -138,7 +138,8 @@ def run(script: list[Event]) -> tuple[History, list[Disagreement], int]:
                 n_cert += 1
                 for k in expect.checks:
                     if expect.checks[k] != got.checks[k]:
-                        out.append(Disagreement(k, expect.checks[k], got.checks[k], i))
+                        why = world.last_cert.checks[k].reasons[:1]
+                        out.append(Disagreement(k, expect.checks[k], (got.checks[k], why), i))
                 if expect.label != got.label:
                     out.append(Disagreement("label", expect.label, got.label, i))
                 if got.family and expect.family != got.family:

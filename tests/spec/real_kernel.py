@@ -176,7 +176,8 @@ class RealWorld:
     def certify(self, spec: ClaimSpec, records: tuple[Record, ...]) -> Verdict:
         claim = self.claim(spec)
         ids = [self._record(claim, spec, r) for r in records]
-        return verdict_of(self.kernel.certify(claim, ids))
+        self.last_cert = self.kernel.certify(claim, ids)
+        return verdict_of(self.last_cert)
 
     def _record(self, claim: Claim, spec: ClaimSpec, r: Record) -> str:
         d = self.datasets.get(r.target)
