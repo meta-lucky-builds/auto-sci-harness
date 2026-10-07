@@ -22,6 +22,11 @@ _ERRORISH = re.compile(r"error|exception|traceback|failed|fatal|warning|assert|n
 Archive = Callable[[str], str]  # full text -> handle (e.g. a blob hash)
 
 
+def references(template: str) -> list[str]:
+    """The dotted state paths a template renders (exactly the lookups `render` performs), in order."""
+    return [m.group(1) for m in _PAT.finditer(template)]
+
+
 def lookup(state: dict[str, Any], path: str, default: Any = _MISSING) -> Any:
     cur: Any = state
     for part in path.split("."):

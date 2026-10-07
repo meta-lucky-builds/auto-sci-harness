@@ -365,21 +365,27 @@ Stages (each a node with a contract, all evolvable):
 
 ### L6 Harness evolution (🟡 core built, proposer weak)
 Pipeline per generation:
-1. **Evidence export**: read-only filesystem of all candidates, full traces (including successes), scores, ledger,
-   Kernel certificates and rejects.
+1. **Evidence export** (✅ built 2026-10-07, M4 piece; no agentic proposer reads it yet): read-only filesystem of all
+   candidates, full traces (including successes), scores, ledger, Kernel certificates and rejects. Policy: evolve-split
+   runs only; gate/sealed outcomes only as aggregate accept/reject (+ rejecting stage); leak audit over the exported
+   tree fails closed (`evolve/export.py`).
 2. **Agentic proposer** (Meta-Harness, done safely): a tool-using agent inside a sandbox with that export, read-only;
    output is **typed edits only** (JSON-pointer ops on the spec) with a predicted effect.
-3. **Structured diagnosis** (AutoSaddler + Self-Harness): first-divergence causal procedure; causal signature (cause,
-   criticality, mechanism) with verifier evidence; the claimed diff is checked against the real one.
+3. **Structured diagnosis** (AutoSaddler + Self-Harness; 🟡 deterministic part built 2026-10-07): first-divergence causal
+   procedure; causal signature (cause, criticality, mechanism) with verifier evidence; the claimed diff is checked against
+   the real one. Built: first divergence in node/route/error vs a better run of the same task, signature with step refs,
+   in the proposer prompt; claimed cluster ids checked (recorded, not enforced). Not built: verifier-evidence linkage,
+   claimed-diff check, content-level divergence.
 4. **Static checks** ✅: protected nodes (setup/verify/audit/Kernel); audit-only terminal; leak patterns; plus a
    deterministic denylist of evolve/gate task ids.
 5. **Critic from a different model family** (RRSI, fixed): leakage, degeneracy, grader gaming, unbounded work; reasons
    are fed back for ≤ k repairs; Socratic mode.
-6. **Decline / no-op allowed**; one mechanism per candidate; novelty gate against re-proposing reverted signatures
-   (HarnessX).
+6. **Decline / no-op allowed** ✅; one mechanism per candidate (❌); novelty gate against re-proposing reverted signatures
+   (HarnessX) ✅ (static- or gate-rejected signatures; race losers are not blocked).
 7. **Smoke run**: one task through the real loop.
 8. **Race** ✅ (paired CI successive halving) → **re-measure the winner on fresh seeds and units** (CR P0-2) → **gate** ✅
-   on the never-shown split, with a unit-alignment check and a cost term (RRSI).
+   on the never-shown split, with a unit-alignment check and a cost term (RRSI; ✅ built 2026-10-07: total cost on the
+   paired gate units ≤ (1 + `max_cost_increase`) × parent, default 1.0 not calibrated, fail closed without cost data).
    **Leave-one-family-out / leave-one-domain-out gates** (✅ built 2026-10-07, M4 piece; no real campaign yet): the campaign's gate split contains at least one
    ENTIRE task family (and, once ≥ 2 domains have adapters, at least one entire domain) that never appears in the
    evolve split nor in any evolver-visible export; a candidate is accepted only if, on EACH held-out family/domain
@@ -390,8 +396,8 @@ Pipeline per generation:
 9. **Branch / route**: if a candidate wins on a cluster but not globally, create a branch; route by descriptors
    **generated from gate evidence**; a select/materialize adaptation seam (Adaptive Auto-Harness, fail-closed); the router
    is tested on the sealed split.
-10. **Ledger** ✅: per-task flipped/regressed, `regressed_unpredicted`, predicted vs actual (calibration), yield, prune,
-    stall, annealed op budget (RRSI); proposer-written generation report.
+10. **Ledger** ✅: per-task flipped/regressed ✅, `regressed_unpredicted` ✅, predicted vs actual (calibration) ✅, yield ✅,
+    prune ✅, stall (❌), annealed op budget (RRSI, ❌); proposer-written generation report (❌).
 11. **Temporal-reveal mode** for streams: labels sealed outside every evolver mount; watermark rule; undated = unrevealed.
 12. **Finalize**: a one-shot freeze; the sealed split is touched once, by a human-run command.
 - Objective: §6.3 (VDS-centred for research harnesses; benchmark score for agent harnesses).

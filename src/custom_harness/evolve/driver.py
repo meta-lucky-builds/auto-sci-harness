@@ -24,6 +24,7 @@ from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
+from .multiplicity import check_campaign, runs_per_task_bound
 
 
 def load_suite(path: Path) -> list[SuiteTask]:
@@ -52,11 +53,17 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
            proposer: Backend, store: EvidenceStore, sandbox_factory: SandboxFactory,
            cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
            campaign_budget: Budget | None = None) -> HarnessSpec:
-    """Run `generations` rounds. The sealed split is filtered out before anything runs."""
+    """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
+    claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py)."""
     cfg = cfg or EvolveConfig()
     working = [t for t in suite if t.split != "sealed"]
+    n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
+    bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
+        generations=generations, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds), n_fresh_seeds=n_fresh,
+        infra_retries=cfg.infra_retries))
+    log(json.dumps({"multiplicity_bound": bound}))
     evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run,
-                          campaign_budget=campaign_budget)
+                          infra_retries=cfg.infra_retries, campaign_budget=campaign_budget)
     parent = seed_spec
     for g in range(generations):
         t0 = time.time()

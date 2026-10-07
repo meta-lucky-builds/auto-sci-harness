@@ -39,6 +39,19 @@ def seed_spec() -> HarnessSpec:
     return HarnessSpec.model_validate(doc)
 
 
+def declared_seed_spec(cfg: EvolveConfig, generations: int = 1) -> HarnessSpec:
+    """seed_spec() with the campaign's multiplicity bound pre-declared on its (protected) claim nodes (R2-2): set by
+    the human author of a campaign's seed; the driver checks the same bound (check_campaign), the Evaluator enforces
+    it after every run."""
+    from custom_harness.evolve.multiplicity import runs_per_task_bound
+    per_task = runs_per_task_bound(generations=generations, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds),
+                                   n_fresh_seeds=len(cfg.seeds), infra_retries=cfg.infra_retries)
+    doc = seed_spec().model_dump(mode="json")
+    for nid in ("claim", "replica_claim"):
+        doc["nodes"][nid]["params"]["n_comparisons"] = 2 * per_task
+    return HarnessSpec.model_validate(doc)
+
+
 def executor(req):
     text = req.messages[-1].content
     if "Propose 5 DISTINCT hypotheses" in text:
@@ -97,10 +110,13 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
     factory = lambda key: LocalSandbox(tmp_path / "sb" / key, i_understand_no_isolation=True)  # noqa: E731
     ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store, factory, suite)
     proposer = MockBackend([json.dumps(PROPOSALS)])
-    parent = seed_spec()
+    cfg = EvolveConfig(n_edits=4, race_rounds=2)
+    parent = declared_seed_spec(cfg)
+    from custom_harness.evolve.multiplicity import check_campaign
+    per_task = parent.nodes["claim"].params["n_comparisons"] // 2
+    assert check_campaign(parent, store, [t.task_dir for t in suite], runs_per_task=per_task) == 2 * per_task
 
-    res = evolve_generation(parent, suite, evaluator=ev, proposer=proposer, store=store,
-                            cfg=EvolveConfig(n_edits=4, race_rounds=2))
+    res = evolve_generation(parent, suite, evaluator=ev, proposer=proposer, store=store, cfg=cfg)
 
     assert res.accepted, res.decision
     assert res.new_parent.nodes["run"].params["max_fixes"] == 2

@@ -14,6 +14,7 @@ import math
 from collections.abc import Callable, Hashable
 from dataclasses import dataclass, field
 
+from ..records import Cost
 from ..verify.stats import mean_t_interval
 
 Unit = tuple[str, int]  # (task_id, seed)
@@ -199,3 +200,45 @@ def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], 
         return GateDecision(False, f"possible regression on gate split (CI lo={glo:.4g} < -{non_regression_eps})",
                             ev, gt)
     return GateDecision(True, "accepted: significant on evolve, non-regressing and positive on gate", ev, gt)
+
+
+COST_METRICS: dict[str, Callable[[Cost], float]] = {
+    "tokens": lambda c: float(c.prompt_tokens + c.completion_tokens),
+    "wall_s": lambda c: float(c.wall_s),
+    "usd": lambda c: float(c.usd),
+}
+
+
+def cost_bound(units: list[Unit], candidate: Callable[[Unit], Cost | None], parent: Callable[[Unit], Cost | None], *,
+               max_increase: float, metric: str = "tokens") -> dict:
+    """Cost term of the gate (GOAL §5 L6.8, §6.3; RRSI relative cost bound): over the SAME units for both arms,
+    total candidate cost <= (1 + max_increase) x total parent cost. A ratio of totals (not a mean of per-unit ratios)
+    so one cheap unit cannot dominate. Fails closed when cost data are missing: a unit without a cost record on either
+    arm, a non-finite or negative value, or a parent total of 0 (no ratio exists; a real run always costs something).
+    """
+    if metric not in COST_METRICS:
+        raise ValueError(f"unknown cost metric {metric!r} (known: {sorted(COST_METRICS)})")
+    if not (isinstance(max_increase, (int, float)) and math.isfinite(max_increase) and max_increase >= 0):
+        raise ValueError("max_cost_increase must be a finite number >= 0")
+    get = COST_METRICS[metric]
+    limit = 1.0 + max_increase
+    out: dict = {"metric": metric, "n": len(units), "limit": limit, "parent_total": None, "candidate_total": None,
+                 "ratio": None}
+    missing = [u for u in units if candidate(u) is None or parent(u) is None]
+    if missing or not units:
+        return out | {"passed": False, "reason": f"cost data missing for {len(missing)}/{len(units)} gate units "
+                                                 "(fail closed)"}
+    c_vals = [get(candidate(u)) for u in units]  # type: ignore[arg-type]
+    p_vals = [get(parent(u)) for u in units]  # type: ignore[arg-type]
+    if not all(math.isfinite(v) and v >= 0 for v in c_vals + p_vals):
+        return out | {"passed": False, "reason": "non-finite or negative cost value (fail closed)"}
+    ct, pt = sum(c_vals), sum(p_vals)
+    out |= {"parent_total": pt, "candidate_total": ct}
+    if pt <= 0:
+        return out | {"passed": False, "reason": f"cost data missing: parent {metric} total is 0 on the gate units "
+                                                 "(fail closed)"}
+    ratio = ct / pt
+    out["ratio"] = ratio
+    if ratio > limit:
+        return out | {"passed": False, "reason": f"cost {metric} x{ratio:.3g} of the parent > allowed x{limit:.3g}"}
+    return out | {"passed": True, "reason": f"cost {metric} x{ratio:.3g} of the parent <= x{limit:.3g}"}

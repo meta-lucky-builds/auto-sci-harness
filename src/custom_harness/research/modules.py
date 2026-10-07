@@ -263,23 +263,17 @@ def tournament(state, params, ctx):
             "queue": [by_id[i] for i in ordered], "current": None}
 
 
-_CODEISH = ("```", "def ", "import ", "lambda", "==", "()")
-_DIRECTIVE_STARTS = ("use ", "try ", "consider ", "you should", "instead", "add ", "remove ", "replace ", "switch ")
-
-
 @register("research.socratic_filter")
 def socratic_filter(state, params, ctx):
     """Question-only critic (AHOIS, GOAL L4.8): enforced in CODE, not by the prompt. A kept item is a single
     question (ends with '?', one '?', bounded length) and contains no code or directive phrasing; everything
     else is dropped and counted, so a critic cannot smuggle answers or instructions into later prompts."""
+    from .socratic import is_genuine_question  # the rules and their stated limits live there
     raw = (state.get("critique_raw") or {}).get("questions", []) or []
     kept, dropped = [], 0
     for q in raw:
         text = str(q).strip()
-        low = text.lower()
-        if (text.endswith("?") and text.count("?") == 1 and 10 <= len(text) <= 300
-                and not any(c in low for c in _CODEISH) and not low.startswith(_DIRECTIVE_STARTS)
-                and "the answer is" not in low):
+        if is_genuine_question(text):
             kept.append(text)
         else:
             dropped += 1
