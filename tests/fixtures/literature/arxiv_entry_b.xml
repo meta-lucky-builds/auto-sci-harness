@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/" xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <id>https://arxiv.org/api/AbCdEfGhIjKlMnOpQrStUvWxYz0</id>
+  <title>arXiv Query: search_query=&amp;id_list=2403.01234&amp;start=0&amp;max_results=1</title>
+  <updated>2026-10-07T10:00:00Z</updated>
+  <link href="https://arxiv.org/api/query?search_query=&amp;id_list=2403.01234&amp;start=0&amp;max_results=1" type="application/atom+xml"/>
+  <opensearch:itemsPerPage>1</opensearch:itemsPerPage>
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <opensearch:startIndex>0</opensearch:startIndex>
+  <entry>
+    <id>http://arxiv.org/abs/2403.01234v2</id>
+    <title>Calibrated Early Stopping under
+  Distribution Shift</title>
+    <updated>2024-06-10T17:59:59Z</updated>
+    <link href="https://arxiv.org/abs/2403.01234v2" rel="alternate" type="text/html"/>
+    <link href="https://arxiv.org/pdf/2403.01234v2" rel="related" type="application/pdf" title="pdf"/>
+    <summary>  We propose a calibrated early stopping rule for models trained under covariate
+shift. Across nine shifted benchmarks the rule reduces expected calibration error
+by 23% relative to validation-loss stopping. It does not change top-1 accuracy.
+</summary>
+    <category term="cs.LG" scheme="http://arxiv.org/schemas/atom"/>
+    <published>2024-03-02T17:59:59Z</published>
+    <arxiv:comment>14 pages, 3 figures</arxiv:comment>
+    <arxiv:primary_category term="cs.LG"/>
+    <author>
+      <name>Lena Hartmann</name>
+    </author>
+    <author>
+      <name>Kofi Mensah</name>
+    </author>
+  </entry>
+</feed>

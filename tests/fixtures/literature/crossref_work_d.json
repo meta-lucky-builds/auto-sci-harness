@@ -1,0 +1,18 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.5555/lit.2019.042",
+    "type": "proceedings-article",
+    "prefix": "10.5555",
+    "title": ["Kernel Density Baselines for Anomaly Scoring"],
+    "container-title": ["Proceedings of the Example Workshop"],
+    "author": [
+      {"given": "Sven", "family": "Aaltonen", "sequence": "first", "affiliation": []}
+    ],
+    "issued": {"date-parts": [[2019, 9]]},
+    "published-print": {"date-parts": [[2019, 9]]},
+    "URL": "https://doi.org/10.5555/lit.2019.042"
+  }
+}

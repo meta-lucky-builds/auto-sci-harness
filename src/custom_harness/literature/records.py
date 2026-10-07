@@ -89,6 +89,14 @@ def latest_date(s: str | None) -> date | None:
         return None
 
 
+def earliest_date(s: str | None) -> date | None:
+    """The EARLIEST calendar day the (possibly partial) date allows: '2024' -> 2024-01-01."""
+    m = _DATE.match(s or "")
+    if not m or latest_date(s) is None:
+        return None
+    return date(int(m.group(1)), int(m.group(2) or 1), int(m.group(3) or 1))
+
+
 def visible_as_of(rec: PaperRecord, as_of: date) -> bool:
     """Provably published on or before `as_of` (unknown or too-coarse dates are not visible: fail closed)."""
     d = latest_date(rec.published)

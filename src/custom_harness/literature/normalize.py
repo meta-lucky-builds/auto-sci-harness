@@ -61,7 +61,7 @@ def mixed_script_words(text: str) -> list[str]:
     """Words whose letters come from more than one confusable script (e.g. Latin with one Cyrillic letter)."""
     out = []
     for w in _WORD.findall(unicodedata.normalize("NFKC", text).translate(_INVISIBLE)):
-        scripts = set()
+        scripts: set[str] = set()
         for ch in w:
             if ch.isalpha():
                 name = unicodedata.name(ch, "")

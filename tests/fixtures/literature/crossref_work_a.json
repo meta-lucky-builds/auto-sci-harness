@@ -1,0 +1,27 @@
+{
+  "status": "ok",
+  "message-type": "work",
+  "message-version": "1.0.0",
+  "message": {
+    "DOI": "10.5555/lit.2021.001",
+    "type": "journal-article",
+    "prefix": "10.5555",
+    "publisher": "Example Press",
+    "title": ["Sparse Gradient Routing for <i>Tabular</i> Ensembles"],
+    "container-title": ["Journal of Example Machine Learning"],
+    "author": [
+      {"given": "Mira", "family": "Okafor", "sequence": "first", "affiliation": []},
+      {"given": "Tomas", "family": "Lindqvist", "sequence": "additional", "affiliation": []},
+      {"given": "Wen", "family": "Zhao", "sequence": "additional", "affiliation": []}
+    ],
+    "created": {"date-parts": [[2021, 2, 1]], "date-time": "2021-02-01T09:00:00Z", "timestamp": 1612170000000},
+    "issued": {"date-parts": [[2021, 3, 15]]},
+    "published-online": {"date-parts": [[2021, 3, 15]]},
+    "published-print": {"date-parts": [[2021, 6]]},
+    "published": {"date-parts": [[2021, 3, 15]]},
+    "abstract": "<jats:title>Abstract</jats:title><jats:p>We study sparse gradient routing for tabular ensembles. On twelve benchmark datasets the method improves accuracy by 1.8 points over gradient boosting. It does not improve calibration, and training cost rises by 40%. The effect on the smallest datasets was −0.5 points.</jats:p>",
+    "URL": "https://doi.org/10.5555/lit.2021.001",
+    "reference-count": 31,
+    "is-referenced-by-count": 4
+  }
+}
