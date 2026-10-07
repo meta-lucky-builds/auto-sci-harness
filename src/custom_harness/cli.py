@@ -88,6 +88,49 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
 APPROVAL_ITEM_PRINT_CHARS = 20_000
 
 
+def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN action (GOAL §4.7): register the measurements humans returned for an APPROVED physical protocol, with an
+    attestation. Refused unless the run is paused at the data gate, the exact protocol was approved by a human
+    (engine rule), the protocol passes the prohibited screen, the data match the protocol, and nothing was registered
+    for it before. The data become a `future` dataset; the attestation is recorded but remains untested."""
+    import hashlib
+
+    from .kernel import DatasetRole, Kernel
+    from .research.physical import Protocol, check_measurements, screen
+    from .runtime.engine import approval_decision, approval_item_hash, paused_approval
+    pause = paused_approval(store, a.run_id)
+    if pause is None or pause.get("node_id") != "data_received":
+        raise SystemExit(f"run {a.run_id} is not paused at the data gate (data_received)")
+    state = pause["state"]
+    item = state.get("physical_item")
+    if not isinstance(item, dict):
+        raise SystemExit("the paused run carries no physical protocol")
+    decision = approval_decision(store, a.run_id, "protocol_review", approval_item_hash(item))
+    if decision is None or decision["decision"] != "approved":
+        raise SystemExit("the protocol was not approved by a human; no data can be registered for it")
+    protocol = Protocol.model_validate(item["protocol"])
+    if screen(protocol):
+        raise SystemExit("the protocol matches a prohibited category")
+    if not a.attest.strip():
+        raise SystemExit("an attestation (who, where, when) is required")
+    data = Path(a.file).read_bytes()
+    problems = check_measurements(protocol, data)
+    if problems:
+        raise SystemExit("returned data refused: " + "; ".join(problems[:10]))
+    vault = Kernel(store).vault
+    if item["dataset_id"] in vault.datasets():
+        raise SystemExit(f"data for this protocol are already registered ({item['dataset_id']})")
+    provenance = {"protocol_hash": item["protocol_hash"], "claim_hash": item["claim_hash"], "run_id": a.run_id,
+                  "attestation": a.attest, "attestation_sha256": hashlib.sha256(a.attest.encode()).hexdigest(),
+                  "data_sha256": hashlib.sha256(data).hexdigest(), "approved_protocol_seq": decision["ledger_seq"]}
+    vault.register_dataset(item["dataset_id"], DatasetRole.FUTURE,
+                           public={"provenance.json": json.dumps(provenance, sort_keys=True).encode()},
+                           private={protocol.measurements.filename: data})
+    print(json.dumps({"registered": item["dataset_id"], "data_sha256": provenance["data_sha256"],
+                      "next": f"chh approve {a.run_id} data_received --decision approve --approver <you>"}))
+    return 0
+
+
 def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Record a human decision for the item a PAUSED run is waiting on (GOAL invariant 15). This is the ONLY code
     path that writes an "approval" ledger entry. It does not resume the run: `chh resume RUN_ID` does."""
@@ -338,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rd = sub.add_parser("return-data", help="HUMAN: register measurements returned for an approved physical protocol")
+    rd.add_argument("run_id")
+    rd.add_argument("--file", required=True)
+    rd.add_argument("--attest", required=True, help="who measured it, where, when (recorded; untested)")
     ap = sub.add_parser("approve", help="record a human approve/reject for a run paused at an approval node")
     ap.add_argument("run_id")
     ap.add_argument("node_id")
@@ -377,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     a = p.parse_args(argv)
     store = EvidenceStore(data_dir() / "store")
     try:
-        return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "rerun": cmd_rerun,
+        return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
+                "rerun": cmd_rerun,
                 "approve-adapter": cmd_approve_adapter, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,

@@ -1,0 +1,37 @@
+# Example physical / empirical protocol (GOAL §4.7): a benign engineering measurement. Passed to examples/physical_v1.yaml
+# with `--input protocol_file=examples/physical/bracket_protocol.yaml`.
+schema_version: 1
+title: Infill density and breaking load of a 3D-printed PLA bracket
+claim:
+  statement: A PLA L-bracket printed at 40% gyroid infill breaks at a higher load than the same bracket at 20% infill
+  kind: improvement
+  treatment: L-bracket (drawing B-01), PLA, 0.2 mm layers, 40% gyroid infill
+  control: L-bracket (drawing B-01), PLA, 0.2 mm layers, 20% gyroid infill
+  metric: {id: breaking_load_n, higher_is_better: true}
+  min_effect: 50.0
+  predicted_lo: 80.0
+  predicted_hi: 220.0
+  probability: 0.7
+  resolve_by: 1830297600  # 2028-01-01
+  assumptions:
+    - specimens of both arms are printed on the same printer from the same filament spool, in randomised order
+procedure: |
+  Print 8 specimens per arm in randomised order. Condition all specimens 24 h at room temperature. Load each in a
+  universal testing machine at 5 mm/min with the fixture of drawing F-02 until fracture; record the peak load.
+measurements:
+  format: csv
+  filename: measurements.csv
+  columns:
+    - {name: specimen_id, type: text}
+    - {name: arm, type: text}
+    - {name: breaking_load_n, type: number, unit: N}
+analysis:
+  arm_column: arm
+  outcome_column: breaking_load_n
+  treatment_label: treatment
+  control_label: control
+  test: welch_t_one_sided
+  alpha: 0.05
+  min_replicates_per_arm: 8
+  plan: one-sided Welch t-test of mean(treatment) - mean(control) >= min_effect at alpha; all specimens reported
+safety_notes: Wear eye protection at the testing machine (fracture fragments). No hazardous materials.
