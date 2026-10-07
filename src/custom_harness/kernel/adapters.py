@@ -23,7 +23,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from ..verify import leak
+from ..verify import leak, lean_validation
 from ..verify import metrics as M
 from ..verify.stats import mean_t_interval, paired_example_interval
 from . import lp
@@ -125,8 +125,15 @@ LP_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
      lambda: bool(lp.bounds(canonical_json(_LP_P), canonical_json(_LP_C), Fraction(10**lp.MAX_DIGITS)))),
 )
 
+# Lean 4 (formal class, T0): the record checker (Kernel side), its fault-injection fixtures, and the sandbox runner
+# that produces the records are ONE adapter: changing any of them changes the hash and needs a new human approval.
+LEAN = AdapterSpec(
+    name="lean", version="1", classes=frozenset({EvidenceClass.FORMAL}),
+    modules=("custom_harness.kernel.formal", "custom_harness.verify.lean_validation", "custom_harness.sandbox.lean"),
+    metrics=frozenset({"lean_theorem"}), exact_module="custom_harness.kernel.formal")
+
 REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
-    "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS)}
+    "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS), "lean": (LEAN, lean_validation.LEAN_CHECKS)}
 
 
 def validate(checks: tuple[tuple[str, Callable[[], bool]], ...]) -> list[str]:

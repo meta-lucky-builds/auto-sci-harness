@@ -20,6 +20,7 @@ from .claim import canonical_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
                    "retraction", "adapter_approval",
+                   "statement_approval",  # a HUMAN approved a Lean statement (`chh approve-statement`)
                    # approval node (runtime/engine.py): the engine records each pause; only `chh approve` records
                    # a human decision
                    "approval_request", "approval"})

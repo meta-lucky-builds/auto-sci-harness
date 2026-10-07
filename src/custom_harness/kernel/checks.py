@@ -714,6 +714,83 @@ COMPUTATIONAL_CHECKS: dict[str, Any] = {
     "K8": k8_computational, "K9": k9_computational,
 }
 
+
+# ================================================================== formal class (Lean 4 check records, T0)
+# The claim: "the human-approved Lean statement (subject) holds". The evidence is ONE check record produced by the
+# adapter's sandbox runner (a registered artifact linked by a PROOF record, as for computational claims, so K0, K2
+# and K9 are shared); the approved adapter's record checker re-checks it from the stored bytes. The Kernel runs no Lean.
+def k1_formal(ctx: Context) -> CheckResult:
+    c, reasons = ctx.claim, []
+    if c.kind != ClaimKind.THEOREM:
+        reasons.append(f"a formal claim must be of kind 'theorem', not {c.kind.value!r}")
+    if c.value is not None:
+        reasons.append("a theorem claim carries no value")
+    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
+    reasons += why
+    spec = _exact_spec(ctx)
+    if spec is not None and spec.exact_module is None:
+        reasons.append(f"adapter {spec.name!r} declares no Lean record checker")
+    approved = [e for e in ctx.ledger.entries("statement_approval")
+                if e.body.get("hash") == c.subject.hash and str(e.body.get("approver", "")).strip()]
+    if not approved:
+        reasons.append(f"statement {c.subject.artifact_id!r} (hash {c.subject.hash[:12]}) has no human approval: run "
+                       f"`chh approve-statement` (models can never approve a statement)")
+    if c.comparator != c.subject:
+        reasons.append("a theorem has no comparator: by convention the comparator must be the subject (the statement)")
+    if c.development or c.generalization_targets or c.scope.datasets:
+        reasons.append("a formal claim uses no datasets: development, generalization targets and scope datasets "
+                       "must be empty")
+    if c.analysis_plan != AnalysisPlan(seeds=()):
+        reasons.append("the analysis plan must be empty (no seeds, defaults): a proof replaces statistics")
+    e = c.effect
+    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
+        reasons.append("effect fields other than the declared probability must be 0")
+    if not 0 < e.probability < 1:
+        reasons.append("declared probability must be strictly between 0 and 1")
+    if c.risk.prior_probability is not None:
+        reasons.append("risk prior must be unset: no K7 rule exists for formal claims (owner decision pending)")
+    return _result(reasons)
+
+
+def _formal_inputs(ctx: Context) -> tuple[Any, bytes, bytes] | list[str]:
+    spec = _exact_spec(ctx)
+    module = spec.exact_module if spec is not None else None
+    reasons = []
+    if module is None:
+        reasons.append("no approved adapter with a Lean record checker (see K1)")
+    if len(ctx.certificates) != 1:
+        reasons.append("no single resolved check record (see K0)")
+    if module is None or reasons:
+        return reasons
+    return (importlib.import_module(module), ctx.store.blobs.get(ctx.claim.subject.hash),
+            ctx.store.blobs.get(ctx.certificates[0].hash))
+
+
+def k3_formal(ctx: Context) -> CheckResult:
+    """The adapter's record checker re-checks the Lean check record against the approved statement's bytes."""
+    got = _formal_inputs(ctx)
+    if isinstance(got, list):
+        return _result(got)
+    module, statement, record = got
+    reasons = list(module.check(statement, record))
+    axioms = [] if reasons else [f"relies on axiom {a}" for a in module.axioms_used(record)]
+    return _result(reasons, [f"Lean check record re-checked by {module.__name__}", *axioms])
+
+
+def k8_formal(ctx: Context) -> CheckResult:
+    """The adapter's registered sanity bounds (source and output sizes)."""
+    got = _formal_inputs(ctx)
+    if isinstance(got, list):
+        return _result(got)
+    module, statement, record = got
+    return _result(list(module.bounds(statement, record)))
+
+
+FORMAL_CHECKS: dict[str, Any] = {
+    "K0": k0_computational, "K1": k1_formal, "K2": k2_computational, "K3": k3_formal, "K8": k8_formal,
+    "K9": k9_computational,
+}
+
 # HUMAN-OWNED (L9), like KernelConfig: which checks apply to each evidence class. None = the check applies and must
 # pass; a string = the check does not apply to the class, and is the reason recorded on the certificate. No claim can
 # change it. A class absent from the table gets every check (fail closed: without an approved adapter, K1 rejects it).
@@ -730,9 +807,18 @@ CHECK_APPLICABILITY: Mapping[EvidenceClass, Mapping[str, str | None]] = MappingP
         "K7": "n/a (computational): correctness is proven exactly; triviality/importance are not judged by the "
               "Kernel (GOAL §4.6)",
         "K8": None, "K9": None}),
+    EvidenceClass.FORMAL: MappingProxyType({
+        "K0": None, "K1": None, "K2": None, "K3": None,
+        "K4": "n/a (formal): a kernel-checked proof replaces statistics; there is no sampling, no seeds and no "
+              "multiplicity to correct",
+        "K5": "n/a (formal): no comparator; the claim is that one human-approved statement holds",
+        "K6": "n/a (formal): no held-out data; a proof holds for the stated theorem, not for a sample of a population",
+        "K7": "n/a (formal) - OWNER DECISION PENDING (GOAL §13.3): a theorem has no resampling noise, so K7's noise "
+              "model does not apply, and no risk prior over statements is defined yet; riskiness is NOT assessed",
+        "K8": None, "K9": None}),
 })
 _CHECKS_BY_CLASS: Mapping[EvidenceClass, dict[str, Any]] = MappingProxyType({
-    EvidenceClass.COMPUTATIONAL: COMPUTATIONAL_CHECKS})
+    EvidenceClass.COMPUTATIONAL: COMPUTATIONAL_CHECKS, EvidenceClass.FORMAL: FORMAL_CHECKS})
 
 
 def applicability(evidence_class: EvidenceClass) -> Mapping[str, str | None]:

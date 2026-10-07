@@ -38,6 +38,16 @@ COMPUTATIONAL_ASSUMPTIONS = (
     Assumption(text="the certificate is checked in exact rational arithmetic from the stored bytes (no floats)",
                tested_by="K3"),
 )
+FORMAL_ASSUMPTIONS = (
+    Assumption(text="the human-approved statement formalises the intended claim (statement fidelity to the intent)",
+               tested_by=None),
+    Assumption(text="the Lean 4 kernel of the pinned toolchain is sound, and the pinned Mathlib build in the sandbox "
+                    "image is the one its commit names", tested_by=None),
+    Assumption(text="the check record was produced by the approved adapter's sandbox runner from the stored statement "
+                    "and proof (the Kernel re-checks the recorded output; it does not re-run Lean)", tested_by=None),
+    Assumption(text="the proved theorem's type equals the approved statement's, and its axioms are allowlisted "
+                    "(comparator and axiom audit in the record)", tested_by="K3"),
+)
 
 
 class KernelError(RuntimeError):
@@ -108,6 +118,7 @@ class Kernel:
         registered = self.vault.registered(ctx.claim_hash)
         table, impl = applicability(claim.evidence_class), checks_for(claim.evidence_class)
         computational = claim.evidence_class == EvidenceClass.COMPUTATIONAL
+        formal = claim.evidence_class == EvidenceClass.FORMAL
         for kid in CHECK_IDS:
             na = table[kid]
             if na is not None:  # the human-owned table says this check does not apply to the class: record why
@@ -132,23 +143,31 @@ class Kernel:
             label = Label.REJECTED
         elif computational:
             label = Label.CERTIFIED_EXACT
+        elif formal:
+            label = Label.CERTIFIED_FORMAL
         else:
             label = Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
                     for o in results[kid].observations if "seed-invariant" in o]
+        if formal and ok:  # the certificate lists every axiom the theorem relies on (untested, GOAL §4.7)
+            observed += [Assumption(text=f"K3: {o}", tested_by=None) for o in results["K3"].observations
+                         if o.startswith("relies on axiom ")]
         stats = {t: {"estimate": s.example.estimate, "lo": s.example.lo, "hi": s.example.hi, "met": s.met,
                      "p_null": s.p_null, "alpha_eff": s.alpha_eff} for t, s in ctx.stats.items()}
         p_nulls = [s.p_null for s in ctx.stats.values() if s.p_null is not None]
         resolution = {"outcome": ok, "declared_probability": claim.effect.probability,
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
-        tier = Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T2_STATISTICAL
+        tier = (Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T0_FORMAL if formal
+                else Tier.T2_STATISTICAL)
         verifiers = (("kernel:K0-K9", f"exact:{claim.metric.id}") if computational else
+                     ("kernel:K0-K9", f"lean:{claim.metric.id}") if formal else
                      ("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
                       "stats:paired-t-seeds", "stats:bca-examples"))
         cert = Certificate(
             kernel_version=self.config.version, claim_hash=ctx.claim_hash, claim=claim.model_dump(mode="json"),
             label=label, tier=int(tier), checks=results,
-            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else STANDARD_ASSUMPTIONS), *observed,
+            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else FORMAL_ASSUMPTIONS if formal
+                           else STANDARD_ASSUMPTIONS), *observed,
                          *(Assumption(text=a, tested_by=None) for a in claim.assumptions)),
             evidence_ids=tuple(evidence_ids), verifier_ids=verifiers,
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),

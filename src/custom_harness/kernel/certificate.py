@@ -27,6 +27,9 @@ VG_LADDER = {
     "CERTIFIED-EXACT": "exact, re-checkable certificate of the stated computation on the registered instance (VG: "
                        "executable/exact verification; says nothing about the computation's importance or whether "
                        "the instance models anything real)",
+    "CERTIFIED-FORMAL": "Lean 4 kernel check of a proof of the human-approved statement (VG: formal verification; "
+                        "holds given Lean's kernel and the listed axioms; says nothing about whether the statement "
+                        "formalises the intended claim beyond the human approval)",
     "REJECTED": "no verification claimed",
 }
 
@@ -35,6 +38,7 @@ class Label(StrEnum):
     CERTIFIED_VALIDATED = "CERTIFIED-VALIDATED"
     CERTIFIED_INTERNAL = "CERTIFIED-INTERNAL"
     CERTIFIED_EXACT = "CERTIFIED-EXACT"  # computational class: an exact certificate re-checked by an approved adapter
+    CERTIFIED_FORMAL = "CERTIFIED-FORMAL"  # formal class: a Lean check record re-checked by the approved adapter
     SUPPORTED = "SUPPORTED"  # judge/retrospective evidence only; not issued by Kernel v1
     REJECTED = "REJECTED"
 
