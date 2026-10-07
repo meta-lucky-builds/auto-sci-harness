@@ -17,6 +17,7 @@ from .literature import cli as lit_cli
 from .runtime import Engine, HarnessSpec
 from .sandbox import LocalSandbox, Sandbox
 from .store import EvidenceStore
+from .verify import provenance_cli
 
 
 def _backend(kind: str) -> Backend:
@@ -607,6 +608,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
     lit_cli.add_parsers(sub)
+    provenance_cli.add_parsers(sub)
     a = p.parse_args(argv)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
@@ -623,7 +625,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
-                **lit_cli.COMMANDS}[a.cmd](a, store)
+                **lit_cli.COMMANDS, **provenance_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 
