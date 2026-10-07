@@ -70,6 +70,7 @@ class KernelConfig:
     count_alphabet: int = 16  # UNCALIBRATED (owner decision, GOAL §13.8): transcripts one `count` release can tell
     # a certificate that relies on a field no human approved is capped at this tier (int(tiers.Tier); 4 = T4)
     self_reported_tier_cap: int = 4  # UNCALIBRATED (owner decision, GOAL §13.8)
+    delta_floor: float = 0.02  # UNCALIBRATED (owner decision, GOAL §13.8): min_effect floor on minted targets
     nonstat_p0: float = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): VDS p0 for classes without a null level
 
 
@@ -357,6 +358,10 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
     if c.risk.prior_probability is not None and not 0 < c.risk.prior_probability < 1:
         reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be strictly between 0 and 1"))
+    minted = sorted({str(e.body.get("dataset_id")) for e in ctx.ledger.entries("mint")} & targets)
+    if minted and c.effect.min_effect < cfg.delta_floor:
+        reasons.append(R(Code.K1_DELTA_FLOOR, f"minimum effect {c.effect.min_effect} is below the floor "
+                                              f"{cfg.delta_floor} on minted target(s) {minted}"))
     eps, beta, _ = reliability(c, cfg)
     if not (0 < eps <= cfg.max_eps_max and 0 < beta <= cfg.max_beta):
         reasons.append(R(Code.K1_RELIABILITY, f"K3 reliability requirement must have eps_max in (0, {cfg.max_eps_max}] "
@@ -706,6 +711,13 @@ def k6_held_out(ctx: Context) -> CheckResult:
         if dev_use:
             reasons.append(R(Code.K6_DEVELOP_READ,
                 f"{target}: used for development ({len(dev_use)} logged 'develop' read(s))"))
+        # KD1 (assure, 2026-10-07): the same held-out examples under another dataset id that was used for development
+        # (declared in the claim, or read with purpose 'develop') are development use of this target
+        dev_twins = sorted(d for d in related_targets(ctx.vault, target) - {target} if d in ctx.claim.development
+                           or any(a.body.get("purpose") == "develop" for a in ctx.vault.accesses(d)))
+        if dev_twins:
+            reasons.append(R(Code.K6_DEVELOP_READ, f"{target}: its held-out examples are also in development "
+                                                   f"dataset(s) {dev_twins}"))
         st = ctx.stats.get(target)
         if st is None:
             reasons.append(R(Code.K6_NO_STATS, f"{target}: no valid statistics (see K4)"))
@@ -741,8 +753,9 @@ def k7_risk(ctx: Context) -> CheckResult:
         return _result([R(Code.K7_NO_RISK_MODEL,
             f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
                         f"(one that could not have failed) cannot be detected without a prior over effects")])
-    if not ctx.stats:
-        return _result([R(Code.K7_NO_STATS, "no statistics to assess risk (see K4)")])
+    missing = sorted(set(c.generalization_targets) - set(ctx.stats))
+    if missing:  # KD2 (assure): risk is judged on every target, never on the subset that has statistics
+        return _result([R(Code.K7_NO_STATS, f"no statistics to assess risk on {missing} (see K4)")])
     reasons: list[str] = []
     p_values = []
     for target, st in ctx.stats.items():

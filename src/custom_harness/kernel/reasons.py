@@ -40,6 +40,7 @@ class Code(StrEnum):
     K1_PROBABILITY_BELOW_P0 = "K1_PROBABILITY_BELOW_P0"  # §16.4: q < p0 is refused (F2)
     K1_RISK_PRIOR = "K1_RISK_PRIOR"
     K1_RELIABILITY = "K1_RELIABILITY"
+    K1_DELTA_FLOOR = "K1_DELTA_FLOOR"  # §16.2: a minted target with a large test set needs min_effect >= the floor
     K1_STATEMENT = "K1_STATEMENT"
     K1_SCOPE = "K1_SCOPE"
     K1_UNREADABLE = "K1_UNREADABLE"

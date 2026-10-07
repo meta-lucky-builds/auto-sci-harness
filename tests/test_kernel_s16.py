@@ -432,3 +432,52 @@ def test_release_with_alpha_account_divides_the_slot_level(tmp_path):
     obs = next(o for o in k.certify(c1, ids, record=False).checks["K4"].observations if "Bonferroni" in o)
     assert "alpha 0.01333" in obs  # 0.02 * k/N = 0.02 * 2/3
     w.close()
+
+
+# ================================================================== §16.2 minted targets (mint's request)
+def test_mint_record_and_delta_floor(tmp_path):
+    w = World(tmp_path / "mint", seed=12, n_train=60, n_test=60)
+    k = w.kernel
+    k.record_mint("test", "f" * 64, "beacon-1", "task-a")
+    with pytest.raises(KernelError, match="beacon shopping"):
+        k.record_mint("test", "f" * 64, "beacon-2", "task-a")
+    c = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.01, n_boot=1000)
+    res = K.k1_well_formed(K.Context(claim=c, claim_hash=c.claim_hash(), store=w.store, vault=w.vault,
+                                     ledger=k.ledger, config=KernelConfig(), replayer=None, evidence_ids=()))
+    assert Code.K1_DELTA_FLOOR in res.codes
+    ok = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.02, n_boot=1000)
+    res = K.k1_well_formed(K.Context(claim=ok, claim_hash=ok.claim_hash(), store=w.store, vault=w.vault,
+                                     ledger=k.ledger, config=KernelConfig(), replayer=None, evidence_ids=()))
+    assert Code.K1_DELTA_FLOOR not in res.codes
+    w.close()
+
+
+# ================================================================== assure's differential findings KD1, KD2
+def test_kd1_development_copy_of_held_out_examples_fails_k6(tmp_path):
+    w = World(tmp_path / "kd1", seed=13, n_train=120, n_test=120)
+    test = w.vault.dataset("test")
+    x = w.store.blobs.get(test.files["test_X.csv"].blob)
+    y = w.store.blobs.get(test.files["test_y.csv"].blob)
+    w.vault.register_dataset("devcopy", DatasetRole.DEV, public={"features.csv": x}, private={"labels.csv": y})
+    good, comp = w.artifact("good"), w.artifact("baseline", "baseline")
+    c = w.claim(good, comp, delta=0.2, n_boot=1000, development=("train", "devcopy"), **FAST)
+    w.kernel.preregister(c)
+    cert = w.kernel.certify(c, w.evaluate_all(c), record=False)
+    assert Code.K6_DEVELOP_READ in cert.checks["K6"].codes and cert.label == Label.REJECTED
+    assert "devcopy" in " ".join(cert.checks["K6"].reasons)
+    w.close()
+
+
+def test_kd2_k7_needs_statistics_on_every_target(world):
+    good, comp = world.artifact("good"), world.artifact("baseline", "baseline")
+    c = world.claim(good, comp, delta=0.2, n_boot=1000, targets=("test", "test2"), **FAST)
+    world.kernel.preregister(c)
+    ids = world.evaluate_all(c, targets=("test",))
+    ctx = K.Context(claim=c, claim_hash=c.claim_hash(), store=world.store, vault=world.vault,
+                    ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=tuple(ids))
+    K.k0_provenance(ctx)
+    K.k2_preregistered(ctx)
+    K.k4_statistics(ctx)
+    assert set(ctx.stats) == {"test"}  # the attack precondition: one target has no statistics
+    res = K.k7_risk(ctx)
+    assert res.status == "fail" and Code.K7_NO_STATS in res.codes and "test2" in res.reasons[0]

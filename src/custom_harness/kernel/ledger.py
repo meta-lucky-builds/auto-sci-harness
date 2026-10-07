@@ -34,7 +34,10 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "approval_request", "approval",
                    # §16.5.3 release ledger; §16.4 per-target alpha-accounts (open: human; reserve: preregister;
                    # retire: slots exhausted or a human)
-                   "release", "alpha_open", "alpha_reserve", "alpha_retire"})
+                   "release", "alpha_open", "alpha_reserve", "alpha_retire",
+                   # §16.2 minted targets (Kernel.record_mint); bodies owned by other workstreams: human feature-
+                   # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
+                   "mint", "feature_ruling", "role_exam"})
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:

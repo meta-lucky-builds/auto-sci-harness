@@ -173,6 +173,15 @@ class Kernel:
         return self.ledger.append("release", {"dataset_id": target_dataset_id, "channel": ch.value,
                                               "alphabet": ab.value, "note": note})
 
+    def record_mint(self, dataset_id: str, frozen_hash: str, beacon: str, task_id: str) -> Entry:
+        """Record that a target's truth was minted after the freeze `frozen_hash` (§16.2). One mint per frozen hash:
+        minting again under the same freeze (beacon shopping) is refused."""
+        self.vault.dataset(dataset_id)
+        if any(e.body.get("frozen_hash") == frozen_hash for e in self.ledger.entries("mint")):
+            raise KernelError(f"frozen hash {frozen_hash[:12]} was already minted: a second mint is beacon shopping")
+        return self.ledger.append("mint", {"dataset_id": dataset_id, "frozen_hash": frozen_hash, "beacon": beacon,
+                                           "task_id": task_id})
+
     def releases(self, target_dataset_id: str) -> list[Entry]:
         """Releases on the target and on every target sharing its held-out examples (the K4 family)."""
         related = related_targets(self.vault, target_dataset_id)
