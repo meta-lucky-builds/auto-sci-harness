@@ -138,7 +138,7 @@ def run_one(root: Path, finding: dict[str, Any], python: str, control: bool = Fa
         work = Path(tmp) / "tree"
         _copy_tree(root, work)
         applied = subprocess.run(["git", "apply", "--check" if control else "--whitespace=nowarn", str(patch)],
-                                 cwd=work, capture_output=True, text=True)
+                                 cwd=work, capture_output=True, text=True, check=False)
         if applied.returncode != 0:
             return Outcome(fid, "BROKEN", f"patch does not apply: {applied.stderr.strip()[:300]}")
         junit = Path(tmp) / "junit.xml"
@@ -146,7 +146,7 @@ def run_one(root: Path, finding: dict[str, Any], python: str, control: bool = Fa
         try:
             res = subprocess.run([python, "-m", "pytest", "-q", "-x", "-p", "no:cacheprovider", f"--junitxml={junit}",
                                   *[str(t) for t in finding["tests"]]], cwd=work, env=env, capture_output=True,
-                                 text=True, timeout=TIMEOUT_S)
+                                 text=True, timeout=TIMEOUT_S, check=False)
         except subprocess.TimeoutExpired:
             return Outcome(fid, "KILLED", f"tests timed out after {TIMEOUT_S}s on the patched code")
         tail = (res.stdout.strip().splitlines() or ["(no output)"])[-1]

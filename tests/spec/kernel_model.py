@@ -136,7 +136,7 @@ def _k2(history: History, claim: ClaimSpec) -> bool:
     for i, ev in enumerate(history[:p]):
         if not isinstance(ev, Read) or ev.purpose == "leakscan":
             continue
-        for t, group in rel.items():
+        for group in rel.values():
             if ev.dataset not in group:
                 continue
             other = regs.get(ev.claim) if ev.claim is not None else None
