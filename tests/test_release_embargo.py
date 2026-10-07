@@ -100,3 +100,25 @@ def test_replay_pins_the_released_bits(store, tmp_path):
     miss = Releases(None, mode="replay", pins={})
     _run(store, tmp_path, "evolve", miss)
     assert miss.misses  # an unrecorded release is a replay flag
+
+
+# ---------------------------------------------------------------- the evidence export is embargoed
+def test_export_shows_verdict_labels_only_and_records_the_release(store, tmp_path):
+    from custom_harness.evolve.export import export_evidence
+    from custom_harness.kernel import DatasetRole, Kernel
+    from test_evolve import seed_spec
+    from test_evolve_evidence import _add_run, _outcome, _task_dir
+    kernel = Kernel(store)
+    kernel.vault.register_dataset("e-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
+    held_mean = "0.8123457"
+    cert = {"hash": "c" * 64, "label": "CERTIFIED-INTERNAL", "subject_mean": float(held_mean),
+            "comparator_mean": 0.61, "failed": []}
+    rid = _add_run(store, seed_spec(), "e0", [("certify", {"certificate": cert}, None),
+                                              ("report", {"report": f"subject mean {held_mean}"}, None)])
+    kernel.vault.read("e-held", "y.csv", purpose="leakscan", run_id=rid)
+    task = SuiteTask("e0", _task_dir(tmp_path, "e0"), "evolve", family="A")
+    res = export_evidence(store, tmp_path / "exp", runs=[_outcome(rid, "e0", 0.5, verified=True)], tasks=[task])
+    text = "".join(p.read_text(encoding="utf-8") for p in res.path.rglob("*.json"))
+    assert "CERTIFIED-INTERNAL" in text  # the verdict label is shown
+    assert held_mean not in text and "0.61" not in text, "a continuous held-out value reached the export"
+    assert [(r["channel"], r["note"]) for r in released(store, "e-held")] == [("export", "export.run:verdict")]
