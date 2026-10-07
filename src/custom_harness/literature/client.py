@@ -19,13 +19,13 @@ import time
 from collections.abc import Callable, Sequence
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel
 
 from .http import HttpxTransport, LiteratureError, PacedTransport, Pacer, Transport, fetch
 from .normalize import title_key
-from .records import PaperRecord, earliest_date, latest_date, parse_identifier, visible_as_of
+from .records import LookupResult, PaperRecord, earliest_date, latest_date, parse_identifier, visible_as_of
 from .snapshot import OfflineTransport, RecordingTransport, SnapshotStore
 from .sources import ALL_SOURCES, PACING, DoiResolver, Source
 
@@ -33,14 +33,6 @@ DOI_ORDER = ("crossref", "openalex", "semanticscholar")
 ARXIV_ORDER = ("arxiv", "semanticscholar")
 SEARCH_ORDER = ("openalex", "crossref", "semanticscholar", "arxiv")
 MAX_SUBQUERIES = 6
-
-
-class LookupResult(BaseModel):
-    identifier: str
-    status: Literal["resolves", "does_not_resolve", "lookup_failed"]
-    reason: str
-    record: PaperRecord | None = None
-    attempts: list[dict[str, Any]] = []
 
 
 class SearchResult(BaseModel):

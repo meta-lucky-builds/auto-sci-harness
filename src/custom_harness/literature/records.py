@@ -5,7 +5,7 @@ from __future__ import annotations
 import calendar
 import re
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -67,6 +67,16 @@ class PaperRecord(BaseModel):
         if self.arxiv_id:
             out.add(f"arxiv:{self.arxiv_id}")
         return out
+
+
+class LookupResult(BaseModel):
+    """Three-valued ID resolution (see client.py for the exact semantics)."""
+
+    identifier: str
+    status: Literal["resolves", "does_not_resolve", "lookup_failed"]
+    reason: str
+    record: PaperRecord | None = None
+    attempts: list[dict[str, Any]] = []
 
 
 _DATE = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[T ].*)?$")
