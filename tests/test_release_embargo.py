@@ -1,0 +1,51 @@
+"""Release emission and the verdict embargo (GOAL §16.5.3, invariant 18).
+
+"Continuous held-out values never reach the evolver": the evolution score keeps only verdict bits (audit,
+certified, replicated) plus the DEV term, and every target-derived value that reaches an agent-visible surface is a
+typed release recorded through `Kernel.record_release` (kstats; until it is merged, the `release_unledgered`
+fallback of kerneld/releases.py, which these tests also accept through `released()`).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from custom_harness.evolve.evaluate import score_state
+from custom_harness.records import RunStatus
+
+# Recorded on 2026-10-07 by running the pre-embargo `score_state` (commit f0f703f) on _state(subject_mean=m):
+# the old score WAS the held-out subject mean (0.5 + 0.5 * (m - 0.5) / 0.5 = m), a continuous held-out value
+# handed to the evolver every run.
+OLD_F0F703F_SCORES = {0.55: 0.55, 0.6: 0.6, 0.75: 0.75, 0.9: 0.9}
+
+
+def _state(subject_mean: float, *, dev: float = 0.8, label: str = "CERTIFIED-INTERNAL") -> dict:
+    return {"audit": {"passed": True},
+            "certificate": {"label": label, "subject_mean": subject_mean, "comparator_mean": 0.5},
+            "best": {"dev_score": dev}, "baseline_dev": 0.7, "task": {"metric": "accuracy"}}
+
+
+def test_old_score_exposed_the_continuous_held_out_mean():
+    """The attack the embargo closes: under the old score an evolver reads the held-out subject mean off the score
+    (here exactly; in general up to the known verdict bits and baseline). Shown on the recorded old values."""
+    for m, old in OLD_F0F703F_SCORES.items():
+        assert old == pytest.approx(m)  # held-out mean recovered from the score
+    assert len(set(OLD_F0F703F_SCORES.values())) == len(OLD_F0F703F_SCORES)  # distinct held-out means -> scores
+
+
+def test_evolution_score_does_not_depend_on_continuous_held_out_values():
+    scores = {m: score_state(_state(m), RunStatus.COMPLETED) for m in OLD_F0F703F_SCORES}
+    assert len(set(scores.values())) == 1, f"the score still varies with the held-out mean: {scores}"
+    score, verified = next(iter(scores.values()))
+    assert verified is True
+    assert score == pytest.approx(0.5 + 0.5 * (0.8 - 0.7) / 0.7)  # verdict bit + dev term
+
+
+def test_evolution_score_still_moves_with_dev_and_verdict_bits():
+    """The score is not a constant: the dev term and the verdict bits still drive it (so the test above is not
+    passing because the score stopped measuring anything)."""
+    base = score_state(_state(0.6), RunStatus.COMPLETED)[0]
+    assert score_state(_state(0.6, dev=0.9), RunStatus.COMPLETED)[0] > base
+    assert score_state(_state(0.6, label="REJECTED"), RunStatus.COMPLETED)[0] == pytest.approx(base - 0.5)
+    no_audit = {**_state(0.6), "audit": {"passed": False}}
+    assert score_state(no_audit, RunStatus.COMPLETED) == (0.0, False)

@@ -44,7 +44,8 @@ class EvidenceStore:
         from ..sandbox.base import protect_path
         protect_path(root)  # blobs hold private labels: no sandbox workspace may overlap the store (invariant 2)
         self.blobs = BlobStore(root / "blobs")
-        self._db = sqlite3.connect(root / "evidence.sqlite", check_same_thread=False)
+        # timeout: a second process (kerneld) may hold the write lock briefly; wait instead of failing
+        self._db = sqlite3.connect(root / "evidence.sqlite", check_same_thread=False, timeout=30)
         self._db.executescript(SCHEMA)
         self._lock = threading.Lock()
 
@@ -168,8 +169,11 @@ class EvidenceStore:
     # --- Evidence-Kernel ledger (hash chain; the chain rule lives in kernel/ledger.py) -------------
     def ledger_append(self, kind: str, body: str, entry_hash: Callable[[int, str, str, str, float], str]
                       ) -> LedgerRow:
-        """Append atomically: seq, prev and the timestamp are fixed under one lock and one transaction."""
+        """Append atomically: seq, prev and the timestamp are fixed under one lock and one transaction. The
+        transaction takes SQLite's write lock BEFORE reading the head (BEGIN IMMEDIATE): another PROCESS on the same
+        store (kerneld, §16.5.2) cannot read the same head in between, which would fork or collide the chain."""
         with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
             last = self._db.execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
             seq, prev = (last[0] + 1, last[1]) if last else (1, "genesis")
             at = time.time()

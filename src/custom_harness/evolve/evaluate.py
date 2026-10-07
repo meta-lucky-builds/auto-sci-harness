@@ -1,14 +1,22 @@
 """Evaluating a harness on a task suite (PLAN §6.2, §10 splits).
 
-Objective per research run (M2 version, documented so it can be audited and changed by humans):
+Objective per research run (documented so it can be audited and changed by humans):
   None (EXCLUDED)           if the environment failed (status INFRA_FAILED): it says nothing about the harness
   0                         if the run did not complete or the integrity audit failed (hard constraint)
-  0.5 * certified + 0.5 * replicated + 0.5 * clip(relative held-out improvement, -1, 1)   otherwise
+  0.5 * certified + 0.5 * replicated + 0.5 * clip(relative DEV improvement, -1, 1)   otherwise
 "certified" = the run's claim holds a Kernel certificate (CERTIFIED-INTERNAL/VALIDATED); "replicated" = an
 independent re-implementation written from the claim text (not the code) was ALSO certified at the same
-minimum effect (GOAL L4.9 headline rule). The relative improvement comes from the held-out evaluation records.
-The VDS-centred objective (GOAL §6.3)
-replaces this once the prediction ledger has enough resolved predictions per campaign (M3).
+minimum effect (GOAL L4.9 headline rule). The relative improvement is the best candidate's DEV score against the
+baseline's dev score (cross-validation on public training data only).
+
+Verdict embargo (GOAL §16.5.3, invariant 18: "continuous held-out values never reach the evolver"): until
+2026-10-07 the third term was the relative HELD-OUT improvement (certificate subject_mean vs comparator_mean), a
+continuous function of the test labels fed back to the proposer every generation (F1: 55.5% false certification
+at nominal 5% in the toy). The held-out side of the score is now only verdict bits (audit passed, certified,
+replicated, the certificate label), and those bits are a typed, ledgered release (`Releases.emit`, channel
+`evolution_score`, alphabet `verdict_bit`) on every target whose private files the run read. In a replayed
+campaign (kerneld/campaign.py) the bits are PINNED to their recorded values.
+The VDS-centred objective (GOAL §6.3) replaces this once the prediction ledger has enough resolved predictions.
 Splits are over TASKS: evolve (proposer sees traces), gate (accept/reject only), sealed (humans only).
 """
 
@@ -19,11 +27,12 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
+from ..kerneld.releases import VERDICT_LABELS
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
 from ..runtime.engine import RetryPolicy
@@ -125,36 +134,62 @@ def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
     return sigs
 
 
+def verdict_bits(state: dict, status: RunStatus) -> dict[str, Any]:
+    """The TARGET-DERIVED part of the run score: verdict bits only (never a continuous held-out value)."""
+    none: dict[str, Any] = {"audit": False, "certified": False, "replicated": False, "label": None}
+    if status != RunStatus.COMPLETED:
+        return dict(none)
+    try:
+        audit = state.get("audit")
+        cert = state.get("certificate")
+        label = cert.get("label") if isinstance(cert, dict) else None
+        label = label if isinstance(label, str) and label in VERDICT_LABELS else None
+        # credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger
+        certified = label in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
+        # replication earns credit only when it was independent by policy too: a replicator of the author's model
+        # family (invariant 5 not met) shares its biases (GOAL §10.5)
+        independent = (state.get("model_policy") or {}).get("invariant_5") == "met"
+        rcert = state.get("replica_certificate") or {}
+        replicated = bool(certified and independent and rcert.get("label") in (
+            "CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED"))
+    except (AttributeError, TypeError, ValueError, KeyError):  # malformed state: no credit (fail closed)
+        return dict(none)
+    return {"audit": isinstance(audit, dict) and audit.get("passed") is True, "certified": certified,
+            "replicated": replicated, "label": label}
+
+
+def dev_term(state: dict) -> float:
+    """clip(relative dev improvement of the best candidate over the baseline, -1, 1); 0 if unavailable. Dev scores
+    come from cross-validation on PUBLIC training data: not target-derived, never a release."""
+    try:
+        best, base = (state.get("best") or {}).get("dev_score"), state.get("baseline_dev")
+        hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
+    except (AttributeError, TypeError):
+        return 0.0
+    if (isinstance(best, (int, float)) and isinstance(base, (int, float)) and not isinstance(best, bool)
+            and not isinstance(base, bool) and math.isfinite(best) and math.isfinite(base) and base != 0):
+        rel = ((best - base) if hib else (base - best)) / abs(base)
+        return max(-1.0, min(1.0, rel))
+    return 0.0
+
+
+def combine(status: RunStatus, bits: dict[str, Any], dev: float) -> tuple[float | None, bool]:
+    """The run score from the (possibly pinned) verdict bits and the dev term."""
+    if status == RunStatus.INFRA_FAILED:
+        return None, False
+    if status != RunStatus.COMPLETED or bits.get("audit") is not True:  # incl. PAUSED; no audit = no credit
+        return 0.0, False
+    verified = bits.get("certified") is True
+    replicated = verified and bits.get("replicated") is True
+    return 0.5 * verified + 0.5 * replicated + 0.5 * dev, verified
+
+
 def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
     if status == RunStatus.INFRA_FAILED:
         return None, False
-    if status != RunStatus.COMPLETED:  # incl. PAUSED: a run waiting for a human decision earns no credit
+    if not isinstance(state, dict):
         return 0.0, False
-    try:
-        return _score_completed(state)
-    except (AttributeError, TypeError, ValueError, KeyError):  # malformed state: no credit (fail closed)
-        return 0.0, False
-
-
-def _score_completed(state: dict) -> tuple[float, bool]:
-    audit = state.get("audit")
-    if not isinstance(audit, dict) or audit.get("passed") is not True:  # no audit = no credit (hard constraint)
-        return 0.0, False
-    cert = state.get("certificate") or {}
-    # Credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger.
-    verified = cert.get("label") in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
-    # replication earns credit only when it was independent by policy too: a replicator of the author's model
-    # family (invariant 5 not met) shares its biases (GOAL §10.5)
-    independent = (state.get("model_policy") or {}).get("invariant_5") == "met"
-    replicated = verified and independent and (state.get("replica_certificate") or {}).get("label") in (
-        "CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
-    sol, base = cert.get("subject_mean"), cert.get("comparator_mean")
-    rel = 0.0
-    if (isinstance(sol, (int, float)) and isinstance(base, (int, float)) and not isinstance(sol, bool)
-            and not isinstance(base, bool) and math.isfinite(sol) and math.isfinite(base) and base != 0):
-        hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
-        rel = ((sol - base) if hib else (base - sol)) / abs(base)
-    return 0.5 * verified + 0.5 * replicated + 0.5 * max(-1.0, min(1.0, rel)), verified
+    return combine(status, verdict_bits(state, status), dev_term(state))
 
 
 # Capability for the one-shot sealed-split evaluation (finalize.py): run_harness refuses a sealed task without it.
