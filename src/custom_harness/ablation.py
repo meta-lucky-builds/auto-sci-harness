@@ -81,7 +81,42 @@ _CORE: tuple[Switch, ...] = (
 _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
 )
 
+_T = "tests/test_ablation_switches_research.py::"
 _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memory wiring, verify/, literature/ ...)
+    Switch(name="cross_task_memory", capability="evoscientist",
+           turns_off="research/memory_wiring.py recall_memory: the memory store is not opened; memory.context is the "
+                     "empty marker, so no cross-task finding, verified failure or dead-end reaches the prompt",
+           test=_T + "test_cross_task_memory_switch_renders_no_memory"),
+    Switch(name="skills_paged_recall", capability="evomaster",
+           turns_off="research/memory_wiring.py recall_memory withholds the skill kinds (playbook, method) from the "
+                     "query; research/recall.py recall refuses every page request (code 'ablated')",
+           test=_T + "test_skills_paged_recall_switch_withholds_skills_and_refuses_pages"),
+    Switch(name="playbook_dead_ends", capability="auto-recsys",
+           turns_off="research/memory_wiring.py recall_memory withholds playbook and dead-end entries from the query",
+           test=_T + "test_playbook_dead_ends_switch_withholds_playbooks_and_dead_ends"),
+    Switch(name="method_library", capability="mm-agent",
+           turns_off="research/memory_wiring.py recall_memory withholds method-library entries from the query",
+           test=_T + "test_method_library_switch_withholds_methods"),
+    Switch(name="data_profile_kway_rank", capability="scider",
+           turns_off="research/modules.py profile_data computes no profile (an 'ablated' marker instead); "
+                     "research/tournament.py tournament_module makes no judge call and keeps the proposer's order",
+           test=_T + "test_data_profile_kway_rank_switch_skips_profile_and_ranking"),
+    Switch(name="btl_tournament", capability="robin",
+           turns_off="research/tournament.py tournament_module: no judge call, no Bradley-Terry fit; the queue keeps "
+                     "the proposer's order",
+           test=_T + "test_btl_tournament_switch_keeps_the_proposer_order"),
+    Switch(name="experiment_tree_repair_improve", capability="ai-scientist-v1-v2",
+           turns_off="research/modules.py run_candidate never routes to `fix` (a failed node is abandoned, no "
+                     "repair) and next_hypothesis opens no improve round: each hypothesis is one draft run",
+           test=_T + "test_experiment_tree_switch_removes_repairs_and_improve_rounds"),
+    Switch(name="multi_source_retrieval", capability="feynman",
+           turns_off="literature/client.py LiteratureClient.search asks only the first source of its order (no "
+                     "fallback across sources); lookups are unchanged",
+           test=_T + "test_multi_source_retrieval_switch_disables_source_fallback"),
+    Switch(name="reward_variance_selection", capability="aworld-rl",
+           turns_off="weights/selection.py select_by_reward_variance ignores the variance: every task in task-id "
+                     "order, none excluded",
+           test=_T + "test_reward_variance_selection_switch_selects_uniformly"),
 )
 
 SWITCHES: Mapping[str, Switch] = _registry(*_CORE, *_EVOLVE, *_RESEARCH)

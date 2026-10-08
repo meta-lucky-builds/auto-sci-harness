@@ -73,7 +73,10 @@ capabilities:
   source: EvoMaster
   capability: Skills, progressive disclosure, context manager
   home: L5, L4 context
-  ablation: null
+  ablation:
+    switch: skills_paged_recall
+    not_covered:
+      context manager: 'not switched: the head/tail + handle archive of over-long values is done by the engine''s prompt rendering (runtime/template.py, runtime/engine.py), which reads no AblationSet in this branch; an off arm also needs a defined rule for an over-long value without a handle'
 - id: weng-survey
   source: Weng survey
   capability: Decision observability, optimiser-of-optimiser
@@ -83,22 +86,34 @@ capabilities:
   source: AI Scientist v1/v2
   capability: End-to-end pipeline, reviewer ensemble, experiment tree, LaTeX loop
   home: L4, L3 T5, L4.7, L4.10
-  ablation: null
+  ablation:
+    switch: experiment_tree_repair_improve
+    not_covered:
+      end-to-end pipeline: 'the pipeline is the research loop itself (examples/research_v*.yaml run by runtime/engine.py): no run exists without it, so there is no off arm'
+      reviewer ensemble: 'the judge panel (verify/judge.py JudgePanel: >= 3 families, both orders, meta-review) is constructed nowhere in src and panel_status is REFUSED with one model family; a smaller panel would break invariant 5, which the panel enforces at construction'
+      LaTeX loop: not built
 - id: evoscientist
   source: EvoScientist
   capability: Cross-task idea and experiment memory, failed directions
   home: L5
-  ablation: null
+  ablation:
+    switch: cross_task_memory
+    not_covered:
+      idea memory: 'not built: the memory store keeps only Kernel-backed entries (certified findings, verified failures, dead-ends, lineage, skills; memory/model.py Kind); an idea with no certificate is never stored'
 - id: scientistone
   source: ScientistOne
   capability: Chain-of-Evidence, deterministic grounding, integrity audit
   home: Kernel K0, L2
-  ablation: null
+  ablation:
+    not_ablatable: 'Chain-of-Evidence and deterministic grounding are Kernel K0 (every claim resolves to stored evidence) and the append-only evidence store (L2); the integrity audit is research.audit I1-I6: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: scider
   source: SciDER
   capability: Data-first profiling, K-way ranking, trajectory data
   home: L4.2, L4.5, L8
-  ablation: null
+  ablation:
+    switch: data_profile_kway_rank
+    not_covered:
+      trajectory data: 'an offline export only (weights/trajectory.py, weights/export.py) that takes trajectories as inputs and is not wired to runs: no run produces or consumes it, so there is nothing in a run to switch off'
 - id: scienceflow
   source: ScienceFlow
   capability: Recoverable states, safe restore, resource controller
@@ -108,27 +123,39 @@ capabilities:
   source: PARNESS
   capability: DAG kernel, full-text index, KG, provider adapters
   home: L0, L4.3, gateway
-  ablation: null
+  ablation:
+    not_ablatable: 'DAG kernel = the runtime graph interpreter (runtime/engine.py) that runs every capability, and provider adapters = the model gateway (gateway/) through which every model call passes with its provenance: no run exists without either; full-text index: not built (literature/fulltext.py is a remote Europe PMC search whose quote-span support serves the citation verifier, an integrity mechanism); KG: not built'
 - id: auto-recsys
   source: Auto-RecSys
   capability: Cognition vs procedure split, playbook with dead-ends
   home: L1, L5 playbook
-  ablation: null
+  ablation:
+    switch: playbook_dead_ends
+    not_covered:
+      cognition vs procedure split: 'structural, not a switchable behaviour: every routing and acceptance decision is a code module and models fill only LLM nodes (runtime/spec.py node kinds); handing those decisions to a model would break GOAL §1.1 and invariant 21 (an LLM may only downgrade, never grant)'
 - id: mm-agent
   source: MM-Agent
   capability: Hierarchical method library, actor-critic, rubric decomposition
   home: L5, L4.8, L3 T5
-  ablation: null
+  ablation:
+    switch: method_library
+    not_covered:
+      actor-critic: 'the critic -> defend chain (research/socratic.py, research/critic_answers.py) changes no route, queue or certificate; its only effect is the deny-only publish blocker recomputed in research.certify (critic_gate), pinned against edits (evolve/edits.py PINNED_NODES): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      rubric decomposition: the judge panel's rubric (verify/judge.py JudgePanel) is a deny-only T5 verifier that no run uses (JudgePanel is constructed nowhere in src; panel_status is REFUSED with one model family); the tournament's per-dimension rankings (research/tournament.py `dimensions`) are not switched by this switch
 - id: matagent
   source: MatAgent
   capability: Human-in-the-loop gates
   home: L9 approval nodes
-  ablation: null
+  ablation:
+    not_ablatable: 'human approval nodes (runtime approval nodes, L9: no model, module or evolved node can approve): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: feynman
   source: Feynman
   capability: Multi-source retrieval, citation verifier
   home: L4.3, K0
-  ablation: null
+  ablation:
+    switch: multi_source_retrieval
+    not_covered:
+      citation verifier: 'K0 / audit I3 (literature/cite.py; ID lookups across sources are its resolution path and stay unchanged): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: the-station
   source: The Station
   capability: Decentralised agents, archive coordination, exact evaluators, stagnation lanes
@@ -138,7 +165,8 @@ capabilities:
   source: AutoOPT
   capability: Lean + comparator, numerical certificates, statement fidelity
   home: L3 T0/T1
-  ablation: null
+  ablation:
+    not_ablatable: 'the Lean (T0) adapter with comparator, axiom audit and statement-fidelity gate (verify/lean_validation.py) and the exact-certificate (T1, kernel/lp.py) checker are Kernel verifiers: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: mda
   source: MDA
   capability: Bayesian evidence, EIG experiment design
@@ -148,42 +176,55 @@ capabilities:
   source: Robin
   capability: Lab-in-loop, BTL tournament, replicated analysis + consensus
   home: L3 T3, L4.5, L4.9
-  ablation: null
+  ablation:
+    switch: btl_tournament
+    not_covered:
+      lab-in-loop: 'the physical claim path (research/physical.py) runs through human approval nodes (protocol_review, data_received) and the human-only `chh return-data`: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      replicated analysis + consensus: 'replication agreement is required for a CERTIFIED headline claim (research/claims.py certify, the replica_* nodes): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: ahois
   source: AHOIS
   capability: Socratic question-only critic, physical bench
   home: L4.8, L6.5, L3 T3
-  ablation: null
+  ablation:
+    not_ablatable: 'the Socratic critic changes no route, queue or certificate: its only effects are the question-only safety filter (research/socratic.py) and the deny-only publish blocker (research/critic_answers.py critic_gate, recomputed in research.certify), both pinned against edits (evolve/edits.py PINNED_NODES); the physical bench runs through human approval nodes (research/physical.py): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: scienceide
   source: ScienceIDE
   capability: Codebase → verifiable environments, fault injection, calibrated tolerances, floor-normalised reward
   home: L3, task suite, L8
-  ablation: null
+  ablation:
+    not_ablatable: 'fault injection and calibrated tolerances validate the verifiers (kernel/adapters.py validation evidence, verify/tolerance.py, verify/synthesis.py) and the repair tasks are benchmark construction (research/suite.py), not run-time behaviour; floor-normalised reward: not built. Verifier validation is an integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: aworld-rl
   source: AWorld-RL
   capability: Reward-variance task selection, stateful verifier
   home: L8, L3 T1
-  ablation: null
+  ablation:
+    switch: reward_variance_selection
+    not_covered:
+      stateful verifier: not built (no stateful T1 verifier in verify/ or kernel/)
 - id: prime-agent
   source: Prime Agent
   capability: Memory hierarchy, long durable runs, recursive spawn ledger
   home: L5, L0/L1
-  ablation: null
+  ablation:
+    not_ablatable: 'memory hierarchy: not built as a hierarchy (one store with kinds and a derivation graph, memory/store.py; its recall is switched under evoscientist''s `cross_task_memory`); long durable runs: per-step checkpoints and resume (runtime/engine.py) are the substrate the trace, run bundle and audit are built from (L2), so a run without them could not be audited; recursive spawn ledger: not built'
 - id: researchbench-sde
   source: ResearchBench / SDE
   capability: Research-judgment evaluation
   home: Scorecard E
-  ablation: null
+  ablation:
+    not_ablatable: 'an evaluation of the system (scorecard axis E), not a behaviour of the system under test: there is nothing in a run to switch off; no research-judgment benchmark is pinned yet (empty scorecard registry)'
 - id: langgraph
   source: LangGraph
   capability: Checkpoint, resume, fan-out, interrupts
   home: L0
-  ablation: null
+  ablation:
+    not_ablatable: 'checkpoint and resume are the runtime substrate the trace, run bundle and audit are built from (runtime/engine.py, L2), so a run without them could not be audited; fan-out (MapNode) is a graph construct of the spec whose declared reducer needs every branch, not a switchable behaviour; interrupts are human approval nodes: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: vg-audit-2608-05179
   source: VG audit (2608.05179)
   capability: Verification ladder, reporting checklist, mechanical vs validated
   home: Kernel tiers, L2, §6.1
-  ablation: null
+  ablation:
+    not_ablatable: 'the verification ladder (Kernel tiers), the reporting checklist (kernel/checklist.py) and the mechanical-vs-validated labels are Kernel and reporting requirements: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: openresearch-alphaxiv
   source: OpenResearch (alphaXiv)
   capability: Experiment-tree lifecycle and shape, fixed run contract, per-completion loop, compute backends, PubMed/bioRxiv/full-text retrieval with fixed windows, large-artifact manifest, figure scripts,

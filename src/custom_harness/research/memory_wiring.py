@@ -12,16 +12,21 @@
   cannot tell whether the model followed it; stated limit).
 
 Memory never changes a certificate or a route: a memory failure is recorded in state and the loop goes on.
+
+Ablation switches (custom_harness/ablation.py; only an ablation run of the scorecard runner sets them):
+`cross_task_memory` renders no memory at all (the store is not opened); `skills_paged_recall`, `playbook_dead_ends`
+and `method_library` withhold their kinds from the query, so those entries are neither read nor rendered.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from ..ablation import AblationSet
 from ..errors import InfraError
 from ..kernel import Kernel, KernelError
 from ..memory import MemoryRefused, MemoryStore, NotReadable, harvest_negatives
-from ..memory.model import SKILL_KINDS
+from ..memory.model import SKILL_KINDS, Kind
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 
@@ -33,14 +38,33 @@ EMPTY = "(no memory entries)"
 _ERRORS = (NotReadable, MemoryRefused, KernelError, InfraError, ValueError)
 
 
+def ablated_kinds(ablation: AblationSet) -> frozenset[Kind]:
+    """Memory kinds an ablation run withholds from recall (custom_harness/ablation.py; empty for production):
+    `skills_paged_recall` the skills (playbook + method), `playbook_dead_ends` playbooks and dead-ends,
+    `method_library` the method library."""
+    off: set[Kind] = set()
+    if ablation.off("skills_paged_recall"):
+        off |= SKILL_KINDS
+    if ablation.off("playbook_dead_ends"):
+        off |= {Kind.PLAYBOOK, Kind.DEAD_END}
+    if ablation.off("method_library"):
+        off.add(Kind.METHOD)
+    return frozenset(off)
+
+
 @register("research.recall_memory")
 def recall_memory(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     ns = str(params.get("namespace", MEMORY_NAMESPACE))
     k = int(params.get("max_entries", MAX_RECALL))
     reader = f"run:{ctx.run_id}"
+    if ctx.ablation.off("cross_task_memory"):  # ablation run: no memory is read or rendered at all
+        return {"memory": {"namespace": ns, "context": EMPTY, "entries": [], "skills": [], "withheld": [],
+                           "error": None, "ablated": ["cross_task_memory"]}}
+    withheld_kinds = ablated_kinds(ctx.ablation)
     try:
         store = MemoryStore(ctx.kernel(), namespace=ns)
-        entries = store.query(reader=reader, purpose="hypothesize prompt")[:k]
+        kinds = [x for x in Kind if x not in withheld_kinds] if withheld_kinds else None  # never read when ablated
+        entries = store.query(reader=reader, kinds=kinds, purpose="hypothesize prompt")[:k]
         kept, withheld = [], []
         for e in entries:  # screened one by one, so one bad entry withholds itself, not the others
             try:
@@ -58,7 +82,8 @@ def recall_memory(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCont
                            "error": f"{type(e).__name__}: {e}"[:500]}}
     return {"memory": {"namespace": ns, "context": text, "entries": [e.id for e in kept],
                        "skills": [e.id for e in kept if e.kind in SKILL_KINDS], "withheld": withheld,
-                       "error": None}}
+                       "error": None,
+                       **({"ablated_kinds": sorted(str(x) for x in withheld_kinds)} if withheld_kinds else {})}}
 
 
 def after_certify(kernel: Kernel, state: dict[str, Any], cert_hash: str, secrets: tuple[str, ...],
@@ -93,4 +118,5 @@ def exploit_check(kernel: Kernel, spawn: Any, targets: dict[str, str], *, min_re
     return PerturbedEvaluatorCheck(PerturbedTaskEvaluator(kernel, spawn, targets), min_retained=min_retained)
 
 
-__all__ = ["EMPTY", "MAX_RECALL", "MEMORY_NAMESPACE", "after_certify", "exploit_check", "recall_memory"]
+__all__ = ["EMPTY", "MAX_RECALL", "MEMORY_NAMESPACE", "ablated_kinds", "after_certify", "exploit_check",
+           "recall_memory"]
