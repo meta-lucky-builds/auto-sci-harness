@@ -59,40 +59,13 @@ T = Dataset("t", "test", "features", EX, "A")
 @given(gen.scripts())
 def test_model_and_kernel_agree_on_generated_histories(script):
     """The triaged clean-room model and the Kernel agree on every check, label, family size and vault decision.
-    Known KERNEL-side divergences (pinned below as strict xfails) are excluded by their exact predicate only."""
+    (Until 2026-10-08 the Kernel-side divergences KD1, KD2 and KD4 were excluded by exact predicates; all three are
+    fixed in the Kernel, so nothing is excluded any more.)"""
     _history, dis, _ = gen.run(script)
-    dis = [d for d in dis if not _known_kernel_side(d, script)]
     assert dis == [], dis
 
 
-def _known_kernel_side(d: gen.Disagreement, script: list[Event]) -> bool:
-    ev = script[d.step]
-    if not isinstance(ev, Certify):
-        return False
-    ds = {e.id: e for e in script[:d.step] if isinstance(e, Dataset)}
-    c = ev.claim
-    # KD1: a development dataset, or a dataset read for development, sharing held-out examples passes K6
-    used = set(c.development) | {e.dataset for e in script[:d.step] if isinstance(e, Read) and e.purpose == "develop"}
-    kd1 = any(dv in ds and t in ds and dv != t and (ds[dv].examples & ds[t].examples or (
-        ds[t].private is not None and ds[dv].private == ds[t].private)) for dv in used for t in c.targets)
-    # KD2: K7 judges risk on the targets that have statistics when another target has none
-    kd2 = len(c.targets) > 1 and d.model == "fail" and d.real[0] == "pass"  # model fails it, Kernel passes
-    # KD4: a non-excused private read of a dataset RELATED to a target (shared rows / identical labels), made before
-    # the claim's registration, is not counted by K2 (only reads of the target itself are)
-    reg = next((i for i, e in enumerate(script[:d.step]) if isinstance(e, Prereg) and e.claim.key == c.key), d.step)
-    kd4 = any(isinstance(e, Read) and e.dataset in ds and t in ds and e.dataset != t and e.purpose != "leakscan" and (
-        ds[e.dataset].examples & ds[t].examples
-        or (ds[t].private is not None and ds[e.dataset].private == ds[t].private))
-        for e in script[:reg] for t in c.targets)
-    if d.where == "K2" and kd4:
-        return True
-    return (d.where == "K6" and kd1) or (d.where == "K7" and kd2) or (d.where == "label" and kd1)
-
-
-# ------------------------------------------------------------------ Kernel-side divergences found (pinned)
-@pytest.mark.xfail(strict=True, reason="KD1 (found by the clean-room differential run 2026-10-07): K6 checks only "
-                   "identical content and public LABELLED copies, so a development dataset that holds the same "
-                   "held-out examples with private labels does not count as development use of the target")
+# ------------------------------------------------------------------ Kernel-side divergences found (fixed)
 def test_kd1_a_development_dataset_sharing_held_out_examples_fails_k6():
     dev = Dataset("devset", "dev", "features", EX, "B")
     c = claim(dev=("devset",))
@@ -101,15 +74,16 @@ def test_kd1_a_development_dataset_sharing_held_out_examples_fails_k6():
     assert v.checks["K6"] == "fail" and v.label == "REJECTED", v
 
 
-def test_kd1_attack_really_certifies_today():
-    """Positive control for KD1: the scenario above is CERTIFIED today (so the xfail is about the gap, not noise)."""
-    dev = Dataset("devset", "dev", "features", EX, "B")
+def test_kd1_control_a_disjoint_development_dataset_still_certifies():
+    """Control for KD1 (inverted 2026-10-08 after the K6 fix; it used to show the attack certified): the same history
+    with a development dataset that shares NO held-out examples and has other labels is still CERTIFIED, so the
+    rejection above is caused by the shared examples, not by having a development dataset at all."""
+    dev = Dataset("devset", "dev", "features", frozenset(range(600, 640)), "B")
     [v] = play([T, dev, *ARTS, Read("devset", "develop"), *honest(claim(dev=("devset",)))])
-    assert v.label == "CERTIFIED-INTERNAL", v
+    assert not (dev.examples & T.examples)
+    assert v.label == "CERTIFIED-INTERNAL" and v.checks["K6"] == "pass", v
 
 
-@pytest.mark.xfail(strict=True, reason="KD2 (differential run): with two targets and statistics on only one, K7 "
-                   "passes on the subset; the label is still REJECTED (K4/K6 fail), so no wrong certificate")
 def test_kd2_k7_fails_when_any_target_has_no_statistics():
     u = Dataset("u", "test", "features", frozenset(range(200, 240)), "U")
     c = claim(targets=("t", "u"))
@@ -192,10 +166,10 @@ def test_mr_arm_swap_never_certifies_both_directions():
         assert not (v1.label.startswith("CERTIFIED") and v2.label.startswith("CERTIFIED")), (v1, v2)
 
 
-@pytest.mark.xfail(strict=True, reason="as-of stability (invariant 17, §16.4, owned by kstats): verify() re-derives "
-                   "against the CURRENT ledger, so a later develop read turns an honest certificate into a "
-                   "'forged-looking' difference instead of a separate STALE status")
-def test_mr_as_of_stability_later_events_do_not_change_verify():
+def test_mr_as_of_stability_later_events_make_a_certificate_stale_never_forged():
+    """Invariant 17 / §16.4: verify_status re-derives as of the certificate's own ledger prefix, so a later develop
+    read of the target makes an honest certificate STALE (with a reason), never "forged". (Was a strict xfail on the
+    strict verify() form until kstats' as-of verify landed; switched to verify_status 2026-10-08.)"""
     world, tmp = fresh()
     try:
         c = claim()
@@ -203,9 +177,11 @@ def test_mr_as_of_stability_later_events_do_not_change_verify():
             world.apply(ev)
         cert = world.last_cert
         assert cert.label.value == "CERTIFIED-INTERNAL"
-        assert world.kernel.verify(cert.cert_hash()) == []
+        before = world.kernel.verify_status(cert.cert_hash())
+        assert (before.status, before.forged, before.stale) == ("valid", (), ())
         world.apply(Read("t", "develop"))  # a later event, after the certificate
-        assert world.kernel.verify(cert.cert_hash()) == []
+        after = world.kernel.verify_status(cert.cert_hash())
+        assert after.status == "stale" and after.forged == () and after.stale, after  # the later read really mattered
     finally:
         world.close()
         tmp.cleanup()
@@ -249,8 +225,9 @@ def test_certify_never_evaluates_k3_to_k9_for_an_unregistered_claim():
         assert checks[k].status == "fail" and checks[k].reasons[0].startswith("not evaluated"), (k, checks[k])
 
 
-def _labelled_target_verdict(n: int) -> model.Verdict:
-    """KD3 scenario: an external target whose PUBLIC file (the program's input) carries the TRUE labels as a column."""
+def _labelled_target_verdict(n: int, with_labels: bool = True) -> model.Verdict:
+    """KD3 scenario: an external target whose PUBLIC file (the program's input) carries the TRUE labels as a column
+    (`with_labels=False`: the control, the same rows with a constant third column instead)."""
     import real_kernel as rk
 
     from custom_harness.kernel import DatasetRole
@@ -259,7 +236,8 @@ def _labelled_target_verdict(n: int) -> model.Verdict:
         labels = rk.token_labels("A")[:n] if n <= rk.N else None
         assert labels is not None
         rows = [rk.example_row(i) for i in range(n)]
-        pub = rk._csv([["x1", "x2", "label"], *[[a, b, y] for (a, b, _), y in zip(rows, labels, strict=True)]])
+        col = labels if with_labels else ["0"] * n
+        pub = rk._csv([["x1", "x2", "label"], *[[a, b, y] for (a, b, _), y in zip(rows, col, strict=True)]])
         world.kernel.vault.register_dataset("t", DatasetRole.EXTERNAL, public={"public.csv": pub},
                                             private={"labels.csv": rk.private_bytes("A")})
         world.datasets["t"] = Dataset("t", "external", "labelled", frozenset(range(n)), "A")
@@ -270,23 +248,21 @@ def _labelled_target_verdict(n: int) -> model.Verdict:
                 world.apply(ev)
         finally:
             rk.public_bytes = original
-        assert pub.decode().splitlines()[1].endswith("," + labels[0])  # the labels really are in the input
+        assert (pub.decode().splitlines()[1].endswith("," + labels[0])) == with_labels  # the labels really are there
         return world.last
     finally:
         world.close()
         tmp.cleanup()
 
 
-@pytest.mark.xfail(strict=True, reason="KD3 (found 2026-10-07 while triaging the differential run): a held-out "
-                   "target whose public input file carries its true labels as a column is CERTIFIED-VALIDATED; K6 "
-                   "compares only against OTHER datasets' public files, K8 only byte-identical private files, and "
-                   "K9 label runs need consecutive labels")
 def test_kd3_a_target_whose_public_input_carries_its_labels_is_rejected():
     assert _labelled_target_verdict(40).label == "REJECTED"
 
 
-def test_kd3_attack_really_certifies_today():
-    assert _labelled_target_verdict(40).label == "CERTIFIED-VALIDATED"
+def test_kd3_control_the_same_target_without_its_labels_certifies():
+    """Control (inverted 2026-10-08 after the K9 label-column fix; it used to show the attack certified): only the
+    label column makes the difference."""
+    assert _labelled_target_verdict(40, with_labels=False).label == "CERTIFIED-VALIDATED"
 
 
 def _related_peek(read_related: bool) -> model.Verdict:
@@ -297,11 +273,10 @@ def _related_peek(read_related: bool) -> model.Verdict:
     return v
 
 
-@pytest.mark.xfail(strict=True, reason="KD4 (differential run 2026-10-08): K2 counts only reads of the target id; an "
-                   "early label read of a dataset holding the same held-out rows under another id is not peeking")
 def test_kd4_an_early_read_of_a_related_dataset_is_peeking():
     assert _related_peek(True).checks["K2"] == "fail"
 
 
-def test_kd4_attack_really_passes_k2_today():
-    assert _related_peek(True).checks["K2"] == "pass" and _related_peek(False).checks["K2"] == "pass"
+def test_kd4_control_without_the_early_read_k2_passes():
+    """Control (inverted 2026-10-08 after the K2 fix): the related dataset alone, never read early, is not peeking."""
+    assert _related_peek(False).checks["K2"] == "pass"

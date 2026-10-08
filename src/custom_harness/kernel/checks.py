@@ -14,7 +14,7 @@ import json
 import math
 import statistics
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from types import MappingProxyType
@@ -146,6 +146,19 @@ def shared_examples(vault: Vault, target: str, other: str) -> dict[str, tuple[in
             if n:
                 found[f"{other}/{name}"] = (n, len(data[0]) > len(t[0]))
     return found
+
+
+def label_columns(data: bytes, labels: Sequence[str]) -> list[str]:
+    """KD3 (assure, 2026-10-07): the columns of a CSV whose values are exactly `labels`, row by row (hidden labels
+    shipped as a column of a public or program input file). Exact text after stripping; a file with another number
+    of rows, or a short row, never matches; single-class labels carry no information and never match. No length
+    floor: a column that reproduces the held-out labels makes the target trivially solvable, so failing closed on
+    a small file is the conservative direction. Not detected (stated): re-mapped, noisy or re-ordered copies."""
+    rows = _csv_rows(data)
+    if len(set(labels)) < 2 or len(rows) - 1 != len(labels):
+        return []
+    return [name for j, name in enumerate(rows[0])
+            if all(len(r) > j and r[j].strip() == y.strip() for r, y in zip(rows[1:], labels, strict=True))]
 
 
 def related_targets(vault: Vault, target: str) -> set[str]:
@@ -405,7 +418,9 @@ def k2_preregistered(ctx: Context) -> CheckResult:
         # A read for a claim registered on an unrelated target, or for an unregistered claim, is peeking.
         related = related_targets(ctx.vault, target)
         early, integrity = [], []
-        for a in ctx.vault.accesses(target):
+        # KD4 (assure, 2026-10-08): a read of a RELATED dataset (the same held-out rows or byte-identical labels
+        # under another id) is a read of this target, with the same excuses
+        for a in sorted((a for d in related for a in ctx.vault.accesses(d)), key=lambda e: e.seq):
             if not a.body.get("private") or a.seq >= prereg.seq:
                 continue
             purpose, ch = a.body.get("purpose"), a.body.get("claim_hash")
@@ -420,8 +435,8 @@ def k2_preregistered(ctx: Context) -> CheckResult:
                 early.append(a)
         if early:
             reasons.append(R(Code.K2_PEEK, f"private data of target {target!r} was read {len(early)} time(s) before "
-                           f"pre-registration (first at ledger seq {early[0].seq}, purpose "
-                           f"{early[0].body.get('purpose')!r})"))
+                           f"pre-registration (first at ledger seq {early[0].seq}, dataset "
+                           f"{early[0].body.get('dataset_id')!r}, purpose {early[0].body.get('purpose')!r})"))
         if integrity:
             obs.append(f"{target}: {len(integrity)} integrity read(s) (leakscan) before pre-registration: not "
                        f"counted as peeking (never fed to a model; purpose declared by trusted host code)")
@@ -845,8 +860,12 @@ def k9_leaks(ctx: Context) -> CheckResult:
     # program inputs: hidden labels must not reach a program even as a renamed or re-headed copy (records here
     # passed K0, so every input blob resolves; a read error would fail this check via certify, never pass it)
     for blob in sorted({ref.blob for _, r in ctx.records for ref in r.inputs.values()}):
-        text = ctx.store.blobs.get(blob).decode("utf-8", errors="ignore")
+        data = ctx.store.blobs.get(blob)
+        text = data.decode("utf-8", errors="ignore")
         reasons += coded(Code.K9_LEAK, leak.scan_text(text, f"program input {blob[:12]}", canaries, windows, runs))
+        # KD3: the labels as a COLUMN (interleaved with features, so no consecutive run exists in the text)
+        reasons += [R(Code.K9_LEAK, f"hidden test labels found as column {col!r} of program input {blob[:12]}")
+                    for labels in label_lists for col in label_columns(data, labels)]
     fp = {"hashes": private_blobs, "canaries": canaries, "label_windows": windows, "label_runs": runs}
     for run_id in sorted({r.run_id for _, r in ctx.records}):
         result = leak.leak_audit(ctx.store.trace(run_id), None, fp, canaries)

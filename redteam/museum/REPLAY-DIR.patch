@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/execution.py b/src/custom_harness/kernel/execution.py
+--- a/src/custom_harness/kernel/execution.py
++++ b/src/custom_harness/kernel/execution.py
+@@ -133,7 +133,7 @@
+             if vault.store.blobs.put(data) != ref.blob:
+                 raise ExecutionError(f"input {role} ({ref.dataset_id}/{ref.file}) no longer matches the record")
+             inputs[role] = (ref.file, data)
+-        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.nonce}-"
++        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-"
+                                        f"{self.calls}")
+         preds, _ = run_program(sandbox, code=vault.store.blobs.get(record.artifact_hash), entrypoint=record.entrypoint,
+                                argv=record.argv, inputs=inputs, seed=record.seed,

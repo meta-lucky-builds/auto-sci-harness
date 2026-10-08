@@ -378,32 +378,63 @@ findings:
     invariant: "§4.3 K6 (targets never seen during development)"
     capability: A3
     tests: ["tests/spec/test_spec_kernel.py::test_kd1_a_development_dataset_sharing_held_out_examples_fails_k6",
-            "tests/spec/test_spec_kernel.py::test_kd1_attack_really_certifies_today"]
-    status: open
+            "tests/test_kernel_s16.py::test_kd1_development_copy_of_held_out_examples_fails_k6"]
+    museum: redteam/museum/KD1.patch
+    status: fixed
   - id: KD2
     title: K7 judges risk on the subset of targets that have statistics (label still REJECTED)
     invariant: "§4.3 K7"
     capability: A3
-    tests: ["tests/spec/test_spec_kernel.py::test_kd2_k7_fails_when_any_target_has_no_statistics"]
-    status: open
+    tests: ["tests/spec/test_spec_kernel.py::test_kd2_k7_fails_when_any_target_has_no_statistics",
+            "tests/test_kernel_s16.py::test_kd2_k7_needs_statistics_on_every_target"]
+    museum: redteam/museum/KD2.patch
+    status: fixed
   - id: ASOF
     title: verify() re-derives on the current ledger, so later events make an honest certificate look forged
     invariant: "§10 inv. 17 (STALE, not forged)"
     capability: A3
-    tests: ["tests/spec/test_spec_kernel.py::test_mr_as_of_stability_later_events_do_not_change_verify"]
-    status: open
+    tests: ["tests/spec/test_spec_kernel.py::test_mr_as_of_stability_later_events_make_a_certificate_stale_never_forged"]
+    museum: redteam/museum/ASOF.patch
+    status: fixed
   - id: KD3
     title: a held-out target whose PUBLIC input file carries its true labels as a column is CERTIFIED-VALIDATED
     invariant: "§10 inv. 2; §4.3 K6/K8/K9"
     capability: A3
     tests: ["tests/spec/test_spec_kernel.py::test_kd3_a_target_whose_public_input_carries_its_labels_is_rejected",
-            "tests/spec/test_spec_kernel.py::test_kd3_attack_really_certifies_today"]
-    status: open
+            "tests/test_kernel_s16.py::test_kd3_target_public_input_carrying_its_labels_fails_k9"]
+    museum: redteam/museum/KD3.patch
+    status: fixed
   - id: KD4
     title: K2 counts only reads of the target id; an early label read of a dataset holding the same held-out rows
       (or byte-identical labels) under another id is not counted as peeking
     invariant: "§4.3 K2"
     capability: A3
     tests: ["tests/spec/test_spec_kernel.py::test_kd4_an_early_read_of_a_related_dataset_is_peeking",
-            "tests/spec/test_spec_kernel.py::test_kd4_attack_really_passes_k2_today"]
-    status: open
+            "tests/test_kernel_s16.py::test_kd4_early_read_of_a_related_dataset_fails_k2"]
+    museum: redteam/museum/KD4.patch
+    status: fixed
+  # ------------------------------------------------------------------ integration fixes (fixer, 2026-10-08)
+  - id: K9-QUOTED
+    title: held-out labels written as a quoted list literal (`["c", "a", ...]`) in a program pass K9 (auditor)
+    invariant: "§10 inv. 2; §4.3 K9"
+    capability: A1
+    tests: ["tests/test_leak_encodings.py::test_label_run_written_as_a_quoted_list_literal_is_found",
+            "tests/test_claim_audit.py::test_planted_label_memorising_method_quoted_literal_k9_gap"]
+    museum: redteam/museum/K9-QUOTED.patch
+    status: fixed
+  - id: BUNDLE-DUP
+    title: the bundle reader kept the LAST of duplicate zip member names (a viewer and the Kernel could see
+      different manifests)
+    invariant: "§4.4 bundle integrity"
+    capability: A4
+    tests: ["tests/test_kernel_integrity.py::test_bundle_with_duplicate_member_names_is_refused"]
+    museum: redteam/museum/BUNDLE-DUP.patch
+    status: fixed
+  - id: REPLAY-DIR
+    title: two Kernel replayers (one per certify/reproduce) used the same replay directory keys, so a replay could
+      inherit an earlier replay's files
+    invariant: "GOAL §5 L0 (every run in its own directory)"
+    capability: A3
+    tests: ["tests/test_kernel_s16.py::test_two_replayers_never_share_a_replay_directory"]
+    museum: redteam/museum/REPLAY-DIR.patch
+    status: fixed

@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -864,8 +864,6 @@
+         text = data.decode("utf-8", errors="ignore")
+         reasons += coded(Code.K9_LEAK, leak.scan_text(text, f"program input {blob[:12]}", canaries, windows, runs))
+         # KD3: the labels as a COLUMN (interleaved with features, so no consecutive run exists in the text)
+-        reasons += [R(Code.K9_LEAK, f"hidden test labels found as column {col!r} of program input {blob[:12]}")
+-                    for labels in label_lists for col in label_columns(data, labels)]
+     fp = {"hashes": private_blobs, "canaries": canaries, "label_windows": windows, "label_runs": runs}
+     for run_id in sorted({r.run_id for _, r in ctx.records}):
+         result = leak.leak_audit(ctx.store.trace(run_id), None, fp, canaries)

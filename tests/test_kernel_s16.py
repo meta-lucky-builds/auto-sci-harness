@@ -469,6 +469,99 @@ def test_kd1_development_copy_of_held_out_examples_fails_k6(tmp_path):
     w.close()
 
 
+def _kd3_world(tmp_path, with_label_column: bool):
+    """KD3 (assure, 2026-10-07): a held-out target whose own PUBLIC file (the program's input) carries its true
+    labels as a column. The control registers the same rows without that column."""
+    from kernel_world import _csv, _sample
+
+    w = World(tmp_path, seed=17, n_train=120, n_test=120)
+    rng = random.Random(99)
+    rows = [_sample(rng) for _ in range(120)]
+    header = ["x1", "x2", "n1", *(["label"] if with_label_column else [])]
+    pub = _csv([header, *[r if with_label_column else r[:-1] for r in rows]])
+    w.vault.register_dataset("lab", DatasetRole.TEST, public={"test_X.csv": pub},
+                             private={"test_y.csv": _csv([["label"], *[[r[-1]] for r in rows]])})
+    w.labels["lab"] = [r[-1] for r in rows]
+    good, comp = w.artifact("good"), w.artifact("baseline", "baseline")
+    c = w.claim(good, comp, delta=0.2, n_boot=1000, targets=("lab",), **FAST)
+    w.kernel.preregister(c)
+    cert = w.kernel.certify(c, w.evaluate_all(c), record=False)
+    w.close()
+    return cert
+
+
+def test_kd3_target_public_input_carrying_its_labels_fails_k9(tmp_path):
+    cert = _kd3_world(tmp_path / "kd3", with_label_column=True)
+    assert cert.checks["K9"].status == "fail" and Code.K9_LEAK in cert.checks["K9"].codes, cert.checks["K9"]
+    assert "column 'label'" in " ".join(cert.checks["K9"].reasons) and cert.label == Label.REJECTED
+
+
+def test_kd3_control_the_same_rows_without_the_label_column_pass_k9(tmp_path):
+    cert = _kd3_world(tmp_path / "kd3c", with_label_column=False)
+    assert cert.checks["K9"].status == "pass", cert.checks["K9"]
+
+
+def test_label_columns_matches_only_an_exact_informative_column():
+    lab = ["0", "1", "2", "1"]
+    data = b"a,b,c\n0,5,0\n1,5,1\n2,5,2\n1,5,1\n"
+    assert K.label_columns(data, lab) == ["a", "c"]
+    assert K.label_columns(data, ["0", "1", "2"]) == []  # another number of rows: never aligned
+    assert K.label_columns(b"a\n1\n1\n", ["1", "1"]) == []  # single-class labels carry no information
+    assert K.label_columns(b"a,b\n5,0\n5\n", ["0", "1"]) == []  # a short row never matches
+    assert K.label_columns(data, []) == []
+
+
+def _kd4_world(tmp_path, read_related: bool):
+    """KD4 (assure, 2026-10-08): an early label read of a dataset that holds the target's held-out rows under
+    another id is peeking at the target."""
+    w = World(tmp_path, seed=19, n_train=120, n_test=120)
+    x = w.store.blobs.get(w.vault.dataset("test").files["test_X.csv"].blob)
+    w.vault.register_dataset("rows", DatasetRole.DEV, public={"features.csv": x},
+                             private={"labels.csv": b"label\n" + b"0\n" * 120})
+    if read_related:
+        w.vault.read("rows", "labels.csv", purpose="audit")
+    c, ids = _honest(w)
+    cert = w.kernel.certify(c, ids, record=False)
+    w.close()
+    return cert
+
+
+def test_kd4_early_read_of_a_related_dataset_fails_k2(tmp_path):
+    cert = _kd4_world(tmp_path / "kd4", read_related=True)
+    assert cert.checks["K2"].status == "fail" and Code.K2_PEEK in cert.checks["K2"].codes, cert.checks["K2"]
+    assert "'rows'" in " ".join(cert.checks["K2"].reasons)
+
+
+def test_kd4_control_without_the_read_passes_k2(tmp_path):
+    assert _kd4_world(tmp_path / "kd4c", read_related=False).checks["K2"].status == "pass"
+
+
+def test_two_replayers_never_share_a_replay_directory(world):
+    """Same class as the confirm-retry gap (orcompute-to-yield-02): every certify/reproduce builds a NEW
+    SandboxReplayer whose call counter restarts at 1, so a factory mapping key -> root / key handed the second
+    replayer the first one's directory and files. The key now carries a per-replayer nonce."""
+    from custom_harness.kernel import SandboxReplayer
+
+    c, ids = _honest(world)
+    ctx = K.Context(claim=c, claim_hash=c.claim_hash(), store=world.store, vault=world.vault,
+                    ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=tuple(ids))
+    K.k0_provenance(ctx)
+    rec = ctx.records[0][1]
+    keys: list[str] = []
+
+    class Stop(Exception):
+        pass
+
+    def factory(key: str):
+        keys.append(key)
+        raise Stop
+
+    for _ in range(2):
+        with pytest.raises(Stop):
+            SandboxReplayer(factory).replay(rec, world.vault)
+    assert len(keys) == 2 and keys[0] != keys[1], keys
+
+
 def test_kd2_k7_needs_statistics_on_every_target(world):
     good, comp = world.artifact("good"), world.artifact("baseline", "baseline")
     c = world.claim(good, comp, delta=0.2, n_boot=1000, targets=("test", "test2"), **FAST)

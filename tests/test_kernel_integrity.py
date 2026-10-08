@@ -380,6 +380,22 @@ def test_bundle_reads_are_bounded_and_refuse_zip_bombs(w, tmp_path):
         reproduce_bundle(_zip(tmp_path / "empty.zip", {"x": b""}), _fresh(tmp_path / "r"))
 
 
+def test_bundle_with_duplicate_member_names_is_refused(w, tmp_path):
+    """Two members with one name: the reader kept the LAST one, so a bundle could show one manifest to a zip viewer
+    (or another reader) and another to the Kernel. Refused, fail closed, before any member is read."""
+    bundle, _ = _certified_bundle(w, tmp_path)
+    with zipfile.ZipFile(bundle) as z:
+        members = [(n, z.read(n)) for n in z.namelist()]
+    dup = tmp_path / "dup.zip"
+    with pytest.warns(UserWarning, match="Duplicate name"), zipfile.ZipFile(dup, "w") as z:
+        for n, b in [*members, ("manifest.json", b'{"format": "chh-bundle/2"}')]:
+            z.writestr(n, b)
+    with zipfile.ZipFile(dup) as z:  # the attack is in place: two members named manifest.json
+        assert sum(i.filename == "manifest.json" for i in z.infolist()) == 2
+    with pytest.raises(BundleError, match="duplicate member name"):
+        reproduce_bundle(dup, _fresh(tmp_path / "rd"))
+
+
 # ================================================================== K9: encoded leaks and long label runs
 def _canary_texts(canary: str) -> dict[str, str]:
     return {"base64": base64.b64encode(f"token={canary};".encode()).decode(),

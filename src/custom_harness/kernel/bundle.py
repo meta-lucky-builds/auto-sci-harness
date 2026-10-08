@@ -176,6 +176,10 @@ class _Reader:
         infos = z.infolist()
         if len(infos) > limits.members:
             raise BundleError(f"bundle has {len(infos)} members, more than the cap of {limits.members}")
+        names = [i.filename for i in infos]
+        dups = sorted({n for n in names if names.count(n) > 1})
+        if dups:  # a dict keeps the LAST member of a name; another reader may show the first: refuse (fail closed)
+            raise BundleError(f"bundle has duplicate member name(s) {dups[:5]}: refused")
         self.infos = {i.filename: i for i in infos}
 
     def read(self, name: str) -> bytes:
@@ -215,7 +219,7 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                     continue
                 if store.blobs.put(reader.read(f"blobs/{h}")) != h:
                     problems.append(f"blob {h[:12]} does not match its hash (tampered)")
-        except BundleError:
+        except BaseException:  # any failure here (a read limit, a malformed manifest) closes the store
             store.close()
             raise
     full = fmt == FORMAT

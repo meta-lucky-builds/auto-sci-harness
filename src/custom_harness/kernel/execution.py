@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import secrets
 from collections.abc import Callable
 from typing import Any, Literal
 
@@ -120,6 +121,9 @@ class SandboxReplayer:
     def __init__(self, sandbox_factory: SandboxFactory):
         self.sandbox_factory = sandbox_factory
         self.calls = 0
+        # a per-replayer nonce in every key: callers build a NEW replayer per certify/reproduce, and a factory that maps
+        # key -> root / key would otherwise hand a second replayer the directory (and files) of the first one
+        self.nonce = secrets.token_hex(4)
 
     def replay(self, record: ExecRecord, vault: Vault) -> list[str] | None:
         self.calls += 1
@@ -129,7 +133,8 @@ class SandboxReplayer:
             if vault.store.blobs.put(data) != ref.blob:
                 raise ExecutionError(f"input {role} ({ref.dataset_id}/{ref.file}) no longer matches the record")
             inputs[role] = (ref.file, data)
-        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.calls}")
+        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.nonce}-"
+                                       f"{self.calls}")
         preds, _ = run_program(sandbox, code=vault.store.blobs.get(record.artifact_hash), entrypoint=record.entrypoint,
                                argv=record.argv, inputs=inputs, seed=record.seed,
                                timeout_s=float(record.limits.get("timeout_s", 900)))
