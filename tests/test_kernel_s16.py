@@ -313,8 +313,9 @@ def test_reasons_are_coded_and_carry_no_exception_text(world, monkeypatch):
     with pytest.raises(TypeError):
         codes_of(["uncoded"])
     assert codes_of(coded(Code.K9_LEAK, ["a"])) == (Code.K9_LEAK,)
-    with pytest.raises(ValueError, match="one code per reason"):
-        K.CheckResult(status="fail", reasons=("a", "b"), codes=(Code.K9_LEAK,))
+    # one code per reason is enforced where results are made (certify -> CHECK_UNCODED above), not by the model:
+    # stored certificates must stay loadable whatever was filed (verify then reports them)
+    assert K.CheckResult(status="fail", reasons=("a", "b"), codes=(Code.K9_LEAK,)).codes == (Code.K9_LEAK,)
     legacy = K.CheckResult(status="pass")
     assert "codes" not in legacy.model_dump()
 
