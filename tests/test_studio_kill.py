@@ -81,6 +81,8 @@ def test_kill_mid_run_ends_failed_runs_nothing_after_and_is_ledgered(dstore):
     assert k.body == {"run_id": res.run_id, "by": "alice", "reason_code": "human_stop", "status_before": "running"}
     with pytest.raises(ValueError, match="killed run is not resumable"):
         eng.resume(res.run_id, force=True)
+    with pytest.raises(ValueError, match="killed run is not forked"):  # forking would continue it under a new id
+        eng.fork(res.run_id, 0)
     # even if a later crash wrote the resumable "engine crash" status, the kill still wins
     dstore.set_run_status(res.run_id, RunStatus.FAILED, "engine crash: OSError: x")
     with pytest.raises(ValueError, match="killed run is not resumable"):

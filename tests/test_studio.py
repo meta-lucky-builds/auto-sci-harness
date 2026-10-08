@@ -149,11 +149,25 @@ def test_tampered_certificate_is_shown_as_forged(tmp_path, capsys):
         assert doc["status"]["verdict"]["value"] == "forged"
         assert "does not match" in doc["status"]["problems"][0]["value"]
         _check_every_fact_resolves(w.kernel, doc)
-        # 3. the honest certificate's blob edited on disk
-        entry = next(e for e in w.kernel.ledger.entries("certificate") if e.body["cert_hash"] == honest.cert_hash())
-        path = w.store.blobs._path(entry.body["blob"])
-        path.write_bytes(path.read_bytes().replace(b'"CERTIFIED-INTERNAL"', b'"CERTIFIED-VALIDATED"'))
+        # 3. a second ledger entry filed under the honest hash with a forged blob (the chain stays intact; lookup reads
+        # the first entry): explain must not show the honest verdict next to the forged content
+        w.kernel.ledger.append("certificate", {"cert_hash": honest.cert_hash(), "claim_hash": honest.claim_hash,
+                                               "label": "CERTIFIED-INTERNAL", "blob": blob, "resolution": {}})
         doc = explain(w.kernel, honest.cert_hash())
+        assert doc["status"]["verdict"]["value"] == "forged"
+        assert "filed under this hash" in doc["status"]["problems"][0]["value"]
+        _check_every_fact_resolves(w.kernel, doc)
+        # 4. a certificate naming an evidence row the store does not hold: the gap is a fact that resolves too
+        missing = w.kernel.certify(bad, ["ev_not_in_store"])
+        doc = explain(w.kernel, missing.cert_hash(), verify=False)
+        (row,) = doc["evidence_chain"]["records"]
+        assert row[1]["value"] is False and row[1]["label"] == "evidence row present"
+        _check_every_fact_resolves(w.kernel, doc)
+        # 5. a certificate's blob edited on disk (REJECTED rewritten as CERTIFIED)
+        entry = next(e for e in w.kernel.ledger.entries("certificate") if e.body["cert_hash"] == rejected.cert_hash())
+        path = w.store.blobs._path(entry.body["blob"])
+        path.write_bytes(path.read_bytes().replace(b'"REJECTED"', b'"CERTIFIED-INTERNAL"'))
+        doc = explain(w.kernel, rejected.cert_hash())
         assert doc["status"]["verdict"]["value"] == "forged" and "corrupted" in doc["status"]["problems"][0]["value"]
         # the CLI shows the same, and exits non-zero
         assert cli.main(["explain", fake.cert_hash()[:12], "--dev-sandbox", "--json"]) == 1
@@ -161,7 +175,7 @@ def test_tampered_certificate_is_shown_as_forged(tmp_path, capsys):
         assert out["status"]["verdict"]["value"] == "forged"
         with pytest.raises(SystemExit, match="--no-verify"):
             cli.main(["explain", fake.cert_hash()[:12]])
-        assert cli.main(["explain", rejected.cert_hash()[:12], "--no-verify"]) == 0
+        assert cli.main(["explain", missing.cert_hash()[:12], "--no-verify"]) == 0
         assert "UNVERIFIED" in capsys.readouterr().out
         with pytest.raises(SystemExit, match="no certificate"):
             cli.main(["explain", "0" * 12, "--no-verify"])

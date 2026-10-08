@@ -247,6 +247,11 @@ class Engine:
 
         The new run's budget starts at the parent's cumulative spend up to that step: forking can
         never be used to reset a budget (GOAL L1)."""
+        from ..studio.kill import kill_entry, killed_detail
+        kill = kill_entry(self.store, run_id)
+        if kill is not None:
+            raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not forked (it would continue "
+                             f"under a new id)")
         steps = self.store.trace(run_id)
         step = next((s for s in steps if s.index == step_index), None)
         if step is None or step.checkpoint_ref is None:
@@ -505,6 +510,10 @@ class Engine:
         if kill is not None:  # killed during the last step: it ends FAILED, never COMPLETED (or PAUSED)
             status, detail = RunStatus.FAILED, killed_detail(kill)
         self.store.set_run_status(run_id, status, detail)
+        kill = kill_entry(self.store, run_id)
+        if kill is not None and status != RunStatus.FAILED:  # a kill that landed between the check and the write
+            status, detail = RunStatus.FAILED, killed_detail(kill)
+            self.store.set_run_status(run_id, status, detail)
         return RunResult(run_id, status, state, detail, steps=index - start_index, cost=total)
 
     def _approval(self, node_id: str, node: ApprovalNode, state: dict[str, Any],

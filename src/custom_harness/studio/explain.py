@@ -78,11 +78,21 @@ class Resolver:
             return k.store.blobs.get_json(str(ref))
         if artifact == "evidence":
             return k.store.get_evidence(str(ref)).model_dump(mode="json")
+        if artifact == "evidence_present":
+            try:
+                k.store.get_evidence(str(ref))
+                return {"present": True}
+            except KeyError:
+                return {"present": False}
         if artifact == "verify":
             if ref not in self._verify:
                 self._verify[ref] = asdict(k.verify_status(str(ref)))
             return self._verify[ref]
         if artifact == "lookup":
+            seqs = [e.seq for e in k.ledger.entries("certificate") if e.body.get("cert_hash") == str(ref)]
+            if len(seqs) > 1:  # Kernel lookup reads the first; any other entry under the hash is a forgery attempt
+                return {"status": "forged", "error": f"{len(seqs)} certificate ledger entries are filed under this "
+                                                     f"hash (seqs {seqs}): only one can be the Kernel's"}
             try:
                 k.certificate(str(ref))
                 return {"status": "found", "error": None}
@@ -133,7 +143,7 @@ def _find_cert_entry(kernel: Kernel, cert_hash: str) -> Any:
         raise ExplainError(f"no certificate {cert_hash!r} in this store's ledger")
     if len({e.body["cert_hash"] for e in hits}) > 1:
         raise ExplainError(f"{cert_hash!r} is ambiguous: give more of the hash")
-    return hits[-1]
+    return hits[0]  # the entry Kernel.certificate() reads (a duplicate is reported as forged)
 
 
 def explain(kernel: Kernel, cert_hash: str, *, verify: bool = True, findings_path: Any = None) -> dict[str, Any]:
@@ -209,7 +219,7 @@ def explain(kernel: Kernel, cert_hash: str, *, verify: bool = True, findings_pat
         try:
             ev = kernel.store.get_evidence(ev_id).model_dump(mode="json")
         except KeyError:
-            row.append(_fact(None, _src("blob", blob, "evidence_ids", i), "evidence missing from the store"))
+            row.append(_fact(False, _src("evidence_present", ev_id, "present"), "evidence row present"))
             records.append(row)
             continue
         row += [_fact(ev[k], _src("evidence", ev_id, k), k) for k in ("kind", "tier", "verifier_id",
