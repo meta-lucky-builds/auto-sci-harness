@@ -35,6 +35,7 @@ import socket
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -65,6 +66,12 @@ from .spec import (
 from .template import lookup, references, render
 
 APPROVAL_DECISIONS = ("approved", "rejected")
+# (module id, output key) -> the reduced release alphabet that module may DECLARE for that key (`_release_alphabets`,
+# 2f1d54a). Owner decision 2026-10-08: kept, and pinned here (tests/test_release_embargo.py); a declaration from any
+# other module or for any other key is ignored (the key stays `continuous`, fail closed). Every module listed here
+# writes reserved state, so no evolve edit can add, rebind or change the node that runs it.
+RELEASE_ALPHABET_ALLOWLIST: Mapping[tuple[str, str], str] = MappingProxyType({
+    ("research.certify", "replication_brief"): "verdict_bit"})
 
 
 def approval_item_hash(item: Any) -> str:
@@ -527,8 +534,9 @@ class Engine:
                             for k in out:
                                 self.release_alphabet.pop(k, None)
                             if isinstance(declared, dict):
-                                self.release_alphabet |= {k: a for k, a in declared.items()
-                                                          if k in out and a in ("verdict_bit", "count")}
+                                module = str(getattr(node, "module", ""))
+                                self.release_alphabet |= {k: a for k, a in declared.items() if k in out and a in (
+                                    "verdict_bit", "count") and RELEASE_ALPHABET_ALLOWLIST.get((module, k)) == a}
                             state.update(out)  # module nodes return a dict of state updates
                             if read:
                                 for k in out:

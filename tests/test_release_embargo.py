@@ -209,9 +209,45 @@ def _declared_run(store, params):
 
 @pytest.mark.parametrize("params,alphabet", [({}, "continuous"), ({"declare": True}, "verdict_bit"),
                                              ({"bogus": True}, "continuous")])
-def test_a_trusted_module_may_declare_a_key_verdict_bit_only(store, params, alphabet):
+def test_a_trusted_module_may_declare_a_key_verdict_bit_only(store, monkeypatch, params, alphabet):
     """Found 2026-10-08 (replication merge break): the replication brief (claim statement, idea, training profile)
     was released as `continuous` only because certify, which wrote it, had read the target; every replica claim then
     failed K6 as adaptively exposed. Without a declaration the fail-closed default stays continuous; an unknown
-    alphabet in a declaration is ignored (stays continuous)."""
+    alphabet in a declaration is ignored (stays continuous). The test module is allowlisted for this test only."""
+    from custom_harness.runtime import engine as E
+    monkeypatch.setattr(E, "RELEASE_ALPHABET_ALLOWLIST",
+                        {**E.RELEASE_ALPHABET_ALLOWLIST, ("test.release_reader_declared", "brief"): "verdict_bit"})
     assert _declared_run(store, params) == [alphabet]
+
+
+def test_release_alphabet_allowlist_is_pinned():
+    """Owner decision 2026-10-08 (keep 2f1d54a, pin it): exactly these (module, key) pairs may declare a reduced
+    release alphabet. Any widening must change this test, i.e. be reviewed."""
+    from custom_harness.runtime.engine import RELEASE_ALPHABET_ALLOWLIST
+    assert dict(RELEASE_ALPHABET_ALLOWLIST) == {("research.certify", "replication_brief"): "verdict_bit"}
+
+
+def test_a_declaration_from_a_module_not_on_the_allowlist_is_ignored(store):
+    """A module that is not on the allowlist (here the test module, NOT patched in) declares `verdict_bit`: the
+    engine ignores it and the release stays `continuous` (fail closed)."""
+    assert _declared_run(store, {"declare": True}) == ["continuous"]
+
+
+def test_no_evolve_edit_can_add_or_rebind_a_declaring_module():
+    """The declaring modules write reserved state, so an evolve edit can neither add a node running one, switch a
+    node to one, nor change the protected node that runs it (evolve/edits.py)."""
+    from custom_harness.evolve.edits import RESERVED_WRITING_MODULES, Edit, EditOp, EditRejected, EditType, apply_edit
+    from custom_harness.runtime.engine import RELEASE_ALPHABET_ALLOWLIST
+    from test_evolve import seed_spec
+    from test_evolve_hardening import _insert_between
+    spec = seed_spec()
+    for module, _key in RELEASE_ALPHABET_ALLOWLIST:
+        assert module in RESERVED_WRITING_MODULES
+        attempts = [
+            _insert_between(spec, "hypothesize", "tournament", "x1", {"kind": "module", "module": module}),
+            [EditOp(op="replace", path="/nodes/tournament/module", value=module)],
+            [EditOp(op="replace", path="/nodes/certify/params", value={"replicate": True, "extra": 1})],
+        ]
+        for ops in attempts:
+            with pytest.raises(EditRejected):
+                apply_edit(spec, Edit(type=EditType.HOP, rationale="x", ops=ops))
