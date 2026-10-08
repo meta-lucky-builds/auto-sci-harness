@@ -399,9 +399,14 @@ def screen_digest(digest: dict[str, Any], store: EvidenceStore, *, runs: Iterabl
         tmp = Path(tempfile.mkdtemp(prefix="chh-digest-"))
         try:
             _dump(tmp / "digest.json", doc)
-            return _audit(tmp, fp)
+            found = _audit(tmp, fp)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+        # error signatures are normalised (evaluate._signature: digits -> <n>), which mangles a canary past the
+        # verbatim/fragment match above while its prefix and letters survive: the prefix alone is a finding
+        if CANARY_PREFIX.lower() in json.dumps(doc, default=str).lower():
+            found.append("a canary prefix found in the digest")
+        return found
 
     found = problems(digest)
     if not found:
