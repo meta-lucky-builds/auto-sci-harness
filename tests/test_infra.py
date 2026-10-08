@@ -195,3 +195,21 @@ def test_docker_missing_image_is_infra(tmp_path):
     sb = DockerSandbox(tmp_path / "ws", image="custom-harness-does-not-exist:none")
     with pytest.raises(InfraError):
         sb.exec([sys.executable, "-c", "pass"], timeout_s=60)
+
+
+def test_an_infra_failed_smoke_run_is_excluded_not_a_rejection():
+    """GOAL L1 / "an infrastructure failure means excluded, not scored": the smoke run (L6.7) rejected a candidate
+    whose smoke unit hit an outage, so an outage changed an accept/reject decision (found 2026-10-08 through
+    test_docker_outage_mid_campaign_changes_no_decision). An infra-failed smoke run is inconclusive: the candidate
+    goes on to the race, where that unit is excluded and the gate fails closed on too many exclusions."""
+    from custom_harness.evolve.evaluate import RunOutcome
+    from custom_harness.evolve.loop import _smoke_failure
+    from custom_harness.records import Cost
+
+    def out(status):
+        return RunOutcome("t", "r", 0, None, False, status, Cost())
+    ok = out(RunStatus.COMPLETED.value)
+    assert out(RunStatus.INFRA_FAILED.value).infra_failed  # the precondition: this outcome is an infra failure
+    assert _smoke_failure(out(RunStatus.INFRA_FAILED.value), ok) is None
+    broken = out(RunStatus.FAILED.value)  # control: a real breakage where the parent ran still rejects
+    assert _smoke_failure(broken, ok) is not None

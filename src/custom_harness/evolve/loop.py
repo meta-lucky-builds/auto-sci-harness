@@ -69,7 +69,8 @@ from .selection import (
 
 # lineage statuses whose edit signature the novelty gate refuses to see again (GOAL §5 L6.6, HarnessX "reverted").
 # Race losers are NOT included: they were eliminated on a few evolve units, never judged by the gate.
-# A smoke failure is included (the candidate broke where the parent did not), except one caused by infrastructure.
+# A smoke failure is included (the candidate broke where the parent did not). Infra-failed smoke runs are not
+# rejections at all (_smoke_failure); older lineage records marked `infra` are still skipped below.
 REJECTED_STATUSES = ("rejected_static", "rejected_gate", "rejected_smoke")
 # smoke run (GOAL §5 L6.7): run statuses meaning the harness itself broke on the smoke task
 SMOKE_BROKEN = ("failed", "step_limit", "budget_exceeded")
@@ -376,10 +377,12 @@ def _public(edit: Edit, evolve_ids: set[str]) -> dict[str, Any]:
 
 def _smoke_failure(cand: RunOutcome, parent: RunOutcome) -> str | None:
     """Why a candidate fails its smoke run, or None. It fails when its run ended broken (SMOKE_BROKEN) on a unit where
-    the parent's run did not, and when its run failed for infrastructure reasons (fail closed: nothing was shown to
-    work; such a rejection is marked `infra` and does not feed the novelty gate)."""
+    the parent's run did not. A smoke run that failed for infrastructure reasons is EXCLUDED, not a rejection (GOAL
+    L1: "an infrastructure failure means excluded, not scored"; an outage must change no accept/reject decision):
+    the candidate goes on to the race, which excludes that unit, and the gate fails closed when too many units are
+    excluded. (Until 2026-10-08 it was rejected, which let an outage change decisions.)"""
     if cand.infra_failed:
-        return "smoke run failed for infrastructure reasons (inconclusive; rejected, fail closed)"
+        return None
     if cand.status in SMOKE_BROKEN and parent.status not in SMOKE_BROKEN:
         sig = "; ".join(cand.failure_signatures[:2])
         return f"smoke run ended {cand.status!r} where the parent's did not ({sig[:300]})"
