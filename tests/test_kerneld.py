@@ -36,9 +36,12 @@ def kd(world):
         yield k
 
 
+_RUNS = iter(range(10**6))
+
+
 @pytest.fixture
 def run(kd):
-    r = kd.open_run("run-test")
+    r = kd.open_run(f"run-test-{next(_RUNS)}")  # one run id per test: the leak-scan budget is per run id
     yield r
     try:
         r.close()
@@ -77,7 +80,7 @@ def test_held_out_score_is_scored_and_logged_in_another_process(world, kd, run):
     assert len(new) == 1
     b = new[0].body
     assert (b["purpose"], b["claim_hash"], b["arm"], b["seed"], b["run_id"], b["private"]) == (
-        "evaluate", world.claim_hash, "subject", 0, "run-test", True)
+        "evaluate", world.claim_hash, "subject", 0, run.run_id, True)
 
 
 def test_rescore_with_kernel_token(world, run):
@@ -173,6 +176,32 @@ def test_leak_scan_workspace_copy(world, run, tmp_path):
     tok = run.token("leakscan", "test", "test_y.csv")
     problems = run.leak_scan(tok, [], tmp_path, {})
     assert problems == ["workspace file stolen.csv is a copy of private file test/test_y.csv"]
+
+
+def test_leak_scan_is_not_an_unlimited_membership_oracle(world, kd, run):
+    """STATUS §6.2: leak_scan answers 'is this text a copy of the hidden labels?', so unlimited calls make it a
+    membership oracle. Each run id gets LEAK_SCAN_BUDGET scans (a re-opened capability for the same run id does not
+    reset it), and one call carries at most MAX_EXTRA_TEXTS extra texts. Refusals are made before the private read."""
+    from custom_harness.kerneld.server import MAX_EXTRA_TEXTS
+    from custom_harness.kerneld.tokens import LEAK_SCAN_BUDGET
+    clean = [{"index": 0, "node_id": "agent", "output": {"text": "nothing"}, "error": None}]
+    tok = run.token("leakscan", "test", "test_y.csv")
+    _refused(world, "rate_limited", run.leak_scan, tok, clean, None,
+             {f"probe{i}": "x" for i in range(MAX_EXTRA_TEXTS + 1)})
+    for _ in range(LEAK_SCAN_BUDGET):
+        assert run.leak_scan(tok, clean, None, {"report": "clean"}) == []
+    _refused(world, "rate_limited", run.leak_scan, tok, clean, None, {"report": "clean"})
+    again = kd.open_run(run.run_id)  # a new capability for the same run id: same budget
+    try:
+        _refused(world, "rate_limited", again.leak_scan, again.token("leakscan", "test", "test_y.csv"), clean, None,
+                 {})
+    finally:
+        again.close()
+    other = kd.open_run(f"{run.run_id}-other")  # control: another run id still has its own budget
+    try:
+        assert other.leak_scan(other.token("leakscan", "test", "test_y.csv"), clean, None, {}) == []
+    finally:
+        other.close()
 
 
 # ------------------------------------------------------------------------------------------- 4. no free text

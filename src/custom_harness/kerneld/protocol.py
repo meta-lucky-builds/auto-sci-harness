@@ -17,7 +17,7 @@ from typing import Any
 
 OPS = ("hello", "open_run", "issue", "score", "rescore", "leak_scan", "record_release", "close_run", "shutdown")
 ERRORS = ("bad_request", "unknown_op", "bad_secret", "bad_token", "token_scope", "token_spent", "not_registered",
-          "not_target", "not_private", "vault_error", "release_error", "internal")
+          "not_target", "not_private", "vault_error", "release_error", "rate_limited", "internal")
 PURPOSES = ("evaluate", "kernel", "leakscan")  # the only purposes a token can carry
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 

@@ -26,6 +26,8 @@ from typing import Any, BinaryIO
 from . import protocol as P
 from .tokens import TokenError, TokenTable
 
+MAX_EXTRA_TEXTS = 16  # UNCALIBRATED (owner decision, GOAL §13.8): extra texts per leak scan (each is one probe)
+
 
 class _Stop(Exception):
     pass
@@ -142,6 +144,9 @@ class Server:
             raise P.ProtocolError()
         extra_canaries = P.str_list(args.get("extra_canaries") or [])
         tok = self.table.use(cap, P.arg(args, "token", str), "leakscan")
+        if len(extra) > MAX_EXTRA_TEXTS:  # many probes in one call would bypass the per-run call budget
+            raise TokenError("rate_limited")
+        self.table.charge_leak_scan(cap)  # membership-oracle budget, charged before the private read
         ds = self.vault.dataset(tok.dataset_id)
         raw = self.vault.read(tok.dataset_id, tok.file, purpose="leakscan", run_id=self.table.run_id(cap),
                               claim_hash=tok.claim_hash)

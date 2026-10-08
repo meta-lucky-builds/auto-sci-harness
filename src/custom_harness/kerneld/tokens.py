@@ -19,6 +19,13 @@ from typing import Any, Protocol
 
 from .protocol import PURPOSES
 
+# A leak scan answers "is this text (or workspace file) a copy of the hidden labels?", so unlimited scans make
+# kerneld a membership oracle for the labels (STATUS §6.2). Each RUN ID gets this many scans for the life of the
+# server process; re-opening a capability for the same run id does not reset it. Limit (stated, not solved): the
+# launch-secret holder can open runs under new ids or restart the server; every scan is still a ledgered
+# `leakscan` read, so the count is auditable after the fact.
+LEAK_SCAN_BUDGET = 8  # UNCALIBRATED (owner decision, GOAL §13.8): an audit needs one scan per run; 8 leaves retries
+
 
 class TokenError(Exception):
     """A refused capability operation; `.code` is a closed protocol error code."""
@@ -50,6 +57,7 @@ class TokenTable:
         self.vault = vault
         self.runs: dict[str, str] = {}  # run capability -> run id
         self.tokens: dict[str, Token] = {}
+        self.leak_scans: dict[str, int] = {}  # run id -> leak scans made (never reset while the server lives)
 
     # ----------------------------------------------------------------------------- run capabilities
     def open_run(self, run_id: str) -> str:
@@ -106,3 +114,11 @@ class TokenTable:
         if purpose == "evaluate":
             tok.spent = True  # spent BEFORE the read: a failed score still uses up the token (fail closed)
         return tok
+
+    def charge_leak_scan(self, run_cap: str) -> None:
+        """Count one leak scan against the run id's budget, BEFORE the private read; refuse once it is used up."""
+        rid = self.run_id(run_cap)
+        used = self.leak_scans.get(rid, 0)
+        if used >= LEAK_SCAN_BUDGET:
+            raise TokenError("rate_limited")
+        self.leak_scans[rid] = used + 1
