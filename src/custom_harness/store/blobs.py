@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -28,14 +29,22 @@ class BlobStore:
             # share `<digest>.tmp`, so one's os.replace could find it gone (tests/test_evalrace.py)
             tmp = path.with_name(f"{digest}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
             tmp.write_bytes(data)
-            try:
-                os.replace(tmp, path)  # atomic; blobs are write-once
-            except OSError:
-                # Windows refuses to replace a file another writer has open; the same digest means the same bytes,
-                # so an existing, intact destination is the blob
-                tmp.unlink(missing_ok=True)
-                if not (path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest):
-                    raise
+            for _ in range(200):
+                try:
+                    os.replace(tmp, path)  # atomic; blobs are write-once
+                    return digest
+                except OSError:
+                    # Windows refuses to replace a file another writer or reader has open. The same digest means the
+                    # same bytes, so an intact destination IS the blob; otherwise wait and try again
+                    try:
+                        if hashlib.sha256(path.read_bytes()).hexdigest() == digest:
+                            tmp.unlink(missing_ok=True)
+                            return digest
+                    except OSError:
+                        pass
+                    time.sleep(0.01)
+            tmp.unlink(missing_ok=True)
+            raise OSError(f"could not store blob {digest}")
         return digest
 
     def get(self, digest: str) -> bytes:

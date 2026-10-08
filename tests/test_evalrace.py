@@ -1,7 +1,7 @@
 """The evolution Evaluator under the per-completion race (control/evalrace.py, GOAL §5 L1).
 
-The first tests show what was unsafe (each fails on the code before the single-writer change): a unit asked for by
-two threads at once ran twice and was charged twice; two writers of the same blob collided on one temp file; a new
+The first tests show what was unsafe (each fails on 4bf1a3d, before the single-writer change): a unit asked for by
+two threads at once ran twice; writers of the same blob collided on one temp file (PermissionError on Windows); a new
 Evaluator after a crash re-ran and re-charged every finished unit. The rest show the wiring: per-completion racing
 over a real Evaluator decides exactly as the batch race (slots 1 and 3, with infrastructure outages), evaluates in the
 batch order with one slot, never runs a unit twice, and commits every run on one thread."""
@@ -9,7 +9,6 @@ batch order with one slot, never runs a unit twice, and commits every run on one
 import hashlib
 import threading
 import time
-import types
 
 import pytest
 
@@ -92,8 +91,10 @@ def evaluator(store, tmp_path, suite, *, factory=None, **kw):
 
 # ---------------------------------------------------------------- what was unsafe (fail on the old code)
 def test_one_unit_asked_for_by_two_threads_runs_once_and_is_charged_once(store, tmp_path):
-    """Old code: both threads missed the cache and both ran the harness (2 runs, 2 campaign-budget charges, 2 sets of
-    Kernel registrations). Now the Evaluator has one writer thread; a second one is refused before any run."""
+    """Old code (seen on 4bf1a3d): both threads missed the cache and both started the harness (Evaluator.calls == 2,
+    two runs of the module); the second run then crashed with PermissionError on the shared blob temp file (see the
+    blob test below), else it would have been charged a second time. Now the Evaluator has one writer thread; a
+    second one is refused before any run."""
     suite = tasks(tmp_path, 1)
     budget = CountingBudget(limits={})
     ev = evaluator(store, tmp_path, suite, campaign_budget=budget)
@@ -116,34 +117,30 @@ def test_one_unit_asked_for_by_two_threads_runs_once_and_is_charged_once(store, 
     assert len(errors) == 1 and "single writer" in str(errors[0])
 
 
-def test_two_writers_of_the_same_blob_do_not_collide(tmp_path, monkeypatch):
-    """Old code: both writers used `<digest>.tmp`; after the first os.replace the second found its temp file gone."""
-    import os
-
-    from custom_harness.store import blobs as blobs_mod
-    gate = threading.Barrier(2, timeout=5)
-
-    def replace(src, dst):
-        gate.wait()  # both writers have written their temp file before either renames it
-        return os.replace(src, dst)
-
-    monkeypatch.setattr(blobs_mod, "os", types.SimpleNamespace(replace=replace, getpid=os.getpid))
+def test_writers_of_the_same_blob_do_not_collide(tmp_path):
+    """Old code: every writer of a blob used `<digest>.tmp`. Two concurrent runs storing identical bytes (the same
+    spec version, workspace snapshot or checkpoint) collided on it: on Windows the second open fails with
+    PermissionError (seen in the two-thread test above on the old code). Many rounds of 6 simultaneous writers."""
     bs = BlobStore(tmp_path / "blobs")
     errors: list[BaseException] = []
+    for i in range(60):
+        data = f"identical bytes from concurrent runs, round {i}".encode() * 200
+        go = threading.Barrier(6, timeout=10)
 
-    def put():
-        try:
-            bs.put(b"identical bytes from two concurrent runs")
-        except BaseException as e:
-            errors.append(e)
+        def put(data=data, go=go):
+            try:
+                go.wait()
+                bs.put(data)
+            except BaseException as e:
+                errors.append(e)
 
-    threads = [threading.Thread(target=put) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(10)
-    assert errors == []
-    assert bs.get(hashlib.sha256(b"identical bytes from two concurrent runs").hexdigest())
+        threads = [threading.Thread(target=put) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        assert bs.get(hashlib.sha256(data).hexdigest()) == data
+    assert errors == [], errors[:3]
     assert not [p for p in (tmp_path / "blobs").rglob("*.tmp")]  # no temp file left behind
 
 
