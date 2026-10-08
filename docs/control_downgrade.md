@@ -40,8 +40,12 @@ never stored (§16.5.8).
 
 ## Not enforced / not wired (yet)
 
-- Not yet bound to studio `chh kill` (a human ledger action), the engine's admission, or the Evaluator's campaign
-  budget; the caller injects the budgets, the `AdmissionRegister` and the `kill` callback.
+- Bound to the studio 2026-10-08 (branch w2-wiring, `studio/controller.py`, `chh supervise`,
+  `tests/test_studio_controller.py`): an automated controller's kill marks the run FAILED and is ledgered as
+  `controller_action` (never `run_kill`, which stays human-only); `studio.kill.kill_entry` returns it, so the engine
+  stops the run before its next step and refuses resume and fork. Not bound: deny and shrink have no studio target
+  (no persisted admission queue, no live per-run Budget object), so from the CLI they are always rejected; the
+  Evaluator's campaign budget is not exposed to a controller.
 - `AdmissionRegister` is in memory; only the ledger records persist.
 - The controller's own model-call cost is not charged to any budget by `ask`.
 - If an effect callback partly acts and then raises, the action is ledgered `rejected / effect_error` although part of

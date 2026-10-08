@@ -76,8 +76,12 @@ Enforced (tests: `tests/test_evolve_generations.py`):
   the generation's signal/budget/stall from source, type-strict, and reports any mismatch or unresolvable ref.
   Proposer text is rendered as escaped, quoted data labelled unverified.
 
-Not wired: no CLI calls `generation_report`/`audit_report`; without `campaign=` the driver writes no ledger; a
-generation stopped by `BudgetExceeded` gets no record; `out_dir` files still use the local loop index on resume.
+Wired 2026-10-08 (branch w2-wiring, tests `tests/test_evolve_report_cli.py`): `chh evolve report CAMPAIGN
+[--generation N] [--json]` renders every generation's report and runs `audit_report` plus `verify_stopped`, exit 1 when
+anything does not reproduce (2 for an unknown campaign); `chh evolve` passes its `--campaign-id` (default: the run tag)
+as `campaign=`, so CLI campaigns are ledgered; `out_dir` files and logged numbers use the campaign-global index; a
+generation stopped by `BudgetExceeded` gets a `generation_stopped` record (index, parent, budget, reason, ranges) that
+does not consume the index. Still without a ledger: driver calls without `campaign=` (library use).
 
 # Static-check tightenings (2026-10-08, tests: `tests/test_evolve_tightening.py`)
 
