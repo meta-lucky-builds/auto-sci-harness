@@ -54,6 +54,7 @@ T = Dataset("t", "test", "features", EX, "A")
 
 # ------------------------------------------------------------------ differential
 @settings(max_examples=N_DIFF, deadline=None, database=None, phases=(Phase.explicit, Phase.generate),
+          derandomize=os.environ.get("CHH_SPEC_RANDOM") != "1",
           suppress_health_check=list(HealthCheck))
 @given(gen.scripts())
 def test_model_and_kernel_agree_on_generated_histories(script):

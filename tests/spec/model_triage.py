@@ -24,6 +24,7 @@ T9 K4 counts evaluate reads as a MULTISET: an evaluation logged twice but report
    (the model compared sets).
 T10 K5 requires a registered BASELINE comparator only for improvement claims (an ablation or negative result may
    compare two methods); the model required it for every kind.
+T11 K0 drops records whose target is unregistered; K3 re-executes the rest (the model failed K3 outright).
 T7 K1: subject and comparator must be different artifacts (GOAL §4.3 K5 "baseline re-run"); the model missed it.
 """
 
@@ -60,6 +61,8 @@ def verdict(history: History, c: ClaimSpec, records: tuple[Record, ...]) -> Verd
     if not records or any(r.target not in ds for r in records):  # T4
         ok["K0"] = False
     if _registered(history, c.key):
+        # T11: K0 drops a record whose target is unregistered; K3 judges the records that resolved (fails if none)
+        ok["K3"] = any(r.target in ds for r in records)
         unreadable = [r for r in records if r.target in ds and (r.target not in c.targets
                                                                  or ds[r.target].private is None)]
         if unreadable:  # T3
