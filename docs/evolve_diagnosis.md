@@ -17,7 +17,7 @@ Branch `b-evolve` (2026-10-08). Code: `src/custom_harness/evolve/diagnosis.py`, 
 
 | A citation or claimed path that the prediction screen DROPPED (too long, too many, a non-id in `failure_clusters_fixed`) | `loop.UNVERIFIABLE_IF_DROPPED` | `rejected_claims` (it could not be checked; the reason quotes the screen note, never the text) |
 | The digest in the proposer's prompt passes the export's leak audit (same fingerprints: private files, canaries, label windows, private run state, private paths) plus a canary-PREFIX rule (error normalisation turns digits into `<n>` and mangles a canary past the verbatim match) | `export.screen_digest`, called by the loop | cluster example excerpts dropped; if still failing, only counts remain (`withheld` = number of findings) |
-| A run whose store record names a different task than its outcome (e.g. a gate run in an evolve cache slot) | `propose._evolve_run`, `export.export_evidence` | dropped from the diagnosis (`n_excluded_split`) / excluded from the export (`task_mismatch`) |
+| A run whose store record names a different task than its outcome (e.g. a gate run in an evolve cache slot) | `propose._evolve_run`, `export.export_evidence` | dropped from the diagnosis (`n_excluded_split`) / excluded from the export (`task_mismatch`); a run id with no store record at all is treated the same way (nothing of it can be read or fingerprinted) |
 
 Ordering in the loop: prediction screen → novelty gate → dropped-claims rule → static checks (apply, one mechanism) → no-op/duplicate →
 **claims (citations + claimed diff)** → critic → smoke → race. A claims rejection is not added to the novelty gate's
