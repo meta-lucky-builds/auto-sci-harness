@@ -45,7 +45,7 @@ from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
 from .modules import ModuleContext, get_module
 from .spec import END, ApprovalNode, Condition, HarnessSpec, LLMNode, ModuleNode, ToolNode, approval_state_keys
-from .template import lookup, render
+from .template import lookup, references, render
 
 APPROVAL_DECISIONS = ("approved", "rejected")
 
@@ -217,6 +217,12 @@ class Engine:
         self.budget = budget
         self.spec_hash = store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=None)
         self._ws_ref: str | None = None  # latest workspace snapshot of the current run
+        # release emission (GOAL §16.5.3): state keys written by a step during which private files were read are
+        # TAINTED with those targets; rendering a tainted key into a prompt or tool command is a ledgered release.
+        # In-memory per engine (a resumed run re-taints only from steps it runs itself: stated limit).
+        self.taint: dict[str, set[str]] = {}
+        self.releases: Any = None  # None = live releases on the store's ledger
+        self._prompt_taint: dict[int, set[str]] = {}
 
     # ------------------------------------------------------------------ public
     def run(self, task_id: str, inputs: dict[str, Any], seed: int = 0) -> RunResult:
@@ -397,16 +403,27 @@ class Engine:
                 state["_last_error"] = error
             else:
                 self._cursor = (run_id, index)
+                rows = self.store.ledger_rows("data_access")
+                seq_before = rows[-1][0] if rows else 0
+                self._run_id = run_id
                 out, cost, prov, error, infra = self._attempt(node, state, run_id)
                 self._cursor = None
                 if infra is None:
                     state["_last_error"] = error
                     if error is None:
+                        from ..kerneld.releases import private_reads
+                        read = set(private_reads(self.store, after_seq=seq_before))
                         key = getattr(node, "output_key", None)
                         if key is not None:
                             state[key] = out.get("value")
+                            carried = read | self._prompt_taint.get(id(node), set())
+                            if carried:
+                                self.taint[key] = carried
                         else:
                             state.update(out)  # module nodes return a dict of state updates
+                            if read:
+                                for k in out:
+                                    self.taint[k] = self.taint.get(k, set()) | read
 
             # An infra failure is not the harness's doing: never route it through the harness's error
             # edges. Stop, and checkpoint so that a resume retries this same node. A pause checkpoints the same
@@ -538,6 +555,8 @@ class Engine:
         if isinstance(node, ToolNode):
             if self.sandbox is None:
                 raise ValueError("tool node requires a sandbox")
+            node_id = next((k for k, v in self.spec.nodes.items() if v is node), "tool")
+            self._prompt_taint[id(node)] = self._release_rendered(node_id, list(node.command), state)
             cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
             if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
@@ -556,10 +575,28 @@ class Engine:
             return updates, mctx.spent, None
         raise ValueError(f"unknown node type {type(node)}")
 
+    def _release_rendered(self, node_id: str, templates: list[str], state: dict[str, Any]) -> set[str]:
+        """Emit a `prompt` release for every tainted state key the templates render; returns the targets."""
+        from ..kerneld.releases import Releases, alphabet_of, note_code
+        targets: set[str] = set()
+        for t in templates:
+            for path in references(t):
+                tk = self.taint.get(path.split(".")[0])
+                if not tk:
+                    continue
+                targets |= tk
+                rel = self.releases or Releases.live(self.store)
+                rel.emit(lookup(state, path, None), targets=tk, channel="prompt",
+                         alphabet=alphabet_of(lookup(state, path, None)), note=note_code("prompt", node_id, path),
+                         key=getattr(self, "_run_id", ""))
+        return targets
+
     def _execute_llm(self, node: LLMNode, state, max_chars, head_fraction):
         backend = self.backends.get(node.role)
         if backend is None:
             raise ValueError(f"no backend bound to role '{node.role}'")
+        node_id = next((k for k, v in self.spec.nodes.items() if v is node), "llm")
+        self._prompt_taint[id(node)] = self._release_rendered(node_id, [node.system or "", node.prompt], state)
         archived: list[str] = []  # handles of values truncated in the prompt (full text kept as blobs)
 
         def archive(text: str) -> str:

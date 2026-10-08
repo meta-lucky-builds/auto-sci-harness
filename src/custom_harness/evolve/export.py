@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..kerneld.releases import Releases, private_reads
 from ..store import EvidenceStore
 from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
 from .evaluate import RunOutcome, SuiteTask
@@ -70,6 +71,12 @@ _LINEAGE_VIEW = ("parent", "status", "candidate", "edit", "reason", "problem", "
 _STATS_VIEW = ("parent", "proposed", "malformed", "declined", "rejected_novelty", "rejected_static",
                "no_op_or_duplicate", "accepted", "rejected_gate", "raced", "pruned", "gated", "yield")
 _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying bundle; private state blob
+# verdict embargo (GOAL §16.5.3): held-out results reach the proposer as verdict labels only. These state keys hold
+# certificate summaries (subject/comparator means, effect, CIs: continuous held-out values) or text rendered from
+# them; in exported traces they are reduced to their label (certificates) or withheld (text).
+_CERT_KEYS = ("certificate", "replica_certificate")
+_EMBARGOED_KEYS = ("report", "report_ref", "publish_blockers", "checklist")
+EMBARGOED = "<embargoed until the target retires>"
 _HEX = re.compile(r"^[0-9a-f]{16,128}$")
 _MAX_PRIVATE_SCAN = 1024 * 1024  # private files above this are matched by hash only
 
@@ -136,6 +143,24 @@ def _clean(obj: Any, drop: tuple[str, ...] = _DROP_KEYS) -> Any:
     return obj
 
 
+def embargo(obj: Any) -> Any:
+    """Reduce held-out results to verdict labels: certificate dicts keep only hash and label; report text is
+    withheld. Applied recursively to exported trace outputs."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if k in _CERT_KEYS and isinstance(v, dict):
+                out[k] = {"hash": v.get("hash"), "label": v.get("label"), "embargoed": True}
+            elif k in _EMBARGOED_KEYS:
+                out[k] = EMBARGOED
+            else:
+                out[k] = embargo(v)
+        return out
+    if isinstance(obj, list):
+        return [embargo(v) for v in obj]
+    return obj
+
+
 def _dump(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -143,7 +168,7 @@ def _dump(path: Path, obj: Any) -> None:
 
 
 def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOutcome], tasks: list[SuiteTask],
-                    canaries: Iterable[str] = ()) -> ExportResult:
+                    canaries: Iterable[str] = (), releases: Releases | None = None) -> ExportResult:
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise ExportRefused([f"destination exists: {out_dir} (an export is never overwritten)"])
@@ -164,6 +189,11 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
     tmp = out_dir.parent / f".{out_dir.name}.partial-{secrets.token_hex(4)}"
     try:
         files = _write(store, tmp, exported, evolve_ids)
+        rel = releases if releases is not None else Releases.live(store)
+        for run_id, o in sorted(exported.items()):  # each exported run releases its verdict labels
+            if run_id:
+                rel.emit(o.cert_label, targets=private_reads(store, run_id=run_id), channel="export",
+                         alphabet="verdict_bit", note="export.run:verdict", key=f"{o.task_id}|{o.seed}")
         problems = _audit(tmp, _fingerprints(store, tasks, exported, canaries))
         if problems:
             raise ExportRefused(problems)
@@ -200,7 +230,7 @@ def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], ev
         spec_hashes.add(run.harness_hash)
         steps = []
         for st in store.trace(run_id):
-            doc = _clean(st.model_dump(mode="json"))
+            doc = embargo(_clean(st.model_dump(mode="json")))
             steps.append(doc)
             out = st.output if isinstance(st.output, dict) else {}
             for key in ("certificate", "replica_certificate"):
@@ -244,7 +274,7 @@ def _cert_summary(store: EvidenceStore, run_id: str, index: int, key: str, info:
                   cert_blobs: dict[str, Any]) -> dict[str, Any]:
     """Label, failed checks and their reasons. The full certificate (claim, evidence ids, config) stays out."""
     out: dict[str, Any] = {"run_id": run_id, "step": index, "key": key, "hash": info.get("hash"),
-                           "label": info.get("label"), "failed": list(info.get("failed") or []), "reasons": {}}
+                           "label": info.get("label"), "failed": [], "reasons": {}}
     blob = cert_blobs.get(str(info.get("hash")))
     if blob:
         try:
@@ -255,7 +285,8 @@ def _cert_summary(store: EvidenceStore, run_id: str, index: int, key: str, info:
             out["label"] = cert.get("label", out["label"])
             failed = {k: v for k, v in cert["checks"].items() if isinstance(v, dict) and v.get("status") == "fail"}
             out["failed"] = sorted(failed)
-            out["reasons"] = {k: list(v.get("reasons") or []) for k, v in sorted(failed.items())}
+            # reasons are free text that quotes held-out statistics (CI bounds, means): embargoed (§16.5.3)
+            out["reasons"] = {k: EMBARGOED for k in sorted(failed)}
     return out
 
 

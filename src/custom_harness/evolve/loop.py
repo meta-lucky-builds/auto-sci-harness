@@ -33,6 +33,7 @@ from typing import Any
 
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
+from ..kerneld.releases import Releases, private_reads
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
@@ -100,7 +101,7 @@ class Evaluator:
     def __init__(self, backends: dict[str, Backend], store: EvidenceStore, sandbox_factory: SandboxFactory,
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
-                 campaign_budget: Budget | None = None):
+                 campaign_budget: Budget | None = None, releases: Releases | None = None):
         sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
         if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
             raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
@@ -112,6 +113,7 @@ class Evaluator:
         # campaign-level cap across all runs (persisted when built with budget.persistent_budget); checked
         # before every run, charged after it; exhaustion stops the campaign cleanly (BudgetExceeded)
         self.campaign_budget = campaign_budget
+        self.releases = releases  # None = live releases on the store's ledger; a replay passes pinned releases
         self.cache: dict[tuple[str, str, int], RunOutcome] = {}
         self.calls = 0  # actual harness runs executed (cache misses, incl. infra re-runs)
         self.infra_failures = 0  # runs that ended INFRA_FAILED (each one excluded, never scored)
@@ -128,7 +130,7 @@ class Evaluator:
                 since = last_prereg_seq(self.store)
                 out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
                                   store=self.store, sandbox_factory=self.sandbox_factory,
-                                  budget_limits=self.budget_per_run, retry=self.retry)
+                                  budget_limits=self.budget_per_run, retry=self.retry, releases=self.releases)
                 # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
                 # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
                 check_run(self.store, since)
@@ -148,8 +150,8 @@ class Evaluator:
 
 
 def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator: Evaluator,
-                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig | None = None
-                      ) -> GenerationResult:
+                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig | None = None,
+                      releases: Releases | None = None) -> GenerationResult:
     cfg = cfg or EvolveConfig()
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
     gate_units = [(t.task_id, s) for t in tasks if t.split == "gate" for s in cfg.seeds]
@@ -238,6 +240,14 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                               lambda u: evaluator.outcome(parent, u).cost,
                               max_increase=cfg.max_cost_increase, metric=cfg.cost_metric)
             ok = d.accepted and lofo["passed"] and cost["passed"] and excl["passed"]
+            # the accept/reject bit is computed from gate-target verdicts and reaches the proposer (proposer_view):
+            # a ledgered verdict-bit release on every target the acceptance runs read (GOAL §16.5.3); pinned in a
+            # replayed campaign
+            used_runs = {evaluator.outcome(x, u).run_id for x in (spec, parent) for u in gate_units}
+            gate_targets = sorted({t for r in used_runs if r for t in private_reads(store, run_id=r)})
+            rel = releases or getattr(evaluator, "releases", None) or Releases.live(store)
+            ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
+                               note="evolve.gate:decision", key=f"{parent_hash}|{best}"))
             rejected_on: str | None
             if not excl["passed"]:  # the comparison itself is untrustworthy: checked first (fail closed)
                 decision, rejected_on = "rejected: " + excl["reason"], "exclusion_asymmetry"
