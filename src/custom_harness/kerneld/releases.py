@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -117,6 +117,48 @@ def private_reads(store: EvidenceStore, *, after_seq: int = 0, run_id: str | Non
         if b.get("private") and (run_id is None or b.get("run_id") == run_id):
             out.add(str(b["dataset_id"]))
     return sorted(out)
+
+
+def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Collection[str],
+                     since: float | None = None) -> tuple[list[str], int]:
+    """Datasets whose PRIVATE files were read in `data_access` ledger entries after `after_seq` that may have fed a
+    run in `run_ids`, and the last seq examined. Per run, not per time window (a concurrent run's read, logged under
+    its own run id, does not taint this run), but fail closed: a read naming NO run (Kernel re-check reads carry
+    none), naming a run the store does not know, or with an unreadable body counts (an unreadable body counts as a
+    read of every registered dataset). `since`: only entries logged at or after this time (seconds)."""
+    out: set[str] = set()
+    last = after_seq
+    known: dict[str, bool] = {}
+    ids = set(run_ids)
+    everything: set[str] | None = None
+    for seq, _kind, body, _prev, _hash, at in store.ledger_rows("data_access"):
+        if seq <= after_seq:
+            continue
+        last = max(last, seq)
+        if since is not None and float(at) < since:
+            continue
+        try:
+            b = json.loads(body)
+            private, rid, ds = bool(b.get("private")), b.get("run_id"), str(b["dataset_id"])
+        except (ValueError, TypeError, KeyError, AttributeError):
+            if everything is None:
+                from ..kernel import Kernel
+                everything = set(Kernel(store).vault.datasets())
+            out |= everything
+            continue
+        if not private:
+            continue
+        if isinstance(rid, str) and rid and rid not in ids:
+            if rid not in known:
+                try:
+                    store.get_run(rid)
+                    known[rid] = True
+                except KeyError:
+                    known[rid] = False
+            if known[rid]:
+                continue  # another, known run's own read
+        out.add(ds)
+    return sorted(out), last
 
 
 Mode = Literal["live", "record", "replay"]

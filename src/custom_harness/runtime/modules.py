@@ -61,6 +61,9 @@ class ModuleContext:
     archive_taint: Mapping[str, frozenset[str]] = field(default_factory=dict)
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     _store: Any = field(init=False, repr=False, default=None)
+    # engine-owned access record (runtime/taint.py): which context surfaces the module touched. The engine sets it to
+    # a fresh set after construction; a module never reports its own reads.
+    _touched: set[str] | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
         if not isinstance(self.store, ModuleStore):
@@ -68,6 +71,13 @@ class ModuleContext:
             self.store = ModuleStore(self.store)
         else:
             self._store = self.store._ModuleStore__store
+
+    def __getattribute__(self, name: str) -> Any:
+        if name in _RECORDED:
+            touched = object.__getattribute__(self, "_touched")
+            if touched is not None:
+                touched.add(name)
+        return object.__getattribute__(self, name)
 
     def kernel(self, replayer: _Replayer | None = None) -> Kernel:
         """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes. It is
@@ -87,6 +97,11 @@ class ModuleContext:
         self.llm_calls.append({"role": role, "provenance": resp.provenance.model_dump(mode="json"),
                                "request": [m.model_dump() for m in request.messages], "response": resp.text})
         return resp
+
+
+# ModuleContext surfaces whose use the engine records for the step's taint label (runtime/taint.py). `_store` and
+# `kernel` both reach the whole store; `sandbox` the workspace; `secrets` the run's private values.
+_RECORDED = frozenset({"store", "_store", "kernel", "sandbox", "secrets"})
 
 
 def _cost():
