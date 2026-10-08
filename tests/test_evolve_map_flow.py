@@ -30,7 +30,7 @@ def _map(items_key: str, body: str = "mb", output_key: str = "mapped") -> dict:
 
 def _edit(spec: HarnessSpec, map_node: dict, body: dict, *, with_tool: bool = True, extra=()) -> Edit:
     ops = [*(_insert_between(spec, "hypothesize", "tournament", "t1", TOOL) if with_tool else []),
-           *_insert_between(spec, "socratic", "next", "m1", map_node),
+           *_insert_between(spec, "check_answers", "next", "m1", map_node),
            EditOp(op="add", path=f"/nodes/{map_node['body']}", value=body), *extra]
     return Edit(type=EditType.TOOL, rationale="x", ops=ops)
 
