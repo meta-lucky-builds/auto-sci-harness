@@ -189,7 +189,9 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 |---|---|---|
 | LOFO/LODO gates (inv. 16) | main | verified: `tests/test_lofo.py` (14). Per-family non-regression; a suite without a held-out family is refused |
 | Evidence export, first-divergence diagnosis, cost term, ledger upgrades, novelty gate, decline | `m3-b3-evolve` | reported: 62 passed. Not reviewed by me. The cost default (1.0) is uncalibrated |
-| Agentic proposer, smoke run, one-mechanism rule, family-separated critic, real campaign | — | not started |
+| Agentic proposer (sandboxed read-only export tools, typed edits only, prediction screen), one-mechanism rule, smoke run | `ph2-proposer` | reported: tests/test_proposer_agent.py, tests/test_evolve_mechanism_smoke.py; scripted backends only, no live model. With LocalSandbox the tools are only path-confined; real isolation needs DockerSandbox (not run) |
+| Family-separated critic | `ph2-proposer` | interface + same-family refusal only; advisory, no repair loop. Needs owner: a second model family (invariant 5 NOT MET) |
+| Real campaign | — | not started |
 
 ---
 
