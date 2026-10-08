@@ -12,3 +12,12 @@ equivalent:
   - id: "src/custom_harness/kernel/ledger.py:121:45:bool-flip"
     reason: "key order inside one JSON anchor line (sort_keys True -> False); every reader (check_anchors) parses the
       line as JSON, so no behaviour depends on it. Not killed by pinning the byte format on purpose."
+  - id: "src/custom_harness/kernel/checks.py:276:27:cmp0:Lt->LtE"
+    reason: "K2 excuse `other.seq < a.seq` vs `<=`: a prereg entry and a data_access entry are different ledger
+      entries and ledger seq is a unique primary key, so the two can never be equal."
+  - id: "src/custom_harness/kernel/checks.py:390:50:int+1"
+    reason: "how many stray records are quoted in a K4 reason MESSAGE ([:5] -> [:6]); the failure is unchanged."
+  - id: "src/custom_harness/kernel/checks.py:509:12:stmt->pass"
+    reason: "redundant reason: a target whose content hash equals a development dataset's is, by that fact, also
+      'identical content registered under other id(s)' two lines below, so K6 fails either way and no verdict,
+      label or status can differ; only the reason text does."

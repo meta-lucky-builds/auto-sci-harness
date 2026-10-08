@@ -77,3 +77,72 @@ def test_an_unreadable_anchor_line_is_a_problem_not_a_crash(tmp_path):
         assert len(problems) == 1 and problems[0].startswith("anchor line 1 unreadable"), problems  # locates it
     finally:
         store.close()
+
+
+def _iv(lo: float, hi: float, degenerate: bool = False):
+    from custom_harness.verify.stats import Interval
+    return Interval(estimate=(lo + hi) / 2, lo=lo, hi=hi, n=10, alpha=0.05, method="t", degenerate=degenerate)
+
+
+def _claim(kind):
+    from custom_harness.kernel import AnalysisPlan, ArtifactRef, Claim, Effect, MetricRef, Scope
+    a, b = ArtifactRef(artifact_id="a", hash="1" * 64), ArtifactRef(artifact_id="b", hash="2" * 64)
+    return Claim(kind=kind, statement="s", subject=a, comparator=b, metric=MetricRef(id="accuracy",
+                 higher_is_better=True), effect=Effect(min_effect=0.1, predicted_lo=0.0, predicted_hi=0.0,
+                 probability=0.5), scope=Scope(datasets=("t",)), development=(), generalization_targets=("t",),
+                 analysis_plan=AnalysisPlan(seeds=(0, 1, 2)), resolve_by=1.0)
+
+
+def test_equivalence_criterion_boundaries_and_seed_use():
+    """Survivors in checks._criterion (equivalence branch, line 453): no test exercised its strict bounds, its seed
+    interval or its and/or structure."""
+    from custom_harness.kernel import ClaimKind
+    from custom_harness.kernel.checks import _criterion
+    eq = _claim(ClaimKind.EQUIVALENCE)
+    inside, flat = _iv(-0.05, 0.05), _iv(0, 0, degenerate=True)
+    assert _criterion(eq, flat, inside) is True  # seed interval degenerate: not used
+    assert _criterion(eq, inside, inside) is True
+    assert _criterion(eq, flat, _iv(-0.1, 0.05)) is False  # lo == -d is not inside (strict)
+    assert _criterion(eq, flat, _iv(-0.05, 0.1)) is False  # hi == d is not inside (strict)
+    assert _criterion(eq, flat, _iv(-0.2, 0.05)) is False  # one side out is enough to fail
+    assert _criterion(eq, flat, _iv(-0.05, 0.2)) is False
+    assert _criterion(eq, _iv(-0.1, 0.05), inside) is False  # a non-degenerate seed interval must also fit
+    assert _criterion(eq, _iv(-0.05, 0.1), inside) is False
+    assert _criterion(eq, _iv(-0.2, 0.05), inside) is False
+    assert _criterion(eq, _iv(-0.05, 0.2), inside) is False
+
+
+def test_unsupported_kinds_never_meet_a_criterion():
+    """Survivor checks.py:452 if-True: a kind the Kernel cannot check must never meet the equivalence formula."""
+    from custom_harness.kernel import ClaimKind
+    from custom_harness.kernel.checks import _criterion
+    for kind in (ClaimKind.SCALING_LAW, ClaimKind.REDISCOVERY):
+        assert _criterion(_claim(kind), _iv(0, 0, degenerate=True), _iv(-0.05, 0.05)) is False
+
+
+def test_shared_examples_flags_label_columns_even_when_the_first_row_is_ragged(tmp_path):
+    """Survivors checks.py:131 (data[0] -> data[1], t[0] -> t[1]): 'may carry labels' is a property of the
+    HEADER, not of the first data row."""
+    from custom_harness.kernel import DatasetRole, Kernel
+    from custom_harness.kernel.checks import shared_examples
+    store = EvidenceStore(tmp_path / "s")
+    try:
+        v = Kernel(store).vault
+        v.register_dataset("t", DatasetRole.TEST, public={"x.csv": b"x1,x2\n1,2,3\n1,2\n"},
+                           private={"y.csv": b"y\n0\n1\n"})
+        v.register_dataset("o", DatasetRole.DEV, public={"tr.csv": b"x1,x2,label\n9\n1,2,0\n"}, private={})
+        assert shared_examples(v, "t", "o") == {"o/tr.csv": (1, True)}
+    finally:
+        store.close()
+
+
+def test_k6_without_statistics_fails_k6_itself(tmp_path):
+    """Survivor checks.py:522 (reason dropped): with a duplicated record K4 computes no statistics; K6 must fail on
+    its own account, not only because K4 also fails."""
+    import gen
+    from history import Certify, Prereg, Record
+    from test_spec_kernel import ARTS, T, claim, play
+    c = claim()
+    recs = gen.honest_records(c) + (Record("subject", 0, "t"),)
+    [v] = play([T, *ARTS, Prereg(c), *gen.eval_reads(c), Certify(c, recs)])
+    assert v.checks["K4"] == "fail" and v.checks["K6"] == "fail", v
