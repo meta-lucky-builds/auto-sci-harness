@@ -9,7 +9,10 @@ Executes a HarnessSpec as a graph. Guarantees:
 - budgets are enforced by deterministic code before and after every step (PLAN P7);
 - LLM contracts (output JSON schemas) are validated in code, with bounded retries;
 - approval nodes (GOAL §5 L0, invariant 15) pause the run (PAUSED) until a human decision for exactly
-  (run, node, item hash) is in the ledger.
+  (run, node, item hash) is in the ledger;
+- a human kill (`chh kill`, studio/kill.py) stops the run before its next step and ends it FAILED; a killed run is
+  never resumed;
+- an optional campaign budget (budget.Campaign) is checked before every step, across all the campaign's runs.
 
 Approval trust boundary (stated honestly). The engine reads decisions ONLY from ledger entries of kind "approval",
 which only `chh approve` writes; values in run state are discarded and overwritten. To stop code that runs before
@@ -37,7 +40,7 @@ from typing import Any
 
 import jsonschema
 
-from ..budget import Budget, BudgetExceeded
+from ..budget import Budget, BudgetExceeded, Campaign
 from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
 from ..kernel.ledger import Ledger
@@ -211,7 +214,8 @@ def _holds(cond: Condition, state: dict[str, Any]) -> bool:
 class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
-                 retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None):
+                 retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None,
+                 campaign: Campaign | None = None):
         # invariant 5, checked before any model call; an override (argument or CHH_ALLOW_SAME_FAMILY=1) is
         # recorded in every run's state as NOT MET and reported in every certificate checklist
         allowed = allow_same_family if allow_same_family is not None else (
@@ -241,6 +245,7 @@ class Engine:
             limits = {k: v for k, v in spec.budget.model_dump().items() if v is not None}
             budget = Budget(limits=limits)
         self.budget = budget
+        self.campaign = campaign  # GOAL L1: one budget across every run of a campaign (derived from the store)
         self.spec_hash = store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=None)
         self._ws_ref: str | None = None  # latest workspace snapshot of the current run
         # release emission (GOAL §16.5.3): state keys written by a step during which private files were read are
@@ -261,6 +266,8 @@ class Engine:
                   inputs_ref=self.store.blobs.put_json(state),
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None)
         self.store.add_run(run)
+        if self.campaign is not None:
+            self.campaign.join(run.id)
         self._ws_ref = None
         self._map_resume = {}
         self._started(run.id)
@@ -275,11 +282,18 @@ class Engine:
         an approval outcome, run inputs, the model policy, or a reserved key (evolve/edits.RESERVED_OUTPUT_KEYS:
         claims, certificates, audit results, task setup ...); a dotted key; a non-JSON value; a value that carries a
         private value of the checkpoint state. Every fork is ledgered (kind `fork`; an append-only store record of
-        that kind until the Kernel allows the ledger kind).
+        that kind until the Kernel allows the ledger kind). A killed run (studio kill switch) is never forked
+        (ValueError, also before anything is written): it would continue under a new id.
 
         Budgets carry over without double counting: an engine-owned (per-run) budget starts at the parent's
         cumulative spend up to that step, so forking can never reset it (GOAL L1); a caller-supplied (e.g. campaign)
-        budget is raised per unit to at least that spend and never has it added a second time."""
+        budget is raised per unit to at least that spend and never has it added a second time. A fork made under a
+        campaign joins that campaign like any new run."""
+        from ..studio.kill import kill_entry, killed_detail
+        kill = kill_entry(self.store, run_id)
+        if kill is not None:
+            raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not forked (it would continue "
+                             f"under a new id)")
         steps = self.store.trace(run_id)
         step = next((s for s in steps if s.index == step_index), None)
         if step is None or step.checkpoint_ref is None:
@@ -311,6 +325,8 @@ class Engine:
             seq = None
         state["_forked_from"] = {"run_id": run_id, "step": step_index, "patch_keys": sorted(patch),
                                  "patch_sha256": patch_sha, "ledger_seq": seq}
+        if self.campaign is not None:
+            self.campaign.join(run.id)
         if cp["next"] == END:
             self.store.set_run_status(run.id, RunStatus.COMPLETED, "forked at terminal checkpoint")
             return RunResult(run.id, RunStatus.COMPLETED, state)
@@ -335,6 +351,10 @@ class Engine:
         stay in the store unreferenced."""
         status, detail = self.store.run_status(run_id)
         run = self.store.get_run(run_id)
+        from ..studio.kill import kill_entry, killed_detail
+        kill = kill_entry(self.store, run_id)
+        if kill is not None:
+            raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not resumable")
         if run.harness_hash != self.spec_hash:
             raise ValueError("resume needs the exact harness spec the run started with")
         resumable = (status in (RunStatus.RUNNING, RunStatus.INFRA_FAILED, RunStatus.PAUSED)
@@ -369,6 +389,8 @@ class Engine:
             restore_snapshot(ws_ref, self.sandbox.workspace, self.store.blobs)
         self._ws_ref = ws_ref
         self.budget.spent = spent
+        if self.campaign is not None:
+            self.campaign.join(run_id)
         if next_node == END:
             self.store.set_run_status(run_id, RunStatus.COMPLETED, "resumed: terminal checkpoint was already reached")
             return RunResult(run_id, RunStatus.COMPLETED, state, cost=Cost())
@@ -421,7 +443,10 @@ class Engine:
         try:
             res = self._loop_inner(run_id, state, node_id, start_index)
         except BaseException as e:
-            self.store.set_run_status(run_id, RunStatus.FAILED, f"engine crash: {type(e).__name__}: {e}")
+            from ..studio.kill import kill_entry, killed_detail
+            kill = kill_entry(self.store, run_id)
+            self.store.set_run_status(run_id, RunStatus.FAILED, killed_detail(kill) if kill is not None
+                                      else f"engine crash: {type(e).__name__}: {e}")
             self._write_run_bundle(run_id)
             raise
         self._write_run_bundle(run_id)
@@ -442,15 +467,22 @@ class Engine:
             self.store.append_record("run_bundle", {"run_id": run_id, "error": f"{type(e).__name__}: {e}"})
 
     def _loop_inner(self, run_id: str, state: dict[str, Any], node_id: str, start_index: int) -> RunResult:
+        from ..studio.kill import kill_entry, killed_detail
         index = start_index
         total = Cost()
         status, detail = RunStatus.COMPLETED, ""
         while True:
+            kill = kill_entry(self.store, run_id)
+            if kill is not None:  # a human stopped the run: no further step runs
+                status, detail = RunStatus.FAILED, killed_detail(kill)
+                break
             if index >= self.spec.max_steps:
                 status, detail = RunStatus.STEP_LIMIT, f"max_steps={self.spec.max_steps}"
                 break
             try:
                 self.budget.check()
+                if self.campaign is not None:
+                    self.campaign.check()
             except BudgetExceeded as e:
                 status, detail = RunStatus.BUDGET_EXCEEDED, str(e)
                 break
@@ -551,7 +583,14 @@ class Engine:
                 break
             node_id = next_node
 
+        kill = kill_entry(self.store, run_id)
+        if kill is not None:  # killed during the last step: it ends FAILED, never COMPLETED (or PAUSED)
+            status, detail = RunStatus.FAILED, killed_detail(kill)
         self.store.set_run_status(run_id, status, detail)
+        kill = kill_entry(self.store, run_id)
+        if kill is not None and status != RunStatus.FAILED:  # a kill that landed between the check and the write
+            status, detail = RunStatus.FAILED, killed_detail(kill)
+            self.store.set_run_status(run_id, status, detail)
         return RunResult(run_id, status, state, detail, steps=index - start_index, cost=total)
 
     def _approval(self, node_id: str, node: ApprovalNode, state: dict[str, Any],
