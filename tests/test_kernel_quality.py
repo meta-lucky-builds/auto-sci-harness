@@ -31,14 +31,16 @@ def test_no_model_call_is_reachable_from_the_kernel():
 
 
 def test_kernel_is_small():
-    """GOAL §4.1: a small trusted core (target < 3k lines of code, excluding blanks and comment lines)."""
+    """GOAL §4.1: a small trusted core (target < 4,000 lines of code, excluding blanks and comment lines). A ratchet:
+    raised from 3,000 on 2026-10-08 by an owner decision (§16 features; core split (§16.6) deferred); lowering it
+    again is the goal, raising it needs another owner decision."""
     loc = 0
     for f in KERNEL.glob("*.py"):
         for line in f.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if s and not s.startswith("#"):
                 loc += 1
-    assert loc < 3000, loc
+    assert loc < 4000, loc
 
 
 @pytest.mark.parametrize("tool", ["mypy", "ruff"])

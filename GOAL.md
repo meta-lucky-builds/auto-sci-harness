@@ -156,7 +156,7 @@ Lean analogy, kept deliberately:
 |---|---|
 | Theorem statement | **Typed Claim** (Claim Language) |
 | Proof | **Evidence Bundle** (pre-registration + code + data hashes + runs + statistics) |
-| Small trusted kernel | Small, deterministic Kernel code (target < 3k LoC, 100% test coverage, no LLM inside) |
+| Small trusted kernel | Small, deterministic Kernel code (target < 4,000 non-comment lines, raised from 3k on 2026-10-08 by the owner: §16 features; core split (§16.6) deferred; 100% test coverage, no LLM inside) |
 | `sorry` / axioms audit | **Assumption audit**: every untested assumption is listed explicitly and lowers the tier (v1: listed and marked tested/untested; tier lowering not yet defined) |
 | Proof checks or fails | Certificate issued at tier T*, or rejected with machine-readable reasons |
 
