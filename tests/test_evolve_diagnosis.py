@@ -361,3 +361,41 @@ def test_export_refs_cover_steps_verdicts_and_failed_checks(store, tmp_path):
                           tasks=[SuiteTask("evo0", task, "evolve", family="f")])
     assert export_refs(exp.path) == {f"{rid}#0", f"{rid}#1", f"{rid}#2", f"{rid}#3", f"{rid}#verdict",
                                      f"{rid}#3/K7"}
+
+
+# ================================================================ the digest passes the export's leak audit
+class LeakyTable(CostTable):
+    """CostTable whose runs exist in the store; every run that earned nothing crashed printing a private token."""
+
+    def __init__(self, *a, secret: str, **kw):
+        super().__init__(*a, **kw)
+        self.secret = secret
+
+    def outcome(self, spec, unit):
+        key = (spec.spec_hash(), unit[0], unit[1])
+        if key not in self.cache:
+            o = super().outcome(spec, unit)
+            err = f"ValueError: label mismatch near {self.secret}" if o.score == 0.0 else None
+            rid = _add_run(self.store, spec, unit[0], [GOOD_STEPS[0], ("run", {"route": "claim"}, err)],
+                           seed=unit[1])
+            self.cache[key] = RunOutcome(o.task_id, rid, o.seed, o.score, o.verified, o.status, o.cost,
+                                         o.failure_signatures)
+        return self.cache[key]
+
+
+def test_a_private_token_in_an_evolve_trace_never_reaches_the_proposer_prompt(store, tmp_path):
+    from custom_harness.evolve import SuiteTask
+    from test_evolve_evidence import CANARY
+    tasks = [SuiteTask(f"e{i}", _task_dir(tmp_path, f"e{i}"), "evolve", family="A") for i in range(2)]
+    tasks += [SuiteTask(f"g{i}", _task_dir(tmp_path, f"g{i}"), "gate", family="A") for i in range(2)]
+    tasks += [SuiteTask("h0", _task_dir(tmp_path, "h0"), "gate", family="H")]
+    parent = seed_spec()
+    ev = LeakyTable(store, tasks, parent.spec_hash(), _gain, lambda a, t, s: _tokens(100), secret=CANARY)
+    proposer = MockBackend([json.dumps({"edits": [], "decline": "x"})])
+    evolve_generation(parent, tasks, evaluator=ev, proposer=proposer, store=store,
+                      cfg=EvolveConfig(seeds=(0, 1), n_edits=1, race_rounds=1))
+    rid = next(o.run_id for o in ev.cache.values() if o.task_id == "e0")
+    assert any(CANARY in (st.error or "") for st in store.trace(rid))  # the attack is in the evolve trace
+    prompt = proposer.requests[0].messages[0].content
+    assert CANARY not in prompt
+    assert '"withheld"' in prompt and "run: gave up after a crash" in prompt  # only the raw excerpt was dropped

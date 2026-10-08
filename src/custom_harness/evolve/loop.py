@@ -53,7 +53,7 @@ from .edits import (
     withheld,
 )
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
-from .export import proposer_view
+from .export import proposer_view, screen_digest
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
 from .proposer_agent import ProposerAgent
@@ -205,6 +205,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     # outcomes never feed the diagnosis, which the proposer reads
     references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
     digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
+    # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
+    digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
+                           canaries=getattr(proposer, "canaries", ()))
     ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
     if isinstance(proposer, ProposerAgent):

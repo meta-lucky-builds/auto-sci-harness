@@ -45,6 +45,7 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -382,6 +383,35 @@ def _audit(root: Path, fp: dict[str, Any]) -> list[str]:
             if any(pp in norm for pp in fp["paths"]):
                 problems.append(f"a task's private directory path found in {rel}")
     return list(dict.fromkeys(problems))
+
+
+def screen_digest(digest: dict[str, Any], store: EvidenceStore, *, runs: Iterable[RunOutcome],
+                  tasks: list[SuiteTask], canaries: Iterable[str] = ()) -> dict[str, Any]:
+    """The export's leak audit (`_audit`, same fingerprints: every task's private files, canaries, label windows,
+    private run-state values, private paths) applied to the diagnosis the proposer reads in its prompt. Fail closed:
+    on any finding the raw cluster example excerpts are dropped; if the rest still fails, only counts remain. The
+    findings are reported as a count (`withheld`), never quoted."""
+    by_id = {t.task_id: t for t in tasks}
+    exported = {o.run_id: o for o in runs if o.task_id in by_id and by_id[o.task_id].split == "evolve"}
+    fp = _fingerprints(store, tasks, exported, canaries)
+
+    def problems(doc: dict[str, Any]) -> list[str]:
+        tmp = Path(tempfile.mkdtemp(prefix="chh-digest-"))
+        try:
+            _dump(tmp / "digest.json", doc)
+            return _audit(tmp, fp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    found = problems(digest)
+    if not found:
+        return digest
+    lean = {**digest, "clusters": [{k: v for k, v in c.items() if k != "examples"} for c in digest.get("clusters", [])],
+            "withheld": len(found)}
+    if not problems(lean):
+        return lean
+    return {k: digest[k] for k in ("n_runs", "n_excluded_infra", "n_excluded_split") if k in digest} | {
+        "clusters": [], "divergences": [], "no_reference": [], "withheld": len(found)}
 
 
 def _make_read_only(root: Path) -> None:
