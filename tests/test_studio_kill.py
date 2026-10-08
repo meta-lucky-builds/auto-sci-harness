@@ -88,6 +88,12 @@ def test_kill_mid_run_ends_failed_runs_nothing_after_and_is_ledgered(dstore):
     assert "ran" not in _HUMAN
 
 
+def test_a_kill_during_the_last_step_still_ends_failed(dstore):
+    res = Engine(_spec("kill.human_kills_now"), backends={}, store=dstore).run("t", {})
+    assert res.status == RunStatus.FAILED  # the step reached END, but the run was killed: never COMPLETED
+    assert "killed by a human" in dstore.run_status(res.run_id)[1]
+
+
 def test_cli_kill_of_a_paused_run_and_refusals(dstore, capsys):
     from test_approval import spec as approval_spec
     res = Engine(approval_spec(), backends={}, store=dstore).run("t", {})
@@ -102,6 +108,12 @@ def test_cli_kill_of_a_paused_run_and_refusals(dstore, capsys):
         cli.main(["approve", res.run_id, "review", "--decision", "approve", "--approver", "alice"])
     with pytest.raises(SystemExit, match="must name the human"):
         cli.main(["kill", res.run_id, "--by", "  "])
+    # generalised: every human command that acts on a paused run refuses a killed one (return-data read the pause
+    # from the trace, not the run status)
+    data = data_dir() / "returned.csv"
+    data.write_text("x\n1\n")
+    with pytest.raises(SystemExit, match="was killed by a human"):
+        cli.main(["return-data", res.run_id, "--file", str(data), "--attest", "alice, lab 1, today"])
     done = Engine(_spec("kill.after"), backends={}, store=dstore).run("t", {})
     with pytest.raises(SystemExit, match="nothing to stop"):
         cli.main(["kill", done.run_id, "--by", "alice"])

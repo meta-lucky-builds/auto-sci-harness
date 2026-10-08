@@ -20,8 +20,8 @@ Why no model or evolved node can change it:
 
 Honest limits: whoever controls both the host files and the store can rewrite the file and append a pin; the ledger
 is tamper-evident, not authenticated (see kernel/ledger.py anchoring). The `by` field is not checked to be a human.
-Consumers: `memory_floors` turns the loaded policy into L5 memory floors. The memory store built by
-research/memory_wiring.py still uses `tiers.DEFAULT_POLICY` until it is wired to `load_policy` (not done here).
+Not wired yet (stated): the memory store (memory/model.py default_floors) and every other consumer still read
+`tiers.DEFAULT_POLICY` from code. Wiring them to `load_policy` is a change in those packages (not done here).
 """
 
 from __future__ import annotations
@@ -29,7 +29,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 from ..config import data_dir
 from ..kernel.ledger import Entry, Ledger
@@ -131,13 +130,3 @@ def pin(store: EvidenceStore, by: str, path: Path | None = None, expect_sha256: 
         raise TierPolicyError(f"the file hashes to {digest}, not the {expect_sha256} you reviewed")
     return Ledger(store).append(PIN_KIND, {"sha256": digest, "policy": to_json(policy), "by": by.strip()})
 
-
-def memory_floors(policy: dict[Action, Tier | None]) -> dict[Any, Tier]:
-    """The L5 memory floors this policy implies (same rule as memory.model.default_floors)."""
-    from ..memory.model import SKILL_KINDS, Kind
-    floors: dict[Any, Tier] = {}
-    for kind in Kind:
-        floor = policy[Action.ADMIT_SKILL if kind in SKILL_KINDS else Action.PUBLISH_VERIFIED]
-        if floor is not None:
-            floors[kind] = floor
-    return floors

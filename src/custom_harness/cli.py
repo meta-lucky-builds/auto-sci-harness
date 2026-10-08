@@ -102,6 +102,10 @@ def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .kernel import DatasetRole, Kernel
     from .research.physical import Protocol, check_measurements, screen
     from .runtime.engine import approval_decision, approval_item_hash, paused_approval
+    from .studio.kill import kill_entry, killed_detail
+    kill = kill_entry(store, a.run_id)
+    if kill is not None:  # the pause is read from the trace, so the kill must be checked explicitly
+        raise SystemExit(f"refused: run {a.run_id} was {killed_detail(kill)}")
     pause = paused_approval(store, a.run_id)
     if pause is None or pause.get("node_id") != "data_received":
         raise SystemExit(f"run {a.run_id} is not paused at the data gate (data_received)")
