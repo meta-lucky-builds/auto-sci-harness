@@ -11,6 +11,7 @@ from pathlib import Path
 
 import yaml
 
+from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
 from .literature import cli as lit_cli
@@ -687,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
     t.add_argument("--full", action="store_true")
     lit_cli.add_parsers(sub)
     provenance_cli.add_parsers(sub)
+    audit_cli.add_parsers(sub)
     a = p.parse_args(argv)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
@@ -704,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
                 "preflight-suite": cmd_preflight_suite,
-                **lit_cli.COMMANDS, **provenance_cli.COMMANDS}[a.cmd](a, store)
+                **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 
