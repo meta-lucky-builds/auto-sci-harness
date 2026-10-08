@@ -38,9 +38,9 @@ from typing import Any
 
 from .edits import Edit
 
-ID = re.compile(r"^[CD]\d{1,4}$")
+ID = re.compile(r"^[CD]\d{1,4}\Z")  # \Z, not $: `$` also matches before a trailing newline
 REF = re.compile(r"^(?P<run>[A-Za-z0-9_\-]{1,64})#"
-                 r"(?:(?P<verdict>verdict)|(?P<step>\d{1,6})(?:/(?P<check>[A-Za-z0-9_.\-]{1,64}))?)$")
+                 r"(?:(?P<verdict>verdict)|(?P<step>\d{1,6})(?:/(?P<check>[A-Za-z0-9_.\-]{1,64}))?)\Z")
 
 
 def step_ref(run_id: str, index: int) -> str:

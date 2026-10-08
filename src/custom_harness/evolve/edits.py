@@ -84,7 +84,10 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   # audit I3 inputs (research/claims.py: citation_audit)
                                   "citations", "literature_snapshot",
                                   # audit I6 input (research/claims.py: _figure_audit)
-                                  "figures"})
+                                  "figures",
+                                  # critic-answer check and recall (research/critic_answers.py, research/recall.py on
+                                  # branch b-research; referenced by id only here)
+                                  "critic_answers", "critic_evidence", "recalled", "recall_log"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
@@ -94,7 +97,12 @@ RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
 RESERVED_WRITING_MODULES = frozenset({
     "research.setup", "research.profile_data", "research.baseline_dev", "research.socratic_filter",
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
-    "research.replica_dev", "research.report", "research.audit"})
+    "research.replica_dev", "research.report", "research.audit",
+    # b-research (by id only): the critic-answer check and recall write reserved keys
+    "research.critic_evidence", "research.check_critic_answers", "research.recall"})
+# Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
+# critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
+PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
@@ -293,6 +301,9 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
             raise EditRejected(f"edges out of approval node '{nid}' are human-only")
         if _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
             raise EditRejected(f"edges into approval node '{nid}' are human-only")
+    for nid in PINNED_NODES:
+        if nid in spec.nodes and (nid not in new.nodes or new.nodes[nid] != spec.nodes[nid]):
+            raise EditRejected(f"critic-chain node '{nid}' is human-only (its definition cannot be edited or removed)")
     protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
     for nid, node in new.nodes.items():
         if nid in spec.nodes and node == spec.nodes[nid]:
@@ -448,7 +459,7 @@ def check_one_mechanism(edit: Edit, spec: HarnessSpec) -> None:
                            f"{[g if len(g) > 1 else g[0] for g in groups][:6]}; propose them as separate edits")
 
 
-_CLUSTER_ID = re.compile(r"^[CD]\d{1,4}$")
+_CLUSTER_ID = re.compile(r"^[CD]\d{1,4}\Z")  # \Z, not $: `$` also matches before a trailing newline
 _CANARY = re.compile(r"CHH-CANARY-", re.I)
 
 

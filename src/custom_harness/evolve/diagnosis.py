@@ -59,7 +59,7 @@ _DECISION_KEYS = frozenset({"route", "run_error"})
 # run-specific bookkeeping that differs between two runs that did the same thing
 _VOLATILE_KEYS = frozenset({"hash", "claim_hash", "replica_claim_hash", "prereg_seq", "replica_prereg_seq",
                             "evidence_ids", "replica_evidence_ids", "embargoed"})
-_ID_LIKE = re.compile(r"^(?:[a-z]+_[0-9a-f]{16}|[0-9a-f]{16,128})$")
+_ID_LIKE = re.compile(r"^(?:[a-z]+_[0-9a-f]{16}|[0-9a-f]{16,128})\Z")
 
 
 def _error_sig(step: TraceStep) -> str | None:

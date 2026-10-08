@@ -79,7 +79,7 @@ _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying 
 _CERT_KEYS = ("certificate", "replica_certificate")
 _EMBARGOED_KEYS = ("report", "report_ref", "publish_blockers", "checklist")
 EMBARGOED = "<embargoed until the target retires>"
-_HEX = re.compile(r"^[0-9a-f]{16,128}$")
+_HEX = re.compile(r"^[0-9a-f]{16,128}\Z")  # \Z, not $: `$` also matches before a trailing newline
 _MAX_PRIVATE_SCAN = 1024 * 1024  # private files above this are matched by hash only
 
 
