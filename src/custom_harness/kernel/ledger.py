@@ -31,7 +31,15 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "statement_approval",  # a HUMAN approved a Lean statement (`chh approve-statement`)
                    # approval node (runtime/engine.py): the engine records each pause; only `chh approve` records
                    # a human decision
-                   "approval_request", "approval"})
+                   "approval_request", "approval",
+                   # §16.5.3 release ledger; §16.4 per-target alpha-accounts (open: human; reserve: preregister;
+                   # retire: slots exhausted or a human)
+                   "release", "alpha_open", "alpha_reserve", "alpha_retire",
+                   # §16.2 minted targets (Kernel.record_mint); bodies owned by other workstreams: human feature-
+                   # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
+                   "mint", "feature_ruling", "role_exam",
+                   "tree_event",  # L4.7 experiment-tree events (research/tree.py owns the body)
+                   "salt_commitment", "salt_reveal"})  # §16.9 salt campaigns (salts/plan.py owns the bodies)
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
@@ -78,6 +86,19 @@ class Ledger:
     def verify(self) -> list[str]:
         """Problems with the full chain (empty list = intact)."""
         return verify_chain(self.entries(), full=True)
+
+
+class AsOfLedger(Ledger):
+    """The ledger as it was up to and including entry `last_seq` (§16.4: `verify` re-derives a certificate as of
+    its own ledger prefix). Reads see only that prefix; appends (the logged label reads a re-derivation makes) still
+    go to the real ledger, because a read is a real event that must be logged."""
+
+    def __init__(self, store: EvidenceStore, last_seq: int):
+        super().__init__(store)
+        self.last_seq = last_seq
+
+    def entries(self, kind: str | None = None) -> list[Entry]:
+        return [e for e in super().entries(kind) if e.seq <= self.last_seq]
 
 
 def verify_chain(entries: list[Entry], *, full: bool) -> list[str]:

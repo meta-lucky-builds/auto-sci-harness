@@ -129,8 +129,8 @@ def test_k0_failure_paths(base):
                                  unparsable.id, "ev_does_not_exist"))
     text = reasons(K.k0_provenance(cx))
     for want in ("different claim", "not a metric record", "not a list of strings", "code blob missing",
-                 "unresolvable", "target 'nope' unregistered", "run_missing", "ValidationError", "KeyError"):
-        assert want in text, want
+                 "unresolvable", "target 'nope' unregistered", f"{no_run}: KeyError", "ValidationError", "KeyError"):
+        assert want in text, want  # §16.5.8: a foreign exception shows its type only (no 'run_missing' message)
     assert cx.records == []
     empty = K.Context(claim=variant(c, subject__artifact_id="ghost"), claim_hash="h", store=w.store, vault=w.vault,
                       ledger=w.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
@@ -190,7 +190,9 @@ def test_k3_paths(base):
     w, c, ids = base
     assert "no usable evaluation records" in reasons(K.k3_reproduced(ctx(w, c, [])))
     assert "no replayer configured" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=None)))
-    assert "failed: boom" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(ExecutionError("boom")))))
+    # §16.5.8: an exception's message never enters a reason (it could carry data out); its type name does
+    boom = ctx(w, c, ids, replayer=FixedReplayer(ExecutionError("boom")))
+    assert "failed: ExecutionError" in reasons(K.k3_reproduced(boom))
     assert "produced no predictions" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(None))))
     tol = variant(c, analysis_plan__reproduce_tolerance=0.02)
     w.kernel.preregister(tol)
@@ -419,11 +421,13 @@ def test_prediction_scoring(tmp_path):
     scores = {s.claim_hash: s for s in score_predictions(k.ledger, now)}
     assert len(scores) == 4
     s_hit, s_miss = scores[hit.claim_hash()], scores[miss.claim_hash()]
-    assert math.isclose(s_hit.info_gain_bits, math.log2(0.9 / 0.1))
-    assert math.isclose(s_miss.info_gain_bits, math.log2(0.2 / 0.6))  # p0 = declared prior 0.4
+    # §16.4 (F2): p0 is the level frozen at registration (alpha / n_comparisons = 0.05), never the p_null measured
+    # after the outcome nor the claimant's declared prior (the old expectations here encoded F2)
+    assert math.isclose(s_hit.info_gain_bits, math.log2(0.9 / 0.05))
+    assert math.isclose(s_miss.info_gain_bits, math.log2(0.2 / 0.95))
     s_exp = scores[expired.claim_hash()]
-    assert s_exp.expired and s_exp.outcome is False and math.isclose(s_exp.info_gain_bits, math.log2(0.3 / 0.5))
-    assert scores[pending.claim_hash()].outcome is None and scores[pending.claim_hash()].p0 == 0.3
+    assert s_exp.expired and s_exp.outcome is False and math.isclose(s_exp.info_gain_bits, math.log2(0.3 / 0.95))
+    assert scores[pending.claim_hash()].outcome is None and scores[pending.claim_hash()].p0 == 0.05
     total = vds(list(scores.values()))
     assert math.isclose(total, sum(s.info_gain_bits for s in scores.values() if s.info_gain_bits is not None))
     cal = calibration(list(scores.values()), bins=5)
@@ -704,7 +708,8 @@ def test_evidence_class_and_adapters_keep_old_hashes_stable(base):
     legacy = Certificate.model_validate({k: v for k, v in cert.model_dump(mode="json").items() if k != "adapters"})
     assert legacy.adapters == () and cert.adapters != ()
     import hashlib
-    old_rule = {k: v for k, v in legacy.model_dump(mode="json").items() if k != "adapters"}  # how v1.0 hashed it
+    # how v1.0 hashed it (fields added later, adapters and self_reported, did not exist)
+    old_rule = {k: v for k, v in legacy.model_dump(mode="json").items() if k not in ("adapters", "self_reported")}
     assert legacy.cert_hash() == hashlib.sha256(canonical_json(old_rule)).hexdigest()
     assert legacy.cert_hash() != cert.cert_hash()  # adapters are part of a new certificate's identity
 

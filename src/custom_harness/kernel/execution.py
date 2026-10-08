@@ -13,9 +13,9 @@ from __future__ import annotations
 import csv
 import io
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SerializerFunctionWrapHandler, model_serializer
 
 from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
 from .vault import Vault
@@ -52,6 +52,16 @@ class ExecRecord(_Model):
     metric: str
     score: float
     run_id: str
+    # invariant 21: the program came from REPLAYED model output (a cassette). Such a record is never evidence (K0
+    # refuses it). Omitted from dumps when false, so records written before the field existed keep their bytes.
+    replayed: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_not_replayed(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("replayed"):
+            doc.pop("replayed", None)
+        return doc
 
 
 class ExecutionError(RuntimeError):

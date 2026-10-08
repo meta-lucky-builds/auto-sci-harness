@@ -191,6 +191,20 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 | Evidence export, first-divergence diagnosis, cost term, ledger upgrades, novelty gate, decline | `m3-b3-evolve` | reported: 62 passed. Not reviewed by me. The cost default (1.0) is uncalibrated |
 | Agentic proposer, smoke run, one-mechanism rule, family-separated critic, real campaign | — | not started |
 
+## §16 Kernel items (workstream kstats, branch `s16-kstats`, Kernel 1.2)
+| Item | State |
+|---|---|
+| §16.4 VDS e-process (p0 at registration, q < p0 refused, F2 regression, skill vs pinned reference) | built; verified by `tests/test_kernel_s16.py` (fail-first shown on f0f703f: old miss scored +0.910 bits) |
+| §16.4 per-target alpha-accounts (human open, fixed slot level, retirement; n_comparisons path kept) | built; verified (`test_alpha_account_*`). No CLI command yet |
+| §16.4 as-of `verify_status` with STALE vs forged (MR7) | built; verified (`test_mr7_*`). `verify()` stays strict |
+| §16.4 K3 zero-failure reliability demonstration | built; verified (50%-flaky pass rate 0.270 old -> <= 0.02). Presets UNCALIBRATED |
+| §16.5.3 Kernel side of the release ledger (`record_release`, transcript bound, exposure) | built; verified incl. F1 against real K4/K6 (`tests/test_kernel_f1.py`) |
+| §16.5.8 closed reason codes | built; verified |
+| §16.6 plan-code divergence in K4 | built; verified |
+| §16.7 self-reported fields cap the tier | built (only: unapproved external/future role -> T4, UNCALIBRATED); verified |
+| invariant 21: replayed evidence refused | built (K0); the `Provenance.replayed` path is code-read only until yield's records.py merges |
+| Kernel size budget (< 3k non-comment lines) | FAILS: 3,496 lines (`test_kernel_is_small`); owner decision needed |
+
 ---
 
 ## 🔴 Red-team and loophole ledger (everything found so far)
