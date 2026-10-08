@@ -73,9 +73,19 @@ def _known_kernel_side(d: gen.Disagreement, script: list[Event]) -> bool:
     c = ev.claim
     # KD1: a development dataset, or a dataset read for development, sharing held-out examples passes K6
     used = set(c.development) | {e.dataset for e in script[:d.step] if isinstance(e, Read) and e.purpose == "develop"}
-    kd1 = any(dv in ds and t in ds and dv != t and ds[dv].examples & ds[t].examples for dv in used for t in c.targets)
+    kd1 = any(dv in ds and t in ds and dv != t and (ds[dv].examples & ds[t].examples or (
+        ds[t].private is not None and ds[dv].private == ds[t].private)) for dv in used for t in c.targets)
     # KD2: K7 judges risk on the targets that have statistics when another target has none
     kd2 = len(c.targets) > 1 and d.model == "fail" and d.real[0] == "pass"  # model fails it, Kernel passes
+    # KD4: a non-excused private read of a dataset RELATED to a target (shared rows / identical labels), made before
+    # the claim's registration, is not counted by K2 (only reads of the target itself are)
+    reg = next((i for i, e in enumerate(script[:d.step]) if isinstance(e, Prereg) and e.claim.key == c.key), d.step)
+    kd4 = any(isinstance(e, Read) and e.dataset in ds and t in ds and e.dataset != t and e.purpose != "leakscan" and (
+        ds[e.dataset].examples & ds[t].examples
+        or (ds[t].private is not None and ds[e.dataset].private == ds[t].private))
+        for e in script[:reg] for t in c.targets)
+    if d.where == "K2" and kd4:
+        return True
     return (d.where == "K6" and kd1) or (d.where == "K7" and kd2) or (d.where == "label" and kd1)
 
 
@@ -277,3 +287,21 @@ def test_kd3_a_target_whose_public_input_carries_its_labels_is_rejected():
 
 def test_kd3_attack_really_certifies_today():
     assert _labelled_target_verdict(40).label == "CERTIFIED-VALIDATED"
+
+
+def _related_peek(read_related: bool) -> model.Verdict:
+    rel = Dataset("t_rows", "dev", "features", EX, "R")  # the target's held-out rows under another id
+    c = claim()
+    reads = [Read("t_rows", "audit")] if read_related else []
+    [v] = play([T, rel, *ARTS, *reads, *honest(c)])
+    return v
+
+
+@pytest.mark.xfail(strict=True, reason="KD4 (differential run 2026-10-08): K2 counts only reads of the target id; an "
+                   "early label read of a dataset holding the same held-out rows under another id is not peeking")
+def test_kd4_an_early_read_of_a_related_dataset_is_peeking():
+    assert _related_peek(True).checks["K2"] == "fail"
+
+
+def test_kd4_attack_really_passes_k2_today():
+    assert _related_peek(True).checks["K2"] == "pass" and _related_peek(False).checks["K2"] == "pass"

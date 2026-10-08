@@ -399,3 +399,11 @@ findings:
     tests: ["tests/spec/test_spec_kernel.py::test_kd3_a_target_whose_public_input_carries_its_labels_is_rejected",
             "tests/spec/test_spec_kernel.py::test_kd3_attack_really_certifies_today"]
     status: open
+  - id: KD4
+    title: K2 counts only reads of the target id; an early label read of a dataset holding the same held-out rows
+      (or byte-identical labels) under another id is not counted as peeking
+    invariant: "§4.3 K2"
+    capability: A3
+    tests: ["tests/spec/test_spec_kernel.py::test_kd4_an_early_read_of_a_related_dataset_is_peeking",
+            "tests/spec/test_spec_kernel.py::test_kd4_attack_really_passes_k2_today"]
+    status: open

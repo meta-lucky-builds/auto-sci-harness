@@ -75,11 +75,11 @@ def verdict(history: History, c: ClaimSpec, records: tuple[Record, ...]) -> Verd
                 ok["K3"] = False
         logged = Counter((e.arm, e.seed, e.dataset) for e in history
                          if isinstance(e, Read) and e.purpose == "evaluate" and e.claim == c.key)
-        if logged - Counter((r.arm, r.seed, r.target) for r in records):  # T9
-            ok["K4"] = False
         stats = {t: _stats(history, c, records, t) for t in c.targets}  # T6
         crit = {t: stats[t] and c.strong and c.kind in model.EFFECT_KINDS for t in c.targets}
         ok["K4"] = ok["K4"] or (base.checks["K4"] == "fail" and _k4_procedural(history, c, records))  # T5
+        if logged - Counter((r.arm, r.seed, r.target) for r in records):  # T9 (after T5)
+            ok["K4"] = False
         ok["K6"] = ok["K6"] and all(crit.values())
         ok["K7"] = ok["K7"] and all(crit.values())
     else:  # T1
