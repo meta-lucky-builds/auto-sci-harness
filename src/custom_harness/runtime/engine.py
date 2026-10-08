@@ -23,6 +23,7 @@ cannot approve.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -30,6 +31,7 @@ import re
 import socket
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,7 +46,18 @@ from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
 from .modules import ModuleContext, get_module
-from .spec import END, ApprovalNode, Condition, HarnessSpec, LLMNode, ModuleNode, ToolNode, approval_state_keys
+from .spec import (
+    END,
+    ApprovalNode,
+    Condition,
+    HarnessSpec,
+    LLMNode,
+    MapNode,
+    ModuleNode,
+    ToolNode,
+    approval_state_keys,
+    engine_reserved,
+)
 from .template import lookup, references, render
 
 APPROVAL_DECISIONS = ("approved", "rejected")
@@ -125,8 +138,10 @@ class _JournalingBackend(Backend):
         resp = self._inner.complete(req)
         cursor = self._engine._cursor
         if cursor is not None:
-            self._engine.store.append_record("cost_journal", {"run_id": cursor[0], "step": cursor[1],
-                                                              "cost": resp.cost.model_dump()})
+            entry: dict[str, Any] = {"run_id": cursor[0], "step": cursor[1], "cost": resp.cost.model_dump()}
+            if len(cursor) == 4:  # inside a fan-out branch: (run, step, branch id, execution nonce)
+                entry.update(branch=cursor[2], nonce=cursor[3])
+            self._engine.store.append_record("cost_journal", entry)
         return resp
 
     def __getattr__(self, item: str) -> Any:  # e.g. MockBackend.requests in tests
@@ -202,12 +217,23 @@ class Engine:
         allowed = allow_same_family if allow_same_family is not None else (
             os.environ.get("CHH_ALLOW_SAME_FAMILY") == "1")
         self.model_policy = model_policy(backends, allow_same_family=allowed)
+        # declared reducers only (also checked by spec validation; repeated here because a spec can be built with
+        # model_construct, which skips validation)
+        from .reducers import get_reducer
+        for node in spec.nodes.values():
+            if isinstance(node, MapNode):
+                get_reducer(node.reducer)
         self.spec = spec
+        self._budget_owned = budget is None
+        # fan-out bookkeeping: a resume of an infra-failed map step hands it the instance and the nonces already
+        # charged (from that step's checkpoint); `_map_pending` is what the current map step adds to its checkpoint
+        self._map_resume: dict[str, dict[str, Any]] = {}
+        self._map_pending: dict[str, Any] | None = None
         self.retry = retry or RetryPolicy()
         self._sleep = sleep
         # every model call is journalled the moment it returns (write-ahead), so the spend of a step that is
         # killed mid-flight can be recovered by resume instead of being lost (M0 review)
-        self._cursor: tuple[str, int] | None = None
+        self._cursor: tuple[Any, ...] | None = None
         self.backends: dict[str, Backend] = {role: _JournalingBackend(b, self) for role, b in backends.items()}
         self.store = store
         self.sandbox = sandbox
@@ -236,31 +262,55 @@ class Engine:
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None)
         self.store.add_run(run)
         self._ws_ref = None
+        self._map_resume = {}
         self._started(run.id)
         return self._loop(run.id, state, self.spec.entry, start_index=0)
 
-    def fork(self, run_id: str, step_index: int, task_id: str | None = None) -> RunResult:
-        """Start a new run from the checkpoint written after `step_index` of `run_id`.
+    def fork(self, run_id: str, step_index: int, state_patch: dict[str, Any] | None = None,
+             task_id: str | None = None) -> RunResult:
+        """`fork(step, state_patch)` (GOAL §5 L0): start a new run from the checkpoint written after `step_index` of
+        `run_id`, with `state_patch` (top-level key -> JSON value) applied to the checkpoint state.
 
-        The new run's budget starts at the parent's cumulative spend up to that step: forking can
-        never be used to reset a budget (GOAL L1)."""
+        Refused (ForkRefused, before anything is written): a patch key that is private or engine state (`_*`),
+        an approval outcome, run inputs, the model policy, or a reserved key (evolve/edits.RESERVED_OUTPUT_KEYS:
+        claims, certificates, audit results, task setup ...); a dotted key; a non-JSON value; a value that carries a
+        private value of the checkpoint state. Every fork is ledgered (kind `fork`; an append-only store record of
+        that kind until the Kernel allows the ledger kind).
+
+        Budgets carry over without double counting: an engine-owned (per-run) budget starts at the parent's
+        cumulative spend up to that step, so forking can never reset it (GOAL L1); a caller-supplied (e.g. campaign)
+        budget is raised per unit to at least that spend and never has it added a second time."""
         steps = self.store.trace(run_id)
         step = next((s for s in steps if s.index == step_index), None)
         if step is None or step.checkpoint_ref is None:
             raise KeyError(f"no checkpoint at step {step_index} of {run_id}")
         cp = self.store.blobs.get_json(step.checkpoint_ref)
+        patch = dict(state_patch or {})
+        patch_sha = _check_fork_patch(patch, cp["state"])
         if cp.get("workspace") and self.sandbox is not None:
             restore_snapshot(cp["workspace"], self.sandbox.workspace, self.store.blobs)
         self._ws_ref = cp.get("workspace")
-        self.budget.spent = _checkpoint_spent(cp, self.store, run_id, step_index)
+        self._map_resume = {}  # a fork re-runs a pending fan-out in full under its own run id
+        carried = _checkpoint_spent(cp, self.store, run_id, step_index)
+        self.budget.spent = carried if self._budget_owned else _unit_max(self.budget.spent, carried)
         parent = self.store.get_run(run_id)
         state = dict(cp["state"])
-        state["_forked_from"] = {"run_id": run_id, "step": step_index}
+        state.update(copy.deepcopy(patch))
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash,
                   task_id=task_id or parent.task_id, seed=parent.seed, inputs_ref=parent.inputs_ref,
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None,
                   forked_from=(run_id, step_index))
         self.store.add_run(run)
+        body = {"parent_run_id": run_id, "step": step_index, "child_run_id": run.id, "patch_keys": sorted(patch),
+                "patch_sha256": patch_sha, "carried_spent": carried.model_dump()}
+        from ..kernel.ledger import KINDS
+        if "fork" in KINDS:
+            seq: int | None = Ledger(self.store).append("fork", body).seq
+        else:  # until the Kernel allows ledger kind `fork` (requested from kstats): append-only, not hash-chained
+            self.store.append_record("fork", body)
+            seq = None
+        state["_forked_from"] = {"run_id": run_id, "step": step_index, "patch_keys": sorted(patch),
+                                 "patch_sha256": patch_sha, "ledger_seq": seq}
         if cp["next"] == END:
             self.store.set_run_status(run.id, RunStatus.COMPLETED, "forked at terminal checkpoint")
             return RunResult(run.id, RunStatus.COMPLETED, state)
@@ -305,9 +355,14 @@ class Engine:
             state, next_node, start = dict(cp["state"]), cp["next"], last.index + 1
             spent = _checkpoint_spent(cp, self.store, run_id, last.index)
             ws_ref = cp.get("workspace")
+            # an infra-failed map step left its fan-out instance and the branch spend it already charged
+            pending = cp.get("map_instance") and last.node_id == next_node
+            self._map_resume = ({next_node: {"instance": cp["map_instance"],
+                                             "charged": list(cp.get("map_charged", []))}} if pending else {})
         else:  # died before the first step finished
             if run.inputs_ref is None:
                 raise ValueError(f"run {run_id} predates resumable runs (no stored inputs)")
+            self._map_resume = {}
             state, next_node, start, spent, ws_ref = (self.store.blobs.get_json(run.inputs_ref), self.spec.entry,
                                                       0, Cost(), None)
         if self.sandbox is not None and ws_ref:
@@ -329,6 +384,8 @@ class Engine:
         """If the process died inside step `index`, its model calls are in the cost journal but the step
         has no trace row. Record that spend as an explicit 'interrupted' row (same checkpoint, so the node
         is retried next) and charge it: resume never double-charges and never loses recorded spend."""
+        if isinstance(self.spec.nodes[node_id], MapNode):
+            return index  # a fan-out step recovers its own journalled spend, per branch (see _map)
         entries = [e for e in self.store.records_where("cost_journal", "run_id", run_id) if e.get("step") == index]
         if not entries:
             return index
@@ -410,7 +467,11 @@ class Engine:
                 rows = self.store.ledger_rows("data_access")
                 seq_before = rows[-1][0] if rows else 0
                 self._run_id = run_id
-                out, cost, prov, error, infra = self._attempt(node, state, run_id)
+                self._map_pending = None
+                if isinstance(node, MapNode):
+                    out, cost, prov, error, infra = self._map(node_id, node, state, run_id, index)
+                else:
+                    out, cost, prov, error, infra = self._attempt(node, state, run_id)
                 self._cursor = None
                 if infra is None:
                     state["_last_error"] = error
@@ -455,8 +516,11 @@ class Engine:
                 self._ws_ref = workspace_ref
             # next=None marks a failed terminal (distinct from END), so resume/fork never mistake a
             # failure for completion; spent = cumulative cost after this step (persisted budget)
-            cp_ref = self.store.blobs.put_json({"state": state, "next": next_node, "workspace": workspace_ref,
-                                                "spent": (self.budget.spent + cost).model_dump()})
+            cp = {"state": state, "next": next_node, "workspace": workspace_ref,
+                  "spent": (self.budget.spent + cost).model_dump()}
+            if infra is not None and self._map_pending is not None:  # a resume continues this fan-out instance
+                cp.update(self._map_pending)
+            cp_ref = self.store.blobs.put_json(cp)
             # the trace is agent-visible (the harness proposer reads it): private values never enter it
             trace_out, trace_err = _scrub_step(out, error, _private_values(state))
             self.store.add_step(TraceStep(
@@ -513,6 +577,188 @@ class Engine:
 
     def _approval_decision(self, run_id: str, node_id: str, item_hash: str) -> dict[str, Any] | None:
         return approval_decision(self.store, run_id, node_id, item_hash)
+
+    def _map(self, node_id: str, node: MapNode, state: dict[str, Any], run_id: str, index: int):
+        """Fan-out step (GOAL §5 L0). Returns what `_attempt` returns: (output, cost, provenance, error, infra).
+
+        Branch k of a fan-out instance has the deterministic id sha256(instance, node, k, item hash); the instance is
+        "<run_id>:<step index>" of the step that started it (a resume after a kill re-runs the same index; a resume
+        after an infra failure takes the instance from that step's checkpoint). Each finished branch is persisted as
+        a `map_branch` record (output blob, cost, nonce, workspace snapshot). A re-execution of the same instance
+        reuses the contiguous prefix of finished branches and runs only the rest.
+
+        Charging, exactly once: every model call inside a branch is journalled with the branch id and a nonce unique
+        to that execution of the branch. The step's cost is the cost of every branch execution not yet charged
+        (reused branches from a killed attempt included: a kill charged nothing) plus the journalled calls of
+        branch executions that died unfinished (spent, so charged, once). The nonces charged so far go into the
+        checkpoint of an infra-failed map step, so its resume never charges them again."""
+        from .reducers import get_reducer
+        body_id = node.body
+        body = self.spec.nodes[body_id]
+        res = self._map_resume.pop(node_id, None)
+        instance = res["instance"] if res else f"{run_id}:{index}"
+        charged: set[str] = set(res["charged"]) if res else set()
+        self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
+        try:
+            items = lookup(state, node.items_key)
+        except KeyError:
+            return {}, Cost(), None, f"MapError: items '{node.items_key}' not in state", None
+        if not isinstance(items, list):
+            return {}, Cost(), None, f"MapError: items '{node.items_key}' is {type(items).__name__}, not a list", None
+        if len(items) > node.max_items:
+            return ({}, Cost(), None, f"MapError: {len(items)} items exceed max_items={node.max_items} (never "
+                    "truncated)", None)
+        try:
+            hashes = [approval_item_hash(it) for it in items]
+        except (TypeError, ValueError) as e:
+            return {}, Cost(), None, f"MapError: items are not JSON: {e}", None
+        ids = [_branch_id(instance, node_id, k, h) for k, h in enumerate(hashes)]
+        records = self.store.records_where("map_branch", "instance", instance)
+        done = {r["branch_id"]: r for r in records if r.get("node_id") == node_id and r.get("error") is None}
+        known_nonces = {r["nonce"] for r in records}
+
+        items_root = node.items_key.split(".")[0]
+        items_taint = set(self.taint.get(items_root, set()))
+        prompt_taint = set(items_taint)
+        acc = Cost()
+        values: list[Any] = []
+        branches: list[dict[str, Any]] = []
+        replayed = False
+        prov_out = None
+        error: str | None = None
+        infra = None
+        reused = 0
+        # 1. reuse the finished prefix (persisted by an earlier execution of this instance)
+        for k, bid in enumerate(ids):
+            r = done.get(bid)
+            if r is None:
+                break
+            blob = self.store.blobs.get_json(r["output_ref"])
+            values.append(blob["value"])
+            c = Cost.model_validate(r["cost"])
+            if r["nonce"] not in charged:
+                acc = acc + c
+                charged.add(r["nonce"])
+            replayed = replayed or bool(r.get("replayed"))
+            prompt_taint |= set(r.get("taint", []))
+            branches.append({"index": k, "branch_id": bid, "item_hash": hashes[k], "reused": True,
+                             "output_ref": r["output_ref"], "cost": c.model_dump(), "out": blob["trace"]})
+            if r.get("workspace") and self.sandbox is not None:
+                restore_snapshot(r["workspace"], self.sandbox.workspace, self.store.blobs)
+                self._ws_ref = r["workspace"]
+            reused += 1
+        # 2. spend of earlier executions of this instance that is not reused and was never charged: persisted
+        # branches past the reused prefix (e.g. a policy-failed branch whose step row the kill prevented), then the
+        # journalled model calls of branch executions that died unfinished
+        lost = Cost()
+        lost_calls = 0
+        for r in records:
+            if r.get("node_id") == node_id and r["nonce"] not in charged:
+                lost = lost + Cost.model_validate(r["cost"])
+                charged.add(r["nonce"])
+        id_set = set(ids)
+        for j in self.store.records_where("cost_journal", "run_id", run_id):
+            n = j.get("nonce")
+            if j.get("branch") in id_set and n is not None and n not in known_nonces and n not in charged:
+                lost = lost + Cost.model_validate(j["cost"])
+                lost_calls += 1
+                charged.add(n)
+        acc = acc + lost
+        # 3. run the remaining branches in item order
+        saved_taint = self.taint
+        for k in range(reused, len(items)):
+            over = self._would_exceed(acc)
+            if over is not None:
+                error = f"BudgetExceeded: during fan-out before branch {k}: {over}"
+                break
+            bid, nonce = ids[k], uuid.uuid4().hex
+            bstate = copy.deepcopy(state)
+            bstate[node.item_key] = copy.deepcopy(items[k])
+            bstate["_map"] = {"node": node_id, "index": k, "branch_id": bid, "n": len(items)}
+            bstate["_last_error"] = None
+            self.taint = {kk: set(v) for kk, v in saved_taint.items()}
+            if items_taint:
+                self.taint[node.item_key] = set(items_taint)
+            else:
+                self.taint.pop(node.item_key, None)
+            self._prompt_taint.pop(id(body), None)
+            self._cursor = (run_id, index, bid, nonce)
+            rows = self.store.ledger_rows("data_access")
+            seq_b = rows[-1][0] if rows else 0
+            try:
+                out, cost, prov, berr, binfra = self._attempt(body, bstate, run_id)
+            finally:
+                self._cursor = (run_id, index)
+                self.taint = saved_taint
+            from ..kerneld.releases import private_reads
+            btaint = set(self._prompt_taint.pop(id(body), set())) | set(private_reads(self.store, after_seq=seq_b))
+            prompt_taint |= btaint
+            acc = acc + cost
+            charged.add(nonce)
+            value: Any = None
+            if berr is None:
+                if getattr(body, "output_key", None) is not None:
+                    value = out.get("value")
+                else:
+                    value = {kk: v for kk, v in out.items() if kk not in ("_module_llm_calls", "_infra_retries")}
+                    bad = sorted(kk for kk in value if engine_reserved(kk))
+                    if bad:
+                        berr = f"MapError: branch {k} wrote reserved state key(s) {bad}"
+            b_replayed = bool(prov is not None and prov.replayed) or any(
+                bool((c.get("provenance") or {}).get("replayed")) for c in out.get("_module_llm_calls", []))
+            replayed = replayed or b_replayed
+            if prov is not None and prov_out is None:
+                prov_out = prov
+            ws_ref = self._ws_ref
+            if self.sandbox is not None and binfra is None and not isinstance(body, LLMNode) and not (
+                    isinstance(body, ToolNode) and not body.snapshot_after):
+                ws_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
+                self._ws_ref = ws_ref
+            summary: dict[str, Any] = {"index": k, "branch_id": bid, "item_hash": hashes[k], "reused": False,
+                                       "cost": cost.model_dump(), "out": out}
+            if prov is not None:
+                summary["provenance"] = prov.model_dump(mode="json")
+            if binfra is None:
+                ref = self.store.blobs.put_json({"value": value, "trace": out})
+                # reduce what was persisted (canonical JSON: sorted keys), so a fresh branch and the same branch
+                # reused after a crash give byte-identical reducer input
+                value = self.store.blobs.get_json(ref)["value"]
+                summary["output_ref"] = ref
+                self.store.append_record("map_branch", {
+                    "instance": instance, "run_id": run_id, "step": index, "node_id": node_id, "index": k,
+                    "branch_id": bid, "item_hash": hashes[k], "nonce": nonce, "output_ref": ref,
+                    "cost": cost.model_dump(), "error": berr, "workspace": ws_ref, "replayed": b_replayed,
+                    "taint": sorted(btaint)})
+            if berr is not None:
+                summary["error"] = berr
+            branches.append(summary)
+            if berr is not None:
+                error, infra = (f"branch {k} ({bid[:12]}): {berr}", binfra)
+                break
+            values.append(value)
+        self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
+        self._prompt_taint[id(node)] = prompt_taint
+        out_doc: dict[str, Any] = {"reducer": node.reducer, "n_items": len(items), "instance": instance,
+                                   "branches": branches, "reused_branches": reused,
+                                   "recovered_lost_calls": lost_calls}
+        if replayed:
+            out_doc["replayed"] = True  # K0 refuses evidence from replayed output (invariant 21)
+            if prov_out is not None:
+                prov_out = prov_out.model_copy(update={"replayed": True})
+        if error is None:
+            try:
+                out_doc["value"] = get_reducer(node.reducer)(values)
+            except (TypeError, ValueError) as e:
+                error = f"ReducerError: {node.reducer}: {e}"
+        return out_doc, acc, prov_out, error, infra
+
+    def _would_exceed(self, extra: Cost) -> str | None:
+        """Would spend `extra` on top of the budget's current spend already be at a cap? (reason, or None)"""
+        try:
+            Budget(limits=dict(self.budget.limits), spent=self.budget.spent + extra).check()
+        except BudgetExceeded as e:
+            return str(e)
+        return None
 
     def _attempt(self, node, state: dict[str, Any], run_id: str):
         """Execute a node with the transient-infra retry policy.
@@ -691,6 +937,57 @@ def _scrub_step(out: dict[str, Any], error: str | None, secrets: list[str]) -> t
     return clean_out, clean_err
 
 
+class ForkRefused(ValueError):
+    """A fork's state patch would touch reserved, private or engine state (nothing was written)."""
+
+
+def _branch_id(instance: str, node_id: str, k: int, item_hash: str) -> str:
+    """Deterministic fan-out branch id: same instance, node, position and item -> same id."""
+    doc = json.dumps({"instance": instance, "node": node_id, "index": k, "item": item_hash}, sort_keys=True,
+                     separators=(",", ":"))
+    return hashlib.sha256(doc.encode("utf-8")).hexdigest()[:32]
+
+
+def _check_fork_patch(patch: dict[str, Any], state: dict[str, Any]) -> str:
+    """Refuse a fork patch that touches reserved or private state; return the patch's sha256 ("" if empty)."""
+    from ..evolve.edits import RESERVED_OUTPUT_KEYS
+    for key in patch:
+        if not isinstance(key, str) or not key or "." in key:
+            raise ForkRefused(f"fork patch key {key!r}: only plain top-level keys may be patched")
+        if engine_reserved(key):
+            raise ForkRefused(f"fork patch key '{key}' is private, engine or approval state")
+        if key in RESERVED_OUTPUT_KEYS:
+            raise ForkRefused(f"fork patch key '{key}' is reserved (only trusted code writes it)")
+    if not patch:
+        return ""
+    try:
+        canon = json.dumps(patch, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        raise ForkRefused(f"fork patch is not JSON: {e}") from e
+    texts = [canon]
+    stack: list[Any] = [patch]
+    while stack:  # string leaves and keys too: JSON escaping must not hide a private value
+        cur = stack.pop()
+        if isinstance(cur, str):
+            texts.append(cur)
+        elif isinstance(cur, dict):
+            texts.extend(str(k) for k in cur)
+            stack.extend(cur.values())
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    if any(p in t for p in _private_values(state) for t in texts):
+        raise ForkRefused("fork patch carries a private value of the checkpoint state")
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def _unit_max(a: Cost, b: Cost) -> Cost:
+    """Per-unit maximum of two cumulative spends."""
+    return Cost(prompt_tokens=max(a.prompt_tokens, b.prompt_tokens),
+                completion_tokens=max(a.completion_tokens, b.completion_tokens), usd=max(a.usd, b.usd),
+                gpu_hours=max(a.gpu_hours, b.gpu_hours), quota_units=max(a.quota_units, b.quota_units),
+                wall_s=max(a.wall_s, b.wall_s), estimated=a.estimated or b.estimated)
+
+
 def _walled(cost: Cost, wall_s: float) -> Cost:
     """Wall-clock budget unit: a step costs its measured elapsed time (replaces backend-reported wall)."""
     return cost.model_copy(update={"wall_s": wall_s})
@@ -736,4 +1033,4 @@ def _pid_alive(pid: int) -> bool:
 
 def _kind(node) -> StepKind:
     return {"llm": StepKind.LLM, "tool": StepKind.TOOL, "module": StepKind.MODULE,
-            "approval": StepKind.APPROVAL}[node.kind]
+            "approval": StepKind.APPROVAL, "map": StepKind.CONTROL}[node.kind]
