@@ -4,6 +4,7 @@ Done-when (GOAL L1): a Docker outage mid-campaign changes no accept/reject decis
 """
 
 import json
+import math
 import sys
 
 import pytest
@@ -13,7 +14,7 @@ from custom_harness.errors import InfraError, infra_cause, is_transient
 from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate, race
 from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import BackendError, MockBackend
-from custom_harness.kernel import Kernel
+from custom_harness.kernel import Kernel, KernelConfig
 from custom_harness.records import RunStatus
 from custom_harness.runtime import END, Condition, Edge, Engine, HarnessSpec, LLMNode, ModuleNode, register
 from custom_harness.runtime.engine import RetryPolicy
@@ -125,10 +126,24 @@ def test_race_never_scores_infra_failures_as_zero():
     assert rr.stats["good"]["excluded"] == 3
 
 
-class FlakyDockerLike(LocalSandbox):
-    """Simulates short Docker outages: in every window of 11 exec calls, calls 5 and 6 fail (daemon down
-    for two consecutive calls) with a transient InfraError."""
+def _k3_replays() -> int:
+    """Clean consecutive replays K3 needs under the Kernel's default reliability presets (checks.reliability)."""
+    cfg = KernelConfig()
+    return math.ceil(math.log(cfg.k3_beta) / math.log(1 - cfg.k3_eps_max) - 1e-12)
 
+
+class FlakyDockerLike(LocalSandbox):
+    """Simulates short Docker outages: in every window of PERIOD exec calls, calls 5 and 6 fail (daemon down
+    for two consecutive calls) with a transient InfraError.
+
+    PERIOD must leave a clean stretch longer than the longest run of consecutive exec calls one node needs: K3's
+    zero-failure demonstration (GOAL §16.4) re-executes `_k3_replays()` times in a row inside one certify. With a
+    period of 11 (the K3 count under the default presets) every 11 consecutive calls contained an outage, so no
+    certify could ever finish: that is a permanent outage for certify, not a short one, and the gate correctly failed
+    closed on the candidate's excluded units (found 2026-10-08). After an outage the engine's third attempt starts on
+    call 7 of the window, so PERIOD >= 7 + replays - 5 is the minimum; twice the K3 count leaves margin."""
+
+    PERIOD = 2 * _k3_replays() + 2
     count = 0
 
     def spawn(self, workspace):
@@ -138,7 +153,7 @@ class FlakyDockerLike(LocalSandbox):
 
     def exec(self, command, timeout_s=600, env=None):
         FlakyDockerLike.count += 1
-        if FlakyDockerLike.count % 11 in (5, 6):
+        if FlakyDockerLike.count % FlakyDockerLike.PERIOD in (5, 6):
             raise InfraError("Cannot connect to the Docker daemon", transient=True)
         return super().exec(command, timeout_s, env)
 
@@ -172,9 +187,23 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
             raise DockerUnavailable("Docker is not running")
         return FlakyDockerLike(tmp_path / "sb2" / f"{key}-{created['n']}", i_understand_no_isolation=True)
 
+    # count certifications aborted by an outage (K3 re-execution hit the daemon being down): the outage must reach
+    # the Kernel's replays too, and the retried certify must still reach the clean campaign's decision
+    aborted = {"n": 0}
+    real_certify = Kernel.certify
+
+    def certify(self, *a, **kw):
+        try:
+            return real_certify(self, *a, **kw)
+        except InfraError:
+            aborted["n"] += 1
+            raise
+
+    monkeypatch.setattr(Kernel, "certify", certify)
     FlakyDockerLike.count = 0
     flaky, ev = campaign("flaky", outage_factory)
     assert ev.infra_failures > 0 and FlakyDockerLike.count >= 11  # both kinds of outage really happened
+    assert aborted["n"] > 0  # ... including during the Kernel's K3 re-executions
     assert flaky.accepted == clean.accepted and flaky.decision == clean.decision
     assert flaky.new_parent.spec_hash() == clean.new_parent.spec_hash()
 
