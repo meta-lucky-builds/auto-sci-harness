@@ -100,7 +100,7 @@ def test_unlabelled_copies_of_the_public_features_are_not_hits(suite, tmp_path):
 
 
 def test_a_wrong_label_next_to_the_features_is_not_a_hit(suite, tmp_path):
-    leak = tmp_path / "agent" / "guess.csv"
+    leak = tmp_path / "agent" / "guesses" / "guess.csv"
     leak.parent.mkdir(parents=True)
     leak.write_text("\n".join(",".join([*x, "7"]) for x in X) + "\n", encoding="utf-8")
     per = _scan(suite, tmp_path / "agent")["per_task"]
