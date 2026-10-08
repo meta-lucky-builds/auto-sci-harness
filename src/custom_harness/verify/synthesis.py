@@ -7,14 +7,19 @@ human-owned one:
 1. Language. The model writes a declarative spec in a closed vocabulary (`OPS`), interpreted here by trusted code
    with exact arithmetic. It never writes executable code, so nothing model-written runs in this process (arbitrary
    code verifiers would need the sandbox: not built, stated in docs/l3_verifiers.md).
-2. Validation (`validate`). Each problem has ONE fixed, human-owned `FaultSuite` in `SUITES` (code, owner named,
+2. Validation (`validate`). Each problem has ONE fixed `FaultSuite` in `SUITES` (code, author named,
    content-hashed): golden cases the verifier must accept and planted faults it must reject. The caller cannot pass
-   a suite: it is looked up by problem. Each half has a PUBLIC part (shown to the author model) and a SEALED part
+   a suite: it is looked up by problem. AUTHORSHIP: every suite in code is AGENT-AUTHORED (`AGENT_AUTHORED`). The
+   two example suites were written by an AI agent, earlier labelled with the owner's name by mistake; no code field
+   can declare a suite human-written. A suite counts as human-approved only through a ledgered HUMAN suite review
+   (`record_suite_review`, ledger kind `verifier_review`, subject "suite", bound to the suite hash). Each half has a PUBLIC part (shown to the author model) and a SEALED part
    (never shown), so a verifier that memorises the visible cases fails on the sealed ones. Passing = every golden
    accepted AND every planted fault rejected, with at least the configured number of each in each half.
-3. Tier (`tier`). Validated and not reviewed: capped at T2 (`SYNTH_UNREVIEWED_TIER_CAP`). A human review recorded in
-   the Kernel ledger (kind `verifier_review`) for exactly this verifier hash and suite hash lifts it to its natural
-   T1; a human rejection makes it unusable. Any content change (a new hash) voids the review.
+3. Tier (`tier`). Validated and not reviewed: capped at T2 (`SYNTH_UNREVIEWED_TIER_CAP`). It reaches its natural T1
+   only with BOTH a human review recorded in the Kernel ledger (kind `verifier_review`) for exactly this verifier
+   hash and suite hash, AND a ledgered human approval of that suite (hash): a verifier validated against an
+   agent-authored suite stays capped at T2 whatever review it has. A human rejection of the verifier or of the suite
+   makes it unusable. Any content change (a new hash) voids the review.
 4. Independence (`verdict`). A synthesized verifier never certifies a claim of its own author (same author id, or
    same model family) alone: an independent second verifier (different author AND family from both the claim's
    author and the conflicted verifier; a human-owned check counts) must also accept it. The verdict tier is the
@@ -68,6 +73,10 @@ KINDS_OPS: dict[str, frozenset[str]] = {
 _RATIONAL_KEYS = frozenset({"lo", "hi", "tolerance"})
 
 
+AGENT_AUTHORED = "AGENT-AUTHORED"  # every suite in code; human approval exists only as a ledgered suite review
+SUITE_SUBJECT = "suite"  # `verifier_review` body "subject" of a suite review (verifier reviews carry no subject)
+
+
 class SynthesisError(ValueError):
     pass
 
@@ -83,17 +92,24 @@ class Case:
 class FaultSuite:
     problem: str
     description: str  # shown to the author model
-    owner: str  # the human who owns the suite
+    author: str  # who wrote the suite (an agent for every suite in code: see `authorship`)
     public_golden: tuple[Case, ...]  # shown to the author model
     sealed_golden: tuple[Case, ...]  # never shown
     public_faults: tuple[Case, ...]  # never shown either (named "public" only as the half a reviewer may publish)
     sealed_faults: tuple[Case, ...]
 
     def hash(self) -> str:
-        doc = {k: getattr(self, k) for k in ("problem", "description", "owner")}
+        doc = {k: getattr(self, k) for k in ("problem", "description", "author")}
+        doc["authorship"] = self.authorship
         for half in ("public_golden", "sealed_golden", "public_faults", "sealed_faults"):
             doc[half] = [[c.id, c.subject] for c in getattr(self, half)]
         return hashlib.sha256(canonical_json(doc)).hexdigest()
+
+    @property
+    def authorship(self) -> str:
+        """Always AGENT-AUTHORED: code cannot declare a suite human-written or human-approved. A human's approval is
+        a ledgered suite review (`record_suite_review`), looked up by `suite_status`."""
+        return AGENT_AUTHORED
 
     def author_view(self) -> str:
         return json.dumps({"problem": self.problem, "description": self.description,
@@ -122,9 +138,13 @@ def _c(cid: str, **subject: Any) -> Case:
     return Case(cid, subject)
 
 
+# Who wrote the two example suites below: an AI agent (workstream g-synth, 2026-10-07). They were first labelled
+# "owner (custom-harness)", which was false. They are agent-authored and nobody has reviewed them.
+_AGENT_SUITE_AUTHOR = "agent:g-synth (AI-written; not written, reviewed or approved by the owner)"
+
 SUITES: dict[str, FaultSuite] = {
     "sort": FaultSuite(
-        problem="sort", owner="owner (custom-harness)",
+        problem="sort", author=_AGENT_SUITE_AUTHOR,
         description='Subjects are JSON objects {"in": list of numbers, "out": list of numbers}. A correct subject '
                     'has "out" listing exactly the numbers of "in", in nondecreasing order.',
         public_golden=(_c("g-pub-1", **{"in": [3, 1, 2], "out": [1, 2, 3]}),
@@ -138,7 +158,7 @@ SUITES: dict[str, FaultSuite] = {
                        _c("extra-element", **{"in": [1, 2], "out": [1, 2, 2]}),
                        _c("reversed-order", **{"in": [1, 2, 3], "out": [3, 2, 1]}))),
     "decay": FaultSuite(
-        problem="decay", owner="owner (custom-harness)",
+        problem="decay", author=_AGENT_SUITE_AUTHOR,
         description='Subjects are JSON objects {"x0": [a, b], "traj": [[a, b], ...]}: "traj" is a trajectory of the '
                     'linear system x_{k+1} = A x_k with A = [[1/2, 0], [1/4, 1/2]], starting at traj[0] = x0, '
                     'computed in floating point (absolute error below 1e-6).',
@@ -167,6 +187,32 @@ class SynthesizedVerifier:
         return hashlib.sha256(canonical_json({"format": SPEC_FORMAT, "problem": self.problem, "kind": self.kind,
                                               "rules": list(self.rules), "author": self.author,
                                               "family": self.family})).hexdigest()
+
+
+def to_record(v: SynthesizedVerifier) -> dict[str, Any]:
+    """A stored form of a verifier: the spec text plus who wrote it. Never a tier or a validation result: those are
+    recomputed from the spec, the suite and the Kernel ledger at every use (`from_record` + `tier`)."""
+    spec = {"format": SPEC_FORMAT, "problem": v.problem, "kind": v.kind, "rules": list(v.rules)}
+    return {"spec": json.dumps(spec, sort_keys=True), "author": v.author, "family": v.family,
+            "verifier_hash": v.hash()}
+
+
+def from_record(doc: object) -> SynthesizedVerifier:
+    """Re-parse a stored verifier through the closed vocabulary; the stored hash must match the re-parsed one."""
+    if not isinstance(doc, dict) or set(doc) != {"spec", "author", "family", "verifier_hash"}:
+        raise SynthesisError("not a stored synthesized verifier")
+    if not all(isinstance(doc[k], str) for k in doc):
+        raise SynthesisError("stored verifier fields must be strings")
+    try:
+        problem = json.loads(doc["spec"]).get("problem")
+    except (ValueError, AttributeError):
+        raise SynthesisError("stored verifier spec is not a JSON object") from None
+    if not isinstance(problem, str):
+        raise SynthesisError("stored verifier spec names no problem")
+    v = parse_spec(doc["spec"], problem, author=doc["author"], family=doc["family"])
+    if v.hash() != doc["verifier_hash"]:
+        raise SynthesisError("stored verifier hash does not match its content")
+    return v
 
 
 def _const(v: object, what: str) -> Fraction:
@@ -221,9 +267,12 @@ def parse_spec(text: str, problem: str, author: str, family: str) -> Synthesized
     return SynthesizedVerifier(problem=problem, kind=kind, rules=tuple(rules), author=author, family=family)
 
 
-def synthesize(backend: Backend, problem: str) -> SynthesizedVerifier:
+def synthesize(backend: Backend, problem: str,
+               complete: Callable[[ChatRequest], Any] | None = None) -> SynthesizedVerifier:
     """Ask `backend` (a scripted backend in tests; no live call is made here) to write a verifier for `problem`. The
-    model sees the problem description, the vocabulary and the PUBLIC golden cases only."""
+    model sees the problem description, the vocabulary and the PUBLIC golden cases only. `complete` (optional) is
+    the call path to use instead of `backend.complete` (the research module passes `ModuleContext.llm`, so the call
+    is budget-checked and traced); the author family is still read from `backend`."""
     view = SUITES[problem].author_view() if problem in SUITES else json.dumps({"problem": problem})
     vocab = json.dumps({"format": SPEC_FORMAT, "kinds": {k: sorted(v) for k, v in KINDS_OPS.items()},
                         "op_keys": {k: sorted(v) for k, v in OPS.items()}}, sort_keys=True)
@@ -232,7 +281,7 @@ def synthesize(backend: Backend, problem: str) -> SynthesizedVerifier:
         Message(role="system", content="Write a verifier for the problem as one JSON object in this vocabulary "
                                        f"(numbers as exact rational strings): {vocab}"),
         Message(role="user", content=view)])
-    resp = backend.complete(req)
+    resp = (complete or backend.complete)(req)
     family = model_family(backend)
     return parse_spec(resp.text, problem, author=f"{family}/{resp.provenance.model}", family=family)
 
@@ -361,10 +410,7 @@ def validate(verifier: SynthesizedVerifier) -> Validation:
 def record_review(ledger: Ledger, verifier: SynthesizedVerifier, *, reviewer: str, approve: bool,
                   note: str = "") -> Entry:
     """Ledger a HUMAN review of exactly this verifier (hash) against exactly this suite (hash)."""
-    if not reviewer.strip():
-        raise SynthesisError("a review must name the human reviewer")
-    if reviewer.strip() in (verifier.author, verifier.family):
-        raise SynthesisError("a verifier's author cannot review it")
+    name = _check_reviewer(reviewer, (verifier.author, verifier.family))
     val = validate(verifier)
     if not val.passed:
         raise SynthesisError(f"verifier {verifier.hash()[:12]} has not passed its fault-injection validation: "
@@ -374,19 +420,67 @@ def record_review(ledger: Ledger, verifier: SynthesizedVerifier, *, reviewer: st
         raise SynthesisError(f"the Kernel ledger has no kind {REVIEW_KIND!r} yet (requested from kstats)")
     return ledger.append(REVIEW_KIND, {"verifier_hash": val.verifier_hash, "suite_hash": val.suite_hash,
                                        "problem": verifier.problem, "author": verifier.author,
-                                       "reviewer": reviewer.strip(), "approve": bool(approve), "note": note})
+                                       "reviewer": name, "approve": bool(approve), "note": note})
+
+
+def _check_reviewer(reviewer: str, authors: Sequence[str]) -> str:
+    name = reviewer.strip()
+    if not name:
+        raise SynthesisError("a review must name the human reviewer")
+    if name in authors or name.casefold().startswith("agent"):
+        # accountability-level, like adapter approvals: the CLI is human-operated; an agent identity is refused
+        raise SynthesisError("an author (or any agent identity) cannot review it")
+    return name
+
+
+def record_suite_review(ledger: Ledger, problem: str, *, reviewer: str, approve: bool, note: str = "") -> Entry:
+    """Ledger a HUMAN review of exactly this fault suite (hash). Only this makes an (agent-authored) suite count as
+    human-approved; a rejection makes every verifier validated against it unusable."""
+    suite = SUITES.get(problem)
+    if suite is None:
+        raise SynthesisError(f"no fault suite for {problem!r}")
+    name = _check_reviewer(reviewer, (suite.author,))
+    if REVIEW_KIND not in _ledger.KINDS:
+        raise SynthesisError(f"the Kernel ledger has no kind {REVIEW_KIND!r}")
+    return ledger.append(REVIEW_KIND, {"subject": SUITE_SUBJECT, "suite_hash": suite.hash(), "problem": problem,
+                                       "author": suite.author, "authorship": suite.authorship, "reviewer": name,
+                                       "approve": bool(approve), "note": note})
+
+
+def _reviews(ledger: Ledger | None) -> list[dict[str, Any]]:
+    return [e.body for e in ledger.entries(REVIEW_KIND)] if ledger is not None else []
+
+
+def suite_status(problem: str, ledger: Ledger | None) -> str:
+    """"human-rejected" | "human-approved" | AGENT_AUTHORED (no ledgered human approval of this exact suite hash).
+    A rejection wins over any approval."""
+    suite = SUITES.get(problem)
+    if suite is None:
+        return "unknown"
+    h = suite.hash()
+    mine = [b for b in _reviews(ledger) if b.get("subject") == SUITE_SUBJECT and b.get("suite_hash") == h
+            and "verifier_hash" not in b]
+    if any(b.get("approve") is not True for b in mine):
+        return "human-rejected"
+    return "human-approved" if mine else suite.authorship
 
 
 def tier(verifier: SynthesizedVerifier, ledger: Ledger | None) -> Tier | None:
-    """None = unusable (failed validation, or a human rejected it). Else T2 (cap) until a ledgered approval."""
+    """None = unusable (failed validation, or a human rejected the verifier or its suite). Else T2 (cap), lifted to
+    T1 only by a ledgered human approval of this verifier AND a ledgered human approval of its suite: an
+    agent-authored suite cannot lift the cap, whatever review the verifier has."""
     val = validate(verifier)
     if not val.passed:
         return None
-    reviews = [e.body for e in ledger.entries(REVIEW_KIND)] if ledger is not None else []
-    mine = [b for b in reviews if b.get("verifier_hash") == val.verifier_hash and b.get("suite_hash") == val.suite_hash]
+    suite = suite_status(verifier.problem, ledger)
+    if suite == "human-rejected":
+        return None
+    mine = [b for b in _reviews(ledger) if "subject" not in b and b.get("verifier_hash") == val.verifier_hash
+            and b.get("suite_hash") == val.suite_hash]
     if any(b.get("approve") is not True for b in mine):
         return None
-    return C.SYNTH_REVIEWED_TIER if mine else max(C.SYNTH_REVIEWED_TIER, C.SYNTH_UNREVIEWED_TIER_CAP)
+    cap = max(C.SYNTH_REVIEWED_TIER, C.SYNTH_UNREVIEWED_TIER_CAP)
+    return C.SYNTH_REVIEWED_TIER if mine and suite == "human-approved" else cap
 
 
 # ------------------------------------------------------------------ verdicts and independence
