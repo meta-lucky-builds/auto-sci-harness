@@ -108,6 +108,36 @@ class RunOutcome:
 
 SandboxFactory = Callable[[str], Sandbox]
 
+# store record kind of a durable unit outcome (Evaluator(durable_key=...)): host-only, never exported
+DURABLE_KIND = "evolve_unit"
+
+
+def outcome_to_record(o: RunOutcome) -> dict[str, Any]:
+    return {"task_id": o.task_id, "run_id": o.run_id, "seed": o.seed, "score": o.score, "verified": o.verified,
+            "status": o.status, "cost": o.cost.model_dump(mode="json"),
+            "failure_signatures": list(o.failure_signatures), "cert_label": o.cert_label}
+
+
+def outcome_from_record(r: dict[str, Any]) -> RunOutcome:
+    score = r["score"]
+    if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))):
+        raise ValueError("malformed durable unit outcome (score)")  # fail closed: never guess a score
+    return RunOutcome(str(r["task_id"]), str(r["run_id"]), int(r["seed"]), None if score is None else float(score),
+                      bool(r["verified"]), str(r["status"]), Cost.model_validate(r["cost"]),
+                      [str(s) for s in r["failure_signatures"]], r.get("cert_label"))
+
+
+@dataclass
+class Attempt:
+    """One attempt (number `n`, 0 = first) at evaluating `unit` with `spec` (Evaluator.begin/finish). `since` = the
+    last pre-registration ledger seq before it started (R2-2 check_run)."""
+
+    key: tuple[str, str, int]
+    spec: HarnessSpec
+    unit: tuple[str, int]
+    n: int
+    since: int
+
 
 def _signature(text: str) -> str:
     """Normalise an error into a clusterable signature (drop numbers, paths, quotes)."""
@@ -201,25 +231,63 @@ def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
                 budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
                 sealed_access: object | None = None, releases: Releases | None = None) -> RunOutcome:
     """`releases`: where the score's verdict bits are released (default: the store's ledger, live mode). Evolve-
-    split scores reach the proposer, so their bits are emitted on every target the run read privately."""
+    split scores reach the proposer, so their bits are emitted on every target the run read privately.
+
+    = `finish_run(execute_run(...))`. The split exists for the per-completion race (control/evalrace.py): only
+    `execute_run` runs on a worker thread; `finish_run` (the release emission, a write to the shared Releases
+    object and the ledger) runs on the single writer thread."""
+    return finish_run(execute_run(spec, task, seed, backends=backends, store=store, sandbox_factory=sandbox_factory,
+                                  budget_limits=budget_limits, retry=retry, sealed_access=sealed_access),
+                      store=store, releases=releases)
+
+
+@dataclass
+class ExecutedRun:
+    """A finished harness run whose score is not computed yet (`finish_run`). `infra` is set instead of `result`
+    when the sandbox could not even be created. `targets` = datasets whose private files were read while it ran
+    (seq window; conservative: a concurrent run's reads over-taint, never under-taint)."""
+
+    spec_hash: str
+    task: SuiteTask
+    seed: int
+    result: Any = None  # runtime.engine.RunResult
+    infra: RunOutcome | None = None
+    targets: list[str] = field(default_factory=list)
+
+
+def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
+                store: EvidenceStore, sandbox_factory: SandboxFactory,
+                budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
+                sealed_access: object | None = None) -> ExecutedRun:
+    """Run the harness; touch no shared in-memory state (the store is internally locked)."""
     if task.split == "sealed" and sealed_access is not _SEALED_ACCESS:  # invariant 6: sealed only via finalize
         raise ValueError(f"task {task.task_id} is in the sealed split: only `chh finalize` (a human action) runs it")
+    h = spec.spec_hash()
     try:
-        sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
+        sandbox = sandbox_factory(f"{h[:10]}-{task.task_id}-{seed}")
     except InfraError as e:  # e.g. Docker daemon down before the run even started
-        return RunOutcome(task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
-                          [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"])
+        return ExecutedRun(h, task, seed, infra=RunOutcome(
+            task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
+            [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"]))
     eng = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
     rows = store.ledger_rows()
     before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
+    targets = private_reads(store, after_seq=before) if task.split == "evolve" else []
+    return ExecutedRun(h, task, seed, result=res, targets=targets)
+
+
+def finish_run(ex: ExecutedRun, *, store: EvidenceStore, releases: Releases | None = None) -> RunOutcome:
+    """The run's score: verdict bits (released on `ex.targets` for an evolve-split run) plus the dev term."""
+    if ex.infra is not None:
+        return ex.infra
+    res, task, seed = ex.result, ex.task, ex.seed
     bits = verdict_bits(res.state, res.status) if isinstance(res.state, dict) else verdict_bits({}, res.status)
     if task.split == "evolve":
         rel = releases if releases is not None else Releases.live(store)
-        bits = rel.emit(bits, targets=private_reads(store, after_seq=before), channel="evolution_score",
-                        alphabet="verdict_bit", note="evolve.score:verdict",
-                        key=f"{spec.spec_hash()}|{task.task_id}|{seed}")
+        bits = rel.emit(bits, targets=ex.targets, channel="evolution_score", alphabet="verdict_bit",
+                        note="evolve.score:verdict", key=f"{ex.spec_hash}|{task.task_id}|{seed}")
     score, verified = combine(res.status, bits, dev_term(res.state) if isinstance(res.state, dict) else 0.0)
     cert = res.state.get("certificate")
     label = cert.get("label") if isinstance(cert, dict) else None
