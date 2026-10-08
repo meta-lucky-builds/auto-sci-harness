@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..runtime.spec import HarnessSpec, LLMNode, ToolNode
+from ..runtime.spec import HarnessSpec, LLMNode, MapNode, ToolNode
 from ..runtime.template import references
 
 
@@ -374,6 +374,48 @@ def _check_information_flow(spec: HarnessSpec, new: HarnessSpec) -> None:
                        and any(p.split(".")[0] == key for t in _templates(n) for p in references(t))]
             if readers:
                 raise EditRejected(f"tool node '{nid}' output '{key}' is rendered into model prompt(s) of {readers}")
+    _check_map_flow(spec, new, tool_keys)
+
+
+def _check_map_flow(spec: HarnessSpec, new: HarnessSpec, tool_keys: set[str]) -> None:
+    """The same rules through a MapNode (R2 evolve gap for maps). A map renders each element of `items_key` into its
+    body's templates under `item_key`, so a body reference to the item is a reference to `items_key`; a map whose
+    body is a tool node carries tool output into the map's `output_key`, which is then tool output itself. Checked
+    for every map that an edit adds or changes, or whose body it changes (a human-written map is judged again when
+    an edit changes its body)."""
+    changed = set(_changed(spec, new))
+    maps = {nid: n for nid, n in new.nodes.items() if isinstance(n, MapNode)}
+    tool_bodied = {m.output_key for m in maps.values() if isinstance(new.nodes.get(m.body), ToolNode)}
+    for mid, m in maps.items():
+        if mid not in changed and m.body not in changed:
+            continue
+        body = new.nodes.get(m.body)
+        items_root = m.items_key.split(".")[0]
+        for path in (p for t in _templates(body) for p in references(t)):
+            if path.split(".")[0] != m.item_key:
+                continue
+            if items_root in UNRENDERABLE_KEYS or items_root.startswith("_"):
+                raise EditRejected(f"map '{mid}' would render '{m.items_key}' into body '{m.body}' as '{path}' "
+                                   "(unfiltered, private, host or engine state is never rendered by an evolved "
+                                   "template)")
+            if isinstance(body, LLMNode) and (items_root in tool_keys | tool_bodied
+                                              or items_root.startswith(TOOL_OUTPUT_PREFIX)):
+                raise EditRejected(f"map '{mid}' would render tool output '{m.items_key}' into the model prompt of "
+                                   f"body '{m.body}' (tool output only routes control flow)")
+        if isinstance(body, ToolNode):
+            if not m.output_key.startswith(TOOL_OUTPUT_PREFIX):
+                raise EditRejected(f"map '{mid}' has tool body '{m.body}', so it must write a '{TOOL_OUTPUT_PREFIX}*' "
+                                   f"key, not '{m.output_key}' (its output is tool output)")
+    judged = {m.output_key for mid, m in maps.items() if m.output_key in tool_bodied
+              and (mid in changed or m.body in changed)}
+    for nid, n in new.nodes.items():  # a tool-bodied map's output reaches no model prompt
+        if not isinstance(n, LLMNode):
+            continue
+        keys = tool_bodied if nid in changed else judged  # unchanged prompts are judged against changed maps only
+        hit = [p for t in _templates(n) for p in references(t) if p.split(".")[0] in keys]
+        if hit:
+            raise EditRejected(f"node '{nid}' would render tool output {hit} (the output of a map with a tool body) "
+                               "into a model prompt")
 
 
 def mechanisms(edit: Edit, spec: HarnessSpec) -> list[list[str]] | None:

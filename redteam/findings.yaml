@@ -438,3 +438,14 @@ findings:
     tests: ["tests/test_kernel_s16.py::test_two_replayers_never_share_a_replay_directory"]
     museum: redteam/museum/REPLAY-DIR.patch
     status: fixed
+  # ------------------------------------------------------------------ integrator, 2026-10-08
+  - id: R2-MAP
+    title: an evolved MapNode could render run inputs or the critic's raw output into its LLM body as the item, or
+      carry a tool body's output into a non-tool key (the R2-5 / tool-taint rules did not model maps)
+    invariant: "§10 inv. 2; GOAL §5 L6 (R2-5 generalised, tool-node taint)"
+    capability: A1
+    tests: ["tests/test_evolve_map_flow.py::test_a_map_cannot_render_private_host_or_unfiltered_state_into_its_llm_body",
+            "tests/test_evolve_map_flow.py::test_a_map_with_a_tool_body_carries_tool_output_and_must_write_a_tool_key",
+            "tests/test_evolve_map_flow.py::test_changing_only_the_body_of_an_existing_map_is_checked_too"]
+    museum: redteam/museum/R2-MAP.patch
+    status: fixed
