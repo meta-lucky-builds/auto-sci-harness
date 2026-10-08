@@ -43,6 +43,20 @@ def _trusted(monkeypatch):
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
 
 
+@pytest.fixture(autouse=True)
+def _fixture_switch(monkeypatch):
+    """The fixture capability `skills` gets a test-only switch `skills` in the closed ablation registry (the registry
+    is closed: an unregistered switch is never counted, tests/test_ablation_scorecard.py)."""
+    from types import MappingProxyType
+
+    import custom_harness.ablation as A
+    import custom_harness.scorecard.registry as G
+    import custom_harness.scorecard.runner as R
+    reg = MappingProxyType({**A.SWITCHES, "skills": A.Switch("skills", "skills", "fixture", "tests/x.py::f")})
+    for mod in (A, R, G):
+        monkeypatch.setattr(mod, "SWITCHES", reg)
+
+
 @dataclass
 class FixtureSystem:
     name: str
