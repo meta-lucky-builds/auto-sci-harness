@@ -323,7 +323,9 @@ def test_tool_node_cannot_put_training_rows_into_a_prompt(store, tmp_path, monke
     spec = seed_spec()
     tool = {"kind": "tool", "command": [sys.executable, "-c", "print(open('data/train.csv').read()[:600])"],
             "output_key": "tool_rows"}
-    ops = _insert_between(spec, "baseline", "hypothesize", "peek", tool)
+    # the node right before hypothesize (was `baseline`; the L5 memory wiring, 93c0c4a, put `recall` in between)
+    (before,) = [e["source"] for e in _edges(spec) if e["target"] == "hypothesize" and e.get("when") is None]
+    ops = _insert_between(spec, before, "hypothesize", "peek", tool)
     ops.append(EditOp(op="replace", path="/nodes/hypothesize/prompt",
                       value=spec.nodes["hypothesize"].prompt + "\nRows: {{tool_rows.stdout}}"))
     with pytest.raises(EditRejected, match="tool output"):
