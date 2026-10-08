@@ -52,7 +52,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..kerneld.releases import Releases, private_reads
+from ..kerneld.releases import Releases, run_targets
+from ..runtime.taint import step_labels
 from ..store import EvidenceStore
 from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
 from .evaluate import RunOutcome, SuiteTask
@@ -163,6 +164,24 @@ def embargo(obj: Any) -> Any:
     return obj
 
 
+def embargo_labelled(doc: dict[str, Any], *, control: bool) -> dict[str, Any]:
+    """A trace step whose output carries target labels (runtime/taint.py: what it wrote derives from held-out
+    targets): every output value and the error are withheld, except certificate summaries already reduced to their
+    verdict label by `embargo`. If the step ran BECAUSE of a target-dependent routing decision (`control`), which node
+    ran is withheld too. Withholding, not releasing: continuous held-out values never reach the evolver (inv. 18)."""
+    out = dict(doc)
+    output = out.get("output")
+    if isinstance(output, dict):
+        out["output"] = {k: (v if k in _CERT_KEYS and isinstance(v, dict) and v.get("embargoed") is True
+                             else EMBARGOED) for k, v in output.items()}
+    if out.get("error") is not None:
+        out["error"] = EMBARGOED
+    if control:
+        out["node_id"] = EMBARGOED
+        out["input"] = EMBARGOED
+    return out
+
+
 def _dump(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -196,7 +215,7 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         rel = releases if releases is not None else Releases.live(store)
         for run_id, o in sorted(exported.items()):  # each exported run releases its verdict labels
             if run_id:
-                rel.emit(o.cert_label, targets=private_reads(store, run_id=run_id), channel="export",
+                rel.emit(o.cert_label, targets=run_targets(store, run_id), channel="export",
                          alphabet="verdict_bit", note="export.run:verdict", key=f"{o.task_id}|{o.seed}")
         problems = _audit(tmp, _fingerprints(store, tasks, exported, canaries))
         if problems:
@@ -240,13 +259,19 @@ def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], ev
         status, detail = store.run_status(run_id)
         spec_hashes.add(run.harness_hash)
         steps = []
+        labels = step_labels(store, run_id)
         for st in store.trace(run_id):
             doc = embargo(_clean(st.model_dump(mode="json")))
+            lab = labels.get(st.index)
+            if lab is not None and lab.tainted:
+                doc = embargo_labelled(doc, control=bool(lab.control))
             steps.append(doc)
             out = st.output if isinstance(st.output, dict) else {}
             for key in ("certificate", "replica_certificate"):
                 if isinstance(out.get(key), dict):
                     certs.append(_cert_summary(store, run_id, st.index, key, out[key], cert_blobs))
+        if any(lab.tainted for lab in labels.values()):
+            detail = EMBARGOED  # the run's end detail quotes its last step's error (possibly target-derived)
         put(f"traces/{run_id}.json", {"run": {"id": run.id, "harness_hash": run.harness_hash, "task_id": run.task_id,
                                               "seed": run.seed, "status": status.value, "detail": detail},
                                       "steps": steps})

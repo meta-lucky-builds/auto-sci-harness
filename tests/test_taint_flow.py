@@ -331,3 +331,112 @@ def test_c_a_private_read_without_a_known_run_id_still_taints_fail_closed(store,
     _run(store, {"anon": {"kind": "module", "module": "tf.anonymous_read", "params": {"run_id": run_id}},
                  "ask": _ask("Note: {{note}}")}, ["anon", "ask"])
     assert _prompt_releases(store) == [("continuous", "prompt:ask:note")]
+
+
+# ------------------------------------------------------------------------------------------ the evolver's views
+EXPORT_LABELS = b"y\n1\n0\n0\n1\n1\n1\n0\n"  # mean 4/7 = 0.5714285714285714: a distinctive held-out value
+
+
+@register("tf.export_held")
+def _export_held(state, params, ctx):
+    vault = ctx.kernel().vault
+    if "tfx-held" not in vault.datasets():
+        vault.register_dataset("tfx-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": EXPORT_LABELS})
+    labels = vault.read("tfx-held", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    return {"raw": {"mean": sum(map(float, labels)) / len(labels)}}
+
+
+@register("tf.export_copy")
+def _export_copy(state, params, ctx):
+    mean = state["raw"]["mean"]
+    if params.get("fail"):
+        raise ValueError(f"majority class is {'POSITIVE' if mean > 0.5 else 'NEGATIVE'}")
+    return {"summary": f"held-out mean {mean}"}
+
+
+def _evolve_run(store, tmp_path, nodes, order, **edges_extra):
+    from custom_harness.evolve.evaluate import SuiteTask, run_harness
+    from custom_harness.sandbox import LocalSandbox
+    task = SuiteTask("tfx", tmp_path / "taskdir", "evolve", family="A")
+    task.task_dir.mkdir(parents=True, exist_ok=True)
+    out = run_harness(_spec(nodes, order, **edges_extra), task, 0, backends={}, store=store,
+                      sandbox_factory=lambda k: LocalSandbox(tmp_path / k, i_understand_no_isolation=True))
+    return out, task
+
+
+def test_export_withholds_a_copied_held_out_value(store, tmp_path):
+    from custom_harness.evolve.export import export_evidence
+    out, task = _evolve_run(store, tmp_path, {"held": {"kind": "module", "module": "tf.export_held"},
+                                               "copy": {"kind": "module", "module": "tf.export_copy"}},
+                            ["held", "copy"])
+    assert out.status == "completed"
+    res = export_evidence(store, tmp_path / "exp", runs=[out], tasks=[task])
+    text = "".join(p.read_text(encoding="utf-8") for p in res.path.rglob("*.json"))
+    assert "traces/" in " ".join(res.files)  # the trace really was exported
+    assert "0.5714285714" not in text, "a copied continuous held-out value reached the evolver's export"
+
+
+def test_failure_signatures_withhold_target_derived_error_text(store, tmp_path):
+    from custom_harness.evolve.evaluate import failure_signatures
+    nodes = {"held": {"kind": "module", "module": "tf.export_held"},
+             "copy": {"kind": "module", "module": "tf.export_copy", "params": {"fail": True}}}
+    out, _task = _evolve_run(store, tmp_path, nodes, ["held", "copy"])
+    sigs = failure_signatures(store, out.run_id)
+    assert sigs, "the run did fail"
+    assert not any("POSITIVE" in s or "NEGATIVE" in s for s in sigs), sigs
+
+
+@register("tf.recheck_read")
+def _recheck_read(state, params, ctx):
+    """A private read that names no run (like a Kernel re-check read)."""
+    vault = ctx.kernel().vault
+    _ensure(vault, "tfr-held")
+    vault.read("tfr-held", "y.csv", purpose="leakscan")
+    return {"certificate": {"label": "CERTIFIED-INTERNAL"}}
+
+
+def test_run_level_releases_count_reads_that_name_no_run(store, tmp_path):
+    """The export's verdict release (and the evolution score's) is on every target the run read, including reads
+    logged without a run id; `private_reads(run_id=...)` missed those."""
+    from custom_harness.evolve.export import export_evidence
+    out, task = _evolve_run(store, tmp_path, {"r": {"kind": "module", "module": "tf.recheck_read"}}, ["r"])
+    export_evidence(store, tmp_path / "exp", runs=[out], tasks=[task])
+    assert [(r["channel"], r["note"]) for r in released(store, "tfr-held")] == [
+        ("evolution_score", "evolve.score:verdict"), ("export", "export.run:verdict")]
+
+
+def test_attributed_reads_rule(store):
+    """Unit rule: a read naming this run, no run or an unknown run counts; another known run's own read does not."""
+    from custom_harness.kerneld.releases import attributed_reads
+    from custom_harness.records import Run
+    vault = Kernel(store).vault
+    for ds in ("u-mine", "u-none", "u-unknown", "u-other"):
+        _ensure(vault, ds)
+    other = Run(harness_id="h", harness_hash="x", task_id="t")
+    store.add_run(other)
+    vault.read("u-mine", "y.csv", purpose="leakscan", run_id="run-me")
+    vault.read("u-none", "y.csv", purpose="leakscan")
+    vault.read("u-unknown", "y.csv", purpose="leakscan", run_id="run-nobody-knows")
+    vault.read("u-other", "y.csv", purpose="leakscan", run_id=other.id)
+    vault.read_public("u-other", "x.csv")
+    targets, last = attributed_reads(store, after_seq=0, run_ids={"run-me"})
+    assert targets == ["u-mine", "u-none", "u-unknown"]
+    assert last == store.ledger_rows("data_access")[-1][0]
+
+
+# ------------------------------------------------------------------------------------------ recall (b-research rule)
+def test_recall_refuses_a_handle_whose_value_a_fresh_engine_fork_inherited_tainted(store):
+    """Paged recall refuses a handle if its archive provenance carries a target (the engine's labels) OR the prompt
+    that archived it ran after a private read of THIS run (research/evidence_refs.run_private_reads). Neither rule
+    contains the other: here the read happened in the PARENT run, before the fork, so the time rule does not fire;
+    only the label restored from the fork checkpoint refuses it. On c9823b8 a fork in a fresh engine served it."""
+    from test_redteam_critic_recall import _ask, _handle, _refused, _rmock, _rspec
+    spec = _rspec(["seed", "held", "agent", "recall", "reader"])
+    parent = Engine(spec, backends={"executor": _rmock(_ask(_handle))}, store=store).run("t", {})
+    assert parent.status == RunStatus.COMPLETED, parent.detail
+    held_step = next(s.index for s in store.trace(parent.run_id) if s.node_id == "held")
+    child = Engine(spec, backends={"executor": _rmock(_ask(_handle))}, store=store).fork(parent.run_id, held_step)
+    assert child.status == RunStatus.COMPLETED, child.detail
+    assert child.state["big"].startswith("held-out derived value")
+    assert _refused(child) == "target_derived", child.state["recalled"]

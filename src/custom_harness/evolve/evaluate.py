@@ -32,10 +32,10 @@ from typing import Any, Literal
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
-from ..kerneld.releases import VERDICT_LABELS, Releases, private_reads
+from ..kerneld.releases import VERDICT_LABELS, Releases, attributed_reads
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
-from ..runtime.engine import RetryPolicy
+from ..runtime.engine import RetryPolicy, run_family
 from ..sandbox import Sandbox
 from ..store import EvidenceStore
 
@@ -147,9 +147,26 @@ def _signature(text: str) -> str:
     return text.strip()[:160]
 
 
+EMBARGOED_SIGNATURE = "<embargoed>"
+
+
 def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
+    """Clusterable failure signatures of a run (the proposer sees them). A step whose output carries target labels
+    (runtime/taint.py) contributes only `<node>: <embargoed>` (and not even the node when it ran because of a
+    target-dependent routing decision); the run's end detail is withheld once any step is labelled."""
+    from ..runtime.taint import step_labels
     sigs = []
+    labels = step_labels(store, run_id)
+    tainted = False
     for step in store.trace(run_id):
+        lab = labels.get(step.index)
+        if lab is not None and lab.tainted:
+            tainted = True
+            out = step.output if isinstance(step.output, dict) else {}
+            if step.error or out.get("run_error") or out.get("route") == "give_up":
+                node = EMBARGOED_SIGNATURE if lab.control else step.node_id
+                sigs.append(f"{node}: {EMBARGOED_SIGNATURE}")
+            continue
         if step.error:
             sigs.append(f"{step.node_id}: {_signature(step.error.splitlines()[0])}")
         run_err = step.output.get("run_error") if isinstance(step.output, dict) else None
@@ -160,7 +177,8 @@ def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
             sigs.append(f"{step.node_id}: gave up without beating baseline on dev")
     status, detail = store.run_status(run_id)
     if status != RunStatus.COMPLETED:
-        sigs.append(f"run: {status.value}: {_signature(detail.splitlines()[0] if detail else '')}")
+        why = EMBARGOED_SIGNATURE if tainted else _signature(detail.splitlines()[0] if detail else "")
+        sigs.append(f"run: {status.value}: {why}")
     return sigs
 
 
@@ -245,7 +263,7 @@ def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
 class ExecutedRun:
     """A finished harness run whose score is not computed yet (`finish_run`). `infra` is set instead of `result`
     when the sandbox could not even be created. `targets` = datasets whose private files were read while it ran
-    (seq window; conservative: a concurrent run's reads over-taint, never under-taint)."""
+    (per run: reads naming it, no run or an unknown run; a concurrent run's own reads do not count)."""
 
     spec_hash: str
     task: SuiteTask
@@ -274,7 +292,10 @@ def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
     rows = store.ledger_rows()
     before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
-    targets = private_reads(store, after_seq=before) if task.split == "evolve" else []
+    # per run, fail closed (kerneld/releases.attributed_reads): a concurrent run's own reads do not count, reads
+    # naming no run or an unknown run do
+    targets = (attributed_reads(store, after_seq=before, run_ids=run_family(res.run_id))[0]
+               if task.split == "evolve" else [])
     return ExecutedRun(h, task, seed, result=res, targets=targets)
 
 

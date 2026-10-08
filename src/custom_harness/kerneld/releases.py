@@ -128,14 +128,35 @@ def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Colle
     read of every registered dataset). `since`: only entries logged at or after this time (seconds)."""
     out: set[str] = set()
     last = after_seq
+    for seq, _at, datasets in attributed_read_log(store, after_seq=after_seq, run_ids=run_ids, since=since):
+        last = max(last, seq)
+        out |= datasets
+    rows = store.ledger_rows("data_access")
+    if rows:
+        last = max(last, int(rows[-1][0]))
+    return sorted(out), last
+
+
+def run_targets(store: EvidenceStore, run_id: str) -> list[str]:
+    """Every target attributed to a finished run (`attributed_reads` since the run started): what a release of
+    anything computed from the whole run (its verdict, its export) is a release on. Replaces `private_reads(run_id=)`,
+    which missed reads naming no run (Kernel re-check reads)."""
+    try:
+        since: float | None = store.get_run(run_id).started_at - 1.0
+    except KeyError:
+        since = None
+    return attributed_reads(store, after_seq=0, run_ids={run_id}, since=since)[0]
+
+
+def attributed_read_log(store: EvidenceStore, *, after_seq: int = 0, run_ids: Collection[str],
+                        since: float | None = None) -> list[tuple[int, float, set[str]]]:
+    """(seq, time, datasets) of every private read `attributed_reads` counts, in ledger order."""
+    out: list[tuple[int, float, set[str]]] = []
     known: dict[str, bool] = {}
     ids = set(run_ids)
     everything: set[str] | None = None
     for seq, _kind, body, _prev, _hash, at in store.ledger_rows("data_access"):
-        if seq <= after_seq:
-            continue
-        last = max(last, seq)
-        if since is not None and float(at) < since:
+        if seq <= after_seq or (since is not None and float(at) < since):
             continue
         try:
             b = json.loads(body)
@@ -144,7 +165,7 @@ def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Colle
             if everything is None:
                 from ..kernel import Kernel
                 everything = set(Kernel(store).vault.datasets())
-            out |= everything
+            out.append((int(seq), float(at), set(everything)))
             continue
         if not private:
             continue
@@ -157,8 +178,8 @@ def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Colle
                     known[rid] = False
             if known[rid]:
                 continue  # another, known run's own read
-        out.add(ds)
-    return sorted(out), last
+        out.append((int(seq), float(at), {ds}))
+    return out
 
 
 Mode = Literal["live", "record", "replay"]

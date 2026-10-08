@@ -42,7 +42,7 @@ def fingerprint(value: Any) -> str | None:
     return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
-class TrackedState(dict):  # type: ignore[type-arg]
+class TrackedState(dict):
     """A module's view of run state: a shallow copy of it whose reads, writes and in-place mutations the engine
     records. Overriding `__iter__` also routes `dict(x)`, `{**x}` and `f(**x)` through `keys()` (CPython), so those
     count as bulk reads. Not a security boundary against hostile code (`dict.__getitem__(x, k)` bypasses it): modules
@@ -141,23 +141,23 @@ class TrackedState(dict):  # type: ignore[type-arg]
         dict.clear(self)
 
     # ------------------------------------------------------------ bulk reads: every key
-    def __iter__(self):  # type: ignore[no-untyped-def]
+    def __iter__(self):
         self._read_all()
         return dict.__iter__(self)
 
-    def __reversed__(self):  # type: ignore[no-untyped-def]
+    def __reversed__(self):
         self._read_all()
         return dict.__reversed__(self)
 
-    def keys(self):  # type: ignore[no-untyped-def]
+    def keys(self):
         self._read_all()
         return dict.keys(self)
 
-    def values(self):  # type: ignore[no-untyped-def]
+    def values(self):
         self._read_all()
         return dict.values(self)
 
-    def items(self):  # type: ignore[no-untyped-def]
+    def items(self):
         self._read_all()
         return dict.items(self)
 
@@ -193,13 +193,13 @@ class TrackedState(dict):  # type: ignore[type-arg]
         self._read_all()
         return dict.__ne__(self, other)
 
-    __hash__ = None  # type: ignore[assignment]
+    __hash__ = None
 
-    def __or__(self, other: Any) -> dict[str, Any]:
+    def __or__(self, other: Any) -> dict[str, Any]:  # type: ignore[override]
         self._read_all()
         return dict(dict.items(self)) | dict(other)
 
-    def __ror__(self, other: Any) -> dict[str, Any]:
+    def __ror__(self, other: Any) -> dict[str, Any]:  # type: ignore[override]
         self._read_all()
         return dict(other) | dict(dict.items(self))
 
@@ -294,6 +294,57 @@ class TaintState:
                           run=self.run, workspace=self.workspace, seq=self.seq)
 
 
+@dataclass(frozen=True)
+class StepLabel:
+    """What one trace step of a run carries: `label` = targets of what it wrote (its outputs, its error), `control`
+    = targets that the decision to run it depended on. `recorded` = read from the step's checkpoint (False: the
+    checkpoint has no labels and the fail-closed time rule was used)."""
+
+    label: frozenset[str]
+    control: frozenset[str]
+    recorded: bool
+
+    @property
+    def tainted(self) -> bool:
+        return bool(self.label or self.control)
+
+
+def step_labels(store: Any, run_id: str) -> dict[int, StepLabel]:
+    """Trace step index -> StepLabel, for agent-visible views of a trace (the evidence export, failure signatures).
+    A checkpoint without labels (written before labels existed, or by hand): fail closed by time: the step carries
+    every target attributed to the run (kerneld/releases.attributed_read_log) read at or before it ended."""
+    from ..kerneld.releases import attributed_read_log
+    steps = store.trace(run_id)
+    try:
+        since: float | None = store.get_run(run_id).started_at - 1.0
+    except KeyError:
+        since = None
+    log: list[tuple[int, float, set[str]]] | None = None
+    out: dict[int, StepLabel] = {}
+    for st in steps:
+        doc = None
+        if st.checkpoint_ref is not None:
+            try:
+                cp = store.blobs.get_json(st.checkpoint_ref)
+                doc = cp.get("taint") if isinstance(cp, dict) else None
+            except (OSError, ValueError, KeyError):
+                doc = None
+        if isinstance(doc, Mapping) and doc.get("v") == TAINT_DOC_VERSION:
+            try:
+                out[st.index] = StepLabel(_targets(doc.get("step", [])), _targets(doc.get("control", [])), True)
+                continue
+            except ValueError:
+                pass
+        if log is None:
+            log = attributed_read_log(store, run_ids={run_id}, since=since)
+        t: set[str] = set()
+        for _seq, at, ds in log:
+            if at <= st.ended_at + 1e-6:
+                t |= ds
+        out[st.index] = StepLabel(frozenset(t), frozenset(t), False)
+    return out
+
+
 def decision_alphabet(n_outcomes: int, count_alphabet: int = 16) -> str:
     """What one routing decision among `n_outcomes` distinct targets can tell."""
     if n_outcomes <= 2:
@@ -301,5 +352,5 @@ def decision_alphabet(n_outcomes: int, count_alphabet: int = 16) -> str:
     return "count" if n_outcomes <= count_alphabet else "continuous"
 
 
-__all__ = ["SANDBOX_SURFACE", "SECRETS_SURFACE", "STORE_SURFACES", "TaintState", "TrackedState", "decision_alphabet",
-           "fingerprint"]
+__all__ = ["SANDBOX_SURFACE", "SECRETS_SURFACE", "STORE_SURFACES", "StepLabel", "TaintState", "TrackedState",
+           "decision_alphabet", "fingerprint", "step_labels"]
