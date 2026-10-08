@@ -317,8 +317,11 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .research.suite import build_suite, export_real
     real = None
     if a.docker:
-        from .sandbox.docker import DockerSandbox
-        real = export_real(lambda ws: DockerSandbox(ws), Path(a.out) / "_export")
+        from .sandbox.docker import FULL_IMAGE, DockerSandbox
+        # the ONLY full-image sandbox: trusted exporter code reads scikit-learn's bundled datasets (agent code runs
+        # in the candidate image, which has none; tests/test_bundled_data.py pins this)
+        real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
+                           Path(a.out) / "_export")
     path = build_suite(Path(a.out), real_data=real)
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
