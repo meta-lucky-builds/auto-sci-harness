@@ -562,3 +562,16 @@ def test_finalize_cli_requires_a_named_human(tmp_path):
     suite.write_text(yaml.safe_dump({"tasks": []}), encoding="utf-8")
     with pytest.raises(SystemExit, match="approver"):
         main(["finalize", str(spec), "--suite", str(suite), "--approver", " ", "--dev-sandbox"])
+
+
+def test_reserved_module_ids_and_keys_name_real_modules():
+    """b-evolve reserved b-research's module ids and output keys by name before that branch was merged; now both are
+    on one branch, every reserved module id must be a REGISTERED module (a typo would reserve nothing), and the
+    critic/recall keys must be keys those modules really write."""
+    from custom_harness.evolve.edits import RESERVED_OUTPUT_KEYS, RESERVED_WRITING_MODULES
+    from custom_harness.runtime.modules import registered
+    assert sorted(RESERVED_WRITING_MODULES - set(registered())) == []
+    src = ROOT / "src/custom_harness/research"
+    written = (src / "critic_answers.py").read_text(encoding="utf-8") + (src / "recall.py").read_text(encoding="utf-8")
+    for key in ("critic_answers", "critic_evidence", "recalled", "recall_log"):
+        assert key in RESERVED_OUTPUT_KEYS and f'"{key}":' in written, key

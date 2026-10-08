@@ -85,8 +85,8 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "citations", "literature_snapshot",
                                   # audit I6 input (research/claims.py: _figure_audit)
                                   "figures",
-                                  # critic-answer check and recall (research/critic_answers.py, research/recall.py on
-                                  # branch b-research; referenced by id only here)
+                                  # critic-answer check and recall (research/critic_answers.py, research/recall.py;
+                                  # tests/test_evolve_hardening.py checks these keys are really written)
                                   "critic_answers", "critic_evidence", "recalled", "recall_log"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
@@ -98,7 +98,7 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.setup", "research.profile_data", "research.baseline_dev", "research.socratic_filter",
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
     "research.replica_dev", "research.report", "research.audit",
-    # b-research (by id only): the critic-answer check and recall write reserved keys
+    # the critic-answer check and recall write reserved keys (ids checked against the registry by a test)
     "research.critic_evidence", "research.check_critic_answers", "research.recall"})
 # Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
 # critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.

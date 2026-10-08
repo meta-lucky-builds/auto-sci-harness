@@ -15,7 +15,7 @@ Records (kinds of `EvidenceStore.append_record`):
     `store.records(kind)`, which is append-only), signal {accepted, proposed, gated, rejected_on {stage: count}},
     stall {window, observed, in_window, window_generations, accepted, gated, proposed, rejected_on, stalled}}.
 
-Stall (mirrors the L7 orchestrator on branch g-router, control/islands.py): stalled = at least `STALL_WINDOW`
+Stall (the L7 orchestrator's rule, control/islands.py): stalled = at least `STALL_WINDOW`
 generations observed in this campaign and no accepted edit in the last `STALL_WINDOW`. "No improvement in the gate
 bits": under the embargo the only gate bits are accept/reject and the rejecting stage, so an improvement IS an accepted
 edit. The window's evidence counts are recorded so the decision can be recomputed (`verify_generation`).
@@ -47,13 +47,13 @@ from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any
 
+from .. import config
 from ..store import EvidenceStore
 from .export import _STATS_VIEW, lineage_view, proposer_view, stats_view
 from .loop import EvolveConfig, GenerationResult
 
-# mirrors config.ISLAND_STALL_WINDOW on branch g-router (UNCALIBRATED owner decision, GOAL §13.8); switch to it once
-# that branch is merged
-STALL_WINDOW = 3
+# the L7 islands' stall window (UNCALIBRATED owner decision, GOAL §13.8): one value, read from config
+STALL_WINDOW = config.ISLAND_STALL_WINDOW
 FORMAT = "generation-ledger/1"
 REPORT_FORMAT = "generation-report/1"
 CAMPAIGN_KIND = "evolve_campaign"

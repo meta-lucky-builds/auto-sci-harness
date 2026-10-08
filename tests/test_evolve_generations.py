@@ -398,3 +398,19 @@ def test_report_from_a_real_generation_has_no_gate_fields(drive, store):
         assert kind not in allowed or top in allowed[kind], c["ref"]
     md = g.render_markdown(rep)
     assert md.startswith("# Generation report") and "accepted" in md
+
+
+def test_stall_window_is_the_islands_one_not_a_copy():
+    """After the g-router merge the generation ledger's stall rule uses config.ISLAND_STALL_WINDOW itself (b-evolve
+    kept a mirrored literal until then): one owner-calibrated value, read in one place."""
+    import ast
+    from pathlib import Path
+
+    from custom_harness import config
+    from custom_harness.control.islands import OrchestratorPolicy
+    from custom_harness.evolve import generations
+    assert generations.STALL_WINDOW == config.ISLAND_STALL_WINDOW == OrchestratorPolicy(version="t").stall_window
+    tree = ast.parse(Path(generations.__file__).read_text(encoding="utf-8"))
+    (assign,) = [n for n in tree.body if isinstance(n, ast.Assign)
+                 and any(getattr(t, "id", None) == "STALL_WINDOW" for t in n.targets)]
+    assert ast.unparse(assign.value) == "config.ISLAND_STALL_WINDOW"  # not a literal that could drift
