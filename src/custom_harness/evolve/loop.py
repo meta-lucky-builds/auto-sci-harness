@@ -37,6 +37,7 @@ from ..kerneld.releases import Releases, private_reads
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
+from .branches import BranchConfig, propose_branch
 from .critic import FamilySeparatedCritic
 from .diagnosis import check_claims
 from .edits import (
@@ -116,6 +117,8 @@ class GenerationResult:
     loop_label: str = "MECHANICAL"
     # yield/prune counters of this generation (also appended as a `generation_stats` record)
     counters: dict[str, Any] = field(default_factory=dict)
+    # L6.9: the `branch` record created this generation (a gate-rejected candidate that won a cluster), or None
+    branch: dict[str, Any] | None = None
 
 
 class Evaluator:
@@ -175,10 +178,13 @@ class Evaluator:
 def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator: Evaluator,
                       proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
                       releases: Releases | None = None,
-                      critic: FamilySeparatedCritic | None = None) -> GenerationResult:
+                      critic: FamilySeparatedCritic | None = None,
+                      branching: BranchConfig | None = None) -> GenerationResult:
     """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
-    shares the proposer's family; its review is advisory (recorded, never gating)."""
+    shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
+    candidate rejected on its evolve re-measurement or the held-out gate is tested per gate cluster and may become
+    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour)."""
     cfg = cfg or EvolveConfig()
     if critic is not None:
         critic.check_proposer(proposer.backend if isinstance(proposer, ProposerAgent) else proposer)
@@ -275,6 +281,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     survivors: list[Any] = []
     loop_label = "MECHANICAL"
     fixed_k = 0
+    branch: dict[str, Any] | None = None
     if candidates:
         rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
                   parent_scores, rounds=cfg.race_rounds, keep=1)
@@ -358,13 +365,16 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "tasks_at_risk": sorted(at_risk), "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
             if ok:
                 accepted_spec, accepted = spec, True
+            elif branching is not None and rejected_on in ("evolve", "held_out_gate"):
+                branch = propose_branch(parent, spec, tasks, seeds=cfg.seeds, outcome=evaluator.outcome,
+                                        store=store, releases=rel, globally_accepted=False, cfg=branching)
     for r in records:
         store.append_record("lineage", {"parent": parent_hash, **r})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
                          n_survivors=len(survivors))
     store.append_record("generation_stats", {"parent": parent_hash, **counters})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
-                            evaluator.calls - calls_before, fixed_k, loop_label, counters)
+                            evaluator.calls - calls_before, fixed_k, loop_label, counters, branch)
 
 
 def _public(edit: Edit, evolve_ids: set[str]) -> dict[str, Any]:

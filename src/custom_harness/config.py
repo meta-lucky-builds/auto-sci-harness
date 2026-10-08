@@ -37,3 +37,21 @@ PANEL_MIN_AGREEMENT = 0.75  # UNCALIBRATED (owner decision, GOAL §13.8): panel 
 PANEL_MIN_KAPPA = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): Cohen's kappa floor (panel vs human)
 PANEL_MAX_ECE = 0.10  # UNCALIBRATED (owner decision, GOAL §13.8): expected calibration error ceiling
 PANEL_CALIBRATION_BINS = 10  # UNCALIBRATED (owner decision, GOAL §13.8): equal-width bins for the ECE
+
+# ---------------------------------------------------------------- L6.9 branch/route, L7 islands (GOAL §5)
+# Branches (evolve/branches.py). A cluster is tested only with this many gate tasks: a one-task cluster would make its
+# verdict bit a per-task gate value.
+BRANCH_MIN_CLUSTER_TASKS = 2  # UNCALIBRATED (owner decision, GOAL §13.8)
+BRANCH_MIN_UNITS = 2  # UNCALIBRATED (owner decision, GOAL §13.8): valid paired units a cluster test needs
+# family-wise level over ONE candidate's cluster tests (Bonferroni: each cluster at alpha / n_tested clusters)
+BRANCH_ALPHA = 0.05  # UNCALIBRATED (owner decision, GOAL §13.8)
+BRANCH_MAX_EXCLUDED_FRAC = 0.25  # UNCALIBRATED (owner decision, GOAL §13.8): as EvolveConfig.max_excluded_frac
+# Islands orchestrator (control/islands.py); the policy object carries these as its versioned defaults
+ISLAND_STALL_WINDOW = 3  # UNCALIBRATED (owner decision, GOAL §13.8): generations without an accept = stalled
+ISLAND_MORE_EVAL_SHARE = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): share of gated rejections on the
+#   (underpowered) evolve re-measurement at which a stalled island gets more evaluation instead of new edits
+ISLAND_STALL_SHRINK = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): budget weight of an island stalled on edits
+ISLAND_MIN_SHARE = 0.1  # UNCALIBRATED (owner decision, GOAL §13.8): no island is starved below this budget share
+ISLAND_PROMPT_MAX_SHARE = 0.4  # UNCALIBRATED (owner decision, GOAL §13.8): edit-type quota on prompt-only edits
+ISLAND_MIN_EDIT_TYPES = 2  # UNCALIBRATED (owner decision, GOAL §13.8): distinct edit types per planned batch
+ISLAND_POLICY_CADENCE = 5  # UNCALIBRATED (owner decision, GOAL §13.8): orchestrator rounds between policy changes
