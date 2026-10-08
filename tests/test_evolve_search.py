@@ -98,7 +98,10 @@ def test_edit_type_quota_is_enforced_in_the_real_loop(store, tmp_path):
     assert len(quota) == 3 and all(c["status"] == "rejected_static" and "signature" not in c for c in quota)
     assert all(c["edit"]["type"] == "prompt_text" and c["edit"]["withheld"] is True for c in quota)
     others = [c for c in res.candidates if c not in quota]
-    assert len(others) == 2  # the 2 admitted edits went on through the loop (whatever their outcome)
+    # the 2 admitted edits (the first two, in proposal order) went on through the loop, whatever their outcome; a race
+    # winner has two lineage records (`raced` and its gate record), so edits are counted by their op path
+    assert {c["edit"]["ops"][0]["path"] for c in others} == {"/nodes/hypothesize/system", "/nodes/implement/system"}
+    assert sum(c["status"] == "raced" for c in others) == 2
     stats = store.records("generation_stats")[-1]
     assert stats["proposed"] == 5 and stats["rejected_static"] >= 3
     lineage_sigs = {r.get("signature") for r in store.records("lineage") if "edit-type quota" in str(r.get("reason"))}
