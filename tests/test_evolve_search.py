@@ -76,8 +76,8 @@ def search(monkeypatch, store, tmp_path):
             proposers=proposers or {"p1": MockBackend([THREE_EDITS]), "p2": MockBackend([THREE_EDITS])},
             backends={}, store=store, sandbox_factory=lambda k: None, cfg=EvolveConfig(**(cfg or CFG)),
             campaign="L7", log=lambda s: None, **kw)
-    run.seen = seen  # type: ignore[attr-defined]
-    run.S = S  # type: ignore[attr-defined]
+    run.seen = seen
+    run.S = S
     return run
 
 
