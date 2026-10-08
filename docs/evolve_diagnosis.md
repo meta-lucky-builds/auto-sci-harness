@@ -15,7 +15,11 @@ Branch `b-evolve` (2026-10-08). Code: `src/custom_harness/evolve/diagnosis.py`, 
 | Cluster ids (C<n>/D<n>) the diagnosis does not contain | same | same (this was "recorded, not enforced" before; now enforced) |
 | The claimed change (`claimed_change`, required in the edit schema) equals the real diff of the spec | `claims.check_claimed_diff`, called by the loop after the edit is applied | `rejected_claims`; a missing claim is a rejection too |
 
-Ordering in the loop: prediction screen → novelty gate → static checks (apply, one mechanism) → no-op/duplicate →
+| A citation or claimed path that the prediction screen DROPPED (too long, too many, a non-id in `failure_clusters_fixed`) | `loop.UNVERIFIABLE_IF_DROPPED` | `rejected_claims` (it could not be checked; the reason quotes the screen note, never the text) |
+| The digest in the proposer's prompt passes the export's leak audit (same fingerprints: private files, canaries, label windows, private run state, private paths) plus a canary-PREFIX rule (error normalisation turns digits into `<n>` and mangles a canary past the verbatim match) | `export.screen_digest`, called by the loop | cluster example excerpts dropped; if still failing, only counts remain (`withheld` = number of findings) |
+| A run whose store record names a different task than its outcome (e.g. a gate run in an evolve cache slot) | `propose._evolve_run`, `export.export_evidence` | dropped from the diagnosis (`n_excluded_split`) / excluded from the export (`task_mismatch`) |
+
+Ordering in the loop: prediction screen → novelty gate → dropped-claims rule → static checks (apply, one mechanism) → no-op/duplicate →
 **claims (citations + claimed diff)** → critic → smoke → race. A claims rejection is not added to the novelty gate's
 rejected signatures: the same ops, honestly cited and claimed, are a new proposal.
 
@@ -39,11 +43,38 @@ form `prefix_<16 hex>`). Only the differing KEY NAMES reach the signature; the v
   a further tightening; not done (owner decision).
 - The claimed-diff check proves the proposer knows what its ops change, not that the change does what the rationale
   says.
-- The digest is not passed through the export's leak audit (`export._audit`); its content is limited by construction
-  (key names, normalised error signatures, verdict fields of evolve runs, check names). The cluster EXAMPLES in the
-  digest still carry raw error excerpts of evolve runs, as before this change.
+- The leak audit is verbatim matching (verify/leak.py limits). Route values and output key NAMES are not
+  number-normalised: a held-out value planted in a route or a key name would reach `cause` / `content.keys` (red-team,
+  inferred, not reachable through an edit because nothing evolvable runs after the protected certify step). The
+  canary-prefix rule is in `screen_digest` only, not yet in the export's own `_audit` (inferred gap: `scores.json`
+  failure signatures and lineage smoke reasons carry normalised error text).
+- Cluster ids are positional per generation: `C0` resolves to THIS generation's C0, whatever the proposer meant.
 - A divergence is a correlate located in time, not a proven cause.
 - Fixture changes made for the enforcement (honest fixtures, no assertion weakened): `tests/test_evolve.py` PROPOSALS
   gained `claimed_change` and the first edit no longer cites `C0` (in table-driven worlds there is no cluster C0, so the
   citation was false); `tests/test_evolve_evidence.py` `CostTable` gives a run that earned 0 a failure signature (so
-  the fixtures that cite C0 cite a real cluster); `tests/test_evolve_mechanism_smoke.py` items gained `claimed_change`.
+  the fixtures that cite C0 cite a real cluster); `tests/test_evolve_mechanism_smoke.py` items gained `claimed_change`, and in the covert-channel test the edit
+  whose covert cluster text the screen drops is now `rejected_claims` (asserted); a fifth, clean copy of that edit keeps
+  every sanitisation assertion (delta rounding, at-risk ids, acceptance).
+
+# Generation ledger (GOAL §5 L6.10) — `evolve/generations.py`, hooks in `evolve/driver.py`
+
+Enforced (tests: `tests/test_evolve_generations.py`):
+- Record kinds in the store's append-only `records` table (no Kernel ledger kind): `evolve_campaign` (one per
+  campaign: the declared annealing schedule, its hash, the n_edits cap, the stall window) and `generation_ledger` (one
+  per completed generation: budget used, refs to its `generation_stats` / `lineage` / `harness_edit` records, the
+  accept/reject signal, the stall evidence).
+- Stall: at least `STALL_WINDOW` (= 3, mirrors `config.ISLAND_STALL_WINDOW` on g-router, UNCALIBRATED) generations
+  observed and no accepted edit in the last 3. Under the verdict embargo the only gate outcomes are the accept bit and
+  the rejecting stage, so "no improvement in the gate bits" and "no accepted edit" coincide. Read only through the
+  proposer-visible views (`stats_view`, `lineage_view`); malformed or inconsistent records fail closed.
+- Annealed edit budget (RRSI): `AnnealSchedule` kinds constant / geometric / linear / step, monotone non-increasing,
+  floor >= 1, start <= cfg.n_edits (the multiplicity bound is computed from cfg.n_edits). Persisted across resume via
+  `campaign=`: numbering and budget continue from the ledger; a resume with a different schedule is refused.
+- Generation report: `generation_report` builds every number as a cell with a ref to its ledger record (through the
+  proposer-visible views only, so no gate mean/CI/LOFO value can be in it); `audit_report` recomputes every cell and
+  the generation's signal/budget/stall from source, type-strict, and reports any mismatch or unresolvable ref.
+  Proposer text is rendered as escaped, quoted data labelled unverified.
+
+Not wired: no CLI calls `generation_report`/`audit_report`; without `campaign=` the driver writes no ledger; a
+generation stopped by `BudgetExceeded` gets no record; `out_dir` files still use the local loop index on resume.
