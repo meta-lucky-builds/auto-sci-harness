@@ -1,0 +1,192 @@
+# Claimed capabilities (GOAL §9 coverage contract, transcribed row by row) and the ablation switch of each
+# (GOAL §2.1, invariant 12: every claimed capability has code, a test and an ablation).
+# `ablation: null` = no switch that turns the capability off exists yet. The scorecard reports every such row as an
+# invariant-12 gap; it never drops a row. Set `ablation` to the name of a switch the system under test understands
+# (passed to System.run as `disabled`) once one is wired, then record an ablation run (`scorecard.runner.run_ablation`).
+capabilities:
+- id: meta-harness
+  source: Meta-Harness
+  capability: Proposer with full history filesystem
+  home: L6.1–2
+  ablation: null
+- id: rhi
+  source: RHI
+  capability: Contracts and hops as edit types; compare to parent
+  home: L6 edit types, race
+  ablation: null
+- id: rrsi
+  source: RRSI
+  capability: Leakage critic, regularised proposals/acceptance, cost-aware admission
+  home: L6.5, L6.8, L6.10
+  ablation: null
+- id: self-harness
+  source: Self-Harness
+  capability: Causal failure signatures, held-in/out non-regression, decline path
+  home: L6.3, L6.6, gate
+  ablation: null
+- id: autosaddler
+  source: AutoSaddler
+  capability: Deep diagnosis, patch taxonomy, mini-batch pre-filter, composition DAG
+  home: L6.3, edit types, L6.8
+  ablation: null
+- id: milo
+  source: MILO
+  capability: Islands, lineage with rejects, adaptive orchestrator
+  home: L7, ledger
+  ablation: null
+- id: mixture-of-branches
+  source: Mixture of Branches
+  capability: Coverage-based branching, router
+  home: L6.9
+  ablation: null
+- id: harnessx
+  source: HarnessX
+  capability: Typed multi-dimension harness, deterministic gate, per-task attribution, novelty gate
+  home: spec, gate, ledger
+  ablation: null
+- id: adaptive-auto-harness
+  source: Adaptive Auto-Harness
+  capability: Branch tree, temporal reveal, solve-time routing, research logs
+  home: L6.9, L6.11
+  ablation: null
+- id: scholarevolve
+  source: ScholarEvolve
+  capability: Literature → mechanism → code mutation; bootstrap CI; topic quotas
+  home: L4.3 → L6.2, gate, L4.4
+  ablation: null
+- id: sol-pi
+  source: SoL-Pi
+  capability: Cost objective, ObservationPack, verified-quote reducer, frozen held-out
+  home: L1, L4 context, gate
+  ablation: null
+- id: continual-harness
+  source: Continual Harness
+  capability: Mid-episode refinement, adaptive cadence
+  home: L6 (low-risk edit types, in-run only)
+  ablation: null
+- id: sia
+  source: SIA
+  capability: Lever choice harness vs weights
+  home: L7 lever, L8
+  ablation: null
+- id: evomaster
+  source: EvoMaster
+  capability: Skills, progressive disclosure, context manager
+  home: L5, L4 context
+  ablation: null
+- id: weng-survey
+  source: Weng survey
+  capability: Decision observability, optimiser-of-optimiser
+  home: calibration, L7
+  ablation: null
+- id: ai-scientist-v1-v2
+  source: AI Scientist v1/v2
+  capability: End-to-end pipeline, reviewer ensemble, experiment tree, LaTeX loop
+  home: L4, L3 T5, L4.7, L4.10
+  ablation: null
+- id: evoscientist
+  source: EvoScientist
+  capability: Cross-task idea and experiment memory, failed directions
+  home: L5
+  ablation: null
+- id: scientistone
+  source: ScientistOne
+  capability: Chain-of-Evidence, deterministic grounding, integrity audit
+  home: Kernel K0, L2
+  ablation: null
+- id: scider
+  source: SciDER
+  capability: Data-first profiling, K-way ranking, trajectory data
+  home: L4.2, L4.5, L8
+  ablation: null
+- id: scienceflow
+  source: ScienceFlow
+  capability: Recoverable states, safe restore, resource controller
+  home: L0 snapshots, L1
+  ablation: null
+- id: parness
+  source: PARNESS
+  capability: DAG kernel, full-text index, KG, provider adapters
+  home: L0, L4.3, gateway
+  ablation: null
+- id: auto-recsys
+  source: Auto-RecSys
+  capability: Cognition vs procedure split, playbook with dead-ends
+  home: L1, L5 playbook
+  ablation: null
+- id: mm-agent
+  source: MM-Agent
+  capability: Hierarchical method library, actor-critic, rubric decomposition
+  home: L5, L4.8, L3 T5
+  ablation: null
+- id: matagent
+  source: MatAgent
+  capability: Human-in-the-loop gates
+  home: L9 approval nodes
+  ablation: null
+- id: feynman
+  source: Feynman
+  capability: Multi-source retrieval, citation verifier
+  home: L4.3, K0
+  ablation: null
+- id: the-station
+  source: The Station
+  capability: Decentralised agents, archive coordination, exact evaluators, stagnation lanes
+  home: L4 multi-agent mode, L3, L7
+  ablation: null
+- id: autoopt
+  source: AutoOPT
+  capability: Lean + comparator, numerical certificates, statement fidelity
+  home: L3 T0/T1
+  ablation: null
+- id: mda
+  source: MDA
+  capability: Bayesian evidence, EIG experiment design
+  home: L4.7 (EIG mode), L1 allocator
+  ablation: null
+- id: robin
+  source: Robin
+  capability: Lab-in-loop, BTL tournament, replicated analysis + consensus
+  home: L3 T3, L4.5, L4.9
+  ablation: null
+- id: ahois
+  source: AHOIS
+  capability: Socratic question-only critic, physical bench
+  home: L4.8, L6.5, L3 T3
+  ablation: null
+- id: scienceide
+  source: ScienceIDE
+  capability: Codebase → verifiable environments, fault injection, calibrated tolerances, floor-normalised reward
+  home: L3, task suite, L8
+  ablation: null
+- id: aworld-rl
+  source: AWorld-RL
+  capability: Reward-variance task selection, stateful verifier
+  home: L8, L3 T1
+  ablation: null
+- id: prime-agent
+  source: Prime Agent
+  capability: Memory hierarchy, long durable runs, recursive spawn ledger
+  home: L5, L0/L1
+  ablation: null
+- id: researchbench-sde
+  source: ResearchBench / SDE
+  capability: Research-judgment evaluation
+  home: Scorecard E
+  ablation: null
+- id: langgraph
+  source: LangGraph
+  capability: Checkpoint, resume, fan-out, interrupts
+  home: L0
+  ablation: null
+- id: vg-audit-2608-05179
+  source: VG audit (2608.05179)
+  capability: Verification ladder, reporting checklist, mechanical vs validated
+  home: Kernel tiers, L2, §6.1
+  ablation: null
+- id: openresearch-alphaxiv
+  source: OpenResearch (alphaXiv)
+  capability: Experiment-tree lifecycle and shape, fixed run contract, per-completion loop, compute backends, PubMed/bioRxiv/full-text retrieval with fixed windows, large-artifact manifest, figure scripts,
+    delegation hygiene, bring-your-coding-agent front-ends
+  home: L4.7, L1, L0, L4.3, L2, §15, gateway
+  ablation: null
