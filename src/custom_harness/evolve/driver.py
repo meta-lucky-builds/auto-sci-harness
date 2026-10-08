@@ -22,6 +22,7 @@ from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
+from .branches import BranchConfig
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 from .multiplicity import check_campaign, runs_per_task_bound
@@ -52,7 +53,7 @@ def load_suite(path: Path) -> list[SuiteTask]:
 def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, backends: dict[str, Backend],
            proposer: Backend, store: EvidenceStore, sandbox_factory: SandboxFactory,
            cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
-           campaign_budget: Budget | None = None) -> HarnessSpec:
+           campaign_budget: Budget | None = None, branching: BranchConfig | None = None) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
     claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py)."""
     cfg = cfg or EvolveConfig()
@@ -68,7 +69,8 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     for g in range(generations):
         t0 = time.time()
         try:
-            res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg)
+            res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg,
+                                    branching=branching)
         except BudgetExceeded as e:
             log(json.dumps({"generation": g, "stopped": f"campaign budget exhausted: {e}"}))
             break
