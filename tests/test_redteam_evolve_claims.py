@@ -2,8 +2,9 @@
 (export.screen_digest).
 
 Each test carries an attack out (and asserts it reached the code path under attack), then asserts it is refused or
-harmless. Attacks that succeed on code outside claims.py / diagnosis.py / export.screen_digest are marked
-xfail(strict=True) with the reason, so the suite stays green and turns red the day they are fixed (to remove the mark).
+harmless. Three attacks first succeeded outside the red-team's files (a citation or false claimed path dropped by the
+prediction screen went unchecked; a gate run filed under an evolve task id reached the prompt); they were fixed in
+loop.py (UNVERIFIABLE_IF_DROPPED), propose.diagnose and export_evidence (the run record's own task id is checked).
 
 Deterministic: hand-built traces and table-driven evaluators, no model call.
 """
@@ -137,10 +138,6 @@ def test_an_id_from_an_earlier_generation_resolves_only_if_this_digest_has_it(st
 _FORGED_LONG = "run_" + "f" * 60 + "#1"  # a REF-shaped forgery longer than the screen's 64-char evidence limit
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "FINDING (loop.py/edits.py, outside the red-team's files): edits.screen_prediction silently drops evidence items "
-    "> 64 chars, items after the 20th and failure_clusters_fixed items that are not C<n>/D<n>; the loop runs "
-    "check_claims on the SCREENED edit, so a forged citation the screen drops never rejects the edit"))
 @pytest.mark.parametrize("attack", ["long", "21st", "cluster_text"])
 def test_a_forged_citation_dropped_by_the_screen_still_rejects_the_edit(store, tmp_path, attack):
     item = {"long": _item(evidence=["C0", _FORGED_LONG]),
@@ -152,10 +149,6 @@ def test_a_forged_citation_dropped_by_the_screen_still_rejects_the_edit(store, t
     assert rec["status"] == "rejected_claims", (rec["status"], rec["claims_check"])
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "FINDING (edits.py, outside the red-team's files): screen_prediction drops claimed_change paths > 200 chars and "
-    "after the 32nd; a dropped FALSE claim then passes the claimed-diff check (the edits.py comment says a dropped "
-    "path 'fails the claimed-diff check, never passes it': true only for dropped REAL paths)"))
 @pytest.mark.parametrize("attack", ["long", "33rd"])
 def test_a_false_claimed_path_dropped_by_the_screen_still_rejects_the_edit(store, tmp_path, attack):
     real = "/nodes/run/params/max_fixes"
@@ -402,10 +395,6 @@ class SmuggleTable(TraceTable):
 GATE_MARK = "gate_only_output_key"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "FINDING (propose.diagnose / export.export_evidence trust RunOutcome.task_id; the run record's own task id is "
-    "never checked): a gate run filed in the evaluator cache under an evolve task id is used as a divergence "
-    "reference and its run id reaches the proposer's prompt. Needs a buggy/compromised Evaluator to happen"))
 def test_a_gate_run_smuggled_under_an_evolve_task_id_never_reaches_the_prompt(store, tmp_path):
     parent = seed_spec()
     tasks = _tasks(tmp_path)

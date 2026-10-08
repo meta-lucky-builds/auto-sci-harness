@@ -186,6 +186,8 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         split = by_id[o.task_id].split
         if split != "evolve":
             excluded[split] += 1
+        elif o.run_id and _record_task(store, o.run_id) != o.task_id:  # the run record says another task: untrusted
+            excluded["task_mismatch"] += 1
         elif o.run_id not in exported:
             exported[o.run_id] = o
     tmp = out_dir.parent / f".{out_dir.name}.partial-{secrets.token_hex(4)}"
@@ -205,6 +207,13 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         raise
     _make_read_only(out_dir)
     return ExportResult(out_dir, len([r for r in exported if r]), dict(excluded), files)
+
+
+def _record_task(store: EvidenceStore, run_id: str) -> str | None:
+    try:
+        return store.get_run(run_id).task_id
+    except KeyError:
+        return None
 
 
 def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], evolve_ids: set[str]) -> list[str]:

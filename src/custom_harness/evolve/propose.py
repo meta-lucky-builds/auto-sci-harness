@@ -35,11 +35,10 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
     Without it the caller vouches that every run is of an evolve-split task."""
     n_split = 0
     if evolve_ids is not None:
-        refs_in = list(references or [])
-        n_split = (sum(o.task_id not in evolve_ids for o in outcomes)
-                   + sum(o.task_id not in evolve_ids for o in refs_in))
-        outcomes = [o for o in outcomes if o.task_id in evolve_ids]
-        references = [o for o in refs_in if o.task_id in evolve_ids]
+        refs_in, outcomes_in = list(references or []), list(outcomes)
+        outcomes = [o for o in outcomes if _evolve_run(o, evolve_ids, store)]
+        references = [o for o in refs_in if _evolve_run(o, evolve_ids, store)]
+        n_split = len(refs_in) + len(outcomes_in) - len(outcomes) - len(references)
     n_infra = sum(o.infra_failed for o in outcomes)
     outcomes = [o for o in outcomes if not o.infra_failed]
     clusters: Counter[str] = Counter()
@@ -71,6 +70,19 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
         "clusters": [{"id": cid, "signature": sig, "count": clusters[sig], "examples": examples[sig]}
                      for cid, sig in named.items()],
     }
+
+
+def _evolve_run(o: RunOutcome, evolve_ids: set[str], store: EvidenceStore) -> bool:
+    """An evolve-split run: its outcome's task AND its run record's own task are evolve tasks (an outcome filed under
+    the wrong task id, e.g. a gate run in an evaluator cache slot of an evolve task, is not trusted)."""
+    if o.task_id not in evolve_ids:
+        return False
+    if not o.run_id:
+        return True  # no run record: nothing of the run can be read
+    try:
+        return store.get_run(o.run_id).task_id == o.task_id
+    except KeyError:
+        return False
 
 
 EDIT_SCHEMA = {

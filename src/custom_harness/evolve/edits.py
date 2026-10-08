@@ -522,7 +522,8 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
     clusters = [c for c in edit.predicted.failure_clusters_fixed if _CLUSTER_ID.match(c)]
     risk = [t for t in edit.predicted.tasks_at_risk if t in known]
     evidence = [e for e in edit.evidence if len(e) <= 64][:20]
-    # claimed paths: bounded like evidence (a dropped path then fails the claimed-diff check, never passes it)
+    # claimed paths: bounded like evidence. A dropped path is noted; the loop rejects an edit whose citations or
+    # claimed paths were dropped (loop.UNVERIFIABLE_IF_DROPPED), since a dropped FALSE claim could not be checked
     claimed = None if edit.claimed_change is None else [p for p in edit.claimed_change if len(p) <= 200][:32]
     rationale = edit.rationale[:max_text_chars]
     delta = edit.predicted.expected_delta

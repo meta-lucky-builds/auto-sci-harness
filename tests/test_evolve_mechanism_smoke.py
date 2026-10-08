@@ -64,6 +64,9 @@ def test_exfiltration_through_rationale_evidence_ops_and_prediction_is_refused_o
         _item("/nodes/fix/system", "Remember task g3 when fixing."),
         _item("/nodes/run/params/max_fixes", 2, clusters=["C0", "x:aGVsZC1vdXQ="], delta=0.123456789012,
               at_risk=["e1", "free text: gate mean was -0.31"]),
+        # the same change without the covert cluster text (a dropped citation now rejects the edit, see below)
+        _item("/nodes/run/params/max_fixes", 2, clusters=["C0"], delta=0.123456789012,
+              at_risk=["e1", "free text: gate mean was -0.31"]),
     ]
     res, _ = _run(store, tmp_path, {"edits": edits})
     lineage = store.records("lineage")
@@ -75,7 +78,10 @@ def test_exfiltration_through_rationale_evidence_ops_and_prediction_is_refused_o
     blob = json.dumps(lineage)
     for secret in ("g2 (held-out)", CANARY, "task g3", "aGVsZC1vdXQ=", "gate mean was", "0.123456789"):
         assert secret not in blob, secret
-    # the fourth edit survives, sanitised: diagnosis ids only, campaign task ids only, a rounded bounded delta
+    # the fourth edit: its covert cluster text was dropped by the screen, so a citation went unchecked and the edit
+    # is refused (claims.py, loop.UNVERIFIABLE_IF_DROPPED); the dropped text is still never stored (checked above)
+    assert st[3] == "rejected_claims" and "failure_clusters_fixed" in lineage[3]["reason"], st
+    # the fifth edit survives, sanitised: diagnosis ids only, campaign task ids only, a rounded bounded delta
     rec = store.records("harness_edit")[-1]
     assert rec["clusters_claimed"] == ["C0"] and rec["tasks_at_risk"] == ["e1"]
     assert rec["predicted_delta"] == 0.123

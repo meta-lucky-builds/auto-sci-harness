@@ -75,6 +75,8 @@ from .selection import (
 REJECTED_STATUSES = ("rejected_static", "rejected_gate", "rejected_smoke")
 # smoke run (GOAL §5 L6.7): run statuses meaning the harness itself broke on the smoke task
 SMOKE_BROKEN = ("failed", "step_limit", "budget_exceeded")
+# screened edit fields whose dropped items are unchecked claims (claims.py): a drop rejects the edit
+UNVERIFIABLE_IF_DROPPED = ("evidence", "failure_clusters_fixed", "claimed_change")
 
 
 @dataclass
@@ -253,6 +255,13 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if sig in rejected_before:
             records.append({"status": "rejected_novelty", **base,
                             "reason": "identical (normalised) to a previously rejected edit"})
+            continue
+        # a citation or claimed path the screen DROPPED (too long, too many, not an id) can never be checked: the edit
+        # is refused rather than judged on what is left (fail closed; the notes quote no proposer text)
+        unverifiable = [n for n in notes if n.split(":")[0] in UNVERIFIABLE_IF_DROPPED and "dropped" in n]
+        if unverifiable:
+            records.append({"status": "rejected_claims", **base,
+                            "reason": "unverifiable claims: " + "; ".join(unverifiable)})
             continue
         try:
             spec = apply_edit(parent, edit, cfg.protected_nodes)
