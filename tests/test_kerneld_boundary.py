@@ -12,12 +12,12 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "custom_harness"
 
-# private vault reads still in-process (old path). research/claims.py belongs to workstream yield: its three reads
-# (confirm: evaluate; audit: leakscan; I4 re-check: kernel) have kerneld equivalents (score / leak_scan / rescore).
-OLD_PATH_PRIVATE_READS = {"research/claims.py": 3}
+# private vault reads still in-process (old path): none. research/claims.py's three reads (confirm: evaluate;
+# audit: leakscan; I4 re-check: kernel) moved behind kerneld (score / leak_scan / rescore) on 2026-10-08.
+OLD_PATH_PRIVATE_READS: dict[str, int] = {}
 # EvidenceStore constructions outside the Kernel process (old path: the CLI opens the store for everything)
 OLD_PATH_STORE_OPENS = {"cli.py": 1}
-COVERED = ["evolve", "runtime/engine.py", "kerneld/client.py"]
+COVERED = ["evolve", "runtime/engine.py", "kerneld/client.py", "research/claims.py"]
 # NOT old-path sites, exempt with a stated reason (2026-10-08): research/preflight.py (GOAL §16.8 zero-call preflight)
 # builds a SCRATCH store in a temporary directory holding only SIMULATED labels it generated itself, and makes one
 # logged read of them so the real K4 sees logged = reported evaluations. It never opens the real store and never reads
