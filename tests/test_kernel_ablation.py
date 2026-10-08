@@ -15,7 +15,7 @@ from kernel_world import World
 
 @pytest.fixture
 def world(tmp_path):
-    w = World(tmp_path / "w", seed=7, n_train=60, n_test=60)
+    w = World(tmp_path / "w", seed=11)  # the world test_scorecard certifies in (CERTIFIED-INTERNAL)
     yield w
     w.close()
 
