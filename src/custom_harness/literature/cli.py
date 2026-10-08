@@ -29,16 +29,21 @@ def add_parsers(sub: Any) -> None:
     ls.add_argument("query", help="';', newlines or ' OR ' split it into subqueries")
     ls.add_argument("--limit", type=int, default=10)
     ls.add_argument("--source", action="append",
-                    choices=["openalex", "crossref", "semanticscholar", "arxiv", "pubmed", "biorxiv"],
+                    choices=["openalex", "crossref", "semanticscholar", "arxiv", "pubmed", "biorxiv", "europepmc"],
                     help="sources in fallback order (default: openalex, crossref, semanticscholar, arxiv)")
     ls.add_argument("--published-from", type=date.fromisoformat, help="publication window start (YYYY-MM-DD)")
     ls.add_argument("--published-to", type=date.fromisoformat, help="window end; never later than --as-of / T")
     ls.add_argument("--session", help="log this result set as retrieval provenance of this session (run id)")
+    ls.add_argument("--full-text", action="store_true",
+                    help="full-text keyword search (Europe PMC open access): records carry text + match snippets")
     _mode_args(ls)
     cc = sub.add_parser("cite-check", help="check citations (JSON list) -> audit I3 verdict; exit 1 unless I3 passes")
     cc.add_argument("file", help='JSON list of {"key", "id", "title", "year", "authors": [...], "quotes": [...]}')
     cc.add_argument("--session", help="session whose logged searches count as retrieval (without it nothing is "
                                       "verified)")
+    cc.add_argument("--full-text", action="store_true",
+                    help="also fetch open-access full text so quotes can be checked against the body, not only "
+                         "the abstract")
     _mode_args(cc)
     fz = sub.add_parser("lit-freeze", help="freeze every recorded literature answer as the snapshot 'as of T'")
     fz.add_argument("--as-of", required=True, type=date.fromisoformat)
@@ -59,11 +64,12 @@ def _store() -> SnapshotStore:
 def _client(a: argparse.Namespace) -> LiteratureClient:
     if a.snapshot and a.live:
         raise SystemExit("choose --snapshot (offline) or --live (network), not both")
+    ft = bool(getattr(a, "full_text", False))
     try:
         if a.snapshot:
-            return offline_client(_store(), a.snapshot, as_of=a.as_of)
+            return offline_client(_store(), a.snapshot, as_of=a.as_of, full_text=ft)
         if a.live:
-            return live_client(_store(), use_cache=not a.no_cache, as_of=a.as_of)
+            return live_client(_store(), use_cache=not a.no_cache, as_of=a.as_of, full_text=ft)
     except (LiteratureError, ValueError) as e:
         raise SystemExit(f"error: {e}") from e
     raise SystemExit("no network access without --live; pass --snapshot <id> to answer offline")
@@ -77,8 +83,9 @@ def cmd_lit_search(a: argparse.Namespace, _store_unused: Any = None) -> int:
     client = _client(a)
     try:
         log = RetrievalLog(_store(), a.session) if a.session else None
-        res = client.search(a.query, limit=a.limit, sources=a.source, published_from=a.published_from,
-                            published_to=a.published_to)
+        run = client.full_text_search if a.full_text else client.search
+        res = run(a.query, limit=a.limit, sources=a.source, published_from=a.published_from,
+                  published_to=a.published_to)
         if log is not None:
             log.record_search(res)
     except (ValueError, LiteratureError) as e:

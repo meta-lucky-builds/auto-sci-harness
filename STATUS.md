@@ -210,6 +210,13 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 | invariant 21: replayed evidence refused | built (K0); the `Provenance.replayed` path is code-read only until yield's records.py merges |
 | Kernel size budget (< 3k non-comment lines) | FAILS: 3,496 lines (`test_kernel_is_small`); owner decision needed |
 
+## OR-derived items (alphaXiv/OpenResearch comparison; branch `or-deleg`, unmerged)
+| Item | Where | State |
+|---|---|---|
+| Delegation driver (GOAL §15 last paragraph) | `src/custom_harness/orchestration/` (library + `python -m custom_harness.orchestration`), `docs/orchestration.md` | verified: `tests/test_orchestration_driver.py` + `_cli.py` (53 passed). Attack tests (nested spawn, over-budget/unauthorised spend, held branch/worktree, brief missing a field) each check the refusal's ledger entry, and each failed with its check disabled. Caps are UNCALIBRATED (`params.py`). NOT wired: nothing forces the gateway/sandbox to call `spend()` first |
+| Full-text keyword retrieval + snippets (L4.3) | `literature/fulltext.py` (Europe PMC OA), `client.full_text_search`, `RetrievalLoop(full_text=True)`, `--full-text` CLI flags | verified offline only (hand-written fixtures; never run live). The window, as-of for the text, snapshots, provenance and the three-valued check are covered by `tests/test_literature_fulltext.py`. alphaXiv is not used (its terms forbid automated access). Europe PMC endpoint shapes are inferred (its doc pages returned 403) |
+| Quote-span support against full text | `cite.py` + `client.lookup(full_text=True)` | verified offline: body quotes are supported; references never support a quote; a full text dated after T leaves the quote unchecked, never supported |
+
 ---
 
 ## 🔴 Red-team and loophole ledger (everything found so far)
