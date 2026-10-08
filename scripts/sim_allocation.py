@@ -10,7 +10,8 @@ clean environment and with infrastructure outages (an evaluation fails, is retri
 whose retry fails too is EXCLUDED). Reports how many accept/reject decisions differ.
 
 `voi`: the same pipeline with three selectors: the batch race, VOI with the race's spend as its budget in that world
-(`voi_matched`: never more evaluations than the race), and VOI with only its own stopping rule (`voi_stop`).
+(`voi_matched`: never more evaluations than the race), VOI with only its own stopping rule (`voi_stop`), and VOI
+with no stopping rule spending exactly the race's budget (`voi_equal`: allocation quality at equal spend).
 Reports, with Wilson 95% two-sided intervals: the false-accept rate (accepted AND the accepted candidate's true gate
 effect <= 0), the true-accept rate, how often the true best candidate was selected, and race evaluations spent.
 
@@ -166,10 +167,20 @@ def wilson(k: int, n: int, z: float = 1.959964) -> list[float]:
     return [round(max(0.0, c - h), 5), round(min(1.0, c + h), 5)]
 
 
+def mcnemar(b: int, c: int) -> float:
+    """Exact two-sided McNemar (binomial) p-value for discordant counts b, c."""
+    n = b + c
+    if n == 0:
+        return 1.0
+    tail = sum(math.comb(n, i) for i in range(min(b, c) + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
 def cmd_voi(args) -> dict:
-    names = ("race", "voi_matched", "voi_stop")
+    names = ("race", "voi_matched", "voi_stop", "voi_equal")
     acc = {k: {"false_accept": 0, "true_accept": 0, "best_selected": 0, "evals": 0, "null_worlds_fa": 0} for k in names}
-    le_race = {"voi_matched": 0, "voi_stop": 0}
+    le_race = {"voi_matched": 0, "voi_stop": 0, "voi_equal": 0}
+    disc = {k: {"best": [0, 0], "true_accept": [0, 0]} for k in names if k != "race"}  # [voi only, race only]
     null_worlds = 0
     voi_cfg = VoiConfig(stop_frac=args.stop_frac, n_init=args.n_init)
     for seed in range(args.start, args.start + args.worlds):
@@ -180,11 +191,15 @@ def cmd_voi(args) -> dict:
         sel["voi_matched"] = voi_race(w.cands, w.evolve, lambda c, u, w=w: w.score(c, u, True), parent,
                                       rounds=w.rounds, cfg=VoiConfig(stop_frac=args.stop_frac, n_init=args.n_init,
                                                                      max_evals=rr.evaluations))
+        sel["voi_equal"] = voi_race(w.cands, w.evolve, lambda c, u, w=w: w.score(c, u, True), parent,
+                                    rounds=w.rounds, cfg=VoiConfig(stop_frac=0.0, n_init=args.n_init,
+                                                                   max_evals=rr.evaluations))
         sel["voi_stop"] = voi_race(w.cands, w.evolve, lambda c, u, w=w: w.score(c, u, True), parent, rounds=w.rounds,
                                    cfg=voi_cfg)
         best = max(w.cands, key=lambda c: (w.mu_gate[c], -w.cands.index(c)))
         is_null = all(w.mu_gate[c] <= 0 for c in w.cands)
         null_worlds += is_null
+        flags = {}
         for k in names:
             r = sel[k]
             win = r.survivors[0] if r.survivors else None
@@ -195,8 +210,13 @@ def cmd_voi(args) -> dict:
             acc[k]["true_accept"] += a and good
             acc[k]["best_selected"] += win == best
             acc[k]["evals"] += r.evaluations
+            flags[k] = (win == best, a and good)
             if k != "race":
                 le_race[k] += r.evaluations <= rr.evaluations
+        for k in disc:
+            for j, key in enumerate(("best", "true_accept")):
+                disc[k][key][0] += flags[k][j] and not flags["race"][j]
+                disc[k][key][1] += flags["race"][j] and not flags[k][j]
     n = args.worlds
     out: dict = {"worlds": n, "seeds": [args.start, args.start + n - 1], "p_infra": args.p_infra, "null": args.null,
                  "big": args.big,
@@ -211,6 +231,9 @@ def cmd_voi(args) -> dict:
                   "best_selected_rate": a["best_selected"] / n, "mean_race_evals": a["evals"] / n}
         if k != "race":
             out[k]["worlds_with_evals_le_race"] = le_race[k]
+            # paired comparison with the race on the same worlds: discordant counts and the exact two-sided McNemar p
+            out[k]["vs_race_discordant_voi_only_race_only"] = disc[k]
+            out[k]["vs_race_mcnemar_p"] = {key: mcnemar(*v) for key, v in disc[k].items()}
     return out
 
 
