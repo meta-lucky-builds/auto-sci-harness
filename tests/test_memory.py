@@ -321,6 +321,34 @@ def test_exploit_check_verdict_is_explicit():
         PerturbedEvaluatorCheck(lambda e, p: 1.0, min_retained=0.0)  # a check that keeps nothing is no check
 
 
+def test_an_outage_in_the_exploit_check_quarantines_instead_of_rejecting(mw):
+    """GOAL L1 (infra != policy): an exploit evaluator that hits an infrastructure failure (e.g. Docker down while
+    re-running the skill under the perturbed grader) gives no verdict. The entry stays QUARANTINED, unreadable, and is
+    judged again later; until 2026-10-08 the broad `except Exception` turned the outage into a terminal REJECTED."""
+    from custom_harness.errors import InfraError
+
+    down = {"on": True}
+    honest = GainTable({"outage playbook": (0.3, 0.28)})
+
+    def evaluator(entry, perturbed):
+        if down["on"]:
+            raise RuntimeError("perturbed run crashed") from InfraError("docker daemon down", transient=True)
+        return honest(entry, perturbed)
+
+    s = store(mw, exploit_check=PerturbedEvaluatorCheck(evaluator))
+    res = s.submit(P(Kind.PLAYBOOK, "outage playbook", (mw.L1,)), writer="w")
+    assert not res.passed and res.status == Status.QUARANTINED, res
+    with pytest.raises(NotReadable):
+        s.get(res.entry_id, reader="t")
+    down["on"] = False  # the daemon is back: the same entry is judged on its merits
+    again = s.admit(res.entry_id)
+    assert again.passed and again.status == Status.ACTIVE, again
+    # control: a policy failure (the evaluator itself is broken, no infrastructure cause) still rejects for good
+    broken = PerturbedEvaluatorCheck(lambda e, p: (_ for _ in ()).throw(KeyError("no such skill")))
+    bad = store(mw, exploit_check=broken).submit(P(Kind.PLAYBOOK, "broken playbook", (mw.L1,)), writer="w")
+    assert not bad.passed and bad.status == Status.REJECTED
+
+
 # ================================================================ M6 exit: revoking one claim removes every dependent
 def test_m6_revoking_one_claim_removes_every_dependent_entry(mw):
     k = mw.kernel

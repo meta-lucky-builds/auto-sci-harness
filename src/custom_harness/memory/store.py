@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors import InfraError
+from ..errors import infra_cause
 from ..kernel import Certificate, Claim, Kernel, KernelError, Label
 from ..kernel.checks import applicability
 from ..kernel.claim import EvidenceClass, canonical_json
@@ -216,7 +216,11 @@ class MemoryStore:
         entry = st.entries[entry_id]
         try:
             reasons, tier = self._gate(entry, st, secrets)
-        except InfraError as e:  # the environment broke during re-derivation: judge again later, do not reject
+        except Exception as e:
+            # the environment broke (Kernel re-derivation, the exploit evaluator): judge again later, do not reject
+            # (GOAL L1, infra != policy). Anything else propagates as before.
+            if infra_cause(e) is None:
+                raise
             return GateResult(entry_id, False, Status.QUARANTINED, None, (f"infrastructure failure: {e}",))
         if reasons:
             self._set(entry_id, Status.REJECTED, "gate", reasons, tier)
@@ -304,7 +308,9 @@ class MemoryStore:
                     verdict = self.exploit_check.check(entry)
                     if not verdict.passed:
                         reasons += list(verdict.reasons) or ["exploit check failed"]
-                except Exception as e:  # noqa: BLE001  fail closed
+                except Exception as e:  # fail closed
+                    if infra_cause(e) is not None:  # an outage is no verdict: admit() keeps the entry quarantined
+                        raise
                     reasons.append(f"exploit check raised {type(e).__name__}")
         return reasons, tier
 
