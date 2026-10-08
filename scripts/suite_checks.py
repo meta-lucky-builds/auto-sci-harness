@@ -8,8 +8,10 @@ JSON report holds counts, hashes and paths only). Checks:
 1. split isolation (research.suite.check_split_isolation);
 2. host truth scan: every held-out row WITH its label, as a CSV line (the format of every train.csv), and every
    canary, searched line by line in every file under the agent-readable roots (commitment.default_agent_readable_roots,
-   minus the by-design truth location <suites>/<suite>/<task>/private and .git object stores); plus the sealed
-   beacon in every encoding (commitment.secret_leak_scan);
+   minus the by-design truth location <suites>/<suite>/<task>/private and .git object stores); the same rows
+   format-agnostically (numbers normalised to 6 significant digits, any delimiter, JSON-escaped newlines, an index
+   column: see TokenIndex); plus the sealed beacon in every encoding (commitment.secret_leak_scan). The report and
+   the record directory are refused inside an agent-readable root (the report scores attacks against the truth);
 3. COUPLED-PRNG regression: the pre-fix seeded generators from the repo history (tests/fixtures/
    suite_prefix_401c00a.py) regenerate each synthetic task; plus the current generators keyed with every public
    value in the suite (manifest hash, key commitments, task ids). Positive control: the same attack on --old-suite;
@@ -23,10 +25,12 @@ JSON report holds counts, hashes and paths only). Checks:
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import math
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -74,6 +78,69 @@ def heldout_lines(task_dir: Path) -> set[bytes]:
     return out
 
 
+# Format-agnostic form of the same search. A labelled copy need not be a CSV line in the suite's own format: other
+# float formatting (8 decimals, 1e-05), other delimiters (tab, ';', spaces), an index column in front (pandas), or
+# rows embedded in JSON/JSONL text whose newlines are the two characters `\n` (agent transcripts) are all found.
+# Every number is normalised to 6 significant digits; text is cut into segments at newlines (real or escaped),
+# brackets, braces, parentheses and double quotes; a segment is a hit when its numbers CONTAIN a held-out row's
+# features in order with the label immediately after them ("label last", the train.csv order of every suite task)
+# or immediately before them ("label first": reported apart, because an index column equal to the label also
+# matches it). Not found: copies with fewer than 6 significant digits than the suite's own values carry
+# (e.g. 3 decimals), binary formats (.npy, parquet, pickles: files with a NUL byte in their first 8 KiB are not
+# token-scanned), and transformed or split copies.
+_NUM = re.compile(rb"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
+_SEG = re.compile(rb"\r\n|\r|\n|\\r\\n|\\n|\\r|[\[\]{}()\"]")
+
+
+@functools.lru_cache(maxsize=1 << 20)
+def norm_number(tok: bytes) -> str:
+    """One number, normalised to 6 significant digits (`-0` is `0`)."""
+    s = f"{float(tok):.6g}"
+    return "0" if s == "-0" else s
+
+
+def heldout_tuples(task_dir: Path) -> dict[str, set[tuple[str, ...]]]:
+    """Every held-out row as normalised numbers: features then label, and label then features."""
+    xs = _lines(task_dir / "public" / "test_X.csv")[1:]
+    ys = _lines(task_dir / "private" / "test_y.csv")[1:]
+    if len(xs) != len(ys):
+        raise ValueError(f"{task_dir}: test_X and test_y differ in length")
+    last, first = set(), set()
+    for x, y in zip(xs, ys, strict=True):
+        f = tuple(norm_number(v.encode()) for v in x.split(","))
+        lab = (norm_number(y.encode()),)
+        last.add(f + lab)
+        first.add(lab + f)
+    return {"label_last": last, "label_first": first}
+
+
+class TokenIndex:
+    """Normalised needles of every task, looked up by window length."""
+
+    def __init__(self) -> None:
+        self.by_len: dict[int, dict[tuple[str, ...], list[tuple[str, str]]]] = {}
+
+    def add(self, needle: tuple[str, ...], tid: str, form: str) -> None:
+        self.by_len.setdefault(len(needle), {}).setdefault(needle, []).append((tid, form))
+
+    def scan(self, raw: bytes) -> list[tuple[tuple[str, ...], str, str]]:
+        """(needle, task id, form) for every window of a segment of `raw` that equals a needle."""
+        out = []
+        lens = sorted(self.by_len)
+        for seg in _SEG.split(raw):
+            toks = _NUM.findall(seg)
+            if len(toks) < lens[0]:
+                continue
+            vals = [norm_number(t) for t in toks]
+            for n in lens:
+                idx = self.by_len[n]
+                for i in range(len(vals) - n + 1):
+                    hit = idx.get(tuple(vals[i:i + n]))
+                    if hit:
+                        out += [(tuple(vals[i:i + n]), tid, form) for tid, form in hit]
+        return out
+
+
 def _walk(roots: Iterable[Path], skip: list[Path]) -> Iterable[Path]:
     seen: set[Path] = set()
     for r in roots:
@@ -93,19 +160,26 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
     needles: dict[bytes, list[str]] = {}
     canaries: dict[bytes, list[str]] = {}
     n_heldout: dict[str, int] = {}
+    index = TokenIndex()
     for t in tasks:
         d = suite / t["id"]
         lines = heldout_lines(d)
         n_heldout[t["id"]] = len(lines)
         for ln in lines:
             needles.setdefault(ln, []).append(t["id"])
+        for form, tuples in heldout_tuples(d).items():
+            for tup in tuples:
+                index.add(tup, t["id"], form)
         canaries.setdefault((d / "private" / "canary.txt").read_text(encoding="utf-8").strip().encode(),
                             []).append(t["id"])
     skip = [(suite / t["id"] / "private").resolve() for t in tasks]
     hits: dict[str, dict[str, int]] = {t["id"]: {} for t in tasks}
     found: dict[str, set[bytes]] = {t["id"]: set() for t in tasks}
+    agn_files: dict[str, dict[str, dict[str, int]]] = {t["id"]: {"label_last": {}, "label_first": {}} for t in tasks}
+    agn_found: dict[str, dict[str, set[tuple[str, ...]]]] = {t["id"]: {"label_last": set(), "label_first": set()}
+                                                             for t in tasks}
     canary_hits: dict[str, list[str]] = {t["id"]: [] for t in tasks}
-    n_files = skipped_big = unreadable = 0
+    n_files = skipped_big = unreadable = not_token_scanned = 0
     for f in _walk(roots, skip):
         n_files += 1
         try:
@@ -120,6 +194,13 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
             if c in raw:
                 for ctid in ctids:
                     canary_hits[ctid].append(str(f))
+        if b"\x00" in raw[:8192]:
+            not_token_scanned += 1
+        else:
+            for tup, tid, form in index.scan(raw):
+                fh = agn_files[tid][form]
+                fh[str(f)] = fh.get(str(f), 0) + 1
+                agn_found[tid][form].add(tup)
         if b"," not in raw:
             continue
         for ln in raw.splitlines():
@@ -130,13 +211,19 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
     beacon_leaks = secret_leak_scan(beacon.encode(), roots)
     per_task = {}
     for t in tasks:
-        rows = sum(hits[t["id"]].values())
-        per_task[t["id"]] = {"labelled_heldout_lines_found": rows, "distinct_heldout_rows_found": len(found[t["id"]]),
-                             "heldout_rows": n_heldout[t["id"]],
-                             "files": sorted(hits[t["id"]], key=lambda k: -hits[t["id"]][k])[:5],
-                             "n_files": len(hits[t["id"]]), "canary_found_in": canary_hits[t["id"]][:5]}
+        tid = t["id"]
+        rows = sum(hits[tid].values())
+        agn = {form: {"distinct_heldout_rows_found": len(agn_found[tid][form]), "n_files": len(fh),
+                      "files": sorted(fh, key=fh.__getitem__, reverse=True)[:5]}
+               for form, fh in agn_files[tid].items()}
+        per_task[tid] = {"labelled_heldout_lines_found": rows, "distinct_heldout_rows_found": len(found[tid]),
+                         "heldout_rows": n_heldout[tid],
+                         "files": sorted(hits[tid], key=lambda k: -hits[tid][k])[:5],
+                         "n_files": len(hits[tid]), "canary_found_in": canary_hits[tid][:5],
+                         "format_agnostic": agn}
     return {"roots": [str(r) for r in roots], "files_scanned": n_files, "skipped_over_64MB": skipped_big,
-            "unreadable": unreadable, "beacon_leaks": beacon_leaks, "per_task": per_task}
+            "unreadable": unreadable, "not_token_scanned_binary": not_token_scanned, "beacon_leaks": beacon_leaks,
+            "per_task": per_task}
 
 
 # ---------------------------------------------------------------- 3. COUPLED-PRNG regression
@@ -252,7 +339,7 @@ def salts_exam(suite: Path, doc: dict, work: Path, per_arm: int) -> dict[str, An
 
 
 # ---------------------------------------------------------------- main
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("suite")
     ap.add_argument("--record-dir", required=True)
@@ -264,7 +351,15 @@ def main() -> int:
     ap.add_argument("--exam-per-arm", type=int, default=40)
     ap.add_argument("--only", default="isolation,scan,prng,preflight,minted,salts")
     ap.add_argument("--extra-root", action="append", default=[], help="another agent-readable root to scan")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
+    # the report scores attacks against held-out truth (aggregate counts): it belongs with the private record
+    readable = default_agent_readable_roots()
+    for what, p in (("report", Path(a.out)), ("record directory", Path(a.record_dir))):
+        inside = RB._inside(p, readable)
+        if inside is not None:
+            print(f"refused: the {what} {p} is inside agent-readable root {inside}; write it outside every "
+                  f"agent-readable root (e.g. <record-dir>/reports)", file=sys.stderr)
+            return 2
     import custom_harness
 
     log("custom_harness from", custom_harness.__file__)
