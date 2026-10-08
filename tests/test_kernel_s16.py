@@ -507,4 +507,5 @@ def test_ledger_accepts_the_kinds_other_workstreams_append():
     from custom_harness.kernel.ledger import KINDS
 
     assert {"release", "alpha_open", "alpha_reserve", "alpha_retire", "mint", "feature_ruling", "role_exam",
-            "tree_event", "salt_commitment", "salt_reveal", "run_kill", "tier_policy", "verifier_review"} <= KINDS
+            "tree_event", "salt_commitment", "salt_reveal", "run_kill", "tier_policy", "verifier_review",
+            "fork"} <= KINDS

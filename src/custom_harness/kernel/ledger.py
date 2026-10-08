@@ -42,7 +42,8 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "salt_commitment", "salt_reveal",  # §16.9 salt campaigns (salts/plan.py owns the bodies)
                    # L9 HUMAN actions written by the studio CLI (`chh kill`, `chh tier-policy set`)
                    "run_kill", "tier_policy",
-                   "verifier_review"})  # verify/synthesis.py owns the body
+                   "verifier_review",  # verify/synthesis.py owns the body
+                   "fork"})  # runtime/engine.py Engine.fork owns the body
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
