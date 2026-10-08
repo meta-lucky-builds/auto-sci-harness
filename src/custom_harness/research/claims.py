@@ -340,6 +340,8 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                      human_in_the_loop="none (fully automated run)",
                      novelty="not performed: the literature module does not exist yet (GOAL M5)")
     ok, blockers = publishable(cert, checklist)
+    from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
+    memory_rec = after_certify(kernel, state, h, ctx.secrets)
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))
             for e in cert.evidence_ids]
     target = claim.generalization_targets[0]
@@ -371,6 +373,7 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                             "comparator_mean": _mean([r.score for r in recs if r.arm == "comparator"])
                             if recs else None},
             f"{p}checklist": checklist, f"{p}publishable": ok, f"{p}publish_blockers": blockers,
+            f"{p}memory_after_certify": memory_rec,
             **({"replication_brief": brief} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
 
@@ -718,13 +721,30 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
     lines += ["", "## Hypotheses considered (model-written text, quoted; not claims)", ""]
     for hyp in _hypotheses(state):
         lines.append(f"> `{_inline(hyp.get('id'), 80)}`: {_inline(hyp.get('idea'))}")
+    lines += [""] + _tree_lines(state, ctx)
     return "\n".join(lines) + "\n"
+
+
+def _tree_lines(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
+    """GOAL L4.7: the experiment tree's shape diagnostics and selection record, read from the tree's stored log (so
+    the audit's re-render checks them against the log, not against evolvable state)."""
+    if not state.get("tree_id"):
+        return ["## Experiment tree", "", "No candidate ran: no experiment tree.", ""]
+    from .tree import ExperimentTree
+    return ExperimentTree.load(ctx.kernel().store, state["tree_id"]).report_lines()
 
 
 @register("research.report")
 def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
+    tree: dict[str, Any] = {}
+    if state.get("tree_id"):  # log the shape diagnostics (a `report` event) before rendering them
+        from .tree import ExperimentTree
+        t = ExperimentTree.load(ctx.kernel().store, state["tree_id"])
+        rep = t.report()
+        tree = {"tree_report": {"shape": rep["shape"], "selection": rep["selection"], "head": rep["head"]},
+                "tree_seq": t.seq}
     text = render_report(state, ctx)
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode())}
+    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree}
 
 
 # ------------------------------------------------------------------ audit

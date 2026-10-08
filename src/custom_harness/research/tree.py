@@ -30,8 +30,8 @@ Storage: the log is an append-only, hash-chained event list in the evidence stor
 reordered or deleted record is detected (`TreeTampered`). The records table is used until workstream kstats adds a
 Kernel ledger kind for tree events (requested in the build16 mailbox); this is NOT the Kernel ledger.
 
-Not done here: wiring into the research loop's modules (research/modules.py, owned by workstream yield) and into the
-rendered run report (research/claims.py `render_report`, also yield's). `report_lines()` is the text to include.
+Wired into the research loop by research/modules.py (`run_candidate`, `next_hypothesis`, `ensemble`) and into the
+run report by research/claims.py (`report` logs `report()`, `render_report` includes `report_lines()`).
 """
 
 from __future__ import annotations
@@ -210,6 +210,7 @@ class ExperimentTree:
         self.store, self.id = store, tree_id
         self.contract: RunContract | None = None
         self.metric, self.higher_is_better, self.labels_sha = "", True, ""
+        self.max_repairs = MAX_REPAIRS
         self.nodes: dict[str, _Node] = {}
         self.rounds: dict[str, _Round] = {}
         self.root: str | None = None
@@ -220,13 +221,15 @@ class ExperimentTree:
     @classmethod
     def create(cls, store: Any, tree_id: str, contract: RunContract, *, root_code: bytes | str,
                root_config: dict[str, Any], metric: str, higher_is_better: bool,
-               dev_labels: list[str]) -> ExperimentTree:
+               dev_labels: list[str], max_repairs: int = MAX_REPAIRS) -> ExperimentTree:
+        """`max_repairs` is the ONE repair cap of the tree (research_v1/v2 pass their `run` node's `max_fixes`);
+        it is fixed in the create event, so a replay applies the same cap."""
         if store.records_where(RECORD_KIND, "tree", tree_id):
             raise TreeRefusal(Code.BAD_EVENT, f"tree {tree_id!r} already exists")
         t = cls(store, tree_id)
         t._commit({"op": "create", "contract": contract.to_json(), "root_code_hash": code_hash(root_code),
                    "root_config": root_config, "metric": metric, "higher_is_better": higher_is_better,
-                   "labels_sha": _sha(list(dev_labels))})
+                   "labels_sha": _sha(list(dev_labels)), "max_repairs": int(max_repairs)})
         return t
 
     @classmethod
@@ -292,7 +295,7 @@ class ExperimentTree:
         op = ev.get("op")
         handler = {"create": self._op_create, "open_round": self._op_open_round, "add_option": self._op_add_option,
                    "edit": self._op_edit, "attempt": self._op_attempt, "confirm": self._op_confirm,
-                   "report": self._op_report}.get(str(op))
+                   "report": self._op_report, "abandon": self._op_abandon}.get(str(op))
         if handler is None:
             raise TreeRefusal(Code.BAD_EVENT, f"unknown event {op!r}")
         if op != "create" and self.contract is None:
@@ -308,6 +311,10 @@ class ExperimentTree:
         self.contract = RunContract.from_json(ev["contract"])
         self.metric, self.higher_is_better, self.labels_sha = ev["metric"], bool(ev["higher_is_better"]), \
             ev["labels_sha"]
+        mr = ev.get("max_repairs", MAX_REPAIRS)  # logs written before the field existed used the module default
+        if isinstance(mr, bool) or not isinstance(mr, int) or mr < 0:
+            raise TreeRefusal(Code.BAD_EVENT, f"max_repairs must be a non-negative integer, not {mr!r}")
+        self.max_repairs = mr
         self.root = "root"
         self.nodes["root"] = _Node("root", None, None, ev["root_code_hash"], dict(ev["root_config"]))
         return {"node": "root"}
@@ -357,8 +364,8 @@ class ExperimentTree:
                 raise TreeRefusal(Code.REPAIR_UNLEDGERED, f"{n.id} has run; an edit must be a repair citing its "
                                                           f"last, unrepaired implementation failure "
                                                           f"(attempt {last.idx}: {last.outcome})")
-            if n.repairs >= MAX_REPAIRS:  # unreachable: a failure with no repair left abandons the node
-                raise TreeRefusal(Code.REPAIR_CAP, f"{n.id} used its {MAX_REPAIRS} repairs")
+            if n.repairs >= self.max_repairs:  # unreachable: a failure with no repair left abandons the node
+                raise TreeRefusal(Code.REPAIR_CAP, f"{n.id} used its {self.max_repairs} repairs")
             n.repairs += 1
             n.repaired.add(last.idx)
         elif ev.get("repair_of") is not None:
@@ -404,10 +411,23 @@ class ExperimentTree:
                 n.status, n.content_hash = "answered", _sha(_content(n, a))
                 if ev.get("content_hash") not in (None, n.content_hash):  # replay: the logged freeze must match
                     raise TreeRefusal(Code.BAD_EVENT, f"{n.id}: logged content hash does not match")
-            elif n.repairs >= MAX_REPAIRS:
+            elif n.repairs >= self.max_repairs:
                 n.status = "abandoned"
         return {"node": n.id, "attempt": a.idx, "status": n.status, "content_hash": n.content_hash,
                 "_log": {"content_hash": n.content_hash} if n.content_hash and purpose == "answer" else {}}
+
+    def _op_abandon(self, ev: dict[str, Any]) -> dict[str, Any]:
+        """The loop gives up on a provisional node (no repair attempted, or it moved on): ledgered, terminal. An
+        answered node cannot be abandoned (its result stays on the record and in every racing comparison)."""
+        n = self._node(ev["node"])
+        if n.status == "answered":
+            raise TreeRefusal(Code.NODE_IMMUTABLE, f"{n.id} was answered; an answered node is never withdrawn")
+        if n.status == "abandoned":
+            raise TreeRefusal(Code.NODE_ABANDONED, f"{n.id} is already abandoned")
+        if not str(ev.get("reason", "")).strip():
+            raise TreeRefusal(Code.BAD_EVENT, "an abandonment states its reason")
+        n.status = "abandoned"
+        return {"node": n.id}
 
     def _ok_preds(self, n: _Node, purpose: str) -> list[str]:
         return [str(a.preds_ref) for a in n.attempts if a.purpose == purpose and a.outcome == "ok"]
@@ -431,7 +451,14 @@ class ExperimentTree:
         labels = self.store.blobs.get_json(ev["labels_ref"])["tree_dev_labels"]
         if _sha(list(labels)) != self.labels_sha:
             raise TreeRefusal(Code.PROMOTION_REFUSED, "these are not the dev labels the tree was created with")
-        rivals = [self.nodes[o] for o in rnd.options if o != w.id and self.nodes[o].status == "answered"]
+        answered = [self.nodes[o] for o in rnd.options if o != w.id and self.nodes[o].status == "answered"]
+        # A rival whose answering run made EXACTLY the winner's dev predictions is the same behaviour, not a rival:
+        # no candidate can beat its own predictions under dev racing, so such a twin would block every round. The
+        # twin is excluded from racing and listed in the selection record; any rival that differs on one row races.
+        w_answer = self.store.blobs.get_json(self._ok_preds(w, "answer")[0])
+        duplicates = [rv.id for rv in answered
+                      if self.store.blobs.get_json(self._ok_preds(rv, "answer")[0]) == w_answer]
+        rivals = [rv for rv in answered if rv.id not in duplicates]
         parent = self.nodes[rnd.parent]
         racer = default_racer(self.metric, self.higher_is_better)  # fixed, so a replay recomputes the same verdict
         losses: list[str] = []
@@ -444,7 +471,7 @@ class ExperimentTree:
             raise TreeRefusal(Code.PROMOTION_REFUSED, f"{w.id} does not beat every rival and the parent under dev "
                                                       f"racing on its answer and every re-measure: {losses}")
         rnd.winner = w.id
-        return {"round": rnd.id, "winner": w.id, "selection": self.selection_record(rnd.id)}
+        return {"round": rnd.id, "winner": w.id, "duplicates": duplicates, "selection": self.selection_record(rnd.id)}
 
     def _op_report(self, ev: dict[str, Any]) -> dict[str, Any]:
         if ev.get("shape") != self.shape():
@@ -482,6 +509,9 @@ class ExperimentTree:
         round's parent). The dev labels are stored as a private blob so a replay recomputes the verdict."""
         ref = self.store.blobs.put_json({"tree_dev_labels": list(dev_labels)})
         return self._commit({"op": "confirm", "round": round_id, "winner": winner, "labels_ref": ref})
+
+    def abandon(self, node_id: str, reason: str) -> None:
+        self._commit({"op": "abandon", "node": node_id, "reason": reason})
 
     def node(self, node_id: str) -> NodeView:
         n = self._node(node_id)
@@ -539,7 +569,7 @@ class ExperimentTree:
         return {"tree": self.id, "head": self.head, "shape": shape, "selection": self.selection_record()}
 
     def report_lines(self) -> list[str]:
-        """Markdown lines for the run report (research.claims.render_report, owned by yield, is not wired yet)."""
+        """Markdown lines for the run report (included by research.claims.render_report)."""
         s, sel = self.shape(), self.selection_record()
         flags = [name for name, on in (("flat fan", s["flat_fan"]), ("noodle", s["noodle"])) if on]
         return ["## Experiment tree", "",
@@ -552,8 +582,9 @@ class ExperimentTree:
 
 def _snapshot(t: ExperimentTree) -> Any:
     import copy
-    return copy.deepcopy((t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root))
+    return copy.deepcopy((t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root,
+                          t.max_repairs))
 
 
 def _restore(t: ExperimentTree, s: Any) -> None:
-    t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root = s
+    t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root, t.max_repairs = s

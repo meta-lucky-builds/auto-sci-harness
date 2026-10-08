@@ -53,6 +53,8 @@ class ModuleContext:
     budget: Budget
     sandbox: Sandbox | None
     spent: Cost = field(default_factory=lambda: _cost())
+    # the run's `_private*` values and their encodings (set by the engine): for content screens only (memory)
+    secrets: tuple[str, ...] = ()
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     _store: Any = field(init=False, repr=False, default=None)
 

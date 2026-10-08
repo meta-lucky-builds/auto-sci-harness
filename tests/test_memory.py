@@ -593,7 +593,9 @@ def test_memory_package_has_no_model_path_and_only_trusted_code_writes():
     r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "PYTHONPATH": str(SRC)},
                        capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stdout + r.stderr
-    allowed = {"cli.py"}
+    # research/memory_wiring.py: the research loop's reader (recall into the hypothesize prompt) and its trusted
+    # writer (harvest_negatives + record_outcome after certify); research/claims.py only calls it after certify
+    allowed = {"cli.py", "research/memory_wiring.py", "research/claims.py"}
     importers = []
     for p in (SRC / "custom_harness").rglob("*.py"):
         rel = p.relative_to(SRC / "custom_harness").as_posix()
