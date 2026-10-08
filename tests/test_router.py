@@ -20,6 +20,7 @@ from custom_harness.evolve.branches import (
     BranchConfig,
     BranchRefused,
     cluster_note,
+    lofo_note,
     propose_branch,
 )
 from custom_harness.evolve.finalize import FinalizeRefused, finalize
@@ -128,9 +129,15 @@ def test_a_cluster_winner_that_does_not_win_globally_becomes_a_branch(store, tmp
                                    "targets": sorted(tid(f"gB{i}") for i in range(3)),
                                    "note": cluster_note(ra["branch_id"], "B")}
     # every tested cluster bit is a ledgered verdict-bit release on each target its runs read (2 branches x 2 x 3)
+    # plus each branch's leave-one-family-out bit on every held-out family's target (A and B are both held out
+    # here: 2 branches x 6 targets; invariant 16, branches.py)
     rel = released(store)
-    assert len(rel) == 12 and {(b["channel"], b["alphabet"]) for b in rel} == {("evolution_score", "verdict_bit")}
-    assert {b["note"] for b in rel} == {cluster_note(r["branch_id"], c) for r in (ra, rb) for c in "AB"}
+    assert len(rel) == 12 + 12 and {(b["channel"], b["alphabet"]) for b in rel} == {("evolution_score",
+                                                                                     "verdict_bit")}
+    assert {b["note"] for b in rel} == ({cluster_note(r["branch_id"], c) for r in (ra, rb) for c in "AB"}
+                                        | {lofo_note(r["branch_id"]) for r in (ra, rb)})
+    assert ra["lofo"] == {"passed": True, "targets": sorted(tid(f"g{f}{i}") for f in "AB" for i in range(3)),
+                          "note": lofo_note(ra["branch_id"])}
     # aggregate only: the stored record holds counts and a timestamp, never a mean, CI bound or score
     for rec in store.records(BRANCH_KIND):
         assert {p for p, _ in _numbers(rec)} <= {".at", ".clusters.A.n_tasks", ".clusters.B.n_tasks"}

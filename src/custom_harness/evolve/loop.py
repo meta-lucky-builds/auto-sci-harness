@@ -494,7 +494,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 accepted_spec, accepted = spec, True
             elif branching is not None and rejected_on in ("evolve", "held_out_gate"):
                 branch = propose_branch(parent, spec, tasks, seeds=cfg.seeds, outcome=evaluator.outcome,
-                                        store=store, releases=rel, globally_accepted=False, cfg=branching)
+                                        store=store, releases=rel, globally_accepted=False, cfg=branching,
+                                        lofo_eps=cfg.non_regression_eps)
     for r in records:
         store.append_record("lineage", {"parent": parent_hash, **r})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),

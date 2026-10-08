@@ -5,6 +5,8 @@ Building (`build_router`):
   1. reads the `branch` records of the CURRENT trunk (branches made against an older trunk compared against a
      harness that is no longer the default: stale, ignored) and re-checks each against the whitelist
      (branches.check_record);
+  1b. refuses a record whose routed harness has no passing leave-one-family/domain-out bit, re-checked against the
+     release ledger like the cluster bits (invariant 16: routing never bypasses LOFO/LODO; branches.py);
   2. re-checks every tested cluster bit against the release ledger: each of its targets must carry a release with
      the record's note, channel `evolution_score`, alphabet `verdict_bit` (kerneld/releases.released). A bit the
      ledger does not account for is refused (RouteRefused), never silently dropped;
@@ -153,6 +155,12 @@ def verified_bits(store: EvidenceStore, trunk_hash: str, cluster_key: str) -> di
             raise RouteRefused(f"branch record {str(rec.get('branch_id'))[:40]!r} refused: {err}") from None
         if rec["cluster_key"] != cluster_key:
             raise RouteRefused("branch records on this trunk use different cluster keys")
+        # invariant 16: the routed harness's leave-one-family/domain-out bit must be a ledgered, passing release
+        lofo = rec["lofo"]
+        missing = [t for t in lofo["targets"] if not _ledgered(store, t, lofo["note"])]
+        if missing:
+            raise RouteRefused(f"branch {rec['branch_id']}: LOFO/LODO bit not in the release ledger for "
+                               f"{len(missing)} target(s) (fail closed)")
         for c, e in rec["clusters"].items():
             if not e["tested"]:
                 continue
