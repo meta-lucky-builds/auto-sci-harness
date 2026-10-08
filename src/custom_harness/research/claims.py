@@ -346,6 +346,11 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                      human_in_the_loop="none (fully automated run)",
                      novelty="not performed: the literature module does not exist yet (GOAL M5)")
     ok, blockers = publishable(cert, checklist)
+    if not p:  # GOAL L4.8 (deny-only): kept critic questions without an answer citing checked evidence block publishing
+        from .critic_answers import critic_gate  # recomputed from the trace, never from run state
+        critic_ok, why = critic_gate(ctx)
+        if not critic_ok:
+            ok, blockers = False, [*blockers, why]
     from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
     memory_rec = after_certify(kernel, state, h, ctx.secrets)
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +55,10 @@ class ModuleContext:
     spent: Cost = field(default_factory=lambda: _cost())
     # the run's `_private*` values and their encodings (set by the engine): for content screens only (memory)
     secrets: tuple[str, ...] = ()
+    # provenance of every handle the engine archived in a prompt of this run (set by the engine; read-only view):
+    # handle digest -> held-out targets of that prompt (empty = not target-derived). A missing handle has UNKNOWN
+    # provenance (research/evidence_refs.py refuses it). In-memory per engine: empty after a resume.
+    archive_taint: Mapping[str, frozenset[str]] = field(default_factory=dict)
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     _store: Any = field(init=False, repr=False, default=None)
 

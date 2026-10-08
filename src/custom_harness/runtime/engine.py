@@ -31,6 +31,7 @@ import socket
 import sys
 import time
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 import jsonschema
@@ -227,6 +228,10 @@ class Engine:
         self.release_alphabet: dict[str, str] = {}
         self.releases: Any = None  # None = live releases on the store's ledger
         self._prompt_taint: dict[int, set[str]] = {}
+        # provenance of archived handles (paged recall / critic citations refuse unknown or target-derived ones): a
+        # handle archived while rendering a prompt that rendered any tainted key carries all of that prompt's targets
+        # (conservative). In-memory per engine, like `taint`.
+        self.archive_taint: dict[str, frozenset[str]] = {}
 
     # ------------------------------------------------------------------ public
     def run(self, task_id: str, inputs: dict[str, Any], seed: int = 0) -> RunResult:
@@ -578,7 +583,8 @@ class Engine:
             # the run's private values (and their encodings) go to modules as `secrets`, so content screens that
             # modules apply (e.g. the L5 memory screen) refuse them; they are never module-visible state otherwise
             mctx = ModuleContext(run_id=run_id, store=self.store, backends=self.backends,
-                                 budget=self.budget, sandbox=self.sandbox, secrets=tuple(_private_values(state)))
+                                 budget=self.budget, sandbox=self.sandbox, secrets=tuple(_private_values(state)),
+                                 archive_taint=MappingProxyType(self.archive_taint))
             try:
                 updates = fn(state, node.params, mctx)
             except Exception as e:
@@ -610,12 +616,14 @@ class Engine:
         if backend is None:
             raise ValueError(f"no backend bound to role '{node.role}'")
         node_id = next((k for k, v in self.spec.nodes.items() if v is node), "llm")
-        self._prompt_taint[id(node)] = self._release_rendered(node_id, [node.system or "", node.prompt], state)
+        targets = self._release_rendered(node_id, [node.system or "", node.prompt], state)
+        self._prompt_taint[id(node)] = targets
         archived: list[str] = []  # handles of values truncated in the prompt (full text kept as blobs)
 
         def archive(text: str) -> str:
             digest = self.store.blobs.put(text.encode())
             archived.append(digest)
+            self.archive_taint[digest] = self.archive_taint.get(digest, frozenset()) | frozenset(targets)
             return digest
 
         messages = []

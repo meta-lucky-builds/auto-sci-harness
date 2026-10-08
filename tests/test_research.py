@@ -1,6 +1,7 @@
 """End-to-end research loop with a scripted (mock) LLM and trusted, stdlib-only solution code."""
 
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -97,8 +98,19 @@ def rings_task(tmp_path):
     return out
 
 
+def critic_answers(text):
+    """research_v1/v2 `defend` node (GOAL L4.8): answer every kept critic question, citing the first evidence id of
+    the code-built catalog shown in the prompt (research/critic_answers.py checks the citations)."""
+    qids = sorted(set(re.findall(r'"id": "(q\d+)"', text)), key=lambda q: int(q[1:]))
+    step = re.search(r'"id": "(step:\d+)"', text).group(1)
+    return json.dumps({"answers": [{"question": q, "answer": "The code-computed data profile bears on this.",
+                                    "evidence": [step]} for q in qids]})
+
+
 def scripted_llm(req):
     text = req.messages[-1].content
+    if "Answer every critic question" in text:
+        return critic_answers(text)
     if "Propose 5 DISTINCT hypotheses" in text:
         return json.dumps({"hypotheses": [
             {"id": "h_radius", "idea": "kNN on radial feature", "rationale": "classes are rings"},
