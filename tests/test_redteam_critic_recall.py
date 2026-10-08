@@ -624,9 +624,18 @@ def test_rt_critic_step_of_another_run_is_refused(store):
 
 # FIXED on b-research (was a strict-xfail red-team finding)
 def test_rt_critic_the_socratic_step_is_model_output_not_evidence(store):
-    res = _crun(store, _cspec(DEFAULT), _q1_bad_q2_good(
-        lambda t: {"question": "q1", "answer": "The critic asked it.", "evidence": [_cat(t, "socratic")]}))
-    assert _qs(res)["q1"]["codes"] == ["not_evidence"], _qs(res)
+    """The socratic filter only relays the critic's model text: it is not in the catalog, and not citable."""
+    seen = {}
+
+    def bad(t):
+        seen["prompt"] = t
+        return {"question": "q1", "answer": "The critic asked it.", "evidence": ["step:2"]}
+    res = _crun(store, _cspec(DEFAULT), _q1_bad_q2_good(bad))
+    assert '"node": "socratic"' not in seen["prompt"]
+    assert _qs(res)["q1"]["status"] == "rejected" and res.state["gate"]["ok"] is False
+    trace = store.trace(res.run_id)
+    soc = next(st for st in trace if st.node_id == "socratic")
+    assert R.vet_step(soc, before_index=99, private_reads=R.private_read_windows(store)).code == "not_evidence"
 
 
 def test_rt_critic_catalog_id_only_in_the_archived_middle_is_not_visible(store):
@@ -744,10 +753,24 @@ def test_rt_critic_gate_refuses_a_switched_off_critic_filter(store):
 
 # FIXED on b-research (was a strict-xfail red-team finding)
 def test_rt_critic_a_step_copying_target_derived_state_is_not_citable(store):
+    """Every step after a private read of this run is hidden (run_private_reads), including a module that copies the
+    target-derived value into a fresh, engine-untainted key."""
     order = ["held", "copy_held", "facts", "critic", "socratic", "critic_evidence", "defend", "check_answers", "gate"]
-    res = _crun(store, _cspec(order), _q1_bad_q2_good(
-        lambda t: {"question": "q1", "answer": "a", "evidence": [_cat(t, "copy_held")]}))
-    assert _qs(res)["q1"]["codes"] == ["target_derived"], _qs(res)
+    seen = {}
+
+    def answers(t):
+        seen["prompt"] = t
+        return {"answers": [{"question": q, "answer": "a", "evidence": ["step:1"]} for q in ("q1", "q2")]}
+    res = _crun(store, _cspec(order), answers)
+    assert '"node": "copy_held"' not in seen["prompt"] and '"node": "facts"' not in seen["prompt"]
+    assert {c for q in _qs(res).values() for c in q["codes"]} == {"not_visible"}
+    assert res.state["gate"]["ok"] is False
+    trace = store.trace(res.run_id)
+    copy = next(st for st in trace if st.node_id == "copy_held")
+    reads = R.private_read_windows(store)
+    assert R.vet_step(copy, before_index=99, private_reads=reads).ok  # the old rule let it through...
+    run_reads = R.run_private_reads(store, trace, res.run_id)
+    assert R.vet_step(copy, before_index=99, private_reads=reads, run_reads=run_reads).code == "hidden"  # ...now hidden
 
 
 def test_rt_critic_rendered_prompt_ignores_assistant_first_and_tool_messages():

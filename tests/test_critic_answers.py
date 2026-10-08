@@ -189,13 +189,16 @@ def test_hidden_steps_are_not_in_the_catalog_and_not_citable(store):
                             {"question": "q2", "answer": "b", "evidence": ["step:1"]}]}  # the private reader
     res, _ = _run(store, spec, answers)
     assert '"node": "private"' not in seen["prompt"] and '"node": "held"' not in seen["prompt"]
-    assert '"node": "facts"' in seen["prompt"]
+    # facts ran AFTER this run's private read: possibly target-derived (run_private_reads), so hidden too
+    assert '"node": "facts"' not in seen["prompt"] and "Catalog: []" in seen["prompt"]
     assert {c for q in _by_q(res).values() for c in q["codes"]} == {"not_visible"}
     trace = store.trace(res.run_id)
     reads = R.private_read_windows(store)
     assert R.vet_step(trace[0], before_index=99, private_reads=reads).code == "hidden"
     assert R.vet_step(trace[1], before_index=99, private_reads=reads).code == "hidden"
-    assert R.vet_step(trace[2], before_index=99, private_reads=reads).ok  # facts
+    assert R.vet_step(trace[2], before_index=99, private_reads=reads).ok  # facts: no read while it ran...
+    run_reads = R.run_private_reads(store, trace, res.run_id)
+    assert R.vet_step(trace[2], before_index=99, private_reads=reads, run_reads=run_reads).code == "hidden"
     critic_step = next(s for s in trace if s.node_id == "critic")
     assert R.vet_step(critic_step, before_index=99, private_reads=reads).code == "not_evidence"  # model output
     assert R.vet_step(trace[2], before_index=2, private_reads=reads).code == "unresolvable"  # not before the answer
@@ -318,7 +321,7 @@ def test_research_v1_claim_with_uncited_critic_answers_is_certified_but_not_publ
     assert s["critic_answers"]["status"] == "fail"
     assert [q["status"] for q in s["critic_answers"]["questions"]] == ["rejected", "missing"]
     assert s["publishable"] is False
-    assert any(b.startswith("critic (GOAL L4.8): 2 of 2 question(s)") for b in s["publish_blockers"]), \
+    assert any(b.startswith("critic (GOAL L4.8): round 1: 2 of 2 question(s)") for b in s["publish_blockers"]), \
         s["publish_blockers"]
     assert s["audit"]["passed"], s["audit"]
 
