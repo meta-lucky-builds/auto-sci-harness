@@ -220,6 +220,13 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 | Family-separated critic | `ph2-proposer` | interface + same-family refusal only; advisory, no repair loop. Needs owner: a second model family (invariant 5 NOT MET) |
 | Real campaign | — | not started |
 
+## M8 scorecard framework + M7 time-split builder (branch `g-scorecard`, unmerged; offline fixtures only)
+| Item | Where | State |
+|---|---|---|
+| Pinned-benchmark registry, baseline re-run runner, as-reported labelling, ablation runner, paired seeded-bootstrap comparison | `src/custom_harness/scorecard/` (`registry.py`, `runner.py`), `docs/scorecard.md` | verified on fixtures: `tests/test_scorecard.py` (10 passed). `benchmarks.yaml` is EMPTY: every real benchmark needs a download (needs owner). `capabilities.yaml` lists the 37 GOAL §9 rows, none with an ablation switch, so coverage (invariant 12) is reported FAILED, not hidden |
+| Axes F/G/H from the store, scorecard bundle, `chh scorecard build` / `check` | `scorecard/facts.py`, `axes.py`, `bundle.py`, `cli.py` | verified on fixtures: every number carries resolving refs; a planted claim without evidence fails axis F; tampering with the bundle or the store makes `check` fail. Axes A–E not measured (no benchmarks); G has no baseline to compare |
+| Time-split prediction benchmark (freeze at T via the literature `freeze`, windows, resolution, per-window VDS/calibration, contamination probes, prior-art (novelty) weighted subset, seed-vs-evolved compare) | `src/custom_harness/timesplit/`, `chh timesplit compare`, `docs/timesplit.md` | verified on fixtures: `tests/test_timesplit.py` (14 passed). Real run needs owner: post-cutoff data, model budget, a live memorisation probe |
+
 ---
 
 ## 🔴 Red-team and loophole ledger (everything found so far)
