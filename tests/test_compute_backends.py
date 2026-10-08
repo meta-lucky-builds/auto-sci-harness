@@ -77,6 +77,13 @@ def test_isolation_class_is_derived_from_the_backend_settings(store, tmp_path):
     assert SSHBackend(store, tmp_path, host="gpu-box").isolation_class is IsolationClass.TRUSTED_ONLY
 
 
+def _approved_trusted(store, backend, code: bytes, **kw) -> RunRequest:
+    """Trusted code on a non-isolated backend: the request plus its recorded human approval (GOAL L0)."""
+    req = _req(store, code, origin=CodeOrigin.TRUSTED, **kw)
+    record_non_isolated_approval(store, approver="alice", backend=backend.name, request=req)
+    return req
+
+
 def test_default_origin_is_agent(store):
     assert _req(store, b"print(1)").origin is CodeOrigin.AGENT
 
@@ -88,7 +95,8 @@ def test_attack_agent_code_submitted_to_a_non_isolated_backend_is_refused(store,
     marker = tmp_path / "host_marker.txt"
     code = _attack_code(marker)
     # the payload is real: run as trusted code on the host backend, it does reach the host
-    LocalProcessBackend(store, tmp_path / "control").run(_req(store, code, origin=CodeOrigin.TRUSTED))
+    control = LocalProcessBackend(store, tmp_path / "control")
+    control.run(_approved_trusted(store, control, code))
     assert marker.read_text() == "escaped", "the attack payload does not work: the test would prove nothing"
     marker.unlink()
     backend = make(store, tmp_path / "runs")
@@ -125,13 +133,38 @@ def test_full_image_never_runs_agent_code_even_with_an_approval(store, tmp_path)
     with pytest.raises(IsolationRefused, match="invariant 2"):
         backend.run(req)
     assert FakeContainer.made == []
-    assert backend.run(_req(store, b"print(1)", origin=CodeOrigin.TRUSTED)).result.returncode == 0
+    assert backend.run(_approved_trusted(store, backend, b"print(1)")).result.returncode == 0
 
 
-def test_a_recorded_human_approval_binds_exactly_one_request(store, tmp_path):
+@pytest.mark.parametrize("make", [lambda s, p: SSHBackend(s, p, host="gpu-box"),
+                                  lambda s, p: LocalProcessBackend(s, p),
+                                  lambda s, p: DockerBackend(s, p, network=True, sandbox_maker=FakeContainer)])
+def test_attack_agent_code_on_a_non_isolated_backend_is_refused_even_with_an_approval(store, tmp_path, make):
+    """GOAL L0 (clarified 2026-10-08): agent-written code is never allowed on a non-isolated backend, with or without
+    approval (invariant 1 wins). A recorded human approval of exactly this request does not admit it."""
+    marker = tmp_path / "host_marker.txt"
+    backend = make(store, tmp_path / "runs")
+    req = _req(store, _attack_code(marker))
+    seq = record_non_isolated_approval(store, approver="alice", backend=backend.name, request=req)
+    assert find_approval(store, req.item_hash(backend.name)) == seq  # the approval really is on the ledger
+    with pytest.raises(IsolationRefused, match="never runs on a non-isolated backend"):
+        backend.run(req)
+    assert not marker.exists() and FakeContainer.made == []
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir()), "materialised before admission"
+
+
+def test_trusted_code_on_an_isolated_backend_needs_no_approval(store, tmp_path):
+    backend = DockerBackend(store, tmp_path / "runs", sandbox_maker=FakeContainer)
+    res = backend.run(_req(store, b"print(1)", origin=CodeOrigin.TRUSTED, cmd=("python", "solution.py")))
+    assert res.isolation_class is IsolationClass.ISOLATED and res.approval_seq is None
+
+
+def test_a_recorded_human_approval_binds_exactly_one_trusted_request(store, tmp_path):
+    """Trusted code on a non-isolated backend needs a recorded human approval of exactly that request."""
     backend = LocalProcessBackend(store, tmp_path / "runs")
-    req = _req(store, b"print('approved')")
-    other = _req(store, b"print('approved')", cmd=(sys.executable, "solution.py", "--extra"))
+    req = _req(store, b"print('approved')", origin=CodeOrigin.TRUSTED)
+    other = _req(store, b"print('approved')", origin=CodeOrigin.TRUSTED,
+                 cmd=(sys.executable, "solution.py", "--extra"))
     with pytest.raises(IsolationRefused):
         backend.run(req)
     seq = record_non_isolated_approval(store, approver="alice", backend=backend.name, request=req, note="one-off")
@@ -148,13 +181,10 @@ def test_a_recorded_human_approval_binds_exactly_one_request(store, tmp_path):
 
 def test_ssh_backend_is_declared_but_never_connects(store, tmp_path):
     backend = SSHBackend(store, tmp_path / "runs", host="gpu-box")
-    trusted = _req(store, b"print(1)", origin=CodeOrigin.TRUSTED)
-    with pytest.raises(RemoteNotBuilt):
-        backend.run(trusted)
-    req = _req(store, b"print(1)")
-    record_non_isolated_approval(store, approver="alice", backend=backend.name, request=req)
+    with pytest.raises(IsolationRefused):  # trusted code without an approval is not even admitted
+        backend.run(_req(store, b"print(1)", origin=CodeOrigin.TRUSTED))
     with pytest.raises(RemoteNotBuilt):  # admitted, but there is no remote execution path
-        backend.run(req)
+        backend.run(_approved_trusted(store, backend, b"print(1)"))
 
 
 # ---------------------------------------------------------------- recorded revisions, never live trees
@@ -181,8 +211,10 @@ def test_the_run_executes_the_recorded_revision_not_the_live_tree_after_it_chang
     rev = Revision.record_tree(live, store.blobs)
     (live / "pkg" / "__init__.py").write_text("v = 'edited after recording'")
     (live / "planted.txt").write_text("not part of the revision")
-    res = LocalProcessBackend(store, tmp_path / "runs").run(
-        RunRequest(rev, (sys.executable, "solution.py"), origin=CodeOrigin.TRUSTED))
+    backend = LocalProcessBackend(store, tmp_path / "runs")
+    req = RunRequest(rev, (sys.executable, "solution.py"), origin=CodeOrigin.TRUSTED)
+    record_non_isolated_approval(store, approver="alice", backend=backend.name, request=req)
+    res = backend.run(req)
     assert res.result.stdout.strip() == "recorded"
     assert res.run_dir.resolve() != live.resolve() and not (res.run_dir / "planted.txt").exists()
 

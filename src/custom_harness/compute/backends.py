@@ -7,7 +7,7 @@ asserted by the caller.
   outright (invariant 2).
 - LocalProcessBackend: the test-only LocalSandbox. Always TRUSTED_ONLY.
 - SSHBackend: a DECLARED stub for a plain SSH host. Always TRUSTED_ONLY; its execution path is not built and it
-  never opens a connection (RemoteNotBuilt), so even an approved request does not run.
+  never opens a connection (RemoteNotBuilt), so even an approved trusted request does not run.
 """
 
 from __future__ import annotations

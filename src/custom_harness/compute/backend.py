@@ -3,8 +3,9 @@
 Every backend declares an ISOLATION CLASS, derived from the isolation properties it actually provides. Only a backend
 whose properties meet invariant 1 (container, no secrets, a network policy of "off" or an allowlist, read-only root
 filesystem, non-root user) is ISOLATED and may run agent-written code. Any other backend (a plain SSH host, a local
-process, a container with full network) is TRUSTED_ONLY: it runs trusted code, or agent code only with a recorded
-human approval bound to exactly that request (ledger kind "approval", node_id NON_ISOLATED_NODE).
+process, a container with full network) is TRUSTED_ONLY: it runs trusted code only, and only with a recorded human
+approval bound to exactly that request (ledger kind "approval", node_id NON_ISOLATED_NODE). Agent-written code never
+runs on a TRUSTED_ONLY backend, with or without an approval (GOAL L0, clarified 2026-10-08: invariant 1 wins).
 
 Every run executes a RECORDED revision (a blob or a workspace snapshot in the content-addressed store), materialised
 into a new directory of its own; a run can never be pointed at a live working tree (GOAL §5 L0 "Sandbox &
@@ -43,7 +44,7 @@ _SECRET_NAME = re.compile(r"(?i)(key|token|secret|passw|credential|auth|cookie|s
 
 class IsolationClass(StrEnum):
     ISOLATED = "isolated"  # meets invariant 1: may run agent-written code
-    TRUSTED_ONLY = "trusted_only"  # trusted code only, or agent code with a recorded human approval
+    TRUSTED_ONLY = "trusted_only"  # trusted code only, with a recorded human approval; agent code never
 
 
 class CodeOrigin(StrEnum):
@@ -52,8 +53,8 @@ class CodeOrigin(StrEnum):
 
 
 class IsolationRefused(PermissionError):
-    """The request may not run on this backend (agent code on a non-isolated backend without approval, or a
-    secret-looking variable for agent code)."""
+    """The request may not run on this backend (agent code on a non-isolated backend, trusted code there without a
+    recorded human approval, or a secret-looking variable for agent code)."""
 
 
 class LiveTreeRefused(TypeError):
@@ -178,13 +179,14 @@ class RunResult:
     backend: str
     isolation_class: IsolationClass
     origin: CodeOrigin
-    approval_seq: int | None  # ledger seq of the human approval, when agent code ran on a non-isolated backend
+    approval_seq: int | None  # ledger seq of the human approval, when trusted code ran on a non-isolated backend
     environment: dict[str, str]
 
 
 def record_non_isolated_approval(store: EvidenceStore, *, approver: str, backend: str, request: RunRequest,
                                  note: str = "") -> int:
-    """HUMAN action: approve exactly this request on this non-isolated backend. Returns the ledger seq."""
+    """HUMAN action: approve exactly this TRUSTED-code request on this non-isolated backend. Returns the ledger seq.
+    Recording an approval for agent code is allowed (it is only a ledger entry) but never admits it (see admit)."""
     if not approver.strip():
         raise ValueError("an approval must name a human approver")
     h = request.item_hash(backend)
@@ -226,7 +228,14 @@ class ComputeBackend(ABC):
         if not isinstance(request.origin, CodeOrigin):
             raise IsolationRefused(f"unknown code origin {request.origin!r}")
         if request.origin is CodeOrigin.TRUSTED:
-            return None
+            if self.isolation_class is IsolationClass.ISOLATED:
+                return None
+            seq = find_approval(self.store, request.item_hash(self.name))
+            if seq is None:
+                raise IsolationRefused(
+                    f"backend {self.name!r} is {self.isolation_class.value}: trusted code runs there only with a "
+                    f"recorded human approval of exactly this request (item {request.item_hash(self.name)})")
+            return seq
         if not self.isolation.hidden_data_free:
             raise IsolationRefused(f"backend {self.name!r} holds hidden data in its environment (invariant 2): agent "
                                    "code never runs there, approved or not")
@@ -235,13 +244,10 @@ class ComputeBackend(ABC):
             raise IsolationRefused(f"agent code never receives credentials: refusing variables {secret}")
         if self.isolation_class is IsolationClass.ISOLATED:
             return None
-        seq = find_approval(self.store, request.item_hash(self.name))
-        if seq is None:
-            raise IsolationRefused(
-                f"backend {self.name!r} is {self.isolation_class.value} (does not meet invariant 1: "
-                f"{', '.join(self.isolation.unmet())}); agent-written code runs only on an isolated backend, or "
-                f"with a recorded human approval of exactly this request (item {request.item_hash(self.name)})")
-        return seq
+        raise IsolationRefused(
+            f"backend {self.name!r} is {self.isolation_class.value} (does not meet invariant 1: "
+            f"{', '.join(self.isolation.unmet())}); agent-written code never runs on a non-isolated backend, with or "
+            f"without a human approval (GOAL L0)")
 
     def run(self, request: RunRequest) -> RunResult:
         seq = self.admit(request)  # before anything is touched
