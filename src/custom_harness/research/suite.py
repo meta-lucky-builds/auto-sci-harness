@@ -102,6 +102,11 @@ def _fill(template: str, target: str, model: str = "") -> str:
     return template.replace("__TARGET__", repr(target)).replace("__MODEL__", model)
 
 
+# task origins (GOAL §16.10). A suite entry without `origin` is human (suites written before the field existed).
+ORIGINS = ("human", "generated")
+GENERATED_SPLITS = ("evolve",)  # the only split a generated task may sit in
+
+
 @dataclass(frozen=True)
 class TaskSpecFiles:
     task_id: str
@@ -118,6 +123,13 @@ class TaskSpecFiles:
     # the base dataset the rows were drawn from; tasks re-split from the same data share examples (a repair task
     # and its real-data task), so they must share a split. None = generated independently (the task id).
     source: str | None = None
+    # who made the task (GOAL §16.10 emergence rule): "human" (curated; any split) or "generated" (a self-generated
+    # task family; EVOLVE split only, never gate, sealed or a held-out family: the system must not write its own exam)
+    origin: str = "human"
+
+    def __post_init__(self) -> None:
+        if self.origin not in ORIGINS:
+            raise ValueError(f"task {self.task_id}: unknown origin {self.origin!r} (expected one of {ORIGINS})")
 
     @property
     def data_source(self) -> str:
@@ -351,14 +363,31 @@ def assign_splits(specs: list[TaskSpecFiles], heldout_families: tuple[str, ...] 
     family so every split mixes families. Then every task takes the split of the first task drawn from the same base
     dataset (held-out tasks first, so their datasets stay in gate), so examples shared by re-splits of one dataset can
     never sit in two splits (a gate/sealed label would be public elsewhere). Fails closed (ValueError) on no or an
-    unknown held-out family, or an empty split."""
-    families = {s.family for s in specs}
+    unknown held-out family, or an empty split.
+
+    Generated tasks (origin "generated", GOAL §16.10) all go to evolve and take no part in the human assignment
+    above, so adding or removing them never moves a human task. Fails closed on an unknown origin, on a held-out
+    family that has a generated task (a held-out family must be human-curated), and on a generated task that shares
+    a base dataset with a human task (one of them would have to leave its split, or the human task's held-out
+    examples would be public in evolve)."""
+    bad_origin = sorted(s.task_id for s in specs if s.origin not in ORIGINS)
+    if bad_origin:
+        raise ValueError(f"task(s) with an unknown origin: {bad_origin}")
+    generated = [s for s in specs if s.origin == "generated"]
+    human = [s for s in specs if s.origin != "generated"]
+    gen_held = sorted({s.family for s in generated} & set(heldout_families))
+    if gen_held:
+        raise ValueError(f"held-out families with a generated task: {gen_held} (held-out families are human-curated)")
+    shared = sorted({s.data_source for s in generated} & {s.data_source for s in human})
+    if shared:
+        raise ValueError(f"base dataset(s) {shared} shared by a generated and a human task")
+    families = {s.family for s in human}
     if not heldout_families:
         raise ValueError("no held-out family requested (the leave-one-family-out gate needs one)")
     unknown = sorted(set(heldout_families) - families)
     if unknown:
         raise ValueError(f"held-out families with no task: {unknown}")
-    ordered = sorted(specs, key=lambda t: (t.family, t.task_id))
+    ordered = sorted(human, key=lambda t: (t.family, t.task_id))
     held = [s for s in ordered if s.family in heldout_families]
     rest = [s for s in ordered if s.family not in heldout_families]
     proposed = {s.task_id: "gate" for s in held} | {s.task_id: _PATTERN[i % len(_PATTERN)] for i, s in enumerate(rest)}
@@ -366,6 +395,7 @@ def assign_splits(specs: list[TaskSpecFiles], heldout_families: tuple[str, ...] 
     for s in held + rest:
         first.setdefault(s.data_source, proposed[s.task_id])
     splits = {s.task_id: first[s.data_source] for s in ordered}
+    splits |= {s.task_id: "evolve" for s in generated}
     empty = sorted({"evolve", "gate", "sealed"} - set(splits.values()))
     if empty:
         raise ValueError(f"split(s) {empty} would be empty")
@@ -392,8 +422,16 @@ def _example_rows(task_dir: Path) -> set[str]:
 def check_split_isolation(entries: list[dict]) -> list[str]:
     """Problems that would let one split see another split's examples: a missing source, a source spread over
     several splits, or (by content, whatever the declared sources say) an example row present in tasks of two
-    different splits. Compares public files only; exact text match, so re-formatted copies are not detected."""
+    different splits. Compares public files only; exact text match, so re-formatted copies are not detected.
+    Also (GOAL §16.10): an unknown `origin`, or a generated task outside the evolve split. No `origin` = human."""
     problems = [f"task {e.get('id')} has no `source` (base dataset)" for e in entries if not e.get("source")]
+    for e in entries:
+        origin = e.get("origin", "human")
+        if origin not in ORIGINS:
+            problems.append(f"task {e.get('id')} has an unknown origin {origin!r} (expected one of {ORIGINS})")
+        elif origin == "generated" and e.get("split") not in GENERATED_SPLITS:
+            problems.append(f"generated task {e.get('id')} is in split {e.get('split')!r}: generated tasks may "
+                            f"only be in {GENERATED_SPLITS} (GOAL §16.10)")
     by_source: dict[str, set[str]] = {}
     for e in entries:
         if e.get("source"):
@@ -429,7 +467,7 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None,
     for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
         d = write_task(s, out, canary=canaries[s.data_source])
         entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
-                        "family": s.family, "domain": "ml", "source": s.data_source,
+                        "family": s.family, "domain": "ml", "source": s.data_source, "origin": s.origin,
                         **({"defect": s.defect} if s.defect else {})})
     problems = check_split_isolation(entries)
     if problems:  # fail closed: never write a suite whose splits leak into each other
