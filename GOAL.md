@@ -3,8 +3,8 @@
 Date: 2026-10-06; scope revised 2026-10-07 (user decision: life sciences + engineering, core/adapter split, §4.7,
 §5 "Domain adapters", §11, §15). Owner: user (product decisions) · Claude (design + build).
 **This is the single source of truth for WHAT custom-harness is and when it is done.**
-(State: M0 ✅, M1 ✅, M2 built with exit test pending; markers in §5/§11 reflect it, details and verification state in
-`STATUS.md`.)
+(State: see `STATUS.md`, which is the only place that records build state, rewritten 2026-10-08. The ✅/🟡/❌
+markers in §5/§11 are historical (2026-10-07 morning) and are no longer maintained here.)
 `PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
 
 Inputs this file is built on (read them only if a detail is needed):
@@ -248,7 +248,8 @@ and the attestation is listed as an untested assumption on every such certificat
 ## 5. Component specifications
 
 Each component lists **Must** (requirements), **Never** (invariants), **Done when** (acceptance test), and the sources
-it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as of 2026-10-06, after M0; proofs in STATUS.md.)
+it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing: HISTORICAL markers as of 2026-10-06/07, no longer
+updated; many ❌ items have since been built. Current state and proofs: STATUS.md.)
 
 ### L0 Substrate
 **Runtime** (🟡) — typed `HarnessSpec` (JSON Schema) interpreted as a graph.
