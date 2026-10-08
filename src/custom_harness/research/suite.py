@@ -527,16 +527,35 @@ def check_split_isolation(entries: list[dict]) -> list[str]:
     return problems
 
 
+def dataset_hash(data: dict) -> str:
+    """SHA-256 of one exported real dataset (canonical JSON of its columns, X and y): its provenance commitment."""
+    return hashlib.sha256(json.dumps({k: data[k] for k in ("columns", "X", "y")}, sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def canary_for(master: bytes, source: str) -> str:
+    """The canary of one base dataset: keyed under the master key, so a rebuild with the same key is byte-identical
+    and the canary is as unguessable as the key (it is never a constant and never derivable without the key)."""
+    return "CHH-CANARY-" + subkey(master, "canary:" + source).hex()[:32]
+
+
 def build_suite(out: Path, *, real_data: dict[str, dict] | None,
-                heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES, key: bytes | None = None) -> Path:
+                heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES, key: bytes | None = None,
+                generator_extra: dict[str, Any] | None = None) -> Path:
     """Write every task and suite.yaml. real_data=None builds the synthetic families only. Every task is in domain
     `ml`; `heldout_families` are held out of evolution (see assign_splits). `key`: the master key every task's data
-    are derived from (None: fresh OS entropy, so no rebuild ever reproduces the data). It is never written; suite.yaml
-    records only its SHA-256 commitment. Tasks are built before any freeze, so none is `minted`; the fixed public
-    datasets (real + repair) are `retrospective_target`s (GOAL §16.2)."""
+    (and canary) are derived from (None: fresh OS entropy, so no rebuild ever reproduces the data); the same key
+    always writes byte-identical task files. It is never written; suite.yaml records only SHA-256 commitments of it
+    and of each task key, each task's generator and the image agent code runs in (the candidate image, GOAL §16.1).
+    Tasks built by this function directly are not `minted` (research/rebuild.py mints a whole suite after its
+    manifest is anchored); the fixed public datasets (real + repair) are `retrospective_target`s (GOAL §16.2).
+    `generator_extra`: more provenance for suite.yaml's generator block (never secret material)."""
+    from ..sandbox.docker import CANDIDATE_IMAGE
+
     out = Path(out)
     master = _key(key)
     specs = [gen(seed, n, key=task_key(master, gen(seed, 1, key=master).task_id)) for gen, seed, n in SYNTHETIC]
+    rows = {gen(seed, 1, key=master).task_id: n for gen, seed, n in SYNTHETIC}
     if real_data is not None:
         specs += [real_task(name, real_data[name], key=task_key(master, name)) for name in REAL]
         for tid, (name, model, defect) in REPAIRS.items():
@@ -545,19 +564,31 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None,
             specs.append(real_task(name, real_data[name], key=task_key(master, name), task_id=tid, defect=defect,
                                    baseline=_fill(_SK, "target", model)))
     splits = assign_splits(specs, heldout_families)
-    canaries = {src: "CHH-CANARY-" + secrets.token_hex(16) for src in {s.data_source for s in specs}}
+    canaries = {src: canary_for(master, src) for src in {s.data_source for s in specs}}
+
+    def provenance(s: TaskSpecFiles) -> dict[str, Any]:
+        extra: dict[str, Any]
+        if s.retrospective_target and real_data is not None:
+            gen = (f"repair:{s.task_id}" if s.defect else "real") + f":{REAL[s.data_source][0]}"
+            kid, extra = s.data_source, {"dataset_sha256": dataset_hash(real_data[s.data_source])}
+        else:
+            gen, kid, extra = f"synthetic:{s.family}", s.task_id, {"rows": rows[s.task_id]}
+        return {"generator": gen, "generator_version": GENERATOR_VERSION,
+                "key_commitment": hashlib.sha256(task_key(master, kid)).hexdigest(), **extra}
+
     entries = []
     for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
         d = write_task(s, out, canary=canaries[s.data_source])
         entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
                         "family": s.family, "domain": "ml", "source": s.data_source, "origin": s.origin,
                         "retrospective_target": s.retrospective_target, "minted": False,
-                        **({"defect": s.defect} if s.defect else {})})
+                        **({"defect": s.defect} if s.defect else {}),
+                        "image": CANDIDATE_IMAGE, "provenance": provenance(s)})
     problems = check_split_isolation(entries)
     if problems:  # fail closed: never write a suite whose splits leak into each other
         raise ValueError("suite splits are not isolated: " + "; ".join(problems))
     generator = {"version": GENERATOR_VERSION, "key_commitment": hashlib.sha256(master).hexdigest(),
-                 "key_source": "caller" if key is not None else "os_entropy"}
+                 "key_source": "caller" if key is not None else "os_entropy", **(generator_extra or {})}
     (out / "suite.yaml").write_text(yaml.safe_dump({"generator": generator, "tasks": entries}, sort_keys=False),
                                     encoding="utf-8")
     return out / "suite.yaml"

@@ -8,6 +8,12 @@ dist/
 .chh-data/
 *.sqlite
 *.db
+# labelled task data and suite-build secrets (they live in CHH_DATA_DIR; docs/suite_rebuild.md): never committed
+**/private/test_y.csv
+**/private/canary.txt
+**/private/mint.json
+real_export.json
+_export/
 # secrets
 .env
 github repo/
