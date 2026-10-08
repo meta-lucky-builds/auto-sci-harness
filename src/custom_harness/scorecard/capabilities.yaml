@@ -1,8 +1,13 @@
-# Claimed capabilities (GOAL §9 coverage contract, transcribed row by row) and the ablation switch of each
-# (GOAL §2.1, invariant 12: every claimed capability has code, a test and an ablation).
-# `ablation: null` = no switch that turns the capability off exists yet. The scorecard reports every such row as an
-# invariant-12 gap; it never drops a row. Set `ablation` to the name of a switch the system under test understands
-# (passed to System.run as `disabled`) once one is wired, then record an ablation run (`scorecard.runner.run_ablation`).
+# Claimed capabilities (GOAL §9 coverage contract, transcribed row by row) and the ablation record of each
+# (GOAL §2.1, invariant 12: every claimed capability has code, a test and an ablation). docs/ablation.md is the table.
+# `ablation` is exactly one of:
+#   {switch: NAME}                       a real switch in the closed registry custom_harness.ablation.SWITCHES (with
+#                                        its code path and its test); `not_covered: {part: reason}` lists any part of
+#                                        the row the switch does NOT turn off (then the row is a partial switch: a gap)
+#   {not_ablatable: "exact reason"}      no switch: not built, or an integrity mechanism (never switched off in
+#                                        production; measured only inside the evaluation harness)
+# The scorecard counts a row as switched only for a full, registered, tested switch, and as ablated only once an
+# ablation run (`scorecard.runner.run_ablation`) is recorded and compared; every other row is an invariant-12 gap.
 capabilities:
 - id: meta-harness
   source: Meta-Harness
