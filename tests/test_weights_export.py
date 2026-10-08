@@ -20,6 +20,7 @@ from custom_harness.weights.goodhart import GapPoint, goodhart_indicator
 from custom_harness.weights.licence import LicenceConfigError, LicencePolicy
 from custom_harness.weights.selection import select_by_reward_variance
 from custom_harness.weights.trajectory import (
+    DeclaredPair,
     Step,
     Trajectory,
     Verdict,
@@ -256,6 +257,47 @@ def test_parameters_are_marked_uncalibrated():
     import inspect
     src = inspect.getsource(C)
     for name in ("SFT_OUTCOMES", "EXPORT_TIER_FLOOR", "GOODHART_WINDOW", "GOODHART_MIN_POINTS", "GOODHART_SLOPE_ALARM",
+                 "GOODHART_JUMP_ALARM",
                  "VARIANCE_MIN_ROLLOUTS", "VARIANCE_MIN"):
         line = next(ln for ln in src.splitlines() if ln.startswith(f"{name} = "))
         assert "# UNCALIBRATED (owner decision, GOAL §13.8)" in line, name
+
+
+# ------------------------------------------------------------------ review findings
+def test_hand_built_pair_is_revalidated():
+    one = VerifierSet("A", (VerifierRef("v1", H["1"], Tier.T1_EXECUTABLE),))
+    two = VerifierSet("B", (VerifierRef("v1", H["1"], Tier.T1_EXECUTABLE),))
+    with pytest.raises(ExportRefused) as e:
+        DeclaredPair(one, two)  # the attack: skip declare_disjoint and pair a set with its copy
+    assert e.value.code == "SETS_OVERLAP"
+
+
+def test_adapter_hash_with_trailing_newline_is_refused():
+    with pytest.raises(ExportRefused) as e:
+        VerifierRef("unit_tests", H["1"] + "\n", Tier.T1_EXECUTABLE)
+    assert e.value.code == "SET_INVALID"
+
+
+def test_set_members_cannot_change_after_declaration():
+    members = [VerifierRef("sealed-replay", H["3"], Tier.T1_EXECUTABLE)]
+    b = VerifierSet("B", members)  # type: ignore[arg-type]
+    pair = declare_disjoint(SET_A, b)
+    members.append(SET_A.members[0])  # the attack: mutate B after it was declared disjoint
+    assert isinstance(pair.b.members, tuple) and [m.id for m in pair.b.members] == ["sealed-replay"]
+
+
+def test_goodhart_indicator_fires_on_a_late_jump():
+    pts = [GapPoint(t, 0.6 + (0.4 if t == 5 else 0.0), 0.6) for t in range(6)]
+    assert pts[-1].a_score - pts[-1].sealed_score == pytest.approx(0.4)  # the planted jump at the newest point
+    rep = goodhart_indicator(pts)
+    assert rep.status == "alarm" and rep.jump == pytest.approx(0.4)
+
+
+def test_indicator_and_selection_parameters_fail_closed():
+    pts = [GapPoint(t, 0.5, 0.5) for t in range(6)]
+    for kw in ({"min_points": 1}, {"window": 0}, {"window": 1}):
+        with pytest.raises(ValueError):
+            goodhart_indicator(pts, **kw)
+    for kw in ({"min_rollouts": 0}, {"k": -1}):
+        with pytest.raises(ValueError):
+            select_by_reward_variance({"x": []}, **kw)

@@ -178,6 +178,7 @@ def _round_with_loser(t: ExperimentTree, *, loser_errors: int, loser_offset: int
     t.record(lo, ok("mlp", errors=loser_errors, seed=0, offset=loser_offset))
     t.record(w, ok("gbm", errors=0, seed=1), purpose="remeasure")
     t.confirm(r, w, LABELS)
+    t.record(lo, ok("mlp", errors=loser_errors, seed=1, offset=loser_offset), purpose="remeasure")
     return r, w, lo
 
 
@@ -339,6 +340,7 @@ def test_revived_dead_end_keeps_its_stage_in_the_curriculum(st):
     lo = t.add_option(r, "arch", "arch-b", {})
     t.record(w, ok("arch-a", errors=0, seed=0))
     t.record(lo, ok("arch-b", errors=4, seed=0, offset=36))
+    t.record(lo, ok("arch-b", errors=4, seed=1, offset=36), purpose="remeasure")
     t.record(w, ok("arch-a", errors=0, seed=1), purpose="remeasure")
     t.confirm(r, w, LABELS)
     t.revive(lo, LABELS)
@@ -394,6 +396,56 @@ def test_checkout_refuses_a_restore_that_is_not_byte_exact(st, tmp_path, monkeyp
 def test_new_parameters_are_marked_uncalibrated():
     import inspect
     src = inspect.getsource(T)
-    for name in ("REVIVE_THETA", "REVIVE_N_BOOT"):
+    for name in ("REVIVE_THETA", "REVIVE_N_BOOT"):  # REVIVE_SEED is a fixed seed, not a policy value
         line = next(ln for ln in src.splitlines() if ln.startswith(f"{name} = "))
         assert "# UNCALIBRATED (owner decision, GOAL §13.8)" in line, name
+
+
+def test_revival_refused_in_an_undecided_round_or_without_a_remeasure(st):
+    """Review finding: a lucky answer must not skip the winner's-curse re-measure or jump an undecided round."""
+    t = new_tree(st)
+    r = t.open_round("root", "model family")
+    lucky = t.add_option(r, "model family", "mlp", {})
+    other = t.add_option(r, "model family", "gbm", {})  # still provisional: the round is undecided
+    t.record(lucky, ok("mlp", errors=0, seed=0))
+    assert t.p_improvement(lucky, LABELS) > T.REVIVE_THETA  # the attack: its single run looks excellent
+    t.record(lucky, ok("mlp", errors=0, seed=1), purpose="remeasure")
+    with pytest.raises(TreeRefusal) as e:
+        t.revive(lucky, LABELS)
+    assert e.value.code is Code.REVIVAL_REFUSED and "undecided" in str(e.value)
+    t.record(other, ok("gbm", errors=6, seed=0))
+    t.record(other, ok("gbm", errors=6, seed=1), purpose="remeasure")
+    t.confirm(r, lucky, LABELS)  # lucky wins; now `other` is a dead-end of a decided round
+    t2 = new_tree(st, tree_id="t2")
+    r2 = t2.open_round("root", "model family")
+    w = t2.add_option(r2, "model family", "gbm", {})
+    lo = t2.add_option(r2, "model family", "mlp", {})
+    t2.record(w, ok("gbm", errors=0, seed=0))
+    t2.record(lo, ok("mlp", errors=8, seed=0, offset=30))
+    t2.record(w, ok("gbm", errors=0, seed=1), purpose="remeasure")
+    t2.confirm(r2, w, LABELS)
+    assert t2.p_improvement(lo, LABELS) > T.REVIVE_THETA  # good evidence, but from ONE run
+    with pytest.raises(TreeRefusal) as e:
+        t2.revive(lo, LABELS)
+    assert e.value.code is Code.REVIVAL_REFUSED and "re-measure" in str(e.value)
+    assert [x["code"] for x in refused(t2)] == ["REVIVAL_REFUSED"]
+
+
+def test_revive_with_a_malformed_labels_ref_is_refused_and_logged(st):
+    t = new_tree(st)
+    _, _, lo = _round_with_loser(t, loser_errors=8, loser_offset=30)
+    for ref in (st.blobs.put_json({"not_labels": []}), "0" * 64):
+        with pytest.raises(TreeRefusal) as e:
+            t._commit({"op": "revive", "node": lo, "labels_ref": ref})
+        assert e.value.code is Code.BAD_EVENT
+    assert [x["code"] for x in refused(t)] == ["BAD_EVENT", "BAD_EVENT"]
+    short = st.blobs.put_json({"tree_dev_labels": LABELS[:10]})
+    with pytest.raises(TreeRefusal) as e:
+        t._commit({"op": "revive", "node": lo, "labels_ref": short})
+    assert e.value.code is Code.REVIVAL_REFUSED
+    assert ExperimentTree.load(st, "t1").seq == t.seq
+
+
+def test_revive_bootstrap_size_is_fixed_in_the_create_event(st):
+    new_tree(st)
+    assert st.records_where(T.RECORD_KIND, "tree", "t1")[0]["event"]["revive_n_boot"] == T.REVIVE_N_BOOT

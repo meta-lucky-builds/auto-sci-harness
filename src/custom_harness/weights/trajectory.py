@@ -39,7 +39,7 @@ class ExportRefused(Exception):
 
 OUTCOMES = frozenset({"certified", "negative", "rejected", "failed", "infra_failed"})
 ROLES = frozenset({"system", "user", "assistant", "tool"})
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX64 = re.compile(r"[0-9a-f]{64}")  # used with fullmatch: no trailing newline or space slips through
 
 
 def _canon(obj: Any) -> str:
@@ -92,7 +92,8 @@ class VerifierRef:
     tier: Tier
 
     def __post_init__(self) -> None:
-        if not norm_id(self.id) or not _HEX64.match(self.adapter_hash.lower()):
+        if not isinstance(self.id, str) or not isinstance(self.adapter_hash, str) or not norm_id(self.id) \
+                or not _HEX64.fullmatch(self.adapter_hash.lower()):
             raise ExportRefused("SET_INVALID", f"verifier {self.id!r} needs a non-empty id and a 64-hex adapter hash")
 
 
@@ -102,6 +103,7 @@ class VerifierSet:
     members: tuple[VerifierRef, ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "members", tuple(self.members))  # a copy: the caller's list cannot change it later
         for m in self.members:
             if not isinstance(m, VerifierRef):
                 raise ExportRefused("SET_INVALID", f"set {self.name!r}: {m!r} is not a VerifierRef")
@@ -117,11 +119,20 @@ class DeclaredPair:
     a: VerifierSet
     b: VerifierSet
 
+    def __post_init__(self) -> None:  # every pair is checked, however it was built
+        _check_disjoint(self.a, self.b)
+
     def digest(self) -> str:
         return _sha({"A": self.a.digest(), "B": self.b.digest()})
 
 
 def declare_disjoint(a: VerifierSet, b: VerifierSet) -> DeclaredPair:
+    return DeclaredPair(a, b)
+
+
+def _check_disjoint(a: VerifierSet, b: VerifierSet) -> None:
+    if not isinstance(a, VerifierSet) or not isinstance(b, VerifierSet):
+        raise ExportRefused("SET_INVALID", "a pair is two VerifierSets")
     for s in (a, b):
         if not s.members:
             raise ExportRefused("SET_INVALID", f"verifier set {s.name!r} is empty: an empty set certifies nothing")
@@ -136,7 +147,6 @@ def declare_disjoint(a: VerifierSet, b: VerifierSet) -> DeclaredPair:
     if shared_ids or shared_hashes:
         raise ExportRefused("SETS_OVERLAP", f"sets {a.name!r} and {b.name!r} share verifier ids {sorted(shared_ids)} "
                                             f"/ adapter hashes {sorted(shared_hashes)}: they must be disjoint")
-    return DeclaredPair(a, b)
 
 
 @dataclass(frozen=True)

@@ -32,14 +32,17 @@ Rules enforced here (each refusal raises a `TreeRefusal` with a closed `Code` AN
    mode, every in-workspace symlink and every empty directory match (`RESTORE_MISMATCH`). The backtrack is logged
    (`checkout` event). A node with no frozen snapshot (provisional, abandoned, or answered without one) is refused
    (`NO_SNAPSHOT`). Exact for files, not for processes; symlinks the snapshot dropped (outside the workspace) are not
-   restored (sandbox/snapshot.py).
+   restored (sandbox/snapshot.py). On `RESTORE_MISMATCH` the workspace is left as restored (not rolled back): the
+   caller must not use it.
 7. **Revivable dead-ends** (L4.7 "persistence rule"). A dead-end is an answered, non-root node that is not its round's
    confirmed winner; it may not be a branch point (rule 4). `revive(node, dev_labels)` lifts that only if
    P(improvement) > `revive_theta`, where P(improvement) is, for the node's answering run AND every ok re-measure, the
    share of `REVIVE_N_BOOT` paired example resamples (fixed seed) in which the node's dev metric is strictly better than
    its round parent's answering run, and the MINIMUM over those runs is used (so extra re-measures can only lower it).
-   No dev evidence (abandoned, never answered) or other dev labels than the tree's: refused (`REVIVAL_REFUSED`).
-   θ is fixed in the create event; the revival is logged with P, θ and the reference node, and a replay recomputes P,
+   No dev evidence (abandoned, never answered), no ok re-measure (one lucky seed must not skip rule 4's winner's-curse
+   re-measure), a round still undecided (provisional options and no winner), or other dev labels than the tree's:
+   refused (`REVIVAL_REFUSED`). A malformed labels reference is `BAD_EVENT`. θ and the resample count are fixed in the
+   create event; the revival is logged with P, θ and the reference node, and a replay recomputes P,
    so a forged revival is `TreeTampered`. A revived node may then open rounds.
 8. **Curriculum** (L4.7 "tune → creative → ablation", AI-Scientist v2). A tree created with `curriculum=True` requires
    every round to declare its stage, one of `STAGES`. Along a lineage the stage never goes back and never skips:
@@ -272,7 +275,7 @@ class ExperimentTree:
         self.contract: RunContract | None = None
         self.metric, self.higher_is_better, self.labels_sha = "", True, ""
         self.max_repairs = MAX_REPAIRS
-        self.curriculum, self.revive_theta = False, REVIVE_THETA
+        self.curriculum, self.revive_theta, self.revive_n_boot = False, REVIVE_THETA, REVIVE_N_BOOT
         self.nodes: dict[str, _Node] = {}
         self.rounds: dict[str, _Round] = {}
         self.root: str | None = None
@@ -294,7 +297,8 @@ class ExperimentTree:
         t._commit({"op": "create", "contract": contract.to_json(), "root_code_hash": code_hash(root_code),
                    "root_config": root_config, "metric": metric, "higher_is_better": higher_is_better,
                    "labels_sha": _sha(list(dev_labels)), "max_repairs": int(max_repairs),
-                   "curriculum": bool(curriculum), "revive_theta": float(revive_theta)})
+                   "curriculum": bool(curriculum), "revive_theta": float(revive_theta),
+                   "revive_n_boot": REVIVE_N_BOOT})
         return t
 
     @classmethod
@@ -387,7 +391,10 @@ class ExperimentTree:
             raise TreeRefusal(Code.BAD_EVENT, f"curriculum must be a boolean, not {cur!r}")
         if isinstance(th, bool) or not isinstance(th, int | float) or not 0.0 <= float(th) < 1.0:
             raise TreeRefusal(Code.BAD_EVENT, f"revive_theta must be a number in [0, 1), not {th!r}")
-        self.curriculum, self.revive_theta = cur, float(th)
+        nb = ev.get("revive_n_boot", REVIVE_N_BOOT)  # logs written before it was pinned used the module default
+        if isinstance(nb, bool) or not isinstance(nb, int) or nb < 1:
+            raise TreeRefusal(Code.BAD_EVENT, f"revive_n_boot must be a positive integer, not {nb!r}")
+        self.curriculum, self.revive_theta, self.revive_n_boot = cur, float(th), nb
         self.root = "root"
         self.nodes["root"] = _Node("root", None, None, ev["root_code_hash"], dict(ev["root_config"]))
         return {"node": "root"}
@@ -578,10 +585,13 @@ class ExperimentTree:
         ps: list[float] = []
         for pref in [*self._ok_preds(n, "answer"), *self._ok_preds(n, "remeasure")]:
             preds = self.store.blobs.get_json(pref)
-            va, vb = M.per_example(self.metric, labels, preds), M.per_example(self.metric, labels, ref_preds)
+            try:
+                va, vb = M.per_example(self.metric, labels, preds), M.per_example(self.metric, labels, ref_preds)
+            except (ValueError, TypeError, KeyError) as e:
+                raise TreeRefusal(Code.REVIVAL_REFUSED, f"{n.id}: dev predictions do not fit the labels ({e})") from e
             rng = random.Random(REVIVE_SEED)
             wins = 0
-            for _ in range(REVIVE_N_BOOT):
+            for _ in range(self.revive_n_boot):
                 idx = [rng.randrange(k) for _ in range(k)]
                 if va is not None and vb is not None:
                     d = M.aggregate(self.metric, sum(va[i] for i in idx) / k) \
@@ -591,7 +601,7 @@ class ExperimentTree:
                     d = M.METRICS[self.metric](t, [preds[i] for i in idx]) \
                         - M.METRICS[self.metric](t, [ref_preds[i] for i in idx])
                 wins += sign * d > 0
-            ps.append(wins / REVIVE_N_BOOT)
+            ps.append(wins / self.revive_n_boot)
         return min(ps), ref.id
 
     def _op_revive(self, ev: dict[str, Any]) -> dict[str, Any]:
@@ -599,10 +609,20 @@ class ExperimentTree:
         if n.revived or (n.round is not None and self.rounds[n.round].winner == n.id):
             raise TreeRefusal(Code.REVIVAL_REFUSED, f"{n.id} is not a dead-end (it is a confirmed winner or already "
                                                     f"revived)")
-        if ev.get("labels_ref") is None:
-            raise TreeRefusal(Code.BAD_EVENT, "revive needs the dev labels")
-        labels = self.store.blobs.get_json(ev["labels_ref"])["tree_dev_labels"]
+        rnd = self.rounds[n.round] if n.round is not None else None
+        if rnd is not None and rnd.winner is None and any(self.nodes[o].status == "provisional" for o in rnd.options):
+            raise TreeRefusal(Code.REVIVAL_REFUSED, f"round {rnd.id} is undecided (provisional options, no winner): "
+                                                    f"{n.id} is not a dead-end yet")
+        try:
+            labels = self.store.blobs.get_json(str(ev["labels_ref"]))["tree_dev_labels"]
+            if not isinstance(labels, list):
+                raise TypeError("labels are not a list")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise TreeRefusal(Code.BAD_EVENT, f"revive needs a readable dev-labels blob ({e!r})") from e
         p, ref = self._p_improvement(n, labels)
+        if not self._ok_preds(n, "remeasure"):
+            raise TreeRefusal(Code.REVIVAL_REFUSED, f"{n.id} was measured by one run only; a revival needs a fresh "
+                                                    f"re-measure too (winner's curse, as for promotion)")
         if not p > self.revive_theta:
             raise TreeRefusal(Code.REVIVAL_REFUSED, f"{n.id}: P(improvement over {ref}) = {p:.4f} is not above "
                                                     f"theta = {self.revive_theta} (UNCALIBRATED); the dead-end stays "
@@ -806,9 +826,9 @@ class ExperimentTree:
 def _snapshot(t: ExperimentTree) -> Any:
     import copy
     return copy.deepcopy((t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root,
-                          t.max_repairs, t.curriculum, t.revive_theta))
+                          t.max_repairs, t.curriculum, t.revive_theta, t.revive_n_boot))
 
 
 def _restore(t: ExperimentTree, s: Any) -> None:
     (t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root, t.max_repairs,
-     t.curriculum, t.revive_theta) = s
+     t.curriculum, t.revive_theta, t.revive_n_boot) = s

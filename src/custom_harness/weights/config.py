@@ -25,6 +25,7 @@ EXPORT_TIER_FLOOR = Tier.T2_STATISTICAL  # UNCALIBRATED (owner decision, GOAL §
 GOODHART_WINDOW = 6  # UNCALIBRATED (owner decision, GOAL §13.8): points the slope is computed over
 GOODHART_MIN_POINTS = 4  # UNCALIBRATED (owner decision, GOAL §13.8): fewer points -> "insufficient_data", not "ok"
 GOODHART_SLOPE_ALARM = 0.01  # UNCALIBRATED (owner decision, GOAL §13.8): gap growth per time unit that alarms
+GOODHART_JUMP_ALARM = 0.05  # UNCALIBRATED (owner decision, GOAL §13.8): newest gap minus earlier median that alarms
 
 # Task selection by reward variance (AWorld idea).
 VARIANCE_MIN_ROLLOUTS = 4  # UNCALIBRATED (owner decision, GOAL §13.8): rollouts needed to estimate a variance

@@ -32,6 +32,8 @@ class VarianceSelection:
 def select_by_reward_variance(rewards: Mapping[str, Sequence[float]], *, k: int | None = None,
                               min_rollouts: int = C.VARIANCE_MIN_ROLLOUTS,
                               min_variance: float = C.VARIANCE_MIN) -> VarianceSelection:
+    if min_rollouts < 1 or (k is not None and k < 0):
+        raise ValueError("min_rollouts must be >= 1 and k must be None or >= 0")
     out = VarianceSelection()
     ranked: list[TaskVariance] = []
     for task, rs in rewards.items():

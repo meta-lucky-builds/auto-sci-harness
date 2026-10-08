@@ -6,6 +6,8 @@
 - every step that carries provenance, and every assistant step (which must carry it), is licence-permitted
   (`licence.LicencePolicy.permits`, invariant 11, fail closed);
 - it has at least one assistant message (otherwise there is nothing to learn).
+Limit: a user/system/tool step WITHOUT provenance is treated as harness-authored and not licence-checked; if a model
+wrote it (e.g. a tool that calls a model), its caller must attach the provenance or it escapes the filter.
 
 `export_trajectories` writes the kept trajectories as SFT rows, one JSON object per line in `sft.jsonl`, OpenAI-style
 `messages` (the SciDER row shape), PLUS the tags SciDER lacks: outcome, trajectory digest, the A/B set digests and the
@@ -56,6 +58,7 @@ def select_for_training(trajectories: Sequence[Trajectory], verdicts: Iterable[V
                         licence: LicencePolicy, *, outcomes: frozenset[str] = C.SFT_OUTCOMES) -> Selection:
     if not isinstance(pair, DeclaredPair):
         raise ExportRefused("SET_INVALID", "verifier sets must be declared with declare_disjoint")
+    DeclaredPair(pair.a, pair.b)  # re-checked at use: disjointness and the tier floor
     vs = list(verdicts)
     sel = Selection()
     seen: set[str] = set()
