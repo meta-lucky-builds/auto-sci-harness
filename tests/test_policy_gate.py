@@ -22,12 +22,12 @@ def PG():
     return importlib.import_module("custom_harness.control.policy_gate")
 
 
-def I():
+def ISL():
     return importlib.import_module("custom_harness.control.islands")
 
 
 def _orch(store=None):
-    isl = I()
+    isl = ISL()
     islands = [isl.Island("a", {"codex": 1.0}, {"contract": 1.0}), isl.Island("b", {"local": 1.0}, {"hop": 1.0}),
                isl.Island("c", {"codex": 1.0}, {"tool": 1.0})]
     return isl.Orchestrator(islands, isl.OrchestratorPolicy(version="v1", **POLICY_KW), total_budget=30,
@@ -35,7 +35,7 @@ def _orch(store=None):
 
 
 def _challenger(version="v2", **kw):
-    return I().OrchestratorPolicy(version=version, **(POLICY_KW | {"stall_window": 2} | kw))
+    return ISL().OrchestratorPolicy(version=version, **(POLICY_KW | {"stall_window": 2} | kw))
 
 
 def _run_trial(orch, y_challenger, y_incumbent):
@@ -100,7 +100,7 @@ def test_an_identical_or_worse_challenger_is_refused(store, y_ch, y_inc):
     orch.declare_trial(ch, order_seed="seed-2")
     dec = _run_trial(orch, y_ch, y_inc)
     assert dec["accepted"] is False
-    with pytest.raises(I().IslandError, match="does not accept"):
+    with pytest.raises(ISL().IslandError, match="does not accept"):
         orch.set_policy(ch, trial_decision=dec)
     assert orch.policy.version == "v1"
 
@@ -130,7 +130,7 @@ def test_the_order_coins_are_reproduced_from_the_declared_seed(store):
 
 
 def test_a_change_without_a_trial_or_too_early_is_refused():
-    isl = I()
+    isl = ISL()
     orch = _orch()
     for _ in range(3):
         orch.step()
@@ -158,12 +158,12 @@ def test_a_trialled_and_refused_challenger_cannot_be_trialled_again():
     ch = _challenger()
     orch.declare_trial(ch, order_seed="s", n_pairs=5)
     assert _run_trial(orch, 0, 0)["accepted"] is False
-    with pytest.raises(I().IslandError, match="used before"):  # no retry until a lucky pass
+    with pytest.raises(ISL().IslandError, match="used before"):  # no retry until a lucky pass
         orch.declare_trial(ch, order_seed="other-seed", n_pairs=5)
 
 
 def test_a_forged_decision_is_refused():
-    isl = I()
+    isl = ISL()
     orch = _orch()
     ch = _challenger()
     decl = orch.declare_trial(ch, order_seed="s", n_pairs=5)
