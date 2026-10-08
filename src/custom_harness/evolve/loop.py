@@ -322,6 +322,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
     # outcomes never feed the diagnosis, which the proposer reads
     references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
+    if abl.off("proposer-history"):  # ablation: no earlier candidate's runs either; the parent's own runs only
+        references = [o for (h, task_id, _), o in getattr(evaluator, "cache", {}).items()
+                      if task_id in evolve_ids and h == parent_hash]
     digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
     if abl.off("causal-signatures"):  # ablation: no first-divergence causal signatures reach the proposer
         digest = {**digest, "divergences": [], "no_reference": [], "unlinked": 0}

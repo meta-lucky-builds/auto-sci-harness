@@ -78,9 +78,10 @@ def _store(tmp_path: Path, name: str) -> EvidenceStore:
     return s
 
 
-def _gen(tmp_path, name, *, off=(), proposer=None, cfg=None, seed_records=(), **world):
-    """One generation in a fresh store under `off` (empty = production). Returns (result, evaluator, proposer,
-    store records helper)."""
+def _gen(tmp_path, name, *, off=(), proposer=None, cfg=None, seed_records=(), cached=(), **world):
+    """One generation in a fresh store under `off` (empty = production). `cached`: (cache key, outcome) pairs the
+    evaluator already holds (runs of earlier generations). Returns (result, evaluator, proposer, store records
+    helper)."""
     abl = ablation_set(set(off)) if off else NO_ABLATION
     st = _store(tmp_path, name)
     for kind, body in seed_records:
@@ -88,6 +89,8 @@ def _gen(tmp_path, name, *, off=(), proposer=None, cfg=None, seed_records=(), **
     tasks = _tasks(tmp_path)
     parent = seed_spec()
     ev = _Table(st, tasks, parent.spec_hash(), ablation=abl, **world)
+    for key, o in cached:
+        ev.cache[key] = o
     proposer = proposer if proposer is not None else MockBackend([_proposal(EDIT0)])
     res = evolve_generation(parent, tasks, evaluator=ev, proposer=proposer, store=st,
                             cfg=cfg or EvolveConfig(**CFG), ablation=abl)
@@ -147,6 +150,23 @@ def test_proposer_history_switch(tmp_path, monkeypatch):
     assert "HISTORY-MARKER-7f3" in _prompt(on["proposer"]) and "HISTORY-MARKER-7f3" in _prompt(ctl["proposer"])
     assert "HISTORY-MARKER-7f3" not in _prompt(off["proposer"])
     assert _prompt(on["proposer"]) == _prompt(ctl["proposer"])  # unchanged when this switch is not set
+
+    # the diagnosis' first-divergence references: production compares against every cached evolve run, earlier
+    # candidates' runs included; with the switch off only the parent's own runs are used (no history through them)
+    earlier = (("c" * 64, "e0", 0), RunOutcome("e0", "EARLIER-CANDIDATE-RUN", 0, 0.5, False, "completed", Cost(), []))
+    refs: dict[str, list[str]] = {}
+    real_diagnose = loop_mod.diagnose
+
+    def spy_diagnose(parent_outcomes, store, *, references, evolve_ids):
+        refs[current] = [o.run_id for o in references]
+        return real_diagnose(parent_outcomes, store, evolve_ids=evolve_ids,
+                             references=[o for o in references if o.run_id != "EARLIER-CANDIDATE-RUN"])
+    monkeypatch.setattr(loop_mod, "diagnose", spy_diagnose)
+    for current, off_set in (("on", ()), ("off", {"proposer-history"}), ("ctl", {OTHER})):
+        _gen(tmp_path, f"refs-{current}", off=off_set, cached=[earlier])
+    assert "EARLIER-CANDIDATE-RUN" in refs["on"] and refs["ctl"] == refs["on"]
+    assert "EARLIER-CANDIDATE-RUN" not in refs["off"] and len(refs["off"]) == len(refs["on"]) - 1
+    monkeypatch.undo()
 
     sessions: list[str] = []
 
