@@ -103,7 +103,8 @@ def test_explain_of_a_scripted_research_run_resolves_every_value(store, tmp_path
     assert [f["value"] for f in doc["adapters"][0] if f["src"]["path"][-1] == "name"] == ["ml"]
     assert doc["assumptions"]["untested"]
     loopholes = {x["finding"]["value"] for x in doc["assumptions"]["open_loopholes"]}
-    assert {"KD1", "KD2", "KD3", "KD4"} <= loopholes  # data-class loopholes apply to this data certificate
+    # the register follows redteam/findings.yaml: KD1-KD4 were fixed on int16-fix (2be4067), ADAPTER-EDIT is open
+    assert "ADAPTER-EDIT" in loopholes and not {"KD1", "KD2", "KD3", "KD4"} & loopholes
     assert any(f["value"] == "report:studio-test" for row in doc["releases"] for f in row)
     assert doc["prediction"] and doc["prediction"][2]["value"] is True  # outcome
     n = _check_every_fact_resolves(kernel, doc)
@@ -220,7 +221,7 @@ def test_research_graph_and_limitations_register_are_read_only(tmp_path):
                 ("claim", "target", "dataset"), ("claim", "subject", "artifact"),
                 ("treenode", "child_of", "treenode"), ("treenode", "root_of", "tree")} <= rels
         loopholes = set(nodes[f"cert:{ch}"]["untested_open_loopholes"])
-        assert {"KD1", "KD2", "KD3", "KD4", "ASOF", "ADAPTER-EDIT"} <= loopholes
+        assert "ADAPTER-EDIT" in loopholes and not {"KD1", "KD2", "KD3", "KD4", "ASOF"} & loopholes  # fixed since
         assert "untested_open_loopholes" not in nodes[f"cert:{rh}"]  # a rejected certificate certifies nothing
         assert g["problems"] == []
         # the register follows the findings file: a new open finding with no scope entry applies to every certificate
@@ -235,6 +236,11 @@ def test_research_graph_and_limitations_register_are_read_only(tmp_path):
             {"id": "OLD", "title": "t", "invariant": "i", "capability": "A3", "tests": [], "status": "fixed"}]}))
         (lim,) = register(w.kernel, custom)
         assert lim.finding_id == "NEW-1" and lim.certificates == (ch,)
+        # a data-scoped finding (SCOPE) that is open again applies to this data certificate
+        custom.write_text(yaml.safe_dump({"findings": [
+            {"id": "KD3", "title": "t", "invariant": "i", "capability": "A2", "tests": [], "status": "open"}]}))
+        (lim,) = register(w.kernel, custom)
+        assert lim.finding_id == "KD3" and lim.certificates == (ch,)
         (lim,) = register(w.kernel, tmp_path / "missing.yaml")
         assert lim.finding_id == UNREADABLE and lim.certificates == (ch,)
         # a tampered certificate is marked, not dropped
