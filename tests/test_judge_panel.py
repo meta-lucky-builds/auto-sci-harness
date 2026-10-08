@@ -150,9 +150,31 @@ def test_fixture_labels_are_measured_but_can_never_validate():
     assert not v.passed and any("not human" in r for r in v.reasons)
     with pytest.raises(PanelNotValidated, match="not human"):
         p.evaluate("plan [q=0.9]", "plan [q=0.1]", validation=v)
-    forged = dataclasses.replace(v, passed=True, reasons=())  # even a record claiming a pass is refused
+    forged = dataclasses.replace(v, passed=True, reasons=())  # a copied record claiming a pass is refused
+    with pytest.raises(PanelNotValidated, match="not issued"):
+        p.evaluate("plan [q=0.9]", "plan [q=0.1]", validation=forged)
+    p._issued.append(forged)  # even if it were slipped into the registry, non-human labels are refused
     with pytest.raises(PanelNotValidated, match="not human"):
         p.evaluate("plan [q=0.9]", "plan [q=0.1]", validation=forged)
+
+
+def test_hand_built_validation_record_is_refused():
+    from custom_harness.verify.judge import PanelValidation
+    p = panel()
+    fake_pass = PanelValidation(p.config_hash, "human", "x", 100, 0, 1.0, 1.0, 0.0, 0.0, 0.0, True, ())
+    with pytest.raises(PanelNotValidated, match="not issued"):
+        p.evaluate("plan [q=0.9]", "plan [q=0.1]", validation=fake_pass)
+    assert all(not m.backend.requests for m in p.members)
+
+
+def test_family_floor_and_thresholds_can_only_be_made_stricter():
+    with pytest.raises(PanelRefused, match="below the floor"):
+        JudgePanel(members(("fam1", "good")), RUBRIC, meta=meta(), author_family="openai", min_families=1)
+    p = panel()
+    for loose in ({"min_labels": 1}, {"min_agreement": 0.0}, {"min_kappa": -1.0}, {"max_ece": 1.0}):
+        with pytest.raises(ValueError, match="stricter"):
+            validate_panel(p, human_set(), **loose)
+    assert not validate_panel(p, human_set(), min_labels=1000).passed  # stricter is allowed
 
 
 def test_validation_rejects_a_bad_panel():
@@ -277,6 +299,21 @@ def test_panel_gate_never_raises_a_decision():
         assert panel_gate(d, yes) == d
     assert panel_gate(PolicyDecision.ALLOW, no) == PolicyDecision.NEEDS_HUMAN
     assert panel_gate(PolicyDecision.DENY, yes) == PolicyDecision.DENY
+
+
+def test_rank_aggregates_by_family_with_quorum(monkeypatch):
+    """Aggregation only (validation is bypassed here: a 5-contrarian family makes the panel miscalibrated, so it
+    could not pass validation; the point is that member count cannot outvote families, and quorum is enforced)."""
+    specs = [("fam1", "good"), ("fam2", "good")] + [("fam3", "contrarian")] * 5
+    p2 = panel(specs)
+    monkeypatch.setattr(JudgePanel, "_require_validation", lambda self, v: v)
+    fit = p2.rank({"lo": "plan [q=0.10]", "hi": "plan [q=0.90]"}, validation=None)
+    assert fit.theta["hi"] > fit.theta["lo"]  # 2 families vs 1, not 2 members vs 5
+    assert fit.n_choices == 6  # 2 orders x 3 families (not 7 members)
+    p3 = JudgePanel([PanelMember("x0", fake("fam1", "prose"))] + members(("fam2", "good"), ("fam3", "good")),
+                    RUBRIC, meta=meta(), author_family="openai")
+    with pytest.raises(PanelRefused, match="quorum"):  # only 2 families answer: no pair counts
+        p3.rank({"lo": "plan [q=0.10]", "hi": "plan [q=0.90]"}, validation=None)
 
 
 def test_rank_fits_bt_with_position_term_and_intervals():

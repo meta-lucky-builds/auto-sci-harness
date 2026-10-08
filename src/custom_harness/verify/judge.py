@@ -81,6 +81,9 @@ def panel_refusals(members: Sequence[PanelMember], meta: PanelMember | None, *, 
     from ..config import PANEL_MIN_FAMILIES
     need = PANEL_MIN_FAMILIES if min_families is None else min_families
     reasons = []
+    if need < PANEL_MIN_FAMILIES:
+        reasons.append(f"min_families={need} is below the floor {PANEL_MIN_FAMILIES} (GOAL §5 L3); "
+                       "it can only be raised")
     names = [m.name for m in members]
     if len(set(names)) != len(names):
         reasons.append("member names must be unique")
@@ -207,6 +210,8 @@ class JudgePanel:
         self.meta = meta
         self.author_family = author_family
         self.min_families = PANEL_MIN_FAMILIES if min_families is None else min_families
+        # validations issued by validate_panel for THIS object; a PanelValidation built or copied elsewhere is refused
+        self._issued: list[PanelValidation] = []
 
     @property
     def config_hash(self) -> str:
@@ -297,6 +302,8 @@ class JudgePanel:
             raise PanelNotValidated(f"judge panel not validated against human labels ({NEEDS_OWNER})")
         if validation.config_hash != self.config_hash:
             raise PanelNotValidated("the validation was for a different panel configuration")
+        if not any(v is validation for v in self._issued):
+            raise PanelNotValidated("this validation record was not issued by validate_panel for this panel")
         if validation.label_source != "human":
             raise PanelNotValidated(f"validation labels are {validation.label_source!r}, not human ({NEEDS_OWNER})")
         if not validation.passed:
@@ -320,26 +327,34 @@ class JudgePanel:
                             validation_hash=v.config_hash)
 
     def rank(self, items: Mapping[str, str], *, validation: PanelValidation | None) -> BTFit:
-        """BT with a position term and intervals over all pairs. Each member's criterion-weighted answer in each
-        order is one choice. Members judging the same pair are not independent draws of the items' quality, so the
-        intervals describe the panel's own noise, not uncertainty about the items' true merit."""
+        """BT with a position term and intervals over all pairs, aggregated like `compare`: per pair and order, each
+        member's criterion-weighted score is averaged within its family; each family with a non-tied average is one
+        choice, and a pair-order counts only with answers from >= min_families families (no family can outvote by
+        member count). Families judging the same pair are not independent draws of the items' merit, so the
+        intervals describe the panel's own noise, not uncertainty about the items' true quality."""
         self._require_validation(validation)
         ids = list(items)
         choices: list[Choice] = []
         for x, y in combinations(ids, 2):
             for first, second in ((x, y), (y, x)):
+                fam: dict[str, list[float]] = {}
                 for m in self.members:
-                    score = 0.0
-                    den = 0.0
+                    score = den = 0.0
                     for c in self.rubric:
                         w = self._ask(m, c, items[first], items[second])
                         if w is not None:
                             score += c.weight * (w == "A")
                             den += c.weight
-                    if den and score / den != 0.5:
-                        choices.append(pair_choice(first, second, first if score / den > 0.5 else second))
+                    if den:
+                        fam.setdefault(m.family, []).append(score / den)
+                if len(fam) < self.min_families:
+                    continue
+                for vals in fam.values():
+                    avg = sum(vals) / len(vals)
+                    if avg != 0.5:
+                        choices.append(pair_choice(first, second, first if avg > 0.5 else second))
         if not choices:
-            raise PanelRefused("the panel produced no valid judgements")
+            raise PanelRefused("the panel produced no valid judgements with quorum")
         return fit_bt(ids, choices, position_effect=True)
 
 
@@ -442,6 +457,9 @@ def validate_panel(panel: JudgePanel, labels: LabelSet, *, min_labels: int | Non
     min_agreement = PANEL_MIN_AGREEMENT if min_agreement is None else min_agreement
     min_kappa = PANEL_MIN_KAPPA if min_kappa is None else min_kappa
     max_ece = PANEL_MAX_ECE if max_ece is None else max_ece
+    if (min_labels < PANEL_MIN_LABELS or min_agreement < PANEL_MIN_AGREEMENT or min_kappa < PANEL_MIN_KAPPA
+            or max_ece > PANEL_MAX_ECE):
+        raise ValueError("validation thresholds can only be made stricter than config.py's (owner decisions)")
     human, panel_l, probs, outs = [], [], [], []
     ties = 0
     for lab in labels.labels:
@@ -460,8 +478,10 @@ def validate_panel(panel: JudgePanel, labels: LabelSet, *, min_labels: int | Non
     if n < min_labels:
         reasons.append(f"{n} labelled pairs < {min_labels}")
     if n == 0:
-        return PanelValidation(panel.config_hash, labels.source, labels.content_hash, 0, ties, 0.0, float("nan"),
-                               float("nan"), float("nan"), 1.0, False, tuple(reasons))
+        empty = PanelValidation(panel.config_hash, labels.source, labels.content_hash, 0, ties, 0.0, float("nan"),
+                                float("nan"), float("nan"), 1.0, False, tuple(reasons))
+        panel._issued.append(empty)
+        return empty
     agreement = sum(h == p for h, p in zip(human, panel_l, strict=True)) / n
     kappa = cohen_kappa(human, panel_l)
     cal = calibration(probs, outs)
@@ -472,6 +492,8 @@ def validate_panel(panel: JudgePanel, labels: LabelSet, *, min_labels: int | Non
         reasons.append(f"kappa {kappa:.3f} < {min_kappa}")
     if not cal["ece"] <= max_ece:
         reasons.append(f"ECE {cal['ece']:.3f} > {max_ece}")
-    return PanelValidation(config_hash=panel.config_hash, label_source=labels.source, label_hash=labels.content_hash,
-                           n=n, ties_skipped=ties, agreement=agreement, kappa=kappa, ece=cal["ece"],
-                           brier=cal["brier"], abstain_rate=abstain, passed=not reasons, reasons=tuple(reasons))
+    rec = PanelValidation(config_hash=panel.config_hash, label_source=labels.source, label_hash=labels.content_hash,
+                          n=n, ties_skipped=ties, agreement=agreement, kappa=kappa, ece=cal["ece"],
+                          brier=cal["brier"], abstain_rate=abstain, passed=not reasons, reasons=tuple(reasons))
+    panel._issued.append(rec)
+    return rec

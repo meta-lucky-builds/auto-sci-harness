@@ -171,6 +171,36 @@ def test_unbiased_pairwise_judge_rarely_flagged():
     assert flagged <= 6  # alpha = 0.01 and the test is conservative under a balanced both-order design
 
 
+def test_order_dependent_refusals_do_not_fake_position_bias():
+    """A judge with NO position preference that refuses whenever the weaker item is shown first: counting single
+    answers would show 'first always wins'. Only pairs judged in both orders are tested and fitted."""
+    def judge(first, second):
+        if TRUE[first["id"]] < TRUE[second["id"]]:
+            return None
+        return first["id"]
+    res = pairwise_rounds(POOL, judge, repeats=5, rng=random.Random(0))
+    assert res.valid == 30 and res.rejected == 30  # the attack happened: every refusal depends on the order
+    rep = position_bias_report(res, None, mode="pairwise")
+    assert rep["trials"] == 0 and not rep["detected"] and rep["unpaired_answers_dropped"] == 30
+    assert res.choices == []
+
+
+def test_kway_rejections_are_reported_by_first_listed():
+    def judge(presented, dim):
+        return None if presented[0]["id"] == "a" else [h["id"] for h in presented]
+    res = kway_rounds(POOL, judge, rounds=40, rng=random.Random(0))
+    rep = position_bias_report(res, None, mode="kway")
+    assert set(rep["rejected_by_first_listed"]) == {"a"} and rep["caveat"]
+
+
+def test_backend_errors_are_not_counted_as_rejected_rounds():
+    class NoBackend:
+        def llm(self, role, req):
+            raise ValueError(f"no backend bound to role '{role}'")
+    with pytest.raises(ValueError, match="no backend"):
+        tournament_module(_state(), {}, NoBackend())
+
+
 def test_position_biased_kway_judge_is_detected():
     rng = random.Random(5)
     biased = kway_rounds(POOL, kway_judge(TRUE, rng, first_bonus=2.0), rounds=60, rng=rng)

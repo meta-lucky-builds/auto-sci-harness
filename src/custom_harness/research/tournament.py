@@ -61,6 +61,8 @@ class RoundsResult:
     expected_rate: float = 0.5
     consistent_pairs: int = 0  # pairwise: both orders valid and agree
     judged_pairs: int = 0      # pairwise: both orders valid
+    unpaired: int = 0          # pairwise: valid answers whose other order was rejected (not fitted, not tested)
+    rejected_by_first: dict[str, int] = field(default_factory=dict)  # K-way: rejections by first-listed item
 
 
 def _valid_permutation(ranking: Any, presented: Sequence[str]) -> list[str] | None:
@@ -101,13 +103,12 @@ def kway_rounds(pool: Sequence[Hyp], judge: JudgeK, *, rounds: int, k: int | Non
         for blk in _blocks(ids, k, rng, pinned):
             presented = blk[:]
             rng.shuffle(presented)
-            try:
-                ranking = _valid_permutation(judge([by_id[i] for i in presented], dimension), presented)
-            except (ValueError, KeyError, TypeError):
-                ranking = None
+            # a judge returns None for an invalid answer; an exception (no backend, budget) is NOT a rejection
+            ranking = _valid_permutation(judge([by_id[i] for i in presented], dimension), presented)
             res.records.append({"round": rnd, "dimension": dimension, "presented": presented, "ranking": ranking})
             if ranking is None:
                 res.rejected += 1
+                res.rejected_by_first[presented[0]] = res.rejected_by_first.get(presented[0], 0) + 1
                 continue
             res.valid += 1
             res.choices.extend(ranking_to_choices(ranking))
@@ -117,7 +118,9 @@ def kway_rounds(pool: Sequence[Hyp], judge: JudgeK, *, rounds: int, k: int | Non
 
 
 def pairwise_rounds(pool: Sequence[Hyp], judge: JudgePair, *, repeats: int = 1, rng: random.Random) -> RoundsResult:
-    """Every unordered pair, `repeats` times, in BOTH orders; the schedule order is shuffled."""
+    """Every unordered pair, `repeats` times, in BOTH orders; the schedule order is shuffled. Only pairs whose two
+    orders are BOTH valid are fitted and enter the position test: a judge that refuses depending on the order would
+    otherwise fake (or hide) position bias, and bias the strengths."""
     by_id = {h["id"]: h for h in pool}
     ids = list(by_id)
     res = RoundsResult(expected_rate=0.5)
@@ -126,25 +129,26 @@ def pairwise_rounds(pool: Sequence[Hyp], judge: JudgePair, *, repeats: int = 1, 
     for a, b, r in schedule:
         orders = [(a, b), (b, a)]
         rng.shuffle(orders)
-        winners = {}
+        winners: dict[str, str] = {}
         for first, second in orders:
-            try:
-                w = judge(by_id[first], by_id[second])
-            except (ValueError, KeyError, TypeError):
-                w = None
+            w = judge(by_id[first], by_id[second])
             ok = isinstance(w, str) and w in (first, second)
             res.records.append({"first": first, "second": second, "repeat": r, "winner": w if ok else None})
             if not ok:
                 res.rejected += 1
                 continue
             res.valid += 1
+            assert isinstance(w, str)
             winners[first] = w
-            res.choices.append(pair_choice(first, second, w))  # type: ignore[arg-type]
-            res.first_trials += 1
-            res.first_hits += w == first
         if len(winners) == 2:
             res.judged_pairs += 1
             res.consistent_pairs += winners[a] == winners[b]
+            for first, second in ((a, b), (b, a)):
+                res.choices.append(pair_choice(first, second, winners[first]))
+                res.first_trials += 1
+                res.first_hits += winners[first] == first
+        else:
+            res.unpaired += len(winners)
     return res
 
 
@@ -163,9 +167,16 @@ def position_bias_report(res: RoundsResult, fit: BTFit | None, *, mode: str, alp
     if mode == "pairwise":
         out["order_consistency"] = (res.consistent_pairs / res.judged_pairs) if res.judged_pairs else None
         out["pairs_judged_both_orders"] = res.judged_pairs
+        out["unpaired_answers_dropped"] = res.unpaired
         if fit is not None and fit.position is not None:
             out["gamma"] = fit.position
             out["gamma_ci"] = list(fit.position_interval(level) or ())
+    else:
+        # rejected rounds are not in the test; if rejections depend on the presentation order the 1/k null no longer
+        # holds exactly, so they are reported by first-listed item and flagged
+        out["rejected_by_first_listed"] = dict(sorted(res.rejected_by_first.items()))
+        out["caveat"] = (f"{res.rejected} rejected round(s) excluded; the 1/k null assumes rejections do not depend "
+                         "on presentation order") if res.rejected else None
     return out
 
 
@@ -199,10 +210,7 @@ def improve_weakest(pool: list[Hyp], fit: BTFit, improve: ImproveFn, *, pinned: 
     weakest = cands[0]
     best = by_id[_ranked(fit, rated)[0]]
     dim = _dim_extreme(dim_fits, weakest, lowest=True)
-    try:
-        out = improve(by_id[weakest], dim, best)
-    except (ValueError, KeyError, TypeError):
-        out = None
+    out = improve(by_id[weakest], dim, best)  # invalid output -> None (checked below); exceptions propagate
     if not _ok_hyp(out) or new_id in by_id:
         return pool, {"operator": "improve_weakest", "applied": False, "target": weakest, "reason": "invalid output"}
     assert out is not None
@@ -222,10 +230,7 @@ def combine(pool: list[Hyp], fit: BTFit, combiner: CombineFn, *, new_id: str,
         return pool, {"operator": "combine", "applied": False, "reason": "fewer than 2 rated hypotheses"}
     a, b = rated[0], rated[1]
     da, db = _dim_extreme(dim_fits, a, lowest=False), _dim_extreme(dim_fits, b, lowest=False)
-    try:
-        out = combiner(by_id[a], by_id[b], da, db)
-    except (ValueError, KeyError, TypeError):
-        out = None
+    out = combiner(by_id[a], by_id[b], da, db)
     if not _ok_hyp(out) or new_id in by_id:
         return pool, {"operator": "combine", "applied": False, "parents": [a, b], "reason": "invalid output"}
     assert out is not None
@@ -288,7 +293,7 @@ def run_tournament(pool: Sequence[Hyp], *, mode: str = "kway", judge_k: JudgeK |
             raise RuntimeError("judge produced no valid rankings")
         fit = fit_bt(cur, res.choices, position_effect=(mode == "pairwise"))
         dim_fits: dict[str, BTFit] = {}
-        for d in dimensions:
+        for d in (dimensions if gen < generations - 1 else ()):  # only Improve-weakest uses them
             assert judge_k is not None
             dr = kway_rounds(pool, judge_k, rounds=rounds, k=k, rng=rng, pinned=pinned, dimension=d)
             if dr.choices:
@@ -335,9 +340,15 @@ def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -
     head = (f"Task: {task['description']}\nMetric: {task['metric']}\n"
             f"Data profile: {json.dumps(state['profile'])[:6000]}\n\n")
 
-    def _ask(role: str, prompt: str, schema: dict[str, Any]) -> Any:
+    def _ask(role: str, prompt: str, schema: dict[str, Any], key: str | None = None) -> Any:
+        """Model call (errors propagate: a missing backend or budget stop is not a rejected round), then a parse
+        that fails closed to None."""
         resp = ctx.llm(role, ChatRequest(messages=[Message(role="user", content=prompt)], json_schema=schema))
-        return parse_json_output(resp.text)
+        try:
+            out = parse_json_output(resp.text)
+            return out[key] if key is not None else out
+        except (ValueError, KeyError, TypeError, IndexError):
+            return None
 
     def _listing(hs: Sequence[Hyp]) -> str:
         return "\n".join(f"- id={h['id']}: {h['idea']} (rationale: {h.get('rationale', '')})" for h in hs)
@@ -350,15 +361,14 @@ def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -
                   f'Return JSON {{"ranking": [ids best-first]}}.')
         schema = {"type": "object", "properties": {"ranking": {"type": "array", "items": {"type": "string"}}},
                   "required": ["ranking"]}
-        out = _ask("judge", prompt, schema)
-        return cast("Sequence[str] | None", out["ranking"])  # validated by kway_rounds
+        return cast("Sequence[str] | None", _ask("judge", prompt, schema, "ranking"))  # validated by kway_rounds
 
     def judge_pair(first: Hyp, second: Hyp) -> str | None:
         prompt = (head + "Which hypothesis is more likely to improve the held-out metric over the baseline, "
                   f"considering feasibility given the data?\n{_listing([first, second])}\n"
                   'Return JSON {"winner": id}.')
         schema = {"type": "object", "properties": {"winner": {"type": "string"}}, "required": ["winner"]}
-        return cast("str | None", _ask("judge", prompt, schema)["winner"])  # validated by pairwise_rounds
+        return cast("str | None", _ask("judge", prompt, schema, "winner"))  # validated by pairwise_rounds
 
     def _gen(prompt: str) -> Mapping[str, Any] | None:
         schema = {"type": "object", "properties": {"idea": {"type": "string"}, "rationale": {"type": "string"}},
