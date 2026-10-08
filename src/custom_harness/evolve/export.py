@@ -401,7 +401,10 @@ def screen_digest(digest: dict[str, Any], store: EvidenceStore, *, runs: Iterabl
     on any finding the raw cluster example excerpts are dropped; if the rest still fails, only counts remain. The
     findings are reported as a count (`withheld`), never quoted."""
     by_id = {t.task_id: t for t in tasks}
-    exported = {o.run_id: o for o in runs if o.task_id in by_id and by_id[o.task_id].split == "evolve"}
+    # the runs the diagnosis can have read: evolve tasks whose run record exists and names the same task (as
+    # propose.diagnose and export_evidence require); a run id with no record has nothing to fingerprint
+    exported = {o.run_id: o for o in runs if o.task_id in by_id and by_id[o.task_id].split == "evolve"
+                and (not o.run_id or _record_task(store, o.run_id) == o.task_id)}
     fp = _fingerprints(store, tasks, exported, canaries)
 
     def problems(doc: dict[str, Any]) -> list[str]:
