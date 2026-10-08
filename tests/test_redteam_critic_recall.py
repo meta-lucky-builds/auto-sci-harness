@@ -728,11 +728,8 @@ def test_rt_critic_a_second_empty_critic_round_does_not_erase_unanswered_questio
     assert res.state["gate"]["ok"] is False, res.state["gate"]
 
 
-@pytest.mark.xfail(strict=True, reason="red-team finding (vacuous gate via the edit surface): an evolve edit may set "
-                   "/nodes/socratic/params/max_questions to 0 (socratic is not a protected node and params are an "
-                   "edit type). The gate now blocks such a run "
-                   "(test_rt_critic_gate_refuses_a_switched_off_critic_filter); the edit itself is still accepted "
-                   "(evolve/edits.py, not owned by b-research)")
+# FIXED by b-evolve (evolve/edits.py PINNED_NODES: the critic-chain node definitions are human-only), seen at the
+# int16-fix merge 2026-10-08: was a strict xfail red-team finding (an evolve edit could set max_questions to 0)
 def test_rt_critic_an_edit_cannot_switch_the_critic_filter_off():
     from custom_harness.evolve.edits import Edit, EditOp, EditRejected, EditType, apply_edit
     spec = HarnessSpec.model_validate(yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text()))
