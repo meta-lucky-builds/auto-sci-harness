@@ -370,7 +370,7 @@ def test_tool_node_rules_and_positive_control():
     with pytest.raises(EditRejected, match="must write a 'tool_\\*' key"):
         apply_edit(spec, tool_edit(check | {"output_key": "queue"}))  # a key a trusted module reads
     with pytest.raises(EditRejected, match=r"tool output|rendered into model prompt"):  # a new LLM node rendering it
-        apply_edit(spec, tool_edit(check, _insert_between(spec, "socratic", "next", "n1", {
+        apply_edit(spec, tool_edit(check, _insert_between(spec, "check_answers", "next", "n1", {
             "kind": "llm", "prompt": "{{tool_check.stdout}}", "output_key": "n1"})))
     with pytest.raises(EditRejected, match="rendered into model prompt"):  # an existing prompt already rendering it
         human = spec.model_dump(mode="json")

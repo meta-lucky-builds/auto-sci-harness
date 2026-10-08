@@ -7,7 +7,7 @@
 id: research_v2
 description: profile -> baseline -> hypotheses -> K-way tournament -> implement/fix loop -> typed claim pre-registered -> held-out confirmation via the vault -> Kernel certificate -> report -> audit
 entry: setup
-max_steps: 60
+max_steps: 63  # +3 for the critic-answer check (critic_evidence, defend, check_answers)
 nodes:
   # dev estimate = k-fold cross-validation on the public training data, each fold in a fresh sandbox (protected)
   # cpu_limit_s: CPU-seconds per dev program run, UNCALIBRATED (owner decision, GOAL §13.8); null = off until the
@@ -75,6 +75,41 @@ nodes:
       required: [questions]
     retries: 1
   socratic: {kind: module, module: research.socratic_filter, params: {max_questions: 5}}
+  # GOAL L4.8 second half: the AUTHOR answers each kept question citing evidence ids; code checks every citation
+  # (research/critic_answers.py). Deny-only: an unanswered or badly cited question makes the claim unpublishable.
+  critic_evidence: {kind: module, module: research.critic_evidence}
+  defend:
+    kind: llm
+    role: proposer
+    system: You answer a critic's questions about your own hypotheses. Every answer cites evidence ids. Output only JSON.
+    prompt: |
+      Task: {{task.description}}  Metric: {{task.metric}}
+      Data profile (computed by code): {{profile}}
+      Baseline dev score: {{baseline_dev}}
+      Hypotheses: {{hypotheses}}
+      Critic questions (id and text): {{critic_evidence.questions}}
+      Evidence catalog (steps of this run computed by code; cite their ids): {{critic_evidence.catalog}}
+
+      Answer every critic question in one or two sentences. Each answer must cite at least one evidence id from
+      the catalog (for example "step:2") that the answer rests on. Code checks every citation: an answer citing
+      nothing, or an id that is not in the catalog, counts as unanswered.
+      Return JSON {"answers": [{"question": "q1", "answer": "...", "evidence": ["step:2"]}]}.
+    output_key: critic_answers_raw
+    output_schema:
+      type: object
+      properties:
+        answers:
+          type: array
+          items:
+            type: object
+            properties:
+              question: {type: string}
+              answer: {type: string}
+              evidence: {type: array, items: {type: string}}
+            required: [question, answer, evidence]
+      required: [answers]
+    retries: 1
+  check_answers: {kind: module, module: research.check_critic_answers, params: {answerer: defend}}
   next: {kind: module, module: research.next_hypothesis, params: {max_improves: 2, pack: 3, headroom_gate: true}}
   unpack: {kind: module, module: research.unpack_solutions}
   ensemble: {kind: module, module: research.ensemble, params: {verify_dev: true}}
@@ -234,7 +269,14 @@ edges:
   # a failed critic is not fatal: continue without questions
   - {source: critic, target: socratic, when: {key: _last_error, op: truthy}}
   - {source: critic, target: socratic}
-  - {source: socratic, target: next}
+  - {source: socratic, target: critic_evidence}
+  # no kept question: nothing to answer, no call
+  - {source: critic_evidence, target: next, when: {key: critic_evidence.questions, op: falsy}}
+  - {source: critic_evidence, target: defend}
+  # a failed answer call is not fatal: the check records every question as missing (fail closed)
+  - {source: defend, target: check_answers, when: {key: _last_error, op: truthy}}
+  - {source: defend, target: check_answers}
+  - {source: check_answers, target: next}
   - {source: next, target: implement, when: {key: route, op: eq, value: implement}}
   - {source: next, target: improve, when: {key: route, op: eq, value: improve}}
   - {source: next, target: implement_batch, when: {key: route, op: eq, value: implement_batch}}

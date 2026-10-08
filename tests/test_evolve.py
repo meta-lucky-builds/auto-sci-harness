@@ -27,7 +27,7 @@ from custom_harness.evolve import (
 from custom_harness.gateway import MockBackend
 from custom_harness.runtime import HarnessSpec
 from custom_harness.sandbox import LocalSandbox
-from test_research import BROKEN, KNN_RADIUS, KNN_REPLICA
+from test_research import BROKEN, KNN_RADIUS, KNN_REPLICA, critic_answers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +54,8 @@ def declared_seed_spec(cfg: EvolveConfig, generations: int = 1) -> HarnessSpec:
 
 def executor(req):
     text = req.messages[-1].content
+    if "Answer every critic question" in text:
+        return critic_answers(text)
     if "Propose 5 DISTINCT hypotheses" in text:
         return json.dumps({"hypotheses": [{"id": "h1", "idea": "radius kNN", "rationale": "rings"},
                                           {"id": "h2", "idea": "radius kNN, k=25", "rationale": "smoother"}]})
