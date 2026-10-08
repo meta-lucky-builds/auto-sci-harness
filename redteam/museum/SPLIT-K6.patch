@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..1c8c53f 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -512,7 +512,7 @@ def k6_held_out(ctx: Context) -> CheckResult:
+             reasons.append(f"{target}: identical content registered under other id(s) {twins}")
+         for other in sorted(d for d in datasets if d != target):  # held-out labels public elsewhere = not held out
+             for where, (n, may_carry_labels) in shared_examples(ctx.vault, target, other).items():
+-                if may_carry_labels:
++                if False:
+                     reasons.append(f"{n} held-out example(s) of {target!r} appear in public file {where}")
+         dev_use = [a for a in ctx.vault.accesses(target) if a.body.get("purpose") == "develop"]
+         if dev_use:

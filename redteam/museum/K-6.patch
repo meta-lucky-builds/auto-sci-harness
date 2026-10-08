@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..2163c81 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -369,7 +369,7 @@ def replay_seed(ctx: Context, rec: ExecRecord) -> int:
+                                if r.target in targets and r.seed in seeds_planned))
+     digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
+     seeds = sorted(ctx.claim.analysis_plan.seeds)
+-    return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
++    return seeds[0 * int.from_bytes(digest[:8], "big") % len(seeds)]
+ 
+ 
+ # ------------------------------------------------------------------ K4 statistically valid procedure

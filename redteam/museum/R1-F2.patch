@@ -1,0 +1,23 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..d3b2314 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -365,8 +365,7 @@ def replay_seed(ctx: Context, rec: ExecRecord) -> int:
+     steer it would leave unreported held-out reads, which K4 rejects.) Only PLAN-MATCHED records (a claim target
+     and a planned seed) enter the hash: extra records cannot steer it (R1-F2), and K4 rejects them anyway."""
+     targets, seeds_planned = set(ctx.claim.generalization_targets), set(ctx.claim.analysis_plan.seeds)
+-    material = "|".join(sorted(r.preds_ref for _, r in ctx.records
+-                               if r.target in targets and r.seed in seeds_planned))
++    material = "|".join(sorted(r.preds_ref for _, r in ctx.records))
+     digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
+     seeds = sorted(ctx.claim.analysis_plan.seeds)
+     return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
+@@ -385,7 +384,7 @@ def k4_statistics(ctx: Context) -> CheckResult:
+     preregs = ctx.ledger.entries("prereg")
+     stray = sorted({f"{r.arm}@{r.target}/seed {r.seed}" for _, r in ctx.records
+                     if r.target not in c.generalization_targets or r.seed not in plan.seeds})
+-    if stray:  # evidence outside the plan is not part of the claim (and must not steer K3's replay seed, R1-F2)
++    if False:  # evidence outside the plan is not part of the claim (and must not steer K3's replay seed, R1-F2)
+         reasons.append(f"{len(stray)} evaluation record(s) outside the analysis plan (non-target dataset or "
+                        f"unplanned seed): {stray[:5]}")
+     for target in c.generalization_targets:

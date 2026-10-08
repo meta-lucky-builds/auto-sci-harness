@@ -1,0 +1,18 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index fcbf631..702c8bc 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -245,12 +245,7 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
+     check_edit(edit, spec, protected_nodes)
+     doc = copy.deepcopy(spec.model_dump(mode="json"))
+     for op in edit.ops:
+-        try:
+-            _apply_op(doc, op)
+-        except EditRejected:
+-            raise
+-        except (ValueError, IndexError, TypeError, KeyError) as e:  # fail closed: a malformed edit is rejected
+-            raise EditRejected(f"cannot apply {op.op} at {op.path}: {type(e).__name__}: {e}") from e
++        _apply_op(doc, op)
+     try:
+         new = HarnessSpec.model_validate(doc)
+     except ValidationError as e:

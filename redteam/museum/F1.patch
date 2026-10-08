@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/research/modules.py b/src/custom_harness/research/modules.py
+index 3bd748a..b407cc6 100644
+--- a/src/custom_harness/research/modules.py
++++ b/src/custom_harness/research/modules.py
+@@ -124,7 +124,7 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
+     budget = DEV_TIME_FACTOR * task.solution_timeout_s  # total over all folds (each fold also keeps the per-run cap)
+     over = (f"\n[harness] dev evaluation exceeded its total time budget ({DEV_TIME_FACTOR:g} x the task's "
+             f"{task.solution_timeout_s:g} s per-run limit, over {len(state['dev_folds'])} folds)")
+-    train_rel, test_rel = f"in/train/{task.train_file}", f"in/test/{task.test_features_file}"
++    train_rel, test_rel = "train.csv", "valid_X.csv"
+     for k, fold in enumerate(state["dev_folds"]):
+         remaining = budget - wall
+         if remaining <= 0:

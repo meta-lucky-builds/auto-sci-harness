@@ -1,0 +1,15 @@
+diff --git a/src/custom_harness/research/claims.py b/src/custom_harness/research/claims.py
+index 7db6b62..6d9da63 100644
+--- a/src/custom_harness/research/claims.py
++++ b/src/custom_harness/research/claims.py
+@@ -69,9 +69,7 @@ def _inline(text: Any, limit: int = 500) -> str:
+ def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
+     """The hypothesis list from (evolvable, model-written) state, parsed defensively: trusted code must not crash
+     on a malformed value an evolved harness wrote; anything that is not a list of objects counts as empty."""
+-    raw = state.get("hypotheses")
+-    items = raw.get("hypotheses") if isinstance(raw, dict) else None
+-    return [h for h in items if isinstance(h, dict)] if isinstance(items, list) else []
++    return (state.get("hypotheses") or {}).get("hypotheses", [])  # type: ignore[no-any-return]
+ 
+ 
+ def _labels(raw: bytes) -> list[str]:

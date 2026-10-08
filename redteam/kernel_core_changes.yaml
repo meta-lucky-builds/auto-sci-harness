@@ -1,0 +1,9 @@
+# Two-speed Kernel records (GOAL §16.7; checked by scripts/governance.py, part of check.py --fast).
+# kind: baseline (the first record only: the core as adopted) / window (scheduled, >= 7 days after 'proposed') /
+# tighten (merges at once; the claim that it only tightens is NOT machine-checked).
+changes:
+- fingerprint: 05c4b9fd1e4e25b73f144b145afcbf89bb242b50b4513053a3711260c94daf14
+  kind: baseline
+  approver: "assure agent bootstrap at f0f703f - NEEDS OWNER CONFIRMATION (an agent cannot approve a core change)"
+  note: Kernel core as merged on main before the §16 workstreams (base commit f0f703f)
+  recorded: '2026-10-07'

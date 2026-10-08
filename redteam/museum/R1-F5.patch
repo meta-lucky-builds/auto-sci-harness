@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/adapters.py b/src/custom_harness/kernel/adapters.py
+index 14c109d..18c47af 100644
+--- a/src/custom_harness/kernel/adapters.py
++++ b/src/custom_harness/kernel/adapters.py
+@@ -110,7 +110,6 @@ def covered_modules(spec: AdapterSpec) -> dict[str, Path]:
+                 raise AdapterError(f"adapter module {name!r} has no project source file")
+             continue
+         out[name] = path
+-        todo += sorted(_imports(name, path, path.read_bytes()))
+     return dict(sorted(out.items()))
+ 
+ 

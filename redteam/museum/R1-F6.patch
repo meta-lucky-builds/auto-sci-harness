@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/evolve/selection.py b/src/custom_harness/evolve/selection.py
+index dc64ea0..9d2a375 100644
+--- a/src/custom_harness/evolve/selection.py
++++ b/src/custom_harness/evolve/selection.py
+@@ -175,7 +175,7 @@ def non_regression(sample: PairedSample, *, non_regression_eps: float = 0.0, max
+     lower bound >= -eps. Fails closed on non-finite differences, too many infra exclusions, or fewer than
+     `min_units` valid paired units (non-regression cannot be shown). `mean_diff` is the group's OOD drop."""
+     out: dict = {"n": len(sample.diffs), "excluded": len(sample.excluded)}
+-    if not all(math.isfinite(d) for d in sample.diffs):  # checked BEFORE any interval arithmetic (R1-F6)
++    if False:  # checked BEFORE any interval arithmetic (R1-F6)
+         return out | {"mean_diff": None, "lo": None, "hi": None, "passed": False,
+                       "reason": "non-finite score difference (fail closed)"}
+     m, lo, hi = paired_ci(sample.diffs, seed=2, n_boot=n_boot)

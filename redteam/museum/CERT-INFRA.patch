@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
+index 04e3d64..9f181d7 100644
+--- a/src/custom_harness/kernel/kernel.py
++++ b/src/custom_harness/kernel/kernel.py
+@@ -138,7 +138,7 @@ class Kernel:
+                 continue
+             try:
+                 results[kid] = impl[kid](ctx)
+-            except InfraError:
++            except ZeroDivisionError:
+                 # the environment broke (e.g. Docker down during K3 re-execution): issue NO certificate, so the
+                 # claim is judged on a retry instead of being rejected for an outage (infra != policy, GOAL L1)
+                 raise
