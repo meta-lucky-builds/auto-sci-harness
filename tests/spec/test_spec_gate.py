@@ -149,3 +149,30 @@ def test_every_sealed_look_is_ledgered_and_an_edited_look_breaks_the_chain(tmp_p
 
 def test_the_committed_look_ledger_is_intact():
     assert sealed.check_chain() == []
+
+
+def _records(root: Path, *recs: dict) -> None:
+    (root / governance.RECORDS).write_text(yaml.safe_dump({"changes": list(recs)}), encoding="utf-8")
+
+
+def test_a_deviation_record_corrects_an_earlier_record_and_never_satisfies_the_gate(tmp_path):
+    """Owner decision 2026-10-08: a record that misclassified a core change is corrected by an APPENDED `deviation`
+    record (history is never rewritten). It must name the record it corrects (an earlier one), list the changes, say
+    whether the 7-day cooling-off was observed (a bool) and name an approver. A deviation never stands in for the
+    window/tighten record the CURRENT core needs (else it would be a way around the cooling-off)."""
+    root = _gov_tree(tmp_path)
+    fp = governance.fingerprint(root)
+    old = {"fingerprint": "a" * 64, "kind": "tighten", "approver": "owner", "recorded": "2026-10-08"}
+    cur = {"fingerprint": fp, "kind": "tighten", "approver": "owner", "recorded": "2026-10-08"}
+    dev = {"fingerprint": "a" * 64, "kind": "deviation", "corrects": "a" * 64, "changes": ["STALE vs forged"],
+           "cooling_off_observed": False, "basis": "GOAL §16.4/§16.6", "approver": "owner", "recorded": "2026-10-08"}
+    _records(root, old, cur, dev)
+    assert governance.problems(root) == []
+    for bad in ({"corrects": "b" * 64}, {"changes": []}, {"cooling_off_observed": "no"}, {"approver": ""},
+                {"basis": ""}):
+        _records(root, old, cur, {**dev, **bad})
+        assert governance.problems(root), bad
+    _records(root, dev | {"corrects": "a" * 64}, old, cur)  # it must come AFTER the record it corrects
+    assert governance.problems(root)
+    _records(root, old, {**dev, "fingerprint": fp, "corrects": "a" * 64})  # no window/tighten for the current core
+    assert "with no record" in " ".join(governance.problems(root))

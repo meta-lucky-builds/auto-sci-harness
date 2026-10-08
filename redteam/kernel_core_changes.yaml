@@ -1,6 +1,8 @@
 # Two-speed Kernel records (GOAL §16.7; checked by scripts/governance.py, part of check.py --fast).
 # kind: baseline (the first record only: the core as adopted) / window (scheduled, >= 7 days after 'proposed') /
 # tighten (merges at once; the claim that it only tightens is NOT machine-checked).
+# deviation (appended correction of an EARLIER record; never satisfies the current core): corrects, changes,
+# cooling_off_observed, basis, approver.
 changes:
 - fingerprint: 05c4b9fd1e4e25b73f144b145afcbf89bb242b50b4513053a3711260c94daf14
   kind: baseline
@@ -33,4 +35,22 @@ changes:
     makes the ML adapter unapprovable. Only adds validation; no pass condition is relaxed. Recorded by the
     integrator agent, not typed by a human. The ML adapter hash changes: `chh approve-adapter ml` must be re-run
     by the human.
+  recorded: '2026-10-08'
+- fingerprint: 352143e29e8717a35c8413b6c9a8ee8313b593f644db9c904aaf61f610ceb43b
+  kind: deviation
+  corrects: 352143e29e8717a35c8413b6c9a8ee8313b593f644db9c904aaf61f610ceb43b
+  changes:
+  - verify_status separates STALE from forged (a stale certificate is no longer reported as a forgery; verify() stays
+    strict)
+  - score_predictions scores a certificate entry without a readable resolution as a miss (invalid_resolution) instead
+    of crashing every prediction reader
+  - the K3 zero-failure reliability demonstration changes how many clean replays a claim needs
+  cooling_off_observed: false
+  basis: GOAL §16.4 (statistics fixed at registration, K3 reliability) and §16.6 (stale vs forged, as-of stability)
+  approver: owner (delegated to orchestrator in chat, 2026-10-08 evening)
+  note: >-
+    Corrects the 'tighten' record above for the same fingerprint, which classed these three changes as tightening.
+    They are Kernel core changes adopted from GOAL §16.4/§16.6 under the owner's delegation on 2026-10-08. The §16.7
+    7-day cooling-off for core changes was NOT observed: this is a recorded deviation, not a tightening. The earlier
+    record is left unchanged (history is not rewritten). Typed by the integrator agent, not by a human.
   recorded: '2026-10-08'

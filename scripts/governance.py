@@ -10,7 +10,9 @@ of the core fingerprint.
     python scripts/governance.py --record --kind window --proposed 2026-10-07 --approver NAME --note "..."
     python scripts/governance.py --record --kind tighten --approver NAME --note "..."
 
-Records live in `redteam/kernel_core_changes.yaml`. What this check CAN enforce: no core change reaches the gate
+Records live in `redteam/kernel_core_changes.yaml`. A `deviation` record (appended, never edited in place)
+corrects an earlier misclassified record and states whether the cooling-off was observed; it never satisfies the
+current core's requirement. What this check CAN enforce: no core change reaches the gate
 without a record bound to its exact fingerprint; a `window` record is at least 7 days after its proposal date; every
 record names an approver. What it CANNOT enforce (stated, not solved): that the approver is a human, and that a
 `tighten` change really only tightens. The museum and the mutation gate are the evidence for the latter; the
@@ -67,16 +69,41 @@ def fingerprint(root: Path = ROOT) -> str:
     return h.hexdigest()
 
 
+def _deviation_problems(recs: list[dict]) -> list[str]:
+    """`deviation` records (owner decision 2026-10-08): an appended correction of an EARLIER record that misclassified
+    a core change (history is never rewritten). Required: `corrects` = the fingerprint of an earlier non-deviation
+    record, a non-empty `changes` list, `cooling_off_observed` as a bool (False = a recorded deviation from §16.7),
+    a `basis` and an `approver`."""
+    out = []
+    for i, r in enumerate(recs):
+        if r.get("kind") != "deviation":
+            continue
+        tag = f"deviation record #{i}"
+        earlier = {e.get("fingerprint") for e in recs[:i] if e.get("kind") != "deviation"}
+        if r.get("corrects") not in earlier:
+            out.append(f"{tag}: 'corrects' must name the fingerprint of an earlier record")
+        changes = r.get("changes")
+        if not isinstance(changes, list) or not changes or not all(isinstance(c, str) and c.strip() for c in changes):
+            out.append(f"{tag}: 'changes' must be a non-empty list of descriptions")
+        if not isinstance(r.get("cooling_off_observed"), bool):
+            out.append(f"{tag}: 'cooling_off_observed' must be true or false")
+        for key in ("basis", "approver"):
+            if not str(r.get(key, "")).strip():
+                out.append(f"{tag}: names no {key}")
+    return out
+
+
 def problems(root: Path = ROOT, today: dt.date | None = None) -> list[str]:
     path = root / RECORDS
     recs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("changes", []) if path.exists() else []
     fp = fingerprint(root)
-    mine = [r for r in recs if r.get("fingerprint") == fp]
+    out = _deviation_problems(recs)
+    # a deviation record annotates an EARLIER record; it never stands in for the record the current core needs
+    mine = [r for r in recs if r.get("fingerprint") == fp and r.get("kind") != "deviation"]
     if not mine:
-        return [f"the Kernel core changed (fingerprint {fp[:16]}) with no record in {RECORDS}: a core change needs "
-                f"a scheduled-window record ({COOLING_DAYS}-day cooling-off) or a tighten-only record "
-                f"(`python scripts/governance.py --record ...`)"]
-    out = []
+        return out + [f"the Kernel core changed (fingerprint {fp[:16]}) with no record in {RECORDS}: a core change "
+                      f"needs a scheduled-window record ({COOLING_DAYS}-day cooling-off) or a tighten-only record "
+                      f"(`python scripts/governance.py --record ...`)"]
     for r in mine:
         if not str(r.get("approver", "")).strip():
             out.append(f"record {fp[:16]}: names no approver")
