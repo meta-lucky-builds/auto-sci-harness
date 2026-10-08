@@ -1,0 +1,7 @@
+# Pinned benchmarks (GOAL §2.3 axes A-E, §11 M8): name, version, axis, licence, content hash, item directory.
+# EMPTY on purpose: every real benchmark (Terminal-Bench 2.x, SWE-bench Verified, GAIA, MLE-bench, ResearchBench, SDE
+# sentinel) needs a download, which is an owner decision (needs owner). To add one: put its items under a directory,
+# compute `custom_harness.scorecard.registry.content_hash(dir)`, and add
+#   - {name: ..., version: ..., axis: A, licence: ..., content_hash: <64 hex>, path: <dir relative to this file>,
+#      metric: pass_rate, higher_is_better: true}
+benchmarks: []

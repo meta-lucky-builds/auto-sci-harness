@@ -25,7 +25,7 @@ chh = "custom_harness.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-custom_harness = ["gateway/providers.yaml"]
+custom_harness = ["gateway/providers.yaml", "scorecard/benchmarks.yaml", "scorecard/capabilities.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
