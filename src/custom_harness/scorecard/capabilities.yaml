@@ -13,67 +13,106 @@ capabilities:
   source: Meta-Harness
   capability: Proposer with full history filesystem
   home: L6.1–2
-  ablation: null
+  ablation:
+    switch: proposer-history
 - id: rhi
   source: RHI
   capability: Contracts and hops as edit types; compare to parent
   home: L6 edit types, race
-  ablation: null
+  ablation:
+    switch: contract-hop-edits
+    not_covered:
+      compare to parent: 'the paired comparison against the parent (evolve/selection.py race / paired_sample / gate) is the acceptance statistic, an integrity mechanism (invariant 6): no switch'
 - id: rrsi
   source: RRSI
   capability: Leakage critic, regularised proposals/acceptance, cost-aware admission
   home: L6.5, L6.8, L6.10
-  ablation: null
+  ablation:
+    switch: cost-term
+    not_covered:
+      leakage critic: 'evolve/critic.py is an interface only: no working critic exists until a second model family is available (invariant 5 NOT MET) and its review is advisory (never gating)'
+      regularised proposals: 'the annealed operator budget (evolve/generations.py AnnealSchedule) is applied in evolve/driver.py (CampaignLedger.begin), which receives no AblationSet: not switched'
+      regularised acceptance: 'the regularised acceptance is the leave-one-family/domain-out non-regression gate (evolve/loop.py _lofo), an integrity gate (invariant 16): no switch'
 - id: self-harness
   source: Self-Harness
   capability: Causal failure signatures, held-in/out non-regression, decline path
   home: L6.3, L6.6, gate
-  ablation: null
+  ablation:
+    switch: causal-signatures
+    not_covered:
+      held-in/out non-regression: 'the held-out gate and the leave-one-family/domain-out non-regression (evolve/selection.py gate, evolve/loop.py _lofo) are integrity gates (invariants 6, 16): no switch'
+      decline path: 'the decline is part of the proposal schema (evolve/propose.py parse_proposal) and only records a `declined` lineage status: no switch built'
 - id: autosaddler
   source: AutoSaddler
   capability: Deep diagnosis, patch taxonomy, mini-batch pre-filter, composition DAG
   home: L6.3, edit types, L6.8
-  ablation: null
+  ablation:
+    switch: minibatch-prefilter
+    not_covered:
+      deep diagnosis: the first-divergence diagnosis (evolve/diagnosis.py) is switched off by `causal-signatures`, which belongs to row self-harness (one row per switch)
+      patch taxonomy: 'the typed edit taxonomy (evolve/edits.py EditType) is the only form an edit can take; removing it removes evolution itself, not one capability of it: no switch'
+      composition DAG: not built (no edit composition exists in evolve/)
 - id: milo
   source: MILO
   capability: Islands, lineage with rejects, adaptive orchestrator
   home: L7, ledger
-  ablation: null
+  ablation:
+    switch: orchestrator-reallocation
+    not_covered:
+      islands: control/islands.py islands are not wired to evolve/driver.py or any run path (only the Orchestrator's allocation over them exists); a single-population arm is not built
+      lineage with rejects: 'the lineage records of rejected edits are the store''s append-only audit trail and the novelty gate''s input (switched by `novelty-gate`, row harnessx); dropping them would falsify the record: no switch'
+      'adaptive orchestrator: lever choice and edit-type quota': the lever choice is switched by `lever-choice` (row sia); the prompt-only edit-type quota (Orchestrator.step cap, admit) is not switched
 - id: mixture-of-branches
   source: Mixture of Branches
   capability: Coverage-based branching, router
   home: L6.9
-  ablation: null
+  ablation:
+    not_ablatable: 'branch creation (evolve/branches.propose_branch) never happens in ANY ablated generation (evolve/loop.py: an ablated arm has no rejected_on, so no branch is proposed), so a branching switch would not isolate it; the router (evolve/router.py) is measured only by router.finalize_routed on the sealed split, a one-shot human-run command (invariant 6) that an ablation run must never consume'
 - id: harnessx
   source: HarnessX
   capability: Typed multi-dimension harness, deterministic gate, per-task attribution, novelty gate
   home: spec, gate, ledger
-  ablation: null
+  ablation:
+    switch: novelty-gate
+    not_covered:
+      typed multi-dimension harness: 'the typed HarnessSpec (runtime/spec.py) is the harness format itself: no switch'
+      deterministic gate: 'the held-out gate (evolve/selection.py gate, evolve/loop.py _lofo) is an integrity mechanism (invariants 6, 16): no switch'
+      per-task attribution: evolve/loop.py _per_task only writes ledger fields (per_task, flipped, regressed); no decision reads them, so switching it off changes no behaviour an ablation could measure
 - id: adaptive-auto-harness
   source: Adaptive Auto-Harness
   capability: Branch tree, temporal reveal, solve-time routing, research logs
   home: L6.9, L6.11
-  ablation: null
+  ablation:
+    not_ablatable: 'branch tree: branch creation (evolve/branches.propose_branch) never happens in ANY ablated generation (evolve/loop.py: an ablated arm has no rejected_on, so no branch is proposed), so a branching switch would not isolate it; solve-time routing: the router (evolve/router.py) is measured only by router.finalize_routed on the sealed split, a one-shot human-run command (invariant 6) that an ablation run must never consume; temporal reveal (evolve/reveal.py): switching it off would reveal undated or future labels, a leak (invariants 2, 18): an integrity mechanism, no switch; research logs: not built as a decision input (evolve/generations.py generation reports are records only)'
 - id: scholarevolve
   source: ScholarEvolve
   capability: Literature → mechanism → code mutation; bootstrap CI; topic quotas
   home: L4.3 → L6.2, gate, L4.4
-  ablation: null
+  ablation:
+    not_ablatable: 'literature -> mechanism -> code mutation: not built (no evolve/ code reads literature/); bootstrap CI: the paired statistics of the race and gate (evolve/selection.py) are an integrity mechanism (invariant 6); topic quotas: research/hypotheses.apply_topic_quota is not wired into the research loop (its own docstring), so no run path reaches it to switch'
 - id: sol-pi
   source: SoL-Pi
   capability: Cost objective, ObservationPack, verified-quote reducer, frozen held-out
   home: L1, L4 context, gate
-  ablation: null
+  ablation:
+    switch: observation-pack
+    not_covered:
+      cost objective: 'the acceptance cost term is switched by `cost-term` (row rrsi); run and campaign budgets (budget.py) are fail-closed resource bounds: no switch'
+      frozen held-out: 'the sealed split and never-shown gate are integrity mechanisms (invariant 6): no switch'
 - id: continual-harness
   source: Continual Harness
   capability: Mid-episode refinement, adaptive cadence
   home: L6 (low-risk edit types, in-run only)
-  ablation: null
+  ablation:
+    not_ablatable: 'not built: no mid-episode (in-run) harness refinement and no adaptive edit cadence exist; evolution edits the harness only between runs (evolve/loop.py evolve_generation)'
 - id: sia
   source: SIA
   capability: Lever choice harness vs weights
   home: L7 lever, L8
-  ablation: null
+  ablation:
+    switch: lever-choice
+    not_covered:
+      weights lever: 'not built: the L8 weights lever is declared but never chosen (control/islands.py BUILT_LEVERS excludes `weights`)'
 - id: evomaster
   source: EvoMaster
   capability: Skills, progressive disclosure, context manager
@@ -83,7 +122,8 @@ capabilities:
   source: Weng survey
   capability: Decision observability, optimiser-of-optimiser
   home: calibration, L7
-  ablation: null
+  ablation:
+    not_ablatable: 'decision observability is records only (orchestrator_decision in control/islands.py, proposer_calibration in evolve/loop.py): no decision reads them, so an ablation would measure nothing; optimiser-of-optimiser: not built (control/islands.py Orchestrator.set_policy only versions and rate-limits a policy change; gating a change on measured meta-level gain is not built)'
 - id: ai-scientist-v1-v2
   source: AI Scientist v1/v2
   capability: End-to-end pipeline, reviewer ensemble, experiment tree, LaTeX loop
@@ -108,7 +148,8 @@ capabilities:
   source: ScienceFlow
   capability: Recoverable states, safe restore, resource controller
   home: L0 snapshots, L1
-  ablation: null
+  ablation:
+    not_ablatable: 'recoverable states (runtime/engine.py resume, evolve/loop.py Evaluator durable unit records) change no result unless a crash happens, and a run is never continued under another ablation (Engine._check_ablation); safe restore (sandbox/snapshot.py preflight / rollback) and the resource controller (budget.py caps, fail closed) are integrity and safety mechanisms (GOAL L0, L1): no switch'
 - id: parness
   source: PARNESS
   capability: DAG kernel, full-text index, KG, provider adapters
@@ -138,7 +179,8 @@ capabilities:
   source: The Station
   capability: Decentralised agents, archive coordination, exact evaluators, stagnation lanes
   home: L4 multi-agent mode, L3, L7
-  ablation: null
+  ablation:
+    not_ablatable: 'decentralised agents, archive coordination and stagnation lanes: not built (no L4 multi-agent research mode exists; orchestration/ is the developer delegation driver of GOAL §15); exact evaluators are the verifier ladder and Kernel checks, integrity mechanisms (invariant 3): no switch'
 - id: autoopt
   source: AutoOPT
   capability: Lean + comparator, numerical certificates, statement fidelity
@@ -148,7 +190,11 @@ capabilities:
   source: MDA
   capability: Bayesian evidence, EIG experiment design
   home: L4.7 (EIG mode), L1 allocator
-  ablation: null
+  ablation:
+    switch: voi-allocation
+    not_covered:
+      Bayesian evidence: 'no Bayesian evidence mode for research claims is built; the Kernel prediction ledger''s likelihood-ratio / information-gain score (kernel/predictions.py) is a Kernel mechanism (invariant 3): no switch'
+      EIG experiment design: the L4.7 EIG mode is not built (nothing in research/); the L1 allocator part is control/voi.py, which this switch turns off
 - id: robin
   source: Robin
   capability: Lab-in-loop, BTL tournament, replicated analysis + consensus

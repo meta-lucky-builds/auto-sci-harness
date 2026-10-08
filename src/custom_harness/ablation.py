@@ -78,7 +78,54 @@ def _registry(*switches: Switch) -> Mapping[str, Switch]:
 _CORE: tuple[Switch, ...] = (
 )
 
+_T_EVOLVE = "tests/test_ablation_switches_evolve.py::"
 _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
+    Switch(name="proposer-history", capability="meta-harness",
+           turns_off="evolve/loop.py evolve_generation: the proposer gets no history. The PAST EDITS ledger "
+                     "(proposer_view of every harness_edit record) is empty, and a ProposerAgent does not run its "
+                     "agentic session over the evidence-export filesystem (propose_from_export): its backend is "
+                     "called once, one-shot (propose.propose), with the current diagnosis only",
+           test=_T_EVOLVE + "test_proposer_history_switch"),
+    Switch(name="contract-hop-edits", capability="rhi",
+           turns_off="evolve/loop.py evolve_generation: edits of type `contract` or `hop` (edits.EditType) are "
+                     "dropped before any screen, check or run (lineage status `ablated_edit_type`, edit withheld)",
+           test=_T_EVOLVE + "test_contract_hop_edits_switch"),
+    Switch(name="cost-term", capability="rrsi",
+           turns_off="evolve/loop.py evolve_generation: the acceptance cost term (selection.cost_bound) no longer "
+                     "rejects; it is still computed and recorded under cost.ablated.measured_passed",
+           test=_T_EVOLVE + "test_cost_term_switch"),
+    Switch(name="causal-signatures", capability="self-harness",
+           turns_off="evolve/loop.py evolve_generation: the diagnosis carries no first-divergence causal "
+                     "signatures (digest divergences / no_reference emptied right after propose.diagnose), so the "
+                     "proposer sees none and cannot cite them (claims.check_claims)",
+           test=_T_EVOLVE + "test_causal_signatures_switch"),
+    Switch(name="minibatch-prefilter", capability="autosaddler",
+           turns_off="evolve/loop.py evolve_generation: no smoke run pre-filter (L6.7, loop._smoke_failure is not "
+                     "run) and no successive-halving early elimination in the race (race_rounds forced to 1: every "
+                     "raced candidate is evaluated on every evolve unit before the best is picked)",
+           test=_T_EVOLVE + "test_minibatch_prefilter_switch"),
+    Switch(name="orchestrator-reallocation", capability="milo",
+           turns_off="control/islands.py Orchestrator.step: a stalled island on the harness_edit lever keeps its "
+                     "budget weight (no stall_shrink) and its mutator mix (no diversification); decisions are "
+                     "logged under `orchestrator_decision:ABLATED`",
+           test=_T_EVOLVE + "test_orchestrator_reallocation_switch"),
+    Switch(name="novelty-gate", capability="harnessx",
+           turns_off="evolve/loop.py evolve_generation: the novelty gate (rejected_signatures) is empty, so an edit "
+                     "identical to a previously rejected one is evaluated instead of `rejected_novelty`",
+           test=_T_EVOLVE + "test_novelty_gate_switch"),
+    Switch(name="observation-pack", capability="sol-pi",
+           turns_off="runtime/engine.py (LLM prompts and tool commands) -> runtime/template.render: no archive "
+                     "of over-long values (no blob handle) and no verified-quote log reducer (`|log` is plain "
+                     "head/tail truncation)",
+           test=_T_EVOLVE + "test_observation_pack_switch"),
+    Switch(name="lever-choice", capability="sia",
+           turns_off="control/islands.py Orchestrator.step: the `more_evaluation` lever is never chosen; a stalled "
+                     "island always takes the harness_edit lever",
+           test=_T_EVOLVE + "test_lever_choice_switch"),
+    Switch(name="voi-allocation", capability="mda",
+           turns_off="evolve/loop.py evolve_generation: with race_allocator='voi', the race runs as the batch race "
+                     "(selection.race) instead of control/voi.voi_race",
+           test=_T_EVOLVE + "test_voi_allocation_switch"),
 )
 
 _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memory wiring, verify/, literature/ ...)
