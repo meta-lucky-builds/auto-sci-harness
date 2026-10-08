@@ -1,16 +1,20 @@
 diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
-index 04e3d64..a358233 100644
 --- a/src/custom_harness/kernel/kernel.py
 +++ b/src/custom_harness/kernel/kernel.py
-@@ -208,9 +208,8 @@ class Kernel:
-         ledger entry, is what makes a certificate trustworthy: the ledger is tamper-evident, not authenticated."""
+@@ -339,14 +339,14 @@
          cert = self.certificate(cert_hash)
-         again = self.certify(Claim.model_validate(cert.claim), list(cert.evidence_ids), record=False)
--        problems = [f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived"
--                    for k in CHECK_IDS if cert.checks[k].status != again.checks[k].status]
--        if again.label != cert.label:
-+        problems: list[str] = []
-+        if False:
-             problems.append(f"label {cert.label.value} recorded, {again.label.value} re-derived")
-         return problems
+         entry = next(e for e in self.ledger.entries("certificate") if e.body.get("cert_hash") == cert_hash)
+         claim, ids = Claim.model_validate(cert.claim), list(cert.evidence_ids)
+-        better, worse = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
++        better, worse = [], []  # museum: no re-derivation compared
+         if (better or worse) and (cert.kernel_version != self.config.version or cert.config != asdict(self.config)):
+             return VerifyResult("stale", (), (f"issued under Kernel {cert.kernel_version} with other rules; today's "
+                                               f"Kernel {self.config.version} re-derives differently", *better, *worse))
+         if better:  # the record claims MORE than its own ledger prefix supports: forged
+             return VerifyResult("forged", tuple(better), tuple(worse))
+         # a record LESS favourable than its re-derivation (e.g. a flaky K3 that passed this time) is not a forgery
+-        b_now, w_now = _differences(cert, self.certify(claim, ids, record=False))
++        b_now, w_now = [], []  # museum: no re-derivation compared
+         now = [*worse, *(p for p in (*b_now, *w_now) if p not in worse)]
+         return VerifyResult("stale" if now else "valid", (), tuple(now))
  

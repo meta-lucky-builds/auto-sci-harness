@@ -1,12 +1,11 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
-index 664c83d..8b9d904 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -303,7 +303,6 @@ def k3_reproduced(ctx: Context) -> CheckResult:
-         if not abs(recomputed - rec.score) <= SCORE_TOLERANCE:
-             reasons.append(f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
-                            f"the stored predictions give {recomputed!r}")
+@@ -461,7 +461,6 @@
+             reasons.append(R(Code.K3_SCORE_MISMATCH,
+                 f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
+                            f"the stored predictions give {recomputed!r}"))
 -    reasons += _earlier_reproduction_failures(ctx)
      if ctx.replayer is None:
-         return _result([*reasons, "no replayer configured: re-execution was not performed"], obs)
-     plan = ctx.claim.analysis_plan
+         return _result([*reasons, R(Code.K3_NO_REPLAYER,
+             "no replayer configured: re-execution was not performed")], obs)

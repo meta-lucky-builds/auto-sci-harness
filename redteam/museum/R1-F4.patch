@@ -1,8 +1,7 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
-index 664c83d..231f12d 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -140,7 +140,7 @@ def related_targets(vault: Vault, target: str) -> set[str]:
+@@ -169,7 +169,7 @@
          return {target}
      private = {f.blob for f in datasets[target].files.values() if f.private}
      return {target} | {d for d, rec in datasets.items() if d != target and (
@@ -10,4 +9,4 @@ index 664c83d..231f12d 100644
 +        shared_examples(vault, target, d))}
  
  
- # ------------------------------------------------------------------ K0 provenance
+ # ------------------------------------------------------------------ fixed at registration (§16.4, invariant 17)

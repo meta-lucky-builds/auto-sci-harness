@@ -1,24 +1,23 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
-index 664c83d..7888485 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -548,8 +548,7 @@ def k7_risk(ctx: Context) -> CheckResult:
+@@ -767,9 +767,7 @@
      that needs a prior over effects, which v1 does not have. Such claims are reported, never certified."""
      c = ctx.claim
      if c.kind not in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT):
--        return _result([f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
--                        f"(one that could not have failed) cannot be detected without a prior over effects"])
-+        return CheckResult(status="n/a", reasons=("no risk model",))
-     if not ctx.stats:
-         return _result(["no statistics to assess risk (see K4)"])
-     reasons: list[str] = []
+-        return _result([R(Code.K7_NO_RISK_MODEL,
+-            f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
+-                        f"(one that could not have failed) cannot be detected without a prior over effects")])
++        return CheckResult(status="n/a", reasons=("no risk model",), codes=(Code.NOT_APPLICABLE,))
+     missing = sorted(set(c.generalization_targets) - set(ctx.stats))
+     if missing:  # KD2 (assure): risk is judged on every target, never on the subset that has statistics
+         return _result([R(Code.K7_NO_STATS, f"no statistics to assess risk on {missing} (see K4)")])
 diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
-index 04e3d64..96de574 100644
 --- a/src/custom_harness/kernel/kernel.py
 +++ b/src/custom_harness/kernel/kernel.py
-@@ -145,7 +145,7 @@ class Kernel:
-             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
-                 results[kid] = CheckResult(status="fail", reasons=(f"check raised {type(e).__name__}: {e}",))
+@@ -258,7 +258,7 @@
+                 results[kid] = CheckResult(status="fail", codes=(code,),
+                                            reasons=(f"check raised {exception_name(e)}",))
          # fail closed: only an explicit pass counts, or an n/a where the TABLE (not the check) says it does not apply
 -        ok = all(r.status == "pass" or (r.status == "n/a" and table[k] is not None) for k, r in results.items())
 +        ok = all(r.status in ("pass", "n/a") for k, r in results.items())

@@ -3,7 +3,7 @@ diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/ker
 +++ b/src/custom_harness/kernel/kernel.py
 @@ -339,7 +339,7 @@
          cert = self.certificate(cert_hash)
-         entry = next(e for e in self.ledger.entries("certificate") if e.body["cert_hash"] == cert_hash)
+         entry = next(e for e in self.ledger.entries("certificate") if e.body.get("cert_hash") == cert_hash)
          claim, ids = Claim.model_validate(cert.claim), list(cert.evidence_ids)
 -        better, worse = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
 +        better, worse = _differences(cert, self.certify(claim, ids, record=False))

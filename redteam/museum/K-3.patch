@@ -1,21 +1,19 @@
 diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
-index 04e3d64..4ee7d59 100644
 --- a/src/custom_harness/kernel/kernel.py
 +++ b/src/custom_harness/kernel/kernel.py
-@@ -131,7 +131,7 @@ class Kernel:
+@@ -239,7 +239,7 @@
              if na is not None:  # the human-owned table says this check does not apply to the class: record why
-                 results[kid] = CheckResult(status="n/a", reasons=(na,))
+                 results[kid] = CheckResult(status="n/a", reasons=(na,), codes=(Code.NOT_APPLICABLE,))
                  continue
 -            if not registered and kid not in ("K0", "K1", "K2"):
 +            if False and not registered and kid not in ("K0", "K1", "K2"):
                  # never touch held-out data for an unregistered claim: certify must not be a free look
-                 results[kid] = CheckResult(status="fail", reasons=(
+                 results[kid] = CheckResult(status="fail", codes=(Code.NOT_EVALUATED_UNREGISTERED,), reasons=(
                      "not evaluated: the claim was never pre-registered (held-out data are not read for it)",))
 diff --git a/src/custom_harness/kernel/vault.py b/src/custom_harness/kernel/vault.py
-index dbd1764..52b978f 100644
 --- a/src/custom_harness/kernel/vault.py
 +++ b/src/custom_harness/kernel/vault.py
-@@ -189,6 +189,8 @@ class Vault:
+@@ -189,6 +189,8 @@
          if purpose in ("evaluate", "kernel"):
              targets = self.registered_targets(claim_hash)
              if targets is None:

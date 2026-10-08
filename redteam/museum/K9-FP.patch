@@ -1,8 +1,7 @@
 diff --git a/src/custom_harness/research/modules.py b/src/custom_harness/research/modules.py
-index 3bd748a..0ba33f8 100644
 --- a/src/custom_harness/research/modules.py
 +++ b/src/custom_harness/research/modules.py
-@@ -62,7 +62,7 @@ _DEV_LABELS_KEY = "private_dev_labels"
+@@ -63,7 +63,7 @@
  
  
  def _dev_labels(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
@@ -10,13 +9,13 @@ index 3bd748a..0ba33f8 100644
 +    return ctx.store.blobs.get_json(state["_private_dev_labels_ref"])
  
  
- def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
-@@ -207,7 +207,7 @@ def setup(state, params, ctx: ModuleContext):
+ def cpu_exec_kwargs(sb: Sandbox, cpu_s: float | None) -> dict[str, Any]:
+@@ -242,7 +242,7 @@
              # per-run canary: lives only in private state; if it ever shows up in a prompt, a response,
              # the trace or the workspace, private state leaked (checked by the audit, I5)
              "_private_canary": new_canary(),
 -            "_private_dev_labels_ref": ctx.store.blobs.put_json({_DEV_LABELS_KEY: labels}),
 +            "_private_dev_labels_ref": ctx.store.blobs.put_json(labels),
-             "attempts": [], "n_attempts": 0, "best": None, "route": None}
- 
- 
+             "attempts": [], "n_attempts": 0, "best": None, "route": None,
+             # CPU-seconds per program run (setup param cpu_limit_s; None = off). Protected node: not evolvable.
+             **({"limits": {"cpu_s": float(params["cpu_limit_s"])}} if params.get("cpu_limit_s") is not None else {})}
