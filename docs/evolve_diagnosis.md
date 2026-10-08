@@ -78,3 +78,17 @@ Enforced (tests: `tests/test_evolve_generations.py`):
 
 Not wired: no CLI calls `generation_report`/`audit_report`; without `campaign=` the driver writes no ledger; a
 generation stopped by `BudgetExceeded` gets no record; `out_dir` files still use the local loop index on resume.
+
+# Static-check tightenings (2026-10-08, tests: `tests/test_evolve_tightening.py`)
+
+- `edits.PINNED_NODES` = socratic, critic_evidence, check_answers: if present in the parent, an edit may not change
+  or remove the node's definition (so `max_questions` cannot be set to 0). Their wiring stays evolvable. NOT covered:
+  re-routing the critic chain around a pinned node by edges alone (b-research's certify-time gate refuses such a run;
+  not checked statically here).
+- Reserved state keys `critic_answers`, `critic_evidence`, `recalled`, `recall_log` and reserved-writing modules
+  `research.critic_evidence`, `research.check_critic_answers`, `research.recall` (b-research; referenced by id only,
+  this branch does not contain those modules).
+- Anchored ids use `\Z`, not `$` (which also matches before a trailing newline): `claims.ID`/`REF`,
+  `edits._CLUSTER_ID`, `diagnosis._ID_LIKE`, `export._HEX`. The same pattern exists elsewhere (not changed here:
+  kerneld/protocol.py HEX64, kerneld/releases.py NOTE, memory/store.py, literature/*, orchestration/brief.py,
+  figures/audit.py); whether each is used with `.match` on untrusted input was not checked.
