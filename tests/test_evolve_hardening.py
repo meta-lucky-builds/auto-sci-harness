@@ -280,7 +280,11 @@ def test_the_edit_surface_cannot_reach_adapter_files(monkeypatch):
         "kind", "role", "system", "prompt", "output_key", "output_schema", "retries", "temperature", "max_tokens",
         "command", "timeout_s", "snapshot_after", "module", "params", "item_key",
         "source", "target", "when", "key", "op", "value", "max_value_chars", "head_fraction",
-        "usd", "gpu_hours", "quota_units", "tokens", "wall_s"}
+        "usd", "gpu_hours", "quota_units", "tokens", "wall_s",
+        # MapNode (g-runtime, reviewed 2026-10-08 at the int16-fix merge): items_key is a state path, body a node id,
+        # reducer a lookup in the trusted declared-reducer registry (never an import), max_items an integer cap. None
+        # resolves code; the evolve flow rules for maps are in edits._check_map_flow (finding R2-MAP).
+        "items_key", "body", "reducer", "max_items"}
     assert not [m for m in registered() if "adapter" in m or m.startswith(("custom_harness", "kernel"))]
     for path in ("custom_harness.kernel.adapters", "kernel.adapters", "custom_harness.verify.metrics"):
         with pytest.raises(KeyError):
@@ -375,10 +379,16 @@ def test_tool_node_rules_and_positive_control():
 
 
 def test_no_trusted_module_reads_tool_prefixed_state():
-    """The tool taint rule relies on no module consuming `tool_*` keys: pin it on the module sources."""
+    """The tool taint rule relies on no module consuming `tool_*` keys: pin it on the module sources. One reviewed
+    exception: runtime/spec.py's check_map REFUSES an LLM map body over a `tool_*` key (a guard, not a reader); it
+    may mention the prefix only inside that `startswith` test."""
     src = ROOT / "src/custom_harness"
+    guard = 'root.startswith("tool_")'
     for p in [*(src / "research").glob("*.py"), *(src / "runtime").glob("*.py")]:
         text = p.read_text(encoding="utf-8")
+        if p.name == "spec.py" and p.parent.name == "runtime":
+            assert text.count(guard) == 1, p  # the guard is still there (not vacuous)
+            text = text.replace(guard, "")
         assert '"tool_' not in text and "'tool_" not in text, p
 
 

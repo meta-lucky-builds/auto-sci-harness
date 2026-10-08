@@ -79,6 +79,10 @@ ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
                        "evaluation; equality of hashes, no score; it can only deny, never accept"),
     ("evolve/export.py", "rejected_novelty"): (
         "not-a-score", "name of the duplicate-gate counter in the proposer-visible generation_stats whitelist"),
+    ("control/islands.py", "rejected_novelty"): (
+        "not-a-score", "the duplicate gate's lineage status, matched only to collect the EDIT TYPES an island tried "
+                       "(edit-type quota); no score, and islands decide budget shares, never accept/reject "
+                       "(reviewed at the g-router merge, 2026-10-08)"),
     # this checker names the tokens it looks for (its regex, this allowlist's keys, its messages); it reads source
     # files and decides nothing about any claim, edit, task or entry. A NEW token here is still flagged.
     **{("emergence.py", tok): ("not-a-score", "the checker's own pattern, allowlist keys and problem messages")
