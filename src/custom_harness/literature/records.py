@@ -9,11 +9,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-_DOI = re.compile(r"^10\.[0-9]{4,9}/[!-~]+$")  # printable ASCII only: no homoglyphs, no spaces
-_ARXIV_NEW = re.compile(r"^([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?$")
-_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?$")
+_DOI = re.compile(r"^10\.[0-9]{4,9}/[!-~]+\Z")  # printable ASCII only: no homoglyphs, no spaces
+_ARXIV_NEW = re.compile(r"^([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?\Z")
+_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?\Z")
 _DOI_PREFIX = re.compile(r"^(?:doi:|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
-_PMID = re.compile(r"^(?:pmid:?\s*|https?://pubmed\.ncbi\.nlm\.nih\.gov/)([1-9][0-9]{0,8})/?$", re.IGNORECASE)
+_PMID = re.compile(r"^(?:pmid:?\s*|https?://pubmed\.ncbi\.nlm\.nih\.gov/)([1-9][0-9]{0,8})/?\Z", re.IGNORECASE)
 _ARXIV_PREFIX = re.compile(r"^(?:arxiv:|https?://(?:export\.)?arxiv\.org/abs/)", re.IGNORECASE)
 
 
@@ -95,7 +95,7 @@ class LookupResult(BaseModel):
     attempts: list[dict[str, Any]] = []
 
 
-_DATE = re.compile(r"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:[T ].*)?$")
+_DATE = re.compile(r"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:[T ].*)?\Z")
 
 
 def latest_date(s: str | None) -> date | None:

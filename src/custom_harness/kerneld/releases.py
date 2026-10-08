@@ -34,7 +34,7 @@ from ..store import EvidenceStore
 # mirror of kstats' closed enums (custom_harness/kernel/releases.py: Channel, Alphabet); the Kernel re-checks them
 CHANNELS = ("prompt", "export", "memory", "evolution_score", "report")
 ALPHABETS = ("verdict_bit", "count", "continuous")
-NOTE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}$")  # a code, never a value (§16.5.8)
+NOTE = re.compile(r"^[a-z][a-z0-9_.:-]{0,79}\Z")  # a code, never a value (§16.5.8)
 FALLBACK_KIND = "release_unledgered"
 
 # certificate labels: the finite verdict alphabet (kernel/certificate.py Label values)

@@ -15,11 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from . import params
 
-_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 # git check-ref-format, conservatively: ASCII letters, digits and ._/- only; no leading '-', no '..', no '//',
 # no trailing '/' or '.lock', no component starting with '.'.
-_BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!\.)[A-Za-z0-9._/-]{1,200}(?<![/.])(?<!\.lock)$")
-_RESOURCE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.:/-]{1,128}$")
+_BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)(?!.*/\.)(?!\.)[A-Za-z0-9._/-]{1,200}(?<![/.])(?<!\.lock)\Z")
+_RESOURCE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_.:/-]{1,128}\Z")
 
 SpendKind = Literal["compute", "model_quota"]
 SpendUnit = Literal["cpu_seconds", "gpu_seconds", "wall_seconds", "calls", "tokens", "usd"]

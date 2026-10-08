@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_BENCHMARKS = HERE / "benchmarks.yaml"
 DEFAULT_CAPABILITIES = HERE / "capabilities.yaml"
 AXES = ("A", "B", "C", "D", "E", "F", "G", "H")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 class ScorecardError(ValueError):

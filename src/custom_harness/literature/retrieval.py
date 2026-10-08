@@ -26,7 +26,7 @@ from .records import PaperRecord, in_window
 from .snapshot import SnapshotStore
 from .sources import ALL_SOURCES
 
-_SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,64}\Z")
 
 
 class RoundCapExceeded(LiteratureError):

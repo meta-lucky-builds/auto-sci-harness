@@ -48,9 +48,9 @@ from .model import (
 from .screen import WRAPPER, Fingerprints, screen_proposal, screen_strings
 
 CERTIFIED = frozenset({Label.CERTIFIED_VALIDATED, Label.CERTIFIED_INTERNAL, Label.CERTIFIED_EXACT})
-_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}\Z")
+_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def cascade_closure(children: Mapping[str, Iterable[str]], roots: Iterable[str]) -> set[str]:

@@ -29,7 +29,7 @@ from .sources import Getter, Source, _doi, _json, _parse_xml, _shape, _ws, _ymd
 
 EPMC_REST = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 EPMC_SEARCH = f"{EPMC_REST}/search"
-_PMCID = re.compile(r"^PMC[1-9][0-9]{0,9}$")
+_PMCID = re.compile(r"^PMC[1-9][0-9]{0,9}\Z")
 _XLINK = "{http://www.w3.org/1999/xlink}"
 _OPERATORS = {"and", "or", "not"}
 

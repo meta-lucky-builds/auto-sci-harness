@@ -43,7 +43,7 @@ from . import svg as S
 FORMAT = "chh-figure/1"
 NS = "{http://www.w3.org/2000/svg}"
 RENDERER_SOURCE = Path(S.__file__).read_bytes()
-_REF_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_REF_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
 # checked on the NFKC form (fullwidth digits/stops, superscripts and the percent sign fold to ASCII); \d also matches
 # other scripts' digits
 _FREE_NUMBER = re.compile(r"\d\s*[.,·]\s*\d|[.,·]\d|\d\s*%|\d\s*percent|\d[eE][-+−]?\d|\d\s*−\s*\d",
