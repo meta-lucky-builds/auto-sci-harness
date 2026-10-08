@@ -89,15 +89,21 @@ def _walk(roots: Iterable[Path], skip: list[Path]) -> Iterable[Path]:
 
 
 def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Path]) -> dict[str, Any]:
-    needles: dict[bytes, str] = {}
-    canaries: dict[bytes, str] = {}
+    # a needle may belong to several tasks (a repair task shares its real task's split, rows and canary)
+    needles: dict[bytes, list[str]] = {}
+    canaries: dict[bytes, list[str]] = {}
+    n_heldout: dict[str, int] = {}
     for t in tasks:
         d = suite / t["id"]
-        for ln in heldout_lines(d):
-            needles.setdefault(ln, t["id"])
-        canaries[(d / "private" / "canary.txt").read_text(encoding="utf-8").strip().encode()] = t["id"]
+        lines = heldout_lines(d)
+        n_heldout[t["id"]] = len(lines)
+        for ln in lines:
+            needles.setdefault(ln, []).append(t["id"])
+        canaries.setdefault((d / "private" / "canary.txt").read_text(encoding="utf-8").strip().encode(),
+                            []).append(t["id"])
     skip = [(suite / t["id"] / "private").resolve() for t in tasks]
     hits: dict[str, dict[str, int]] = {t["id"]: {} for t in tasks}
+    found: dict[str, set[bytes]] = {t["id"]: set() for t in tasks}
     canary_hits: dict[str, list[str]] = {t["id"]: [] for t in tasks}
     n_files = skipped_big = unreadable = 0
     for f in _walk(roots, skip):
@@ -110,20 +116,23 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
         except OSError:
             unreadable += 1
             continue
-        for c, ctid in canaries.items():
+        for c, ctids in canaries.items():
             if c in raw:
-                canary_hits[ctid].append(str(f))
+                for ctid in ctids:
+                    canary_hits[ctid].append(str(f))
         if b"," not in raw:
             continue
         for ln in raw.splitlines():
-            tid = needles.get(ln.rstrip(b"\r"))
-            if tid is not None:
+            key = ln.rstrip(b"\r")
+            for tid in needles.get(key, ()):
                 hits[tid][str(f)] = hits[tid].get(str(f), 0) + 1
+                found[tid].add(key)
     beacon_leaks = secret_leak_scan(beacon.encode(), roots)
     per_task = {}
     for t in tasks:
         rows = sum(hits[t["id"]].values())
-        per_task[t["id"]] = {"labelled_heldout_lines_found": rows,
+        per_task[t["id"]] = {"labelled_heldout_lines_found": rows, "distinct_heldout_rows_found": len(found[t["id"]]),
+                             "heldout_rows": n_heldout[t["id"]],
                              "files": sorted(hits[t["id"]], key=lambda k: -hits[t["id"]][k])[:5],
                              "n_files": len(hits[t["id"]]), "canary_found_in": canary_hits[t["id"]][:5]}
     return {"roots": [str(r) for r in roots], "files_scanned": n_files, "skipped_over_64MB": skipped_big,
