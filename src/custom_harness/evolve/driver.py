@@ -23,6 +23,7 @@ from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
+from .generations import AnnealSchedule, open_campaign
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 from .multiplicity import check_campaign, runs_per_task_bound
 
@@ -52,10 +53,14 @@ def load_suite(path: Path) -> list[SuiteTask]:
 def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, backends: dict[str, Backend],
            proposer: Backend, store: EvidenceStore, sandbox_factory: SandboxFactory,
            cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
-           campaign_budget: Budget | None = None) -> HarnessSpec:
+           campaign_budget: Budget | None = None, campaign: str | None = None,
+           anneal: AnnealSchedule | None = None) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
     claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py)."""
     cfg = cfg or EvolveConfig()
+    # `campaign`/`anneal`: generation ledger (generations.py): declared or resumed here, before any run (fail closed);
+    # each generation gets the annealed edit budget and a `generation_ledger` record (stall, budget, refs)
+    gen_ledger = open_campaign(store, campaign, anneal, cfg)
     working = [t for t in suite if t.split != "sealed"]
     n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
     bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
@@ -66,12 +71,17 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
                           infra_retries=cfg.infra_retries, campaign_budget=campaign_budget)
     parent = seed_spec
     for g in range(generations):
+        cfg = gen_ledger.begin(cfg) if gen_ledger is not None else cfg  # annealed n_edits (<= the bound's)
         t0 = time.time()
         try:
             res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg)
         except BudgetExceeded as e:
             log(json.dumps({"generation": g, "stopped": f"campaign budget exhausted: {e}"}))
             break
+        if gen_ledger is not None:
+            led = gen_ledger.record(res)
+            log(json.dumps({"campaign": campaign, "ledger_generation": led["generation"], "budget": led["budget"],
+                            "stalled": led["stall"]["stalled"]}))
         summary = {"generation": g, "accepted": res.accepted, "decision": res.decision,
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,
