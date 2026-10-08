@@ -379,6 +379,9 @@ def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -
     unknown = ops - {"improve_weakest", "combine"}
     if unknown:
         raise ValueError(f"unknown tournament operators: {sorted(unknown)}")
+    if len(hyps) == 1:  # nothing to compare (an evolved spec may drop minItems): no judge call, no fit
+        return {"ranking": {"order": [hyps[0]["id"]], "valid_rounds": 0, "rejected_rounds": 0, "mode": "single",
+                            "method": "single hypothesis: nothing to rank"}, "queue": list(hyps), "current": None}
     out = run_tournament(hyps, mode=params.get("mode", "kway"), judge_k=judge_k, judge_pair=judge_pair,
                          rounds=int(params.get("rounds", 3)), k=params.get("k"),
                          repeats=int(params.get("repeats", 1)), generations=int(params.get("generations", 1)),

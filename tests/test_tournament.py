@@ -341,6 +341,14 @@ def test_module_default_kway_matches_judge_and_reports_intervals():
     assert rb["fit"]["ci_level"] == 0.95 and "position_bias" in rb
 
 
+def test_module_single_hypothesis_needs_no_judge():
+    st = _state()
+    st["hypotheses"]["hypotheses"] = st["hypotheses"]["hypotheses"][:1]
+    ctx = _Ctx(lambda req: pytest.fail("no judge call expected"))
+    out = tournament_module(st, {}, ctx)
+    assert out["ranking"]["order"] == ["a"] and out["queue"] == st["hypotheses"]["hypotheses"]
+
+
 def test_module_operators_call_proposer_and_keep_incumbent():
     roles = []
 
