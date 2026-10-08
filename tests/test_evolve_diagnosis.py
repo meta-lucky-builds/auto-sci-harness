@@ -71,6 +71,10 @@ def test_run_specific_ids_are_not_a_content_divergence(store):
     _, bad = _trace(store, spec, [GOOD_STEPS[0], _code("x", claim_hash="c" * 64, report_ref="d" * 64,
                                                         evidence_ids=["ev_" + "2" * 16]), *GOOD_STEPS[2:]])
     assert first_divergence(bad, ok, failing_score=0.0) is None
+    # ...while a real content change next to the same id noise is still found
+    _, other = _trace(store, spec, [GOOD_STEPS[0], _code("y", claim_hash="e" * 64), *GOOD_STEPS[2:]])
+    sig = first_divergence(other, ok, failing_score=0.0)
+    assert sig is not None and sig["content"]["keys"] == ["code"]
 
 
 def test_decision_divergence_carries_the_first_content_difference_before_it(store):
