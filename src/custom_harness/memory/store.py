@@ -566,8 +566,10 @@ def negative_proposal(kernel: Kernel, cert_hash: str) -> Proposal | None:
                                                  "min_effect": claim.effect.min_effect, "targets": targets})
 
 
-def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> list[GateResult]:
-    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store."""
+def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest",
+                      secrets: Sequence[str] = ()) -> list[GateResult]:
+    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store.
+    `secrets`: the calling run's private values (the research loop passes them), screened like any write's."""
     st = store._state()
     done = {h for e in st.entries.values() if e.kind == Kind.NEGATIVE for h in e.evidence}
     out = []
@@ -579,7 +581,7 @@ def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> 
         if prop is None:
             continue
         try:
-            out.append(store.submit(prop, writer=writer))
+            out.append(store.submit(prop, writer=writer, secrets=secrets))
         except MemoryRefused:
             continue  # e.g. the claim statement carries an injection pattern: refused and logged by propose
         done.add(h)

@@ -545,8 +545,10 @@ class Engine:
             return {"value": res.model_dump()}, Cost(wall_s=res.wall_s), None
         if isinstance(node, ModuleNode):
             fn = get_module(node.module)
+            # the run's private values (and their encodings) go to modules as `secrets`, so content screens that
+            # modules apply (e.g. the L5 memory screen) refuse them; they are never module-visible state otherwise
             mctx = ModuleContext(run_id=run_id, store=self.store, backends=self.backends,
-                                 budget=self.budget, sandbox=self.sandbox)
+                                 budget=self.budget, sandbox=self.sandbox, secrets=tuple(_private_values(state)))
             try:
                 updates = fn(state, node.params, mctx)
             except Exception as e:
