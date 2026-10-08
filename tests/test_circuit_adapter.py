@@ -116,7 +116,7 @@ def test_scope_phrase_names_the_ideal_model_and_disclaims_physical_circuits():
     (b"{", "not JSON"),
     (b"[]", "not a chh-circuit/1"),
     (b" " * (C.MAX_BYTES + 1), "at most"),
-])
+], ids=["truncated", "not-an-object", "oversized"])  # explicit ids: a 2 MB parameter id overflows the environment
 def test_unreadable_documents(doc, why):
     assert any(why in r for r in C.check(doc, b"{}", Fraction(1)))
     assert any(why in r for r in C.bounds(doc, b"{}", Fraction(1)))
@@ -178,7 +178,8 @@ def test_reasons_are_capped():
     bad = {**cert, "x": ["1"] * 8}
     got = C.check(p, json.dumps(bad).encode(), Fraction(0))
     assert any("... and 3 more A x != b rows" in r for r in got)
-    assert any("... and 3 more law violations" in r for r in C.kirchhoff(C.parse_problem(p), [Fraction(1)] * 8))
+    laws = C.kirchhoff(C.parse_problem(p), [Fraction(1)] * 8)  # 9 KCL violations: n0..n7 and ground
+    assert any("... and 4 more law violations" in r for r in laws)
 
 
 def test_a_huge_claimed_value_is_flagged():
