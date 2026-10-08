@@ -54,3 +54,14 @@ changes:
     7-day cooling-off for core changes was NOT observed: this is a recorded deviation, not a tightening. The earlier
     record is left unchanged (history is not rewritten). Typed by the integrator agent, not by a human.
   recorded: '2026-10-08'
+- fingerprint: 59e42223d03c6099ca43c3da7a4f6bd98011699e74917a9807a05b4a6b278aad
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; recorded by the s3-domain builder agent, not typed by a human)
+  note: >-
+    Additive registration of a NEW domain adapter 'circuit' (computational class, metric circuit_value; code outside
+    the Kernel in custom_harness/adapters/circuit) in kernel/adapters.py: one import, one AdapterSpec and one REGISTRY
+    entry. No existing pass condition, check, adapter or adapter hash changes. The new adapter is UNAPPROVED and
+    unusable (K1 refuses) until a human runs `chh approve-adapter circuit` after its validation passes. Classified
+    tighten-only by the builder because nothing becomes certifiable without a new human approval; strictly it widens
+    the trusted base by a new checker, so the owner should confirm the classification or append a deviation record.
+  recorded: '2026-10-08'
