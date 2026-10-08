@@ -410,3 +410,64 @@ def test_parameters_are_marked_uncalibrated():
                  "FLAT_FAN_ROOT_SHARE", "NOODLE_MIN_CHAIN"):
         line = next(ln for ln in src.splitlines() if ln.startswith(f"{name} = "))
         assert "# UNCALIBRATED (owner decision, GOAL §13.8)" in line, name
+
+
+# ------------------------------------------------------------------ phase-2 wiring additions
+def test_the_repair_cap_is_one_parameter_fixed_at_creation_and_replayed(st):
+    """research_v1/v2 pass their run node's max_fixes as the tree's cap: the tree, not the loop, enforces it."""
+    t = ExperimentTree.create(st, "cap0", CONTRACT, root_code="baseline", root_config={}, metric="accuracy",
+                              higher_is_better=True, dev_labels=LABELS, max_repairs=0)
+    t.record("root", ok("baseline", errors=20, seed=0))
+    r = t.open_round("root", "features")
+    a = t.add_option(r, "features", "v0", {})
+    t.record(a, fail("v0"))
+    assert t.node(a).status == "abandoned"  # cap 0: the first failure abandons the node (MAX_REPAIRS is 2)
+    with pytest.raises(TreeRefusal) as e:
+        t.edit(a, "v1", {}, repair_of=1)
+    assert e.value.code is Code.NODE_ABANDONED
+    assert ExperimentTree.load(st, "cap0").max_repairs == 0 and ExperimentTree.load(st, "cap0").node(a).status \
+        == "abandoned"
+    with pytest.raises(TreeRefusal):
+        ExperimentTree.create(st, "capneg", CONTRACT, root_code="b", root_config={}, metric="accuracy",
+                              higher_is_better=True, dev_labels=LABELS, max_repairs=-1)
+
+
+def test_abandon_is_logged_and_never_withdraws_an_answered_node(st):
+    t = new_tree(st)
+    r = t.open_round("root", "features")
+    a = t.add_option(r, "features", "a", {})
+    b = t.add_option(r, "features", "b", {})
+    t.record(a, ok("a", errors=2, seed=0))
+    t.record(b, fail("b"))
+    with pytest.raises(TreeRefusal) as e:  # the attack: withdraw an answered (losing or inconvenient) node
+        t.abandon(a, "looks bad")
+    assert e.value.code is Code.NODE_IMMUTABLE and refused(t)[-1]["attempted"]["op"] == "abandon"
+    t.abandon(b, "no repair attempted")
+    assert t.node(b).status == "abandoned"
+    with pytest.raises(TreeRefusal):
+        t.abandon(b, "again")
+    t.record(a, ok("a", errors=2, seed=1), purpose="remeasure")
+    assert t.confirm(r, a, LABELS)["winner"] == a  # no provisional option is left once b is abandoned
+    assert ExperimentTree.load(st, "t1").node(b).status == "abandoned"
+
+
+def test_an_exact_behavioural_twin_is_not_a_rival_but_a_near_twin_is(st):
+    t = new_tree(st)
+    r = t.open_round("root", "model family")
+    w = t.add_option(r, "model family", "w", {})
+    twin = t.add_option(r, "model family", "w-copy", {})  # different code, identical dev predictions
+    t.record(w, ok("w", errors=2, seed=0))
+    t.record(twin, ok("w-copy", errors=2, seed=0))
+    t.record(w, ok("w", errors=2, seed=1), purpose="remeasure")
+    out = t.confirm(r, w, LABELS)
+    assert out["winner"] == w and out["duplicates"] == [twin]
+    t2 = new_tree(st, "t2")
+    r2 = t2.open_round("root", "model family")
+    w2 = t2.add_option(r2, "model family", "w", {})
+    near = t2.add_option(r2, "model family", "near", {})
+    t2.record(w2, ok("w", errors=2, seed=0))
+    t2.record(near, ok("near", errors=3, seed=0))  # differs on one row: a real rival, and w does not beat it
+    t2.record(w2, ok("w", errors=2, seed=1), purpose="remeasure")
+    with pytest.raises(TreeRefusal) as e:
+        t2.confirm(r2, w2, LABELS)
+    assert e.value.code is Code.PROMOTION_REFUSED and f"{near}@" in str(e.value)
