@@ -103,11 +103,39 @@ See the final report of the b-control builder for the exact runs. Summary at the
 
 - `equivalence --worlds 300` (seeds 0..299): 2,400 comparisons (2 environments x 4 slot counts). Per-completion vs
   batch gave **0** differing winners and **0** differing accept/reject decisions after the full acceptance pipeline.
-- `voi`: see the table in the report. False-accept rates are given with Wilson 95% two-sided intervals.
-  - False accepts: VOI never exceeded the race in any variant.
-  - Spend: with the race's spend as its cap, VOI never used more race evaluations than the race in any world.
-  - Selection quality: **VOI did not beat racing**. Its default stopping rule stops early and selects the true best
-    candidate less often, especially in the larger worlds. At equal spend (`voi_equal`) see the report.
+- `voi` (commit d10d182, `--p-infra 0.05`). FA = false accept: the candidate was accepted and its true gate effect
+  is <= 0. Intervals are Wilson 95%, two-sided. "best" = the true best candidate was the one selected. p values are
+  exact two-sided McNemar tests against the race on the same worlds, not corrected for multiplicity.
+  - The variants: `matched` = the race's spend as its cap, default stopping rule; `stop` = the stopping rule only;
+    `equal` = the race's spend exactly, no stopping rule.
+  - Spend: `matched` and `equal` never spent more race evaluations than the race, in every world of every run.
+    `stop` exceeded the race in 254/3000 mixed worlds and 351/3000 null worlds.
+
+| worlds (seeds) | selector | FA [95% CI] | true accept | best | race evals (mean) |
+|---|---|---|---|---|---|
+| mixed 3000 (0..2999) | race | 1/3000, 0.00033 [0.00006, 0.00189] | 0.0327 | 0.590 | 21.6 |
+|  | VOI matched | 1/3000, same | 0.0307 | 0.558 (p = 6e-6, worse) | 10.8 |
+|  | VOI equal | 1/3000, same | 0.0323 | 0.596 (p = 0.23) | 21.6 |
+| global null 3000 (0..2999) | race | 4/3000, 0.00133 [0.00052, 0.00342] | 0 | – | 21.9 |
+|  | VOI matched / equal | 4/3000, same | 0 | – | 11.5 / 21.9 |
+| big 2000 (0..1999) | race | 0/2000 [0, 0.00192] | 0.176 | 0.701 | 71.7 |
+|  | VOI matched | 0/2000 | 0.147 (p = 8e-11, worse) | 0.571 (p = 2e-29, worse) | 11.6 |
+|  | VOI equal | 0/2000 | 0.178 (p = 0.22) | 0.712 (56 vs 34 discordant, p = 0.026) | 71.4 |
+| big global null 2000 (0..1999) | all four | 0/2000 [0, 0.00192] | 0 | – | 72.0 / 12.5 / 71.8 |
+
+  - **Verdict.** False accepts stay far below alpha = 0.05 for every selector, as expected: the acceptance evidence
+    is fresh. **VOI did not beat racing on power.**
+    - At equal spend it selects the true best candidate about as often or slightly more often: p = 0.026 in the big
+      worlds, one of several uncorrected tests. The true-accept difference is not significant.
+    - With its default stopping rule (`stop_frac` 0.01) it spends about half or less, and in the big worlds it loses
+      significant power.
+    - So `race_allocator="voi"` stays opt-in. Its default stopping rule is not recommended without a cap
+      (UNCALIBRATED).
+  - An independent audit agent wrote its own world model (K 2..8, 6..30 race units, binary and Gaussian scores, an
+    overfit "hard null"). It found: 0 allocator differences over 1,600 runs plus adversarial cases; VOI false-accept
+    rates within [0.0013, 0.0093], the highest Wilson upper bound being 0.0156; never more spend when matched.
+    Its sensitivity check: feeding the race's own data to the rule gave 0.067 [0.056, 0.081] false accepts,
+    confirming the simulation can detect a broken rule.
 
 ## Parameters that are UNCALIBRATED
 
