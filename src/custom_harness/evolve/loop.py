@@ -37,12 +37,25 @@ from ..kerneld.releases import Releases, private_reads
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
+from .critic import FamilySeparatedCritic
 from .diagnosis import check_claims
-from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
+from .edits import (
+    DEFAULT_PROTECTED_NODES,
+    Edit,
+    EditRejected,
+    ScreenRejected,
+    _token_hit,
+    apply_edit,
+    check_one_mechanism,
+    denied_tokens,
+    screen_prediction,
+    withheld,
+)
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
 from .export import proposer_view
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
+from .proposer_agent import ProposerAgent
 from .selection import (
     PairedSample,
     Unit,
@@ -56,7 +69,10 @@ from .selection import (
 
 # lineage statuses whose edit signature the novelty gate refuses to see again (GOAL §5 L6.6, HarnessX "reverted").
 # Race losers are NOT included: they were eliminated on a few evolve units, never judged by the gate.
-REJECTED_STATUSES = ("rejected_static", "rejected_gate")
+# A smoke failure is included (the candidate broke where the parent did not), except one caused by infrastructure.
+REJECTED_STATUSES = ("rejected_static", "rejected_gate", "rejected_smoke")
+# smoke run (GOAL §5 L6.7): run statuses meaning the harness itself broke on the smoke task
+SMOKE_BROKEN = ("failed", "step_limit", "budget_exceeded")
 
 
 @dataclass
@@ -77,6 +93,12 @@ class EvolveConfig:
     # 1.0 = at most twice the parent's cost: a provisional default, not calibrated on a real campaign.
     max_cost_increase: float = 1.0
     cost_metric: str = "tokens"  # "tokens" (prompt + completion), "wall_s" or "usd" (selection.COST_METRICS)
+    # prediction screen (edits.screen_prediction, GOAL §5 L6.2): bounds on proposer free text and on the predicted
+    # delta (the objective per run lies in [-0.5, 1.5], so a paired delta lies in [-2, 2]). A bandwidth limit on the
+    # ledger channel, not claim policy.
+    max_rationale_chars: int = 2000
+    max_expected_delta: float = 2.0
+    delta_decimals: int = 3
 
 
 @dataclass
@@ -150,9 +172,15 @@ class Evaluator:
 
 
 def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator: Evaluator,
-                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig | None = None,
-                      releases: Releases | None = None) -> GenerationResult:
+                      proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
+                      releases: Releases | None = None,
+                      critic: FamilySeparatedCritic | None = None) -> GenerationResult:
+    """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
+    in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
+    shares the proposer's family; its review is advisory (recorded, never gating)."""
     cfg = cfg or EvolveConfig()
+    if critic is not None:
+        critic.check_proposer(proposer.backend if isinstance(proposer, ProposerAgent) else proposer)
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
     gate_units = [(t.task_id, s) for t in tasks if t.split == "gate" for s in cfg.seeds]
     if not evolve_units or not gate_units:
@@ -177,22 +205,48 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     digest = diagnose(parent_outcomes, store, references=references)
     ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
-    proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+    if isinstance(proposer, ProposerAgent):
+        proposal: Any = proposer.propose_from_export(
+            parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
+            n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+        store.append_record("proposer_session", {"parent": parent_hash, "transcript": proposal.transcript,
+                                                 "problems": proposal.problems})
+    else:
+        proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
     edits, problems = proposal.edits, proposal.problems
     rejected_before = rejected_signatures(store)
+    deny = denied_tokens(tasks)
+    task_ids = {t.task_id for t in tasks}
     candidates: dict[str, tuple[Edit, HarnessSpec]] = {}
+    extras: dict[str, dict[str, Any]] = {}  # per candidate: screen notes and the (advisory) critic review
     records: list[dict[str, Any]] = [{"status": "malformed", "problem": p} for p in problems]
     if proposal.decline is not None:
-        records.append({"status": "declined", "reason": proposal.decline})
+        # proposer free text written to the lineage (exported): screened like an edit's rationale
+        reason = proposal.decline if not _token_hit(proposal.decline, deny) else "<withheld: names held-out data>"
+        records.append({"status": "declined", "reason": reason})
     for edit in edits:
         sig = edit_signature(edit)
-        base = {"edit": edit.model_dump(), "signature": sig, "claims_check": check_claims(edit, digest)}
+        try:  # covert-channel / leak screen on the edit's text and predicted effect, before anything is stored
+            edit, notes = screen_prediction(edit, task_ids=task_ids, deny=deny, max_text_chars=cfg.max_rationale_chars,
+                                            max_delta=cfg.max_expected_delta, delta_decimals=cfg.delta_decimals)
+        except ScreenRejected as e:  # the refused text is never stored (withheld); a text-only refusal does not
+            # feed the novelty gate (the same change re-worded is a different proposal), an ops refusal does
+            if sig in rejected_before:
+                records.append({"status": "rejected_novelty", "edit": withheld(edit), "signature": sig,
+                                "reason": "identical (normalised) to a previously rejected edit"})
+            else:
+                records.append({"status": "rejected_static", "edit": withheld(edit), "reason": str(e),
+                                **({"signature": sig} if e.about_ops else {})})
+            continue
+        base = {"edit": _public(edit, evolve_ids), "signature": sig, "claims_check": check_claims(edit, digest),
+                **({"screen": notes} if notes else {})}
         if sig in rejected_before:
             records.append({"status": "rejected_novelty", **base,
                             "reason": "identical (normalised) to a previously rejected edit"})
             continue
         try:
             spec = apply_edit(parent, edit, cfg.protected_nodes)
+            check_one_mechanism(edit, parent)  # GOAL §5 L6.6: one mechanism per candidate
         except EditRejected as e:
             records.append({"status": "rejected_static", **base, "reason": str(e)})
             continue
@@ -200,8 +254,20 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if h == parent_hash or h in candidates:
             records.append({"status": "no_op_or_duplicate", **base})
             continue
-        candidates[h] = (edit, spec)
+        if critic is not None:
+            base["critic"] = critic.review(edit).as_record()
         store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=parent_hash)
+        # smoke run (GOAL §5 L6.7): the candidate runs the first evolve unit through the real loop before racing.
+        # That unit is in the race's first chunk, so a passing smoke run costs nothing extra (the Evaluator caches it).
+        smoke = evaluator.outcome(spec, evolve_units[0])
+        smoke_fail = _smoke_failure(smoke, parent_outcomes[0])
+        if smoke_fail is not None:
+            records.append({"status": "rejected_smoke", **base, "candidate": h, "reason": smoke_fail,
+                            "infra": smoke.infra_failed, "smoke": {"task": smoke.task_id, "seed": smoke.seed,
+                                                                   "status": smoke.status, "run_id": smoke.run_id}})
+            continue
+        candidates[h] = (edit, spec)
+        extras[h] = {k: base[k] for k in ("screen", "critic") if k in base}
 
     accepted_spec, accepted = parent, False
     decision = f"proposer declined: {proposal.decline}" if proposal.decline is not None else "no valid candidates"
@@ -215,8 +281,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         survivors = list(rr.survivors)
         for h, (edit, _) in candidates.items():
             st = rr.stats.get(h, {})
-            records.append({"status": "raced", "candidate": h, "edit": edit.model_dump(), "race": st,
-                            "survived": h in rr.survivors, "signature": edit_signature(edit)})
+            records.append({"status": "raced", "candidate": h, "edit": _public(edit, evolve_ids), "race": st,
+                            "survived": h in rr.survivors, "signature": edit_signature(edit), **extras[h]})
         if rr.survivors:
             best = str(rr.survivors[0])
             edit, spec = candidates[best]
@@ -264,7 +330,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                                  lambda u: evaluator.score(parent, u))
             flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
             regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
-            at_risk = set(edit.predicted.tasks_at_risk)
+            at_risk = set(edit.predicted.tasks_at_risk)  # screened: exact campaign task ids only
             claims = check_claims(edit, digest)
             # every unit the acceptance decision rested on, BOTH arms: the fresh evolve re-measurement and the gate
             # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
@@ -272,7 +338,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in used_labels) else "MECHANICAL"
             records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
                             "loop_label": loop_label,
-                            "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
+                            "edit": _public(edit, evolve_ids), "race": rr.stats.get(best, {}),
+                            "evolve_fresh": d.evolve,
                             "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo, "cost": cost,
                             "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
                             "claims_check": claims})
@@ -299,6 +366,26 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                             evaluator.calls - calls_before, fixed_k, loop_label, counters)
 
 
+def _public(edit: Edit, evolve_ids: set[str]) -> dict[str, Any]:
+    """An edit as the lineage (exported to the proposer) stores it: tasks_at_risk restricted to evolve tasks. The
+    harness_edit ledger keeps the full list (it computes `regressed_unpredicted`; never exported raw)."""
+    doc = edit.model_dump()
+    doc["predicted"]["tasks_at_risk"] = [t for t in doc["predicted"]["tasks_at_risk"] if t in evolve_ids]
+    return doc
+
+
+def _smoke_failure(cand: RunOutcome, parent: RunOutcome) -> str | None:
+    """Why a candidate fails its smoke run, or None. It fails when its run ended broken (SMOKE_BROKEN) on a unit where
+    the parent's run did not, and when its run failed for infrastructure reasons (fail closed: nothing was shown to
+    work; such a rejection is marked `infra` and does not feed the novelty gate)."""
+    if cand.infra_failed:
+        return "smoke run failed for infrastructure reasons (inconclusive; rejected, fail closed)"
+    if cand.status in SMOKE_BROKEN and parent.status not in SMOKE_BROKEN:
+        sig = "; ".join(cand.failure_signatures[:2])
+        return f"smoke run ended {cand.status!r} where the parent's did not ({sig[:300]})"
+    return None
+
+
 def edit_signature(edit: Edit) -> str:
     """Normalised edit signature for the novelty gate: the edit type plus its ops sorted by (path, op, value), each
     value in canonical JSON (dict key order irrelevant). Rationale and predictions are not part of it: the same
@@ -312,7 +399,7 @@ def rejected_signatures(store: EvidenceStore) -> set[str]:
     existed are re-signed from their stored edit; an unreadable one is skipped (it cannot be compared)."""
     out: set[str] = set()
     for r in store.records("lineage"):
-        if r.get("status") not in REJECTED_STATUSES:
+        if r.get("status") not in REJECTED_STATUSES or (r.get("status") == "rejected_smoke" and r.get("infra")):
             continue
         if r.get("signature"):
             out.add(r["signature"])
@@ -341,8 +428,8 @@ def _per_task(units: list[Unit], tasks: list[SuiteTask], cand: Callable[[Unit], 
 def _counters(records: list[dict[str, Any]], *, n_proposed: int, n_raced: int, n_survivors: int) -> dict[str, Any]:
     """Yield/prune counters of one generation (L6.10). yield = accepted / proposed; pruned = raced - race survivors."""
     count = {s: sum(r["status"] == s for r in records) for s in (
-        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "accepted",
-        "rejected_gate")}
+        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "rejected_smoke",
+        "accepted", "rejected_gate")}
     gated = count["accepted"] + count["rejected_gate"]
     return {"proposed": n_proposed, **count, "raced": n_raced, "pruned": n_raced - n_survivors, "gated": gated,
             "yield": count["accepted"] / n_proposed if n_proposed else 0.0}

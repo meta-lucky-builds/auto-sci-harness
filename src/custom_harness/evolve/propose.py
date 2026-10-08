@@ -135,17 +135,35 @@ def propose(backend: Backend, spec: HarnessSpec, digest: dict, ledger: list[dict
     resp = backend.complete(ChatRequest(
         messages=[Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected))],
         json_schema=EDIT_SCHEMA))
-    problems: list[str] = []
-    edits: list[Edit] = []
     try:
         raw = parse_json_output(resp.text)
     except json.JSONDecodeError as e:
         return Proposal([], [f"proposer output not JSON: {e}"], resp, None)
+    return parse_proposal(raw, n_edits, resp)
+
+
+# the typed-edit fields of EDIT_SCHEMA (anything else in a proposer's edit is refused, not ignored)
+_ITEM_KEYS = frozenset({"type", "ops", "rationale", "evidence", "failure_clusters_fixed", "expected_delta",
+                        "tasks_at_risk"})
+_OP_KEYS = frozenset({"op", "path", "value_json"})
+
+
+def parse_proposal(raw: Any, n_edits: int, resp: Any) -> Proposal:
+    """Typed edits from a proposer's decoded JSON answer ({"edits": [...], "decline": ...} in EDIT_SCHEMA form).
+    Anything that is not a typed edit (unknown edit type or op, a free-form patch, missing fields) is reported as
+    malformed, never guessed. Shared by the one-shot proposer and the agentic one (proposer_agent.py)."""
+    problems: list[str] = []
+    edits: list[Edit] = []
     if not isinstance(raw, dict) or not isinstance(raw.get("edits", []), list):
         return Proposal([], [f"proposer output is not an object with an 'edits' list: {type(raw).__name__}"], resp,
                         None)
     for i, item in enumerate(raw.get("edits", [])[:n_edits]):
         try:
+            if not isinstance(item, dict) or set(item) - _ITEM_KEYS:
+                raise TypeError(f"not a typed edit: unknown field(s) {sorted(set(item) - _ITEM_KEYS)[:5]}"
+                                if isinstance(item, dict) else "an edit is a JSON object")
+            if any(not isinstance(o, dict) or set(o) - _OP_KEYS for o in item["ops"]):
+                raise TypeError("not a typed edit: an op has fields other than op/path/value_json")
             ops = [{"op": o["op"], "path": o["path"],
                     "value": None if o["op"] == "remove" else json.loads(o["value_json"])}
                    for o in item["ops"]]

@@ -216,6 +216,9 @@ Both make the forecast optimistic. Neither is corrected; the prediction ledger m
 | Delegation driver (GOAL §15 last paragraph) | `src/custom_harness/orchestration/` (library + `python -m custom_harness.orchestration`), `docs/orchestration.md` | verified: `tests/test_orchestration_driver.py` + `_cli.py` (53 passed). Attack tests (nested spawn, over-budget/unauthorised spend, held branch/worktree, brief missing a field) each check the refusal's ledger entry, and each failed with its check disabled. Caps are UNCALIBRATED (`params.py`). NOT wired: nothing forces the gateway/sandbox to call `spend()` first |
 | Full-text keyword retrieval + snippets (L4.3) | `literature/fulltext.py` (Europe PMC OA), `client.full_text_search`, `RetrievalLoop(full_text=True)`, `--full-text` CLI flags | verified offline only (hand-written fixtures; never run live). The window, as-of for the text, snapshots, provenance and the three-valued check are covered by `tests/test_literature_fulltext.py`. alphaXiv is not used (its terms forbid automated access). Europe PMC endpoint shapes are inferred (its doc pages returned 403) |
 | Quote-span support against full text | `cite.py` + `client.lookup(full_text=True)` | verified offline: body quotes are supported; references never support a quote; a full text dated after T leaves the quote unchecked, never supported |
+| Agentic proposer (sandboxed read-only export tools, typed edits only, prediction screen), one-mechanism rule, smoke run | `ph2-proposer` | reported: tests/test_proposer_agent.py, tests/test_evolve_mechanism_smoke.py; scripted backends only, no live model. With LocalSandbox the tools are only path-confined; real isolation needs DockerSandbox (not run) |
+| Family-separated critic | `ph2-proposer` | interface + same-family refusal only; advisory, no repair loop. Needs owner: a second model family (invariant 5 NOT MET) |
+| Real campaign | — | not started |
 
 ---
 
