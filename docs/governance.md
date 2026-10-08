@@ -17,8 +17,11 @@ What the code CANNOT check:
 - that a `tighten` change only tightens (the museum and the mutation score are evidence, not proof);
 - that an agent did not read the sealed halves (they are files in the repository).
 
-The first record in `redteam/kernel_core_changes.yaml` was written by the assure agent as a bootstrap at f0f703f and
-says so. **Needs owner:** confirm it, or replace it with your own record.
+The first record in `redteam/kernel_core_changes.yaml` was written by the assure agent as a bootstrap at f0f703f.
+On 2026-10-08 the owner delegated its confirmation, and the approval of the §16 core change, to the orchestrator in
+chat; the fixer agent then replaced the bootstrap approver and added a `tighten` record for the integrated §16 core.
+That record's note lists the parts that are not plainly tighten-only. **Needs owner:** review that note; an agent
+typed both records, so no human has yet typed an approver name.
 
 ## 2. The human-held check (cannot be built by an agent)
 
