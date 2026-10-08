@@ -66,9 +66,11 @@ class ModuleContext:
             self._store = self.store._ModuleStore__store
 
     def kernel(self, replayer: _Replayer | None = None) -> Kernel:
-        """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes."""
-        from ..kernel import Kernel
-        return Kernel(self._store, replayer=replayer)
+        """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes. It is
+        bound to the run: once a human kills the run (`chh kill`), it pre-registers, records and certifies nothing
+        (studio/kill.py)."""
+        from ..studio.kill import RunGuardedKernel
+        return RunGuardedKernel(self._store, run_id=self.run_id, replayer=replayer)
 
     def llm(self, role: str, request: ChatRequest, fallback_role: str | None = "executor") -> ChatResponse:
         """LLM call from inside a module: budget-checked, cost-accounted, logged into the step trace."""
