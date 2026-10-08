@@ -63,13 +63,18 @@ def check_release(channel: str, alphabet: str, note: str) -> None:
         raise ReleaseError(f"release note {note!r} is not a code ({NOTE.pattern})")
 
 
-def alphabet_of(value: Any) -> str:
-    """The alphabet a released value needs: verdict bits and labels are `verdict_bit`, small integers `count`,
-    everything else (floats, text, structures) `continuous` (fail closed: unknown = the widest alphabet)."""
+def alphabet_of(value: Any, count_alphabet: int | None = None) -> str:
+    """The alphabet a released value needs: verdict bits and labels are `verdict_bit`, integers in
+    [0, count_alphabet) `count` (KernelConfig.count_alphabet: the transcripts one `count` release may tell),
+    everything else (floats, text, structures, and ANY integer outside that range: a large int can encode a
+    continuous value) `continuous` (fail closed: unknown = the widest alphabet)."""
     if isinstance(value, bool) or value is None or (isinstance(value, str) and value in VERDICT_LABELS):
         return "verdict_bit"
     if isinstance(value, int):
-        return "count"
+        if count_alphabet is None:
+            from ..kernel import KernelConfig
+            count_alphabet = KernelConfig().count_alphabet
+        return "count" if 0 <= value < count_alphabet else "continuous"
     return "continuous"
 
 
@@ -120,15 +125,18 @@ def private_reads(store: EvidenceStore, *, after_seq: int = 0, run_id: str | Non
 
 
 def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Collection[str],
-                     since: float | None = None) -> tuple[list[str], int]:
+                     since: float | None = None, own_seqs: Collection[int] = ()) -> tuple[list[str], int]:
     """Datasets whose PRIVATE files were read in `data_access` ledger entries after `after_seq` that may have fed a
     run in `run_ids`, and the last seq examined. Per run, not per time window (a concurrent run's read, logged under
     its own run id, does not taint this run), but fail closed: a read naming NO run (Kernel re-check reads carry
     none), naming a run the store does not know, or with an unreadable body counts (an unreadable body counts as a
-    read of every registered dataset). `since`: only entries logged at or after this time (seconds)."""
+    read of every registered dataset). `since`: only entries logged at or after this time (seconds). `own_seqs`:
+    ledger seqs of reads the caller SAW being made in its own execution context (engine.py captures them as they
+    are appended); they count whatever run they name."""
     out: set[str] = set()
     last = after_seq
-    for seq, _at, datasets in attributed_read_log(store, after_seq=after_seq, run_ids=run_ids, since=since):
+    for seq, _at, datasets in attributed_read_log(store, after_seq=after_seq, run_ids=run_ids, since=since,
+                                                  own_seqs=own_seqs):
         last = max(last, seq)
         out |= datasets
     rows = store.ledger_rows("data_access")
@@ -140,20 +148,25 @@ def attributed_reads(store: EvidenceStore, *, after_seq: int = 0, run_ids: Colle
 def run_targets(store: EvidenceStore, run_id: str) -> list[str]:
     """Every target attributed to a finished run (`attributed_reads` since the run started): what a release of
     anything computed from the whole run (its verdict, its export) is a release on. Replaces `private_reads(run_id=)`,
-    which missed reads naming no run (Kernel re-check reads)."""
+    which missed reads naming no run (Kernel re-check reads). Also every target the run's persisted labels carry
+    (runtime/taint.persisted_run_label: e.g. a read made inside one of its steps that names another run)."""
+    from ..runtime.taint import persisted_run_label
     try:
         since: float | None = store.get_run(run_id).started_at - 1.0
     except KeyError:
         since = None
-    return attributed_reads(store, after_seq=0, run_ids={run_id}, since=since)[0]
+    reads = attributed_reads(store, after_seq=0, run_ids={run_id}, since=since)[0]
+    return sorted(set(reads) | persisted_run_label(store, run_id))
 
 
 def attributed_read_log(store: EvidenceStore, *, after_seq: int = 0, run_ids: Collection[str],
-                        since: float | None = None) -> list[tuple[int, float, set[str]]]:
+                        since: float | None = None, own_seqs: Collection[int] = ()
+                        ) -> list[tuple[int, float, set[str]]]:
     """(seq, time, datasets) of every private read `attributed_reads` counts, in ledger order."""
     out: list[tuple[int, float, set[str]]] = []
     known: dict[str, bool] = {}
     ids = set(run_ids)
+    own = set(own_seqs)
     everything: set[str] | None = None
     for seq, _kind, body, _prev, _hash, at in store.ledger_rows("data_access"):
         if seq <= after_seq or (since is not None and float(at) < since):
@@ -169,7 +182,7 @@ def attributed_read_log(store: EvidenceStore, *, after_seq: int = 0, run_ids: Co
             continue
         if not private:
             continue
-        if isinstance(rid, str) and rid and rid not in ids:
+        if isinstance(rid, str) and rid and rid not in ids and int(seq) not in own:
             if rid not in known:
                 try:
                     store.get_run(rid)

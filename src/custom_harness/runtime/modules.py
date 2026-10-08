@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,18 @@ if TYPE_CHECKING:
     from ..records import Cost
     from ..sandbox import Sandbox
     from ..store import EvidenceStore
+
+
+# The context surfaces touched by the module step executing in this context (engine-owned, runtime/taint.py): set by
+# the engine around a module call. A store facade or a ModuleContext a module CACHED from an earlier step still
+# records into the step that uses it.
+STEP_TOUCHED: ContextVar[set[str] | None] = ContextVar("chh_step_touched", default=None)
+
+
+def _note_touch(name: str) -> None:
+    cur = STEP_TOUCHED.get()
+    if cur is not None:
+        cur.add(name)
 
 
 class ModuleStore:
@@ -34,6 +47,11 @@ class ModuleStore:
     def __init__(self, store: EvidenceStore):
         object.__setattr__(self, "_ModuleStore__store", store)
         object.__setattr__(self, "blobs", store.blobs)
+
+    def __getattribute__(self, name: str) -> Any:
+        if not name.startswith("__"):
+            _note_touch("store")
+        return object.__getattribute__(self, name)
 
     def __getattr__(self, name: str) -> Any:
         if name in ModuleStore._READS:
@@ -77,6 +95,7 @@ class ModuleContext:
             touched = object.__getattribute__(self, "_touched")
             if touched is not None:
                 touched.add(name)
+            _note_touch(name)
         return object.__getattribute__(self, name)
 
     def kernel(self, replayer: _Replayer | None = None) -> Kernel:

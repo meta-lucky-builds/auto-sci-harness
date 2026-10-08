@@ -32,20 +32,45 @@ SECRETS_SURFACE = "secrets"  # the run's `_private*` values: the labels of the `
 
 
 def fingerprint(value: Any) -> str | None:
-    """Content fingerprint of a MUTABLE value (None for immutable scalars, which cannot change in place)."""
+    """Content fingerprint of a MUTABLE value (None for immutable scalars, which cannot change in place). ORDER
+    SENSITIVE (no sort_keys): prompts render dicts in insertion order (template.render), so an in-place reordering is
+    a change of what an agent can see."""
     if value is None or isinstance(value, (str, int, float, bool, bytes, tuple, frozenset)):
         return None
     try:
-        text = json.dumps(value, sort_keys=True, default=repr, ensure_ascii=False)
+        text = json.dumps(value, default=repr, ensure_ascii=False)
     except (TypeError, ValueError):  # e.g. a cycle: the content cannot be compared, so it counts as changed
         return f"unfingerprintable:{id(value)}:{object()!r}"
     return hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
+def state_fingerprints(state: Mapping[str, Any]) -> dict[str, str]:
+    """Fingerprint of every mutable top-level value of `state` (immutable values are left out)."""
+    out: dict[str, str] = {}
+    for k, v in dict.items(state) if isinstance(state, dict) else state.items():
+        fp = fingerprint(v)
+        if fp is not None:
+            out[str(k)] = fp
+    return out
+
+
+def changed_in_place(state: dict[str, Any], before: Mapping[str, str]) -> set[str]:
+    """Keys present in `state` whose mutable value no longer matches its fingerprint in `before`. Taken over the
+    WHOLE state around a step, so a change through an alias (two keys sharing one object) or through a reference a
+    module kept from an earlier step is seen, whether or not the step read that key."""
+    out = set()
+    for k, fp in before.items():
+        if dict.__contains__(state, k) and fingerprint(dict.__getitem__(state, k)) != fp:
+            out.add(k)
+    return out
+
+
 class TrackedState(dict):
-    """A module's view of run state: a shallow copy of it whose reads, writes and in-place mutations the engine
-    records. Overriding `__iter__` also routes `dict(x)`, `{**x}` and `f(**x)` through `keys()` (CPython), so those
-    count as bulk reads. Not a security boundary against hostile code (`dict.__getitem__(x, k)` bypasses it): modules
+    """A module's view of run state: a shallow copy of it whose reads and writes the engine records (in-place
+    mutations are found by `changed_in_place` over the whole state around the step). Overriding `__iter__` also
+    routes `dict(x)`, `{**x}` and `f(**x)` through `keys()` (CPython), so those count as bulk reads; the engine
+    deep-copies what a module returns while it still records, so returning the view (or a structure holding it)
+    is a bulk read too. Not a security boundary against hostile code (`dict.__getitem__(x, k)` bypasses it): modules
     are trusted, registry-only code; it records what honest code reads, including through library calls."""
 
     def __init__(self, state: Mapping[str, Any]):
@@ -54,14 +79,10 @@ class TrackedState(dict):
         self.bulk = False
         self.written: set[str] = set()
         self.deleted: set[str] = set()
-        self._fp: dict[str, str | None] = {}
 
     # ------------------------------------------------------------ recording
     def _read(self, key: Any) -> None:
-        k = str(key)
-        self.reads.add(k)
-        if k not in self._fp and dict.__contains__(self, k):
-            self._fp[k] = fingerprint(dict.__getitem__(self, k))
+        self.reads.add(str(key))
 
     def _read_all(self) -> None:
         self.bulk = True
@@ -75,14 +96,6 @@ class TrackedState(dict):
     def _delete(self, key: Any) -> None:
         self.deleted.add(str(key))
         self.written.discard(str(key))
-
-    def mutated(self) -> set[str]:
-        """Keys whose value was changed IN PLACE (not by assignment) since the module first read them."""
-        out = set()
-        for k, fp in self._fp.items():
-            if fp is not None and dict.__contains__(self, k) and fingerprint(dict.__getitem__(self, k)) != fp:
-                out.add(k)
-        return out
 
     # ------------------------------------------------------------ single-key reads
     def __getitem__(self, key: Any) -> Any:
@@ -345,6 +358,35 @@ def step_labels(store: Any, run_id: str) -> dict[int, StepLabel]:
     return out
 
 
+def persisted_run_label(store: Any, run_id: str) -> frozenset[str]:
+    """Every target the run's labels attributed to it, as persisted in its checkpoints (the union of each labelled
+    checkpoint's `run` label and its key labels). It includes reads the ledger alone cannot attribute to the run (a
+    private read made inside one of its steps that names another run: engine-captured, see engine.py). Empty for a
+    run without labelled checkpoints (then only the ledger rule, kerneld/releases.attributed_reads, applies)."""
+    out: set[str] = set()
+    for st in store.trace(run_id):
+        if st.checkpoint_ref is None:
+            continue
+        try:
+            cp = store.blobs.get_json(st.checkpoint_ref)
+        except (OSError, ValueError, KeyError):
+            continue
+        doc = cp.get("taint") if isinstance(cp, dict) else None
+        if not isinstance(doc, Mapping) or doc.get("v") != TAINT_DOC_VERSION:
+            continue
+        try:
+            out |= _targets(doc.get("run", []))
+            out |= _targets(doc.get("step", []))
+            out |= _targets(doc.get("control", []))
+            labels = doc.get("labels", {})
+            if isinstance(labels, Mapping):
+                for v in labels.values():
+                    out |= _targets(v)
+        except ValueError:
+            continue
+    return frozenset(out)
+
+
 def decision_alphabet(n_outcomes: int, count_alphabet: int = 16) -> str:
     """What one routing decision among `n_outcomes` distinct targets can tell."""
     if n_outcomes <= 2:
@@ -353,4 +395,5 @@ def decision_alphabet(n_outcomes: int, count_alphabet: int = 16) -> str:
 
 
 __all__ = ["SANDBOX_SURFACE", "SECRETS_SURFACE", "STORE_SURFACES", "StepLabel", "TaintState", "TrackedState",
-           "decision_alphabet", "fingerprint", "step_labels"]
+           "changed_in_place", "decision_alphabet", "fingerprint", "persisted_run_label", "state_fingerprints",
+           "step_labels"]

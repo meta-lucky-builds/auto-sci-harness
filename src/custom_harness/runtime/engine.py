@@ -51,7 +51,8 @@ from ..policy import model_policy
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
-from .modules import ModuleContext, get_module
+from ..store.evidence import add_ledger_observer
+from .modules import STEP_TOUCHED, ModuleContext, get_module
 from .spec import (
     END,
     ApprovalNode,
@@ -64,7 +65,15 @@ from .spec import (
     approval_state_keys,
     engine_reserved,
 )
-from .taint import SANDBOX_SURFACE, SECRETS_SURFACE, TaintState, TrackedState, decision_alphabet
+from .taint import (
+    SANDBOX_SURFACE,
+    SECRETS_SURFACE,
+    TaintState,
+    TrackedState,
+    changed_in_place,
+    decision_alphabet,
+    state_fingerprints,
+)
 from .template import lookup, references, render
 
 APPROVAL_DECISIONS = ("approved", "rejected")
@@ -94,6 +103,22 @@ def _note_nested(child: str) -> None:
     parent = _ACTIVE_RUN.get()
     if parent is not None and parent != child:
         _NESTED_PARENT[child] = parent
+
+
+# The ledger seqs of `data_access` entries appended in this execution context while a step (and every enclosing
+# step of an outer engine) executes: a private read a step makes ITSELF is attributed to its run whatever run id the
+# read names (kerneld/releases.attributed_reads `own_seqs`). Reads served by another process (kerneld) are not seen
+# here; they are attributed by the run id they name (docs/taint.md).
+_CAPTURE: contextvars.ContextVar[tuple[list[int], ...]] = contextvars.ContextVar("chh_read_capture", default=())
+
+
+def _observe_ledger(seq: int, kind: str) -> None:
+    if kind == "data_access":
+        for seqs in _CAPTURE.get():
+            seqs.append(int(seq))
+
+
+add_ledger_observer(_observe_ledger)
 # (module id, output key) -> the reduced release alphabet that module may DECLARE for that key (`_release_alphabets`,
 # 2f1d54a). Owner decision 2026-10-08: kept, and pinned here (tests/test_release_embargo.py); a declaration from any
 # other module or for any other key is ignored (the key stays `continuous`, fail closed). Every module listed here
@@ -221,6 +246,7 @@ class _ModuleFrame:
     touched: set[str]
     seq: int  # data_access ledger seq when the step started
     run_id: str
+    own: list[int] = field(default_factory=list)  # seqs of private reads this step made itself (`_CAPTURE`)
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
@@ -310,6 +336,7 @@ class Engine:
         self._step_surface: dict[int, set[str]] = {}  # node -> ModuleContext surfaces it touched
         self._step_writes: dict[int, dict[str, str]] = {}  # node -> state keys a module wrote directly / in place
         self._frame: _ModuleFrame | None = None  # the module step currently executing (for its model calls)
+        self._step_capture: list[int] = []  # seqs of the private reads the executing step made itself
         from ..kernel import KernelConfig
         self._count_alphabet = KernelConfig().count_alphabet
         # provenance of archived handles (paged recall / critic citations refuse unknown or target-derived ones): a
@@ -339,7 +366,9 @@ class Engine:
             self.campaign.join(run.id)
         self._ws_ref = None
         self._map_resume = {}
-        self._ts = TaintState(seq=self._data_access_seq())  # a new run starts with no labels
+        # labels already held by this engine object are kept (as before: an engine reused for another run, or a test
+        # seeding `engine.taint`, can only over-taint, never under-taint)
+        self._ts.seq = self._data_access_seq()
         self._started(run.id)
         return self._loop(run.id, state, self.spec.entry, start_index=0)
 
@@ -412,7 +441,8 @@ class Engine:
         # the child continues from the parent's labels (a fork in a fresh engine must not launder them); patched keys
         # hold caller-supplied values (refused if they carry a private value): unlabelled
         self._ts = self._restore_taint(cp, run_id, state)
-        state.update(copy.deepcopy(patch))
+        for k, v in patch.items():  # each value on its own: two patched keys never share one object
+            state[k] = copy.deepcopy(v)
         for k in patch:
             self._ts.set_label(k, ())
             self._ts.alphabets.pop(k, None)
@@ -600,6 +630,7 @@ class Engine:
             node = self.spec.nodes[node_id]
             t0 = time.time()
             paused = False
+            prev_ws = self._ws_ref
             if isinstance(node, ApprovalNode):
                 out, error, paused = self._approval(node_id, node, state, run_id)
                 cost, prov, infra = Cost(), None, None
@@ -617,27 +648,37 @@ class Engine:
                 self._map_pending = None
                 for registry in (self._step_label, self._step_surface, self._step_writes):
                     registry.pop(id(node), None)
+                # in-place changes are found over the WHOLE state (an alias of a key, or a reference a module kept
+                # from an earlier step, changes a key the step never read); LLM and tool steps cannot change state
+                fp_before = state_fingerprints(state) if isinstance(node, (ModuleNode, MapNode)) else {}
+                capture: list[int] = []
+                self._step_capture = capture
                 token = _ACTIVE_RUN.set(run_id)
+                ctoken = _CAPTURE.set((*_CAPTURE.get(), capture))
                 try:
                     if isinstance(node, MapNode):
                         out, cost, prov, error, infra = self._map(node_id, node, state, run_id, index)
                     else:
                         out, cost, prov, error, infra = self._attempt(node, state, run_id)
                 finally:
+                    _CAPTURE.reset(ctoken)
                     _ACTIVE_RUN.reset(token)
                 self._cursor = None
                 # the label of everything this step wrote: what it read (engine-recorded), the private reads
-                # attributed to this run while it ran, and the run's control label
-                read, self._ts.seq = attributed_reads(self.store, after_seq=seq_before, run_ids=run_family(run_id))
+                # attributed to this run while it ran (incl. those it made itself, whatever run they name), and the
+                # run's control label
+                read, self._ts.seq = attributed_reads(self.store, after_seq=seq_before, run_ids=run_family(run_id),
+                                                      own_seqs=capture)
                 step_label = set(read) | self._step_label.pop(id(node), set()) | self._ts.control
                 surfaces = self._step_surface.pop(id(node), set())
-                for k, how in self._step_writes.pop(id(node), {}).items():  # direct writes / in-place mutations
+                writes = self._step_writes.pop(id(node), {})
+                for k in changed_in_place(state, fp_before):
+                    writes.setdefault(k, "mutate")
+                for k, how in writes.items():  # direct writes / deletes / in-place mutations
                     self._ts.alphabets.pop(k, None)
-                    if how == "delete":
-                        self._ts.set_label(k, ())
-                    else:
-                        self._ts.set_label(k, step_label | (self._ts.labels.get(k, frozenset()) if how == "mutate"
-                                                            else set()))
+                    # a delete keeps a label (a tombstone): the key's ABSENCE can tell what the step read
+                    keep = how in ("mutate", "delete")
+                    self._ts.set_label(k, step_label | (self._ts.labels.get(k, frozenset()) if keep else set()))
                 if isinstance(node, ToolNode) or SANDBOX_SURFACE in surfaces:
                     self._ts.workspace |= frozenset(step_label)
                 self._ts.run |= frozenset(step_label)
@@ -658,10 +699,10 @@ class Engine:
                                 module = str(getattr(node, "module", ""))
                                 self._ts.alphabets |= {k: a for k, a in declared.items() if k in out and a in (
                                     "verdict_bit", "count") and RELEASE_ALPHABET_ALLOWLIST.get((module, k)) == a}
-                            # module nodes return a dict of state updates; copied, so no two keys share an object
-                            # (an in-place change through one key must not silently change another key's value)
-                            state.update(copy.deepcopy(out))
-                            for k in out:
+                            # module nodes return a dict of state updates, each value deep-copied ON ITS OWN by
+                            # _execute (one deepcopy of the whole dict would keep two returned keys one object)
+                            for k, v in out.items():
+                                state[k] = v
                                 self._ts.set_label(k, step_label)
 
             # An infra failure is not the harness's doing: never route it through the harness's error
@@ -681,6 +722,9 @@ class Engine:
                 elif not (isinstance(node, ToolNode) and not node.snapshot_after):
                     workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
                 self._ws_ref = workspace_ref
+                # a step that CHANGED the workspace (by any path, not only through ctx.sandbox) wrote its label there
+                if not isinstance(node, (LLMNode, ApprovalNode)) and workspace_ref != prev_ws:
+                    self._ts.workspace |= frozenset(step_label)
             # next=None marks a failed terminal (distinct from END), so resume/fork never mistake a
             # failure for completion; spent = cumulative cost after this step (persisted budget)
             cp = {"state": state, "next": next_node, "workspace": workspace_ref,
@@ -858,8 +902,8 @@ class Engine:
             # each branch sees the run's labels, with the item labelled like the list it came from
             bts = saved_ts.copy()
             bts.set_label(node.item_key, items_taint)
-            for kk in ("_map", "_last_error"):
-                bts.set_label(kk, ())
+            bts.set_label("_map", items_taint)  # n = len(items), index and branch id derive from the items
+            bts.set_label("_last_error", ())
             self._ts = bts
             for registry in (self._step_label, self._step_surface, self._step_writes):
                 registry.pop(id(body), None)
@@ -872,7 +916,8 @@ class Engine:
                 self._ts = saved_ts
             if not bts.pending:  # a control decision released inside the branch is released for the run
                 saved_ts.pending = []
-            reads_b, _ = attributed_reads(self.store, after_seq=seq_b, run_ids=run_family(run_id))
+            reads_b, _ = attributed_reads(self.store, after_seq=seq_b, run_ids=run_family(run_id),
+                                          own_seqs=self._step_capture)
             self._step_writes.pop(id(body), None)  # direct writes went to the branch's own copy of the state
             surfaces |= self._step_surface.pop(id(body), set())
             btaint = set(self._step_label.pop(id(body), set())) | set(reads_b)
@@ -1003,7 +1048,11 @@ class Engine:
         edge, a step or budget limit) is not counted (termination channel; docs/taint.md)."""
         consulted: set[str] = set()
         target = self._next(node_id, state, consulted)
-        successors = {e.target for e in self.spec.outgoing(node_id)}
+        edges = self.spec.outgoing(node_id)
+        # whether the step errored decides which edges are even looked at (`_next`), whatever their order
+        if any(e.when is not None and e.when.key.split(".")[0] == "_last_error" for e in edges):
+            consulted.add("_last_error")
+        successors = {e.target for e in edges}
         lab = self._ts.label_of(consulted)
         if lab and len(successors) > 1:
             d = {"node": node_id, "targets": sorted(lab), "chosen": target,
@@ -1054,12 +1103,19 @@ class Engine:
             touched: set[str] = set()
             mctx._touched = touched
             outer = self._frame
-            self._frame = _ModuleFrame(node_id, tracked, touched, self._data_access_seq(), run_id)
+            self._frame = _ModuleFrame(node_id, tracked, touched, self._data_access_seq(), run_id,
+                                       own=self._step_capture)
+            ttoken = STEP_TOUCHED.set(touched)
             try:
                 updates = fn(tracked, node.params, mctx)
+                # copied WHILE the engine still records: returning the TrackedState (or a structure holding it) is a
+                # bulk read; each value on its own, so no two returned keys share one object
+                if isinstance(updates, Mapping):
+                    updates = {k: copy.deepcopy(v) for k, v in updates.items()}
             except Exception as e:
                 raise ModuleError(f"{type(e).__name__}: {e}", mctx.spent, mctx.llm_calls) from e
             finally:
+                STEP_TOUCHED.reset(ttoken)
                 self._frame = outer
                 mctx._touched = None
                 self._finish_module(node, state, tracked, touched)
@@ -1092,10 +1148,12 @@ class Engine:
             state.pop(k, None)
             writes[k] = "delete"
         for k in tracked.written:
-            state[k] = dict.__getitem__(tracked, k)
+            value = dict.__getitem__(tracked, k)
+            try:  # a copy: `state['b'] = state['a']` must not make two keys one object
+                state[k] = copy.deepcopy(value)
+            except Exception:  # noqa: BLE001  (uncopyable: kept; an aliased change is still found by fingerprints)
+                state[k] = value
             writes[k] = "write"
-        for k in tracked.mutated() - tracked.written - tracked.deleted:
-            writes.setdefault(k, "mutate")  # changed in place: the object is shared with the real state
         self._step_writes[id(node)] = writes
         lab: set[str] = set()
         for t in self._module_reads(tracked, touched).values():
@@ -1119,7 +1177,7 @@ class Engine:
                                                        else "continuous")
             rel.emit(value, targets=targets, channel="prompt", alphabet=alphabet,
                      note=note_code("module_llm", f.node_id, src), key=getattr(self, "_run_id", ""))
-        reads, _ = attributed_reads(self.store, after_seq=f.seq, run_ids=run_family(f.run_id))
+        reads, _ = attributed_reads(self.store, after_seq=f.seq, run_ids=run_family(f.run_id), own_seqs=f.own)
         if reads:
             rel.emit(None, targets=reads, channel="prompt", alphabet="continuous",
                      note=note_code("module_llm", f.node_id, "private_read"), key=getattr(self, "_run_id", ""))

@@ -293,8 +293,11 @@ def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
     before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
     # per run, fail closed (kerneld/releases.attributed_reads): a concurrent run's own reads do not count, reads
-    # naming no run or an unknown run do
-    targets = (attributed_reads(store, after_seq=before, run_ids=run_family(res.run_id))[0]
+    # naming no run or an unknown run do; so does every target the run's persisted labels carry (e.g. a read a step
+    # made itself naming another run, runtime/taint.persisted_run_label)
+    from ..runtime.taint import persisted_run_label
+    targets = (sorted(set(attributed_reads(store, after_seq=before, run_ids=run_family(res.run_id))[0])
+                      | persisted_run_label(store, res.run_id))
                if task.split == "evolve" else [])
     return ExecutedRun(h, task, seed, result=res, targets=targets)
 

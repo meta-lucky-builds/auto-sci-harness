@@ -197,9 +197,73 @@ def test_target_derived_values_are_refused_not_released(store):
     from custom_harness.kerneld.releases import released
     res, _ = _run(store, _spec(held=True), lambda t: {"handle": _handle(t), "page": 1})
     assert _refused(res) == "target_derived"
-    # the only release is the engine's own (rendering the tainted value into the agent's prompt), none from recall
+    # recall itself releases nothing: every release is the engine's own, at a prompt it renders. The agent's prompt
+    # renders the tainted value; the reader's prompt renders the recall reply, which is computed from the agent's
+    # request (model output of a tainted prompt, read back from the trace), so it is released too
+    # (w2-taint, docs/taint.md; why that release is required: test_a_served_page_chosen_by_a_tainted_request_...)
     notes = [r["note"] for r in released(store, "rec-held")]
-    assert notes and all(n.startswith("prompt:agent") for n in notes), notes
+    assert any(n.startswith("prompt:agent") for n in notes), notes
+    assert all(n.startswith("prompt:agent") or n == "prompt:reader:recalled.text" for n in notes), notes
+
+
+@register("test_recall.start")
+def _start(state, params, ctx):
+    return {"note": "none", "phase": 0}
+
+
+@register("test_recall.reveal_then_shrink")
+def _reveal_then_shrink(state, params, ctx):
+    """A private read: the agent's NEXT prompt carries a target-derived note (and no longer archives `big`)."""
+    vault = ctx.kernel().vault
+    if "rec-choice" not in vault.datasets():
+        vault.register_dataset("rec-choice", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n1\n"})
+    ys = vault.read("rec-choice", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    return {"big": "short", "note": "high" if sum(map(float, ys)) / len(ys) > 0.5 else "low", "phase": 1}
+
+
+def test_a_served_page_chosen_by_a_tainted_request_is_released(store):
+    """The agent first sees `big` in a CLEAN prompt (its handle has clean provenance and predates every private
+    read, so recall serves it), then sees a target-derived note and asks for page 2 if the note says "high", else
+    page 3. Which page the reader sees is a function of the target: an implicit flow through the agent's request,
+    which recall reads back from the trace. Recall's own rules cannot refuse it (the handle is clean); the engine's
+    labels release it (the recall step read the store, which carries the run's targets). On c9823b8 no release."""
+    from custom_harness.kerneld.releases import released
+    nodes = {
+        "seed": {"kind": "module", "module": "test_recall.seed"},
+        "start": {"kind": "module", "module": "test_recall.start"},
+        "agent": {"kind": "llm", "role": "executor", "output_key": "agent_out", "output_schema": {},
+                  "prompt": "AGENT. Log: {{big}} Note: {{note}}"},
+        "reveal": {"kind": "module", "module": "test_recall.reveal_then_shrink"},
+        "recall": {"kind": "module", "module": "research.recall", "params": {"agent": "agent", "page_chars": 1000}},
+        "reader": {"kind": "llm", "role": "executor", "output_key": "reader_out",
+                   "prompt": "READER. Recalled: {{recalled.text}}"},
+    }
+    edges = [{"source": "seed", "target": "start"}, {"source": "start", "target": "agent"},
+             {"source": "agent", "target": "reveal", "when": {"key": "phase", "op": "eq", "value": 0}},
+             {"source": "agent", "target": "recall"}, {"source": "reveal", "target": "agent"},
+             {"source": "recall", "target": "reader"}]
+    spec = HarnessSpec.model_validate({"id": "recall-choice", "entry": "seed", "max_steps": 20, "nodes": nodes,
+                                       "edges": edges, "context": {"max_value_chars": 2000}})
+    seen: dict = {}
+
+    def respond(req):
+        text = req.messages[-1].content
+        if text.startswith("AGENT."):
+            if "archived as" in text:
+                seen["handle"] = _handle(text)
+                return json.dumps({"recall": {"handle": seen["handle"], "page": 1}})
+            return json.dumps({"recall": {"handle": seen["handle"], "page": 2 if "Note: high" in text else 3}})
+        return "ok"
+
+    llm = MockBackend(respond)
+    res = Engine(spec, backends={"executor": llm}, store=store).run("t", {})
+    assert res.status.value == "completed", res.detail
+    # live: the page the reader sees was chosen by the target (mean 1.0 > 0.5 -> page 2), and recall served it
+    assert _refused(res) is None and res.state["recalled"]["page"] == 2
+    assert BIG[1000:1100].splitlines()[1] in llm.requests[-1].messages[-1].content
+    rel = [(r["alphabet"], r["note"]) for r in released(store, "rec-choice")]
+    assert ("continuous", "prompt:reader:recalled.text") in rel, rel
 
 
 def _asked(store, request) -> tuple[str, list[str]]:
