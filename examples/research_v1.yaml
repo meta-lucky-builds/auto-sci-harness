@@ -104,7 +104,9 @@ nodes:
       required: [answers]
     retries: 1
   check_answers: {kind: module, module: research.check_critic_answers, params: {answerer: defend}}
-  next: {kind: module, module: research.next_hypothesis, params: {max_improves: 2}}
+  # revive: the persistence rule (research/tree.py rule 7) may let a dead-end incumbent be refined. Off until the
+  # owner decides (theta is UNCALIBRATED).
+  next: {kind: module, module: research.next_hypothesis, params: {max_improves: 2, revive: false}}
 
   implement:
     kind: llm
@@ -166,6 +168,7 @@ nodes:
       output column `prediction`). Allowed libraries ONLY: {{task.allowed_libraries}}.
       Data profile: {{profile}}
       Questions a critic raised: {{critique.questions}}
+      {{improve_stage}}
       Current best script:
       {{best_code}}
       Return JSON {"code": "<full improved script>", "notes": "<the one change>"}.
@@ -180,7 +183,9 @@ nodes:
 
   # max_fixes IS the experiment tree's repair cap (one parameter, fixed in the tree when the first candidate runs;
   # research.tree.MAX_REPAIRS is only its default). Improvements are promoted only after a fresh-seed re-measure.
-  run: {kind: module, module: research.run_candidate, params: {max_attempts: 8, max_fixes: 2, max_improves: 2}}
+  # Tree extras (docs/tree_extras.md): backtrack = exact workspace backtracking via snapshots (on); curriculum =
+  # tune -> creative -> ablation with the stage decided by code from dev-racing evidence (off until the owner decides).
+  run: {kind: module, module: research.run_candidate, params: {max_attempts: 8, max_fixes: 2, max_improves: 2, backtrack: true, curriculum: false}}
   # Kernel-integrated end of the loop. Protected: the evolver cannot edit these nodes (evolve/edits.py).
   claim: {kind: module, module: research.claim, params: {seeds: [0, 1, 2], alpha: 0.05}}
   confirm: {kind: module, module: research.confirm}
