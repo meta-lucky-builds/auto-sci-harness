@@ -30,7 +30,7 @@ import json
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..ablation import MARKER, NO_ABLATION, AblationSet
@@ -47,6 +47,7 @@ from .edits import (
     DEFAULT_PROTECTED_NODES,
     Edit,
     EditRejected,
+    EditType,
     ScreenRejected,
     _token_hit,
     apply_edit,
@@ -322,13 +323,20 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     # outcomes never feed the diagnosis, which the proposer reads
     references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
     digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
+    if abl.off("causal-signatures"):  # ablation: no first-divergence causal signatures reach the proposer
+        digest = {**digest, "divergences": [], "no_reference": [], "unlinked": 0}
     # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
     digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
                            canaries=getattr(proposer, "canaries", ()))
-    ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
+    no_history = abl.off("proposer-history")  # ablation: no past-edit ledger and no evidence-export session
+    ledger = [] if no_history else [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
-    if isinstance(proposer, ProposerAgent):
-        proposal: Any = proposer.propose_from_export(
+    proposal: Any
+    if isinstance(proposer, ProposerAgent) and no_history:
+        proposal = propose(proposer.backend, parent, digest, ledger, n_edits=cfg.n_edits,
+                           protected=cfg.protected_nodes)
+    elif isinstance(proposer, ProposerAgent):
+        proposal = proposer.propose_from_export(
             parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
             n_edits=cfg.n_edits, protected=cfg.protected_nodes)
         store.append_record("proposer_session" + sfx, {"parent": parent_hash, "transcript": proposal.transcript,
@@ -341,7 +349,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     shown = getattr(proposal, "evidence_refs", None)
     known = set(shown) if shown is not None else digest_refs(digest)
     claims_by: dict[str, dict[str, Any]] = {}
-    rejected_before = rejected_signatures(store)
+    rejected_before = set() if abl.off("novelty-gate") else rejected_signatures(store)
     deny = denied_tokens(tasks)
     task_ids = {t.task_id for t in tasks}
     candidates: dict[str, tuple[Edit, HarnessSpec]] = {}
@@ -353,6 +361,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         records.append({"status": "declined", "reason": reason})
     for edit in edits:
         sig = edit_signature(edit)
+        if abl.off("contract-hop-edits") and edit.type in (EditType.CONTRACT, EditType.HOP):
+            # ablation: these edit types do not exist in this arm (unscreened text never stored: withheld)
+            records.append({"status": "ablated_edit_type", "edit": withheld(edit),
+                            "reason": f"edit type {edit.type.value!r} switched off (contract-hop-edits)"})
+            continue
         try:  # covert-channel / leak screen on the edit's text and predicted effect, before anything is stored
             edit, notes = screen_prediction(edit, task_ids=task_ids, deny=deny, max_text_chars=cfg.max_rationale_chars,
                                             max_delta=cfg.max_expected_delta, delta_decimals=cfg.delta_decimals)
@@ -400,16 +413,18 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=parent_hash)
         # smoke run (GOAL §5 L6.7): the candidate runs the first evolve unit through the real loop before racing.
         # That unit is in the race's first chunk, so a passing smoke run costs nothing extra (the Evaluator caches it).
-        smoke = evaluator.outcome(spec, evolve_units[0])
-        smoke_fail = _smoke_failure(smoke, parent_outcomes[0])
-        if smoke_fail is not None:
+        # ablation `minibatch-prefilter`: no smoke run pre-filter
+        smoke = None if abl.off("minibatch-prefilter") else evaluator.outcome(spec, evolve_units[0])
+        smoke_fail = None if smoke is None else _smoke_failure(smoke, parent_outcomes[0])
+        if smoke is not None and smoke_fail is not None:
             records.append({"status": "rejected_smoke", **base, "candidate": h, "reason": smoke_fail,
                             "infra": smoke.infra_failed, "smoke": {"task": smoke.task_id, "seed": smoke.seed,
                                                                    "status": smoke.status, "run_id": smoke.run_id}})
             continue
         candidates[h] = (edit, spec)
         extras[h] = {k: base[k] for k in ("screen", "critic") if k in base}
-        if smoke.infra_failed:  # excluded, not scored (invariant 21: a proxy denies only on evidence): ledgered here
+        if smoke is not None and smoke.infra_failed:  # excluded, not scored (invariant 21: a proxy denies only on
+            # evidence): ledgered here
             extras[h]["smoke"] = {"excluded": "infra", "task": smoke.task_id, "seed": smoke.seed,
                                   "status": smoke.status, "run_id": smoke.run_id}
 
@@ -420,7 +435,12 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     fixed_k = 0
     branch: dict[str, Any] | None = None
     if candidates:
-        rr = _race(candidates, evolve_units, evaluator, parent_scores, cfg)
+        race_cfg = cfg  # selection only; the acceptance rule below never reads it
+        if abl.off("minibatch-prefilter"):  # ablation: no successive-halving elimination (one round, every unit)
+            race_cfg = replace(race_cfg, race_rounds=1)
+        if abl.off("voi-allocation") and race_cfg.race_allocator == "voi":  # ablation: the batch race instead
+            race_cfg = replace(race_cfg, race_allocator="batch")
+        rr = _race(candidates, evolve_units, evaluator, parent_scores, race_cfg)
         fixed_k = rr.evaluations_fixed_k
         survivors = list(rr.survivors)
         for h, (edit, _) in candidates.items():
@@ -449,6 +469,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             cost = cost_bound(valid_gate, lambda u: evaluator.outcome(spec, u).cost,
                               lambda u: evaluator.outcome(parent, u).cost,
                               max_increase=cfg.max_cost_increase, metric=cfg.cost_metric)
+            if abl.off("cost-term"):  # ablation: the cost term is measured, not applied (this arm never accepts)
+                cost = {**cost, "passed": True, "ablated": {"switch": "cost-term", "measured_passed": cost["passed"]}}
             ok = d.accepted and lofo["passed"] and cost["passed"] and excl["passed"]
             # the accept/reject bit is computed from gate-target verdicts and reaches the proposer (proposer_view):
             # a ledgered verdict-bit release on every target the acceptance runs read (GOAL §16.5.3); pinned in a

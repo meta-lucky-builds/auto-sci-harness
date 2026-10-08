@@ -80,15 +80,20 @@ class PrivateDataAccess(KeyError):
 
 
 def render(template: str, state: dict[str, Any], max_chars: int = 20_000, head_fraction: float = 0.5,
-           archive: Archive | None = None) -> str:
+           archive: Archive | None = None, *, observation_pack: bool = True) -> str:
     """Render {{path}} references. Paths starting with `_private` can never reach a prompt:
-    hidden labels / held-out data must not leak through an evolved prompt (PLAN P2, L6 leakage)."""
+    hidden labels / held-out data must not leak through an evolved prompt (PLAN P2, L6 leakage).
+    `observation_pack=False` (ablation switch `observation-pack`, custom_harness/ablation.py): no archive handle and
+    no verified-quote log reducer; every value, `|log` included, is plain head/tail truncation."""
+    if not observation_pack:
+        archive = None
+
     def sub(m: re.Match) -> str:
         if m.group(1).split(".")[0].startswith("_private"):
             raise PrivateDataAccess(f"template referenced private state '{m.group(1)}'")
         value = lookup(state, m.group(1))
         text = value if isinstance(value, str) else json.dumps(value, default=str, indent=1)
-        if m.group(2):
+        if m.group(2) and observation_pack:
             return reduce_log(text, max_chars, archive)
         return truncate(text, max_chars, head_fraction, archive)
     return _PAT.sub(sub, template)

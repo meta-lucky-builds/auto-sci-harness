@@ -883,7 +883,8 @@ class Engine:
                 raise ValueError("tool node requires a sandbox")
             node_id = next((k for k, v in self.spec.nodes.items() if v is node), "tool")
             self._prompt_taint[id(node)] = self._release_rendered(node_id, list(node.command), state)
-            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
+            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction,
+                          observation_pack=not self.ablation.off("observation-pack")) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
             if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
                 raise ValueError(f"tool command exceeded a sandbox limit: {res.limit_exceeded}")
@@ -937,10 +938,12 @@ class Engine:
             return digest
 
         messages = []
+        pack = not self.ablation.off("observation-pack")  # ablation switch (custom_harness/ablation.py)
         if node.system:
             messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction,
-                                                                  archive)))
-        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive)))
+                                                                  archive, observation_pack=pack)))
+        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive,
+                                                            observation_pack=pack)))
         total = Cost()
         attempts: list[str] = []
         for _ in range(node.retries + 1):
