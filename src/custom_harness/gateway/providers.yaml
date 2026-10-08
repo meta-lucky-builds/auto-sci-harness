@@ -7,12 +7,18 @@
 #   prohibited -> option hidden; use API or OW mode
 #   unknown   -> disabled until a human verifies
 # training_on_outputs: allowed | forbidden | unknown   (drives the L8 filter, §14.3)
+# auth_kind (official auth only, invariant 11; checked by `chh verify-registry`):
+#   byos -> official_cli | official_oauth (the provider's own client / sign-in, used by the user themselves)
+#   api  -> api_key        ow -> none | api_key        a blocked byos entry may say: unknown
+# A byos entry is usable only if it is ALSO on BYOS_ALLOWLIST in gateway/registry.py (human-owned code): this file
+# and the override file can narrow that allowlist, never widen it.
 #
 # Every entry must be re-verified before each release. "verified_by" must be a human.
 
 openai-api:
   provider: openai
   mode: api
+  auth_kind: api_key
   byos_status: n/a
   training_on_outputs: forbidden   # usage policies restrict using outputs to develop competing models; re-verify
   source_url: https://openai.com/policies/
@@ -22,6 +28,7 @@ openai-api:
 openai-codex-cli:
   provider: openai
   mode: byos
+  auth_kind: official_cli
   byos_status: allowed
   auth_flow: "Official OpenAI Codex CLI, signed in by the user themselves (`codex login`). We invoke `codex exec` as a subprocess; we never read, copy or reuse its tokens."
   training_on_outputs: forbidden
@@ -33,6 +40,7 @@ openai-codex-cli:
 openai-siwc:
   provider: openai
   mode: byos
+  auth_kind: official_oauth
   byos_status: needs_partner_approval
   auth_flow: "Sign in with ChatGPT (OAuth 2.0 + PKCE, client id oaiapp_...). Limited trial for approved partners (2026-10)."
   training_on_outputs: forbidden
@@ -43,6 +51,7 @@ openai-siwc:
 anthropic-api:
   provider: anthropic
   mode: api
+  auth_kind: api_key
   byos_status: n/a
   training_on_outputs: forbidden   # commercial terms restrict training competing models; re-verify
   source_url: https://www.anthropic.com/legal/commercial-terms
@@ -52,6 +61,7 @@ anthropic-api:
 anthropic-subscription:
   provider: anthropic
   mode: byos
+  auth_kind: unknown
   byos_status: prohibited
   training_on_outputs: forbidden
   source_url: https://www.anthropic.com/legal/consumer-terms
@@ -62,6 +72,7 @@ anthropic-subscription:
 google-subscription:
   provider: google
   mode: byos
+  auth_kind: unknown
   byos_status: unknown
   training_on_outputs: unknown
   verified_on: null
@@ -70,6 +81,7 @@ google-subscription:
 local-openai-compatible:
   provider: local
   mode: ow
+  auth_kind: none
   byos_status: n/a
   training_on_outputs: unknown   # depends on the model's license; set per model in config
   notes: "Ollama / vLLM / llama.cpp server exposing an OpenAI-compatible endpoint."

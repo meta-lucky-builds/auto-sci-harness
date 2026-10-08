@@ -151,7 +151,10 @@ def test_fixture_campaign_every_number_resolves_and_reproduces(tmp_path):
     assert f["unverifiable_citations"]["value"] == 0
     assert f["reports_with_checklist_and_bundle"]["value"] == 100.0 and f["status"] == "pass"
     g = card["axes"]["G"]["cost_per_certified_claim"]
-    assert g["certified_claims"] == 1 and g["value"]["usd"] == pytest.approx(0.5)
+    # the fixture step spends 100 tokens (and says usd 0.5) with NO provenance: no cost-table row can price it, so usd
+    # is unknown (never the backend's own number, never 0: gateway/costs.py); the per-claim division is on tokens
+    assert g["certified_claims"] == 1 and g["value"]["tokens"] == pytest.approx(100.0)
+    assert g["value"]["usd"] is None and g["usd_status"] == "unknown"
     h = card["axes"]["H"]
     assert h["planted_exploit_catch_rate"]["value"] == 1.0 and h["leak_audit_pass_rate"]["value"] == 1.0
     assert h["salts"]["status"] == "pass" and h["red_team_open_rate"]["value"] == 0.0
