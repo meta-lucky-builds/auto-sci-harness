@@ -226,7 +226,18 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Re-check a Reproducibility Bundle from its bytes alone (GOAL L2 done-when)."""
     from .kernel import SandboxReplayer
     from .kernel.bundle import BundleError, reproduce_bundle
+    from .store.run_bundle import RunBundleError, check_artifacts, read_bundle_manifest
     factory = _sandbox_factory(a, data_dir() / "sandboxes" / f"reproduce-{int(time.time())}")
+    try:  # GOAL L2 large artifacts: the bundle's artifact manifest (if it has one) is checked first, fail closed
+        arts = check_artifacts(read_bundle_manifest(Path(a.bundle)), Path(a.bundle), blobs=store.blobs,
+                               roots=[Path(r) for r in getattr(a, "artifact_root", None) or []])
+    except RunBundleError as e:
+        print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
+        return 1
+    if arts.fatal:
+        print(json.dumps({"reproduced": False, "refused": "artifacts: " + "; ".join(arts.fatal[:10]),
+                          "artifacts": arts.to_json()}, indent=1))
+        return 1
     try:
         report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
@@ -235,7 +246,7 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems}, indent=1))
+                      "problems": report.problems, "artifacts": arts.to_json()}, indent=1))
     return 0 if report.reproduced else 1
 
 
@@ -366,11 +377,36 @@ def cmd_trace(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Re-run a per-run Reproducibility Bundle (invariant 9): same spec, inputs and seed; refused if the task files on
-    disk no longer match the hashes recorded in the bundle."""
+    disk no longer match the hashes recorded in the bundle, if manifest.json differs from the hash this store
+    recorded for the run, or (GOAL L2 large artifacts) if a required artifact is missing or any artifact's hash
+    differs. Missing optional artifacts are reported, never skipped silently."""
     import custom_harness.research  # noqa: F401
 
-    from .store.run_bundle import check_task_files, read_run_bundle
-    m = read_run_bundle(Path(a.bundle))
+    from .store.run_bundle import RunBundleError, check_artifacts, check_task_files, read_run_bundle_bytes
+    try:
+        m, manifest_sha = read_run_bundle_bytes(Path(a.bundle))
+    except RunBundleError as e:
+        raise SystemExit(f"run bundle refused: {e}") from e
+    # a manifest is self-attested (it says which artifacts are required) unless its hash is anchored: by this store's
+    # record of the run, or by a hash the user got from where the bundle was published
+    recorded = {r.get("manifest_sha256") for r in store.records("run_bundle")
+                if r.get("run_id") == m["run"]["id"] and r.get("manifest_sha256")}
+    given = getattr(a, "manifest_sha256", None)
+    if recorded and manifest_sha not in recorded:
+        raise SystemExit("run bundle refused: its manifest.json differs from the one recorded in this store for run "
+                         f"{m['run']['id']} (edited after it was written)")
+    if given and manifest_sha != given:
+        raise SystemExit(f"run bundle refused: its manifest.json sha256 {manifest_sha} differs from the hash given")
+    if recorded:
+        anchor = "matches the store's record"
+    elif given:
+        anchor = "matches the given --manifest-sha256"
+    elif getattr(a, "allow_unanchored", False):
+        anchor = f"NOT anchored (--allow-unanchored): manifest sha256 {manifest_sha} is self-attested"
+    else:
+        raise SystemExit(f"run bundle refused: its manifest is not anchored (no record of run {m['run']['id']} in "
+                         f"this store). Pass --manifest-sha256 with the published hash, or --allow-unanchored. "
+                         f"This manifest's sha256: {manifest_sha}")
     spec = HarnessSpec.model_validate(m["spec"])
     inputs = dict((m.get("inputs") or {}).get("input") or {})
     if a.task_dir:
@@ -379,6 +415,15 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
         diff = check_task_files(m, inputs["task_dir"])
         if diff:
             raise SystemExit("task files differ from the bundle: " + "; ".join(diff[:10]))
+    try:
+        arts = check_artifacts(m, Path(a.bundle), blobs=store.blobs,
+                               roots=[Path(r) for r in getattr(a, "artifact_root", None) or []],
+                               task_dir=inputs.get("task_dir"))
+    except RunBundleError as e:
+        raise SystemExit(f"run bundle refused: {e}") from e
+    if arts.fatal:
+        print(json.dumps({"rerun_of": m["run"]["id"], "refused": True, "artifacts": arts.to_json()}, indent=1))
+        raise SystemExit("run bundle refused (fail closed): " + "; ".join(arts.fatal[:10]))
     backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
     ws = data_dir() / "sandboxes" / f"rerun-{m['run']['id']}-{int(time.time())}"
     sandbox: Sandbox | None = None
@@ -390,7 +435,7 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  allow_same_family=a.allow_same_family).run(m["run"]["task_id"], inputs, seed=int(m["seed"]))
     print(json.dumps({"rerun_of": m["run"]["id"], "run_id": res.run_id, "status": res.status,
-                      "detail": res.detail}, indent=1))
+                      "detail": res.detail, "manifest_anchor": anchor, "artifacts": arts.to_json()}, indent=1))
     return 0 if res.status == "completed" else 1
 
 
@@ -572,6 +617,12 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--allow-same-family", action="store_true",
                     help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
+    rb.add_argument("--manifest-sha256", default=None,
+                    help="the published sha256 of the bundle's manifest.json (needed when this store has no record)")
+    rb.add_argument("--allow-unanchored", action="store_true",
+                    help="run a bundle whose manifest is not anchored (its artifact list is then self-attested)")
+    rb.add_argument("--artifact-root", action="append", default=[],
+                    help="a directory to look for artifacts the bundle does not carry (repeatable; hashes are checked)")
     rb.add_argument("--docker", action="store_true")
     rb.add_argument("--dev-sandbox", action="store_true")
     aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
@@ -603,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
     rp.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; trusted code only)")
+    rp.add_argument("--artifact-root", action="append", default=[],
+                    help="a directory to look for artifacts the bundle does not carry (repeatable; hashes are checked)")
     bd = sub.add_parser("bundle", help="write the Reproducibility Bundle of a certificate")
     bd.add_argument("cert_hash")
     bd.add_argument("-o", "--out")
