@@ -30,7 +30,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from ..verify import leak, lean_validation
+from ..verify import leak, lean_validation, transductive
 from ..verify import metrics as M
 from ..verify.stats import mean_t_interval, paired_example_interval
 from . import lp, sim
@@ -127,7 +127,7 @@ def adapter_hash(spec: AdapterSpec) -> str:
 ML = AdapterSpec(
     name="ml", version="1", classes=frozenset({EvidenceClass.DATA}),
     modules=("custom_harness.verify.metrics", "custom_harness.verify.stats", "custom_harness.verify.leak",
-             "custom_harness.kernel.execution"),
+             "custom_harness.kernel.execution", "custom_harness.verify.transductive"),
     metrics=frozenset(M.METRICS))
 
 
@@ -161,6 +161,7 @@ ML_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
     ("base64-encoded planted canary is detected",  # base64 of "x CHH-CANARY-ab12 y"
      lambda: bool(leak.scan_text("eCBDSEgtQ0FOQVJZLWFiMTIgeQ==", "t", ["CHH-CANARY-ab12"], []))),
     ("multi-column predictions are refused", lambda: _raises(lambda: parse_predictions(b"prediction\n1,2\n"))),
+    *transductive.F4_CHECKS,  # F4 (GOAL §16.5 item 7): a prediction must not depend on the other test rows
 )
 
 LP = AdapterSpec(

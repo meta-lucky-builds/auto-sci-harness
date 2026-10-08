@@ -35,6 +35,20 @@ def test_f4_validation_fails_when_a_fault_goes_unflagged(monkeypatch):
     assert "F4: a position-dependent predictor is flagged on permutation" not in failed
 
 
+def test_f4_is_registered_in_the_ml_adapter(monkeypatch):
+    """STATUS §6.2 (F4 'check built, not registered'): the ML adapter's identity covers the F4 module, and its
+    fault-injection validation runs every F4 case, so an approval of the ML adapter is also an approval of F4 and a
+    broken F4 makes the ML adapter unapprovable. Registering changes the ML adapter hash: the owner re-approves."""
+    from custom_harness.kernel import adapters as A
+    assert "custom_harness.verify.transductive" in A.ML.modules
+    assert "custom_harness.verify.transductive" in A.covered_modules(A.ML)
+    names = [n for n, _ in A.REGISTRY["ml"][1]]
+    assert all(n in names for n, _ in T.F4_CHECKS)
+    assert A.validate(A.REGISTRY["ml"][1]) == []
+    monkeypatch.setattr(T, "N_SUBSETS", 0)  # a weakened F4 must fail the ML adapter's own validation
+    assert "F4: per-batch normalisation is flagged on subsets" in A.validate(A.REGISTRY["ml"][1])
+
+
 def test_transductive_module_is_stdlib_only():
     """The Kernel's ML adapter will import this module: no numpy, pydantic, sandbox or other project imports."""
     tree = ast.parse(Path(T.__file__).read_text(encoding="utf-8"))

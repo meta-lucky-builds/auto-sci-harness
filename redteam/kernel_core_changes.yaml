@@ -24,3 +24,13 @@ changes:
     museum (45/45 KILLED) and the Kernel tests are the evidence, not proof. The owner should review these three
     points and, if any is not a tightening, replace this record with a window record.
   recorded: '2026-10-08'
+- fingerprint: 71b85b551ca602006c28b39bf77ecc22e975c047fd026514872c0be63f6bd961
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; tighten-only changes may merge at once, GOAL 16.7)
+  note: >-
+    F4 transductive check registered in the ML adapter: the adapter's identity now covers
+    custom_harness.verify.transductive and its fault-injection validation runs the 13 F4 cases, so a weakened F4
+    makes the ML adapter unapprovable. Only adds validation; no pass condition is relaxed. Recorded by the
+    integrator agent, not typed by a human. The ML adapter hash changes: `chh approve-adapter ml` must be re-run
+    by the human.
+  recorded: '2026-10-08'
