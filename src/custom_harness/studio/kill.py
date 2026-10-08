@@ -104,6 +104,10 @@ class RunGuardedKernel(Kernel):
         kill = kill_entry(self.store, self.run_id)
         if kill is not None:
             raise KernelError(f"{what} refused: run {self.run_id} was {killed_detail(kill)}")
+        # an ABLATED run (custom_harness/ablation.py) pre-registers, records and certifies nothing (fail closed)
+        off = self.store.run_ablated(self.run_id)
+        if off:
+            raise KernelError(f"{what} refused: run {self.run_id} is ABLATED (switched off: {', '.join(off)})")
 
     def preregister(self, claim: Claim) -> Entry:
         self._refuse_if_killed("pre-registration")

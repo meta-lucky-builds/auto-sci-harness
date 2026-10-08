@@ -33,6 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..ablation import MARKER, NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..kerneld.releases import Releases, private_reads
@@ -153,11 +154,16 @@ class Evaluator:
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
                  campaign_budget: Budget | None = None, releases: Releases | None = None,
-                 durable_key: str | None = None):
+                 durable_key: str | None = None, ablation: AblationSet = NO_ABLATION):
         sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
         if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
             raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
+        # capability switches OFF in every run this evaluator starts (custom_harness/ablation.py): each run is marked
+        # ABLATED, and its durable outcomes live under their own key (never mixed with production outcomes)
+        self.ablation = ablation
+        if ablation and durable_key is not None:
+            durable_key = f"{durable_key}|{MARKER}:{','.join(ablation.names)}"
         self.tasks = {t.task_id: t for t in tasks}
         self.budget_per_run = budget_per_run
         self.infra_retries = infra_retries
@@ -227,7 +233,8 @@ class Evaluator:
     def attempt(self, att: Attempt) -> ExecutedRun:
         """Any thread: the harness run itself (no Evaluator state is touched)."""
         return execute_run(att.spec, self.tasks[att.unit[0]], att.unit[1], backends=self.backends, store=self.store,
-                           sandbox_factory=self.sandbox_factory, budget_limits=self.budget_per_run, retry=self.retry)
+                           sandbox_factory=self.sandbox_factory, budget_limits=self.budget_per_run, retry=self.retry,
+                           ablation=self.ablation)
 
     def finish(self, att: Attempt, ex: ExecutedRun) -> RunOutcome | None:
         """Writer thread: score, check, charge and record attempt `att`. Returns the unit's final outcome, or None
@@ -272,12 +279,23 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                       proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
                       releases: Releases | None = None,
                       critic: FamilySeparatedCritic | None = None,
-                      branching: BranchConfig | None = None) -> GenerationResult:
+                      branching: BranchConfig | None = None, ablation: AblationSet | None = None) -> GenerationResult:
     """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
     shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
     candidate rejected on its evolve re-measurement or the held-out gate is tested per gate cluster and may become
-    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour)."""
+    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour).
+
+    `ablation` (custom_harness/ablation.py; default: the evaluator's): capability switches OFF in this generation. An
+    ablated generation NEVER accepts an edit and never proposes a branch: it is a measurement arm. Its lineage,
+    harness-edit, stats and proposer-session records go to `<kind>:ABLATED` record kinds, which no production reader
+    (novelty gate, proposer ledger, calibration, export) reads. Any acceptance run that is itself ABLATED also blocks
+    acceptance (fail closed)."""
+    abl = ablation if ablation is not None else getattr(evaluator, "ablation", NO_ABLATION)
+    if getattr(evaluator, "ablation", abl) != abl:
+        raise ValueError(f"the generation's ablation {list(abl.names)} differs from its evaluator's "
+                         f"{list(evaluator.ablation.names)}: both arms of one generation run under one ablation")
+    sfx = f":{MARKER}" if abl else ""  # ablated records never enter the production record kinds
     cfg = cfg or EvolveConfig()
     check_race_config(cfg)  # fail closed before any run
     if critic is not None:
@@ -313,7 +331,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         proposal: Any = proposer.propose_from_export(
             parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
             n_edits=cfg.n_edits, protected=cfg.protected_nodes)
-        store.append_record("proposer_session", {"parent": parent_hash, "transcript": proposal.transcript,
+        store.append_record("proposer_session" + sfx, {"parent": parent_hash, "transcript": proposal.transcript,
                                                  "problems": proposal.problems})
     else:
         proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
@@ -440,6 +458,14 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             rel = releases or getattr(evaluator, "releases", None) or Releases.live(store)
             ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
                                note="evolve.gate:decision", key=f"{parent_hash}|{best}"))
+            # ABLATED (custom_harness/ablation.py): an ablated generation, or an acceptance resting on any ablated run,
+            # never accepts. The released bit is kept as the measurement (`ablated_would_accept`), nothing else.
+            ablated_runs = sorted(r for r in used_runs if r and store.run_ablated(r))
+            ablated_block: dict[str, Any] = {}
+            if abl or ablated_runs:
+                ablated_block = {MARKER: True, "disabled": list(abl.names), "ablated_runs": ablated_runs,
+                                 "ablated_would_accept": ok}
+                ok = False
             rejected_on: str | None
             # infra_aborted: too many units were lost to infrastructure failures, so there is no verdict at all
             # (INCONCLUSIVE, owner decision 2026-10-08; GOAL L1 "excluded, not scored"). Never accepted, but not a
@@ -470,7 +496,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
             used_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in fresh_units + gate_units]
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in used_labels) else "MECHANICAL"
-            records.append({"status": "accepted" if ok else ("infra_aborted" if infra_aborted else "rejected_gate"),
+            if ablated_block:
+                decision, rejected_on = f"not accepted: {MARKER} measurement arm ({decision})", None
+            records.append({"status": "accepted" if ok else ("ablated_not_accepted" if ablated_block else
+                                                             "infra_aborted" if infra_aborted else "rejected_gate"),
+                            **ablated_block,
                             "candidate": best,
                             "loop_label": loop_label,
                             "edit": _public(edit, evolve_ids), "race": rr.stats.get(best, {}),
@@ -479,7 +509,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                             "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
                             "claims_check": claims})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
-            store.append_record("harness_edit", {
+            store.append_record("harness_edit" + sfx, {**ablated_block,
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
                 "rationale": edit.rationale, "accepted": ok, "decision": decision,
                 "pooled_gate_accepted": d.accepted, "lofo": lofo,
@@ -496,10 +526,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 branch = propose_branch(parent, spec, tasks, seeds=cfg.seeds, outcome=evaluator.outcome,
                                         store=store, releases=rel, globally_accepted=False, cfg=branching)
     for r in records:
-        store.append_record("lineage", {"parent": parent_hash, **r})
+        store.append_record("lineage" + sfx, {"parent": parent_hash, **r, **abl.marker()})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
                          n_survivors=len(survivors))
-    store.append_record("generation_stats", {"parent": parent_hash, **counters})
+    store.append_record("generation_stats" + sfx, {"parent": parent_hash, **counters, **abl.marker()})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
                             evaluator.calls - calls_before, fixed_k, loop_label, counters, branch)
 
