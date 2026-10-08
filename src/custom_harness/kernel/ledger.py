@@ -39,7 +39,9 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
                    "mint", "feature_ruling", "role_exam",
                    "tree_event",  # L4.7 experiment-tree events (research/tree.py owns the body)
-                   "salt_commitment", "salt_reveal"})  # §16.9 salt campaigns (salts/plan.py owns the bodies)
+                   "salt_commitment", "salt_reveal",  # §16.9 salt campaigns (salts/plan.py owns the bodies)
+                   # L9 HUMAN actions written by the studio CLI (`chh kill`, `chh tier-policy set`)
+                   "run_kill", "tier_policy"})
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
