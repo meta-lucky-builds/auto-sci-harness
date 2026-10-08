@@ -94,6 +94,34 @@ def private_read_windows(store: Any) -> list[float]:
     return times
 
 
+def run_private_reads(store: Any, trace: Sequence[TraceStep], run_id: str) -> list[float]:
+    """Ledger times of PRIVATE vault reads that may have fed THIS run: reads naming this run, or naming no run (Kernel
+    re-check reads carry none), logged at or after the run's first step. Engine taint does not follow a value that a
+    module copies into a fresh key, and is empty after a resume (red-team findings), so anything produced after such a
+    read is treated as possibly target-derived (conservative: over-refuses, never under-refuses)."""
+    if not trace:
+        return []
+    start = min(s.started_at for s in trace) - 1e-6
+    out = []
+    for _seq, _kind, body, _prev, _h, at in store.ledger_rows("data_access"):
+        try:
+            b = json.loads(body)
+            private, rid = bool(b.get("private")), b.get("run_id")
+        except (ValueError, TypeError, AttributeError):
+            private, rid = True, None  # unreadable row: count it (fail closed)
+        if private and rid in (run_id, None) and float(at) >= start:
+            out.append(float(at))
+    return out
+
+
+# Modules whose outputs only RELAY model-written text or other steps' outputs (critic questions, the catalog, answer
+# checks, recalled pages, memory entries, queued hypotheses / unpacked scripts): resolvable, but not evidence. A deny
+# list (stated limit): a new relay module must be added here.
+RELAY_MODULES = frozenset({"research.socratic_filter", "research.critic_evidence", "research.check_critic_answers",
+                           "research.recall", "research.recall_memory", "research.next_hypothesis",
+                           "research.unpack_solutions", "research.tournament"})
+
+
 def _has_private_keys(obj: Any) -> bool:
     if isinstance(obj, dict):
         return any(str(k).startswith("_private") or _has_private_keys(v) for k, v in obj.items())
@@ -102,17 +130,22 @@ def _has_private_keys(obj: Any) -> bool:
     return False
 
 
-def vet_step(step: TraceStep | None, *, before_index: int, private_reads: Sequence[float]) -> Vetted:
+def vet_step(step: TraceStep | None, *, before_index: int, private_reads: Sequence[float],
+             run_reads: Sequence[float] = ()) -> Vetted:
     """A trace step is citable evidence only if it is a successful MODULE step (code, not model output) that ran
-    before `before_index`, made no model call, wrote no `_private*` key, had no private value redacted from its
-    output, and no private vault read was logged while it ran."""
+    before `before_index`, is not a relay module, made no model call, wrote no `_private*` key, had no private value
+    redacted from its output, no private vault read (any run) was logged while it ran, and no private read of THIS run
+    (`run_reads`, see run_private_reads) was logged before it ended."""
     if step is None or step.index >= before_index:
         return Vetted(False, UNRESOLVABLE)
-    if step.kind != StepKind.MODULE or step.error is not None or step.output.get("_module_llm_calls"):
+    if (step.kind != StepKind.MODULE or step.error is not None or step.output.get("_module_llm_calls")
+            or step_module(step) in RELAY_MODULES):
         return Vetted(False, NOT_EVIDENCE)
     if _has_private_keys(step.output) or "_redacted_private_values" in step.output:
         return Vetted(False, HIDDEN)
     if any(step.started_at - 1e-6 <= t <= step.ended_at + 1e-6 for t in private_reads):
+        return Vetted(False, HIDDEN)
+    if any(t <= step.ended_at + 1e-6 for t in run_reads):
         return Vetted(False, HIDDEN)
     return Vetted(True)
 
@@ -137,7 +170,7 @@ class PrivateScreen:
                 canary = vault.store.blobs.get(ds.canary_ref).decode("utf-8", errors="replace")
                 pats |= set(secret_patterns(canary, min_verbatim=1)) if canary else set()
         secrets = [s for s in secrets if s]
-        digests |= {s for s in secrets if HANDLE_RE.match(s) and len(s) == 64}
+        digests |= {s for s in secrets if HANDLE_RE.fullmatch(s) and len(s) == 64}
         pats |= {s for s in secrets if len(s) >= 6}
         return cls(frozenset(digests), tuple(sorted(pats, key=lambda p: (-len(p), p))))
 
@@ -153,7 +186,7 @@ def resolve_handle(handle: str, visible: Iterable[str]) -> Vetted:
     """A handle (>= 16 lowercase hex) resolves only against digests VISIBLE to the agent, and only if exactly one
     matches. Nothing is looked up by the agent's string itself, so a forged or traversal-shaped handle cannot reach
     the blob store."""
-    if not isinstance(handle, str) or not HANDLE_RE.match(handle):
+    if not isinstance(handle, str) or not HANDLE_RE.fullmatch(handle):
         return Vetted(False, MALFORMED)
     hits = sorted({d for d in visible if isinstance(d, str) and len(d) == 64 and d.startswith(handle)})
     if not hits:
@@ -164,13 +197,14 @@ def resolve_handle(handle: str, visible: Iterable[str]) -> Vetted:
 
 
 def vet_blob(digest: str, store: Any, screen: PrivateScreen,
-             archive_taint: Mapping[str, Iterable[str]]) -> tuple[Vetted, str | None]:
-    """Private / target-derived / provenance checks on a VISIBLE digest; returns the decoded text when allowed."""
+             archive_taint: Mapping[str, Iterable[str]], *, after_run_read: bool = False) -> tuple[Vetted, str | None]:
+    """Private / target-derived / provenance checks on a VISIBLE digest; returns the decoded text when allowed.
+    `after_run_read`: the prompt that archived it was rendered after a private read of this run (run_private_reads)."""
     if screen.digest_private(digest):
         return Vetted(False, PRIVATE), None
     if digest not in archive_taint:
         return Vetted(False, PROVENANCE_UNKNOWN), None
-    if set(archive_taint[digest]):
+    if set(archive_taint[digest]) or after_run_read:
         return Vetted(False, TARGET_DERIVED), None
     try:
         text = store.blobs.get(digest).decode("utf-8", errors="replace")
@@ -198,6 +232,6 @@ def archived_by(trace: Sequence[TraceStep], node_ids: Iterable[str] | None = Non
     return out
 
 
-__all__ = ["BLOB_RE", "CODES", "EV_RE", "HANDLE_RE", "STEP_RE", "PrivateScreen", "Vetted", "archived_by",
-           "private_read_windows", "rendered_prompt", "resolve_handle", "step_module", "step_params", "vet_blob",
-           "vet_step"]
+__all__ = ["BLOB_RE", "CODES", "EV_RE", "HANDLE_RE", "RELAY_MODULES", "STEP_RE", "PrivateScreen", "Vetted",
+           "archived_by", "private_read_windows", "rendered_prompt", "resolve_handle", "run_private_reads",
+           "step_module", "step_params", "vet_blob", "vet_step"]

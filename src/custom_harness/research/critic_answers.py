@@ -90,9 +90,10 @@ def critic_evidence(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCo
     here = (trace[-1].index + 1) if trace else 0
     questions = kept_questions(_socratic(trace))
     reads = R.private_read_windows(ctx.store)
+    run_reads = R.run_private_reads(ctx.store, trace, ctx.run_id)
     catalog = []
     for st in trace:
-        if R.vet_step(st, before_index=here, private_reads=reads).ok:
+        if R.vet_step(st, before_index=here, private_reads=reads, run_reads=run_reads).ok:
             wrote = sorted(k for k in st.output if not str(k).startswith("_"))
             catalog.append({"id": f"step:{st.index}", "node": st.node_id, "wrote": wrote})
     limit = max(1, min(int(params.get("max_catalog", MAX_CATALOG)), MAX_CATALOG))
@@ -100,18 +101,19 @@ def critic_evidence(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCo
 
 
 def _vet_citation(token: Any, *, answer: TraceStep, prompt: str, catalog_ids: set[str],
-                  by_index: Mapping[int, TraceStep], reads: Sequence[float], screen: R.PrivateScreen,
-                  ctx: ModuleContext) -> str | None:
+                  by_index: Mapping[int, TraceStep], reads: Sequence[float], run_reads: Sequence[float],
+                  screen: R.PrivateScreen, ctx: ModuleContext) -> str | None:
     """None if the citation is acceptable, else its reason code."""
     if not isinstance(token, str):
         return R.MALFORMED
-    m = R.STEP_RE.match(token)
+    m = R.STEP_RE.fullmatch(token)
     if m:
         if token not in catalog_ids or not _visible(token, prompt):
             return R.NOT_VISIBLE
-        v = R.vet_step(by_index.get(int(m.group(1))), before_index=answer.index, private_reads=reads)
+        v = R.vet_step(by_index.get(int(m.group(1))), before_index=answer.index, private_reads=reads,
+                       run_reads=run_reads)
         return None if v.ok else v.code
-    m = R.BLOB_RE.match(token)
+    m = R.BLOB_RE.fullmatch(token)
     if m:
         handle = m.group(1)
         if not _visible(handle, prompt):
@@ -119,9 +121,10 @@ def _vet_citation(token: Any, *, answer: TraceStep, prompt: str, catalog_ids: se
         r = R.resolve_handle(handle, answer.output.get("archived") or [])
         if not r.ok or r.digest is None:
             return r.code
-        v, _text = R.vet_blob(r.digest, ctx.store, screen, ctx.archive_taint)
+        v, _text = R.vet_blob(r.digest, ctx.store, screen, ctx.archive_taint,
+                              after_run_read=any(t <= answer.started_at + 1e-6 for t in run_reads))
         return None if v.ok else v.code
-    m = R.EV_RE.match(token)
+    m = R.EV_RE.fullmatch(token)
     if m:
         if not _visible(m.group(1), prompt):
             return R.NOT_VISIBLE
@@ -180,10 +183,11 @@ def evaluate(ctx: ModuleContext, *, answerer: str = DEFAULT_ANSWERER, before: in
     catalog_ids = {str(e.get("id")) for e in (cat_out or {}).get("catalog") or [] if isinstance(e, dict)}
     by_index = {s.index: s for s in trace}
     reads = R.private_read_windows(ctx.store)
+    run_reads = R.run_private_reads(ctx.store, trace, ctx.run_id)
     screen = R.PrivateScreen.build(ctx.kernel().vault, ctx.secrets)
     for a in answers:
         qid = a.get("question") if isinstance(a, dict) else None
-        if not (isinstance(qid, str) and _QID.match(qid) and qid in counts):
+        if not (isinstance(qid, str) and _QID.fullmatch(qid) and qid in counts):
             stray += 1  # not attributable to a kept question: counts as no answer for any question
             continue
         counts[qid] += 1
@@ -197,7 +201,7 @@ def evaluate(ctx: ModuleContext, *, answerer: str = DEFAULT_ANSWERER, before: in
             continue
         for token in ev:
             code = _vet_citation(token, answer=ans, prompt=prompt, catalog_ids=catalog_ids, by_index=by_index,
-                                 reads=reads, screen=screen, ctx=ctx)
+                                 reads=reads, run_reads=run_reads, screen=screen, ctx=ctx)
             if code is not None:
                 results[qid].append(code)
     return finish()
@@ -210,27 +214,38 @@ def check_critic_answers(state: dict[str, Any], params: dict[str, Any], ctx: Mod
 
 
 def critic_gate(ctx: ModuleContext) -> tuple[bool, str]:
-    """(True, "") when the run's kept critic questions were all answered with checked citations, or none were kept;
-    otherwise (False, a publish-blocker reason). Recomputed from the trace; run state is never consulted."""
+    """(True, "") when every critic round of the run had all its kept questions answered with checked citations, or no
+    round kept a question; otherwise (False, a publish-blocker reason). Recomputed from the trace; run state is never
+    consulted. Each `research.socratic_filter` step is a round, checked by the latest check step before the next round
+    (a later empty round cannot erase an earlier round's open questions). A filter step that failed, or that ran with
+    `max_questions` < 1 (the critic switched off by a parameter edit), blocks (fail closed)."""
     trace = ctx.store.trace(ctx.run_id)
-    questions = kept_questions(_socratic(trace))
-    if not questions:
+    rounds = [s for s in trace if s.kind == StepKind.MODULE and R.step_module(s) == SOCRATIC_MODULE]
+    problems: list[str] = []
+    for i, soc in enumerate(rounds):
+        mq = R.step_params(soc).get("max_questions", 5)
+        if soc.error is not None or isinstance(mq, bool) or not isinstance(mq, int) or mq < 1:
+            problems.append(f"round {i + 1}: the critic filter failed or was switched off")
+            continue
+        questions = kept_questions(soc)
+        if not questions:
+            continue
+        nxt = rounds[i + 1].index if i + 1 < len(rounds) else None
+        chk = _latest(trace, lambda s: s.kind == StepKind.MODULE and R.step_module(s) == CHECK_MODULE
+                      and s.error is None, after=soc.index, before=nxt)
+        if chk is None:
+            problems.append(f"round {i + 1}: {len(questions)} kept question(s) were never checked for answers "
+                            f"citing evidence")
+            continue
+        rec = evaluate(ctx, answerer=str(R.step_params(chk).get("answerer", DEFAULT_ANSWERER)), before=chk.index)
+        open_q = [q for q in rec["questions"] if q["status"] != CITED]
+        if rec["status"] != "pass" or open_q or not rec["questions"]:
+            codes = sorted({c for q in open_q for c in q["codes"]})
+            problems.append(f"round {i + 1}: {len(open_q)} of {len(rec['questions'])} question(s) without an answer "
+                            f"citing checked evidence ({', '.join(codes)})")
+    if not problems:
         return True, ""
-    soc = _socratic(trace)
-    if soc is None:  # unreachable (questions come from soc): fail closed
-        return False, "critic (GOAL L4.8): the critic step could not be located"
-    chk = _latest(trace, lambda s: s.kind == StepKind.MODULE and R.step_module(s) == CHECK_MODULE
-                  and s.error is None, after=soc.index)
-    if chk is None:
-        return False, (f"critic (GOAL L4.8): {len(questions)} kept question(s) were never checked for answers "
-                       f"citing evidence")
-    rec = evaluate(ctx, answerer=str(R.step_params(chk).get("answerer", DEFAULT_ANSWERER)), before=chk.index)
-    open_q = [q for q in rec["questions"] if q["status"] != CITED]
-    if rec["status"] == "pass" and not open_q:
-        return True, ""
-    codes = sorted({c for q in open_q for c in q["codes"]})
-    return False, (f"critic (GOAL L4.8): {len(open_q)} of {len(rec['questions'])} question(s) without an answer "
-                   f"citing checked evidence ({', '.join(codes)})")
+    return False, "critic (GOAL L4.8): " + "; ".join(problems)
 
 
 __all__ = ["CATALOG_MODULE", "CHECK_MODULE", "CITED", "check_critic_answers", "critic_evidence", "critic_gate",
