@@ -315,7 +315,7 @@ class Kernel:
         """Look up a certificate. Its content must hash to the id it is filed under (catches a mis-filed or
         edited blob). A forger with write access could still file a self-consistent fake: use verify()."""
         for e in self.ledger.entries("certificate"):
-            if e.body["cert_hash"] == cert_hash:
+            if e.body.get("cert_hash") == cert_hash:  # a malformed entry never breaks other lookups
                 cert = Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
                 if cert.cert_hash() != cert_hash or cert.claim_hash != e.body.get("claim_hash"):
                     raise KernelError(f"certificate {cert_hash[:12]}: content does not match its ledger entry")
@@ -337,7 +337,7 @@ class Kernel:
         with that reason, and is not valid either way. This, not the ledger entry, is what makes a certificate
         trustworthy: the ledger is tamper-evident, not authenticated."""
         cert = self.certificate(cert_hash)
-        entry = next(e for e in self.ledger.entries("certificate") if e.body["cert_hash"] == cert_hash)
+        entry = next(e for e in self.ledger.entries("certificate") if e.body.get("cert_hash") == cert_hash)
         claim, ids = Claim.model_validate(cert.claim), list(cert.evidence_ids)
         better, worse = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
         if (better or worse) and (cert.kernel_version != self.config.version or cert.config != asdict(self.config)):
@@ -358,7 +358,7 @@ class Kernel:
 
     def status(self, cert_hash: str) -> str:
         self.certificate(cert_hash)
-        retracted = any(e.body["cert_hash"] == cert_hash for e in self.ledger.entries("retraction"))
+        retracted = any(e.body.get("cert_hash") == cert_hash for e in self.ledger.entries("retraction"))
         return "retracted" if retracted else "active"
 
 

@@ -127,6 +127,50 @@ def test_scoring_reads_registered_terms_and_skill(world):
     assert math.isclose(skill(list(s.values())), sum(x.skill_bits or 0 for x in s.values()))
 
 
+def test_malformed_ledger_entries_fail_closed_per_claim_not_for_the_whole_store(world):
+    """studio-to-kstats-02: a certificate entry without `resolution.outcome` (e.g. the self-consistent forgery of
+    test_e4b) made score_predictions raise KeyError, so every prediction reader crashed for the whole store. Now the
+    affected claim alone is marked (closed reason) and scored as a miss (no credit); other claims score normally."""
+    from custom_harness.kernel import predictions as P
+
+    now = time.time()
+    claim = world.claim(world.artifact("good"), world.artifact("baseline", "baseline")).model_dump(mode="json")
+    pre = [{"claim_hash": h, "claim": {**claim, "resolve_by": now + 1e6}, "fixed": {"p0": 0.05, "p_ref": 0.25}}
+           for h in ("ok", "noout", "nores", "strout")]
+    broken_prereg = {"claim_hash": "bad", "claim": {"effect": {}}}  # unreadable registration terms
+    led = _fake_ledger([*pre, broken_prereg, {"no": "hash"}],
+                       [{"claim_hash": "ok", "resolution": {"outcome": True}},
+                        {"claim_hash": "noout", "resolution": {}},
+                        {"claim_hash": "nores"},
+                        {"claim_hash": "strout", "resolution": {"outcome": "yes"}},
+                        {"resolution": {"outcome": True}}])
+    s = {x.claim_hash: x for x in score_predictions(led, now)}  # type: ignore[arg-type]
+    assert set(s) == {"ok", "noout", "nores", "strout", "bad"}
+    assert s["ok"].outcome is True and s["ok"].invalid is None
+    for h in ("noout", "nores", "strout"):  # fail closed: a miss with a closed reason, never a crash or credit
+        assert s[h].outcome is False and s[h].invalid == P.INVALID_RESOLUTION and s[h].info_gain_bits <= 0, s[h]
+    assert s["bad"].invalid == P.INVALID_PREREG and s["bad"].info_gain_bits is None and s["bad"].outcome is None
+
+
+def test_a_malformed_certificate_entry_breaks_no_other_lookup(tmp_path):
+    """Same class (ledger readers indexing a missing key): one certificate or retraction entry without `cert_hash`
+    made every certificate lookup, status and verify raise KeyError for the whole store."""
+    w = World(tmp_path / "mal", seed=23, n_train=60, n_test=60)
+    c, ids = _honest(w)
+    cert = w.kernel.certify(c, ids)
+    w.kernel.ledger.append("certificate", {"claim_hash": "x", "resolution": {}})  # malformed (no cert_hash)
+    w.kernel.ledger.append("retraction", {"reason": "no hash"})
+    first = w.kernel.ledger.entries("certificate")[0]
+    assert first.body.get("cert_hash") == cert.cert_hash()  # the real one precedes; the malformed one is later
+    assert w.kernel.certificate(cert.cert_hash()) == cert and w.kernel.status(cert.cert_hash()) == "active"
+    assert w.kernel.verify_status(cert.cert_hash()).status in ("valid", "stale")
+    with pytest.raises(KernelError):
+        w.kernel.certificate("0" * 64)  # a lookup past the malformed entry: refused cleanly, not a KeyError
+    (sc,) = [x for x in score_predictions(w.kernel.ledger, time.time()) if x.claim_hash == c.claim_hash()]
+    assert sc.invalid is None
+    w.close()
+
+
 def test_prereg_freezes_terms(world):
     c, _ = _honest(world, eps_max=0.3, beta=0.2)
     entry = K.registration(world.kernel.ledger, c.claim_hash())

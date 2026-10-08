@@ -27,7 +27,7 @@ from ..store.evidence import EvidenceStore
 from ..verify import leak
 from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
-from . import adapters, alpha, simulated
+from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
 from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
 from .execution import ExecRecord, ExecutionError
@@ -218,8 +218,8 @@ def fixed_terms(ledger: Ledger, vault: Vault, claim: Claim, cfg: KernelConfig) -
     """Everything a verdict depends on that must not move after registration: p0 (VDS baseline and the K1 q >= p0
     rule), the pinned reference forecast p_ref (Laplace base rate of the certificates resolved so far), and the K3
     reliability requirement. Stored in the prereg entry."""
-    outcomes = {e.body.get("claim_hash"): bool(e.body.get("resolution", {}).get("outcome"))
-                for e in ledger.entries("certificate")}
+    # a malformed certificate entry counts as not certified (predictions._outcome; it never crashes registration)
+    outcomes = {e.body.get("claim_hash"): bool(predictions.outcome_of(e.body)) for e in ledger.entries("certificate")}
     eps, beta, n = reliability(claim, cfg)
     return {"p0": registration_level(ledger, vault, claim, cfg),
             "p_ref": (sum(outcomes.values()) + 1) / (len(outcomes) + 2), "reference": "laplace-base-rate/1",
