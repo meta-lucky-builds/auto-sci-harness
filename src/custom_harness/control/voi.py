@@ -96,6 +96,8 @@ def voi_race(candidates: list[Hashable], units: list[Unit], evaluate: Callable[[
         pos[c] += 1
         spent += 1
         score, base = evaluate(c, u), parent_scores[u]
+        if any(x is not None and not math.isfinite(x) for x in (score, base)):  # fail closed, with a reason
+            raise ValueError(f"non-finite score on {u!r}: the race cannot rank on it")
         if score is None or base is None:
             excluded[c] += 1
         else:

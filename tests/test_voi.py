@@ -60,6 +60,12 @@ def test_the_signature_has_no_held_out_input():
     assert params == {"candidates", "units", "evaluate", "parent_scores", "rounds", "keep", "cfg"}
 
 
+def test_a_non_finite_score_fails_closed_with_a_reason():
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="non-finite"):
+            voi_race(["a", "b"], [("t", 0), ("t", 1)], lambda c, u, b=bad: b, {("t", 0): 0.5, ("t", 1): 0.5}, rounds=1)
+
+
 def test_knowledge_gradient_basics():
     assert knowledge_gradient(0.0, 0.0, 1.0, 0) == math.inf  # an arm with no valid unit is worth sampling
     near = knowledge_gradient(0.01, 0.0, 1.0, 4)
