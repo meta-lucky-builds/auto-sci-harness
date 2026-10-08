@@ -247,7 +247,8 @@ def protect_path(p: Path | str) -> None:
 def protected_paths() -> list[Path]:
     from ..config import data_dir
     d = data_dir()
-    return sorted({_norm(d / "store"), _norm(d / "bundles"), *(Path(p) for p in _PROTECTED)})
+    # d / "human": the human-only L9 config (studio/tierpolicy.py), never inside an agent mount
+    return sorted({_norm(d / "store"), _norm(d / "bundles"), _norm(d / "human"), *(Path(p) for p in _PROTECTED)})
 
 
 def check_mount(workspace: Path | str) -> None:
