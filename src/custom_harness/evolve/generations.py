@@ -14,6 +14,10 @@ Records (kinds of `EvidenceStore.append_record`):
     proposer was given), refs {generation_stats: n, lineage: [start, end), harness_edit: [start, end)} (positions in
     `store.records(kind)`, which is append-only), signal {accepted, proposed, gated, rejected_on {stage: count}},
     stall {window, observed, in_window, window_generations, accepted, gated, proposed, rejected_on, stalled}}.
+  - `generation_stopped` (one per generation that began and did not complete, e.g. BudgetExceeded): {format,
+    campaign, generation (the index it attempted; not consumed), parent, schedule_hash, budget, reason, detail, refs
+    {generation_stats/lineage/harness_edit: [start, end)} of the records written before the stop}; host-only, checked
+    by `verify_stopped` and by `chh evolve report`.
 
 Stall (the L7 orchestrator's rule, control/islands.py): stalled = at least `STALL_WINDOW`
 generations observed in this campaign and no accepted edit in the last `STALL_WINDOW`. "No improvement in the gate
@@ -69,6 +73,12 @@ _GEN_FIELDS = frozenset({"format", "campaign", "generation", "parent", "new_pare
                          "refs", "signal", "stall"})
 _CAMPAIGN_FIELDS = frozenset({"format", "campaign", "schedule", "schedule_hash", "n_edits_cap", "stall_window"})
 _MAX_QUOTE = 2000
+# a generation that began and did not complete (driver hook): host-only record, not a proposer-visible view
+STOPPED_KIND = "generation_stopped"
+STOP_REASONS = ("budget_exceeded",)
+MAX_STOP_DETAIL = 500
+_STOP_FIELDS = frozenset({"format", "campaign", "generation", "parent", "schedule_hash", "budget", "reason", "detail",
+                          "refs"})
 
 
 class LedgerError(ValueError):
@@ -320,6 +330,83 @@ class CampaignLedger:
         self.store.append_record(GENERATION_KIND, rec)
         self.generation += 1
         return rec
+
+    def record_stopped(self, parent_hash: str, reason: str, detail: str) -> dict[str, Any]:
+        """A generation that began but did not complete (e.g. the campaign budget ran out mid-generation) gets a
+        `generation_stopped` record: its campaign-global index, parent, budget and stop reason, plus the [start, end)
+        ranges of the loop records written before the stop. It does NOT consume the index: completed generations stay
+        numbered 0..k-1, and a resume re-attempts generation `self.generation` (possibly several stops per index)."""
+        if self._snap is None:
+            raise LedgerError("record_stopped() without begin()")
+        if reason not in STOP_REASONS:
+            raise LedgerError(f"stop reason {reason!r} not in {STOP_REASONS}")
+        snap, self._snap = self._snap, None
+        rec = {"format": FORMAT, "campaign": self.campaign, "generation": self.generation, "parent": parent_hash,
+               "schedule_hash": self.schedule.schedule_hash(), "budget": self._budget, "reason": reason,
+               "detail": str(detail)[:MAX_STOP_DETAIL],
+               "refs": {k: [snap[k], len(self.store.records(k))]
+                        for k in ("generation_stats", "lineage", "harness_edit")}}
+        self.store.append_record(STOPPED_KIND, rec)
+        return rec
+
+
+def last_parent(store: EvidenceStore, campaign: str) -> str | None:
+    """The spec hash a resumed campaign continues from: the `new_parent` of its last completed generation (None when
+    no generation completed). Read through the checked numbering (fail closed on malformed records)."""
+    rows = _campaign_generations(store, campaign)
+    return rows[-1][1]["new_parent"] if rows else None
+
+
+def first_parent(store: EvidenceStore, campaign: str) -> str | None:
+    rows = _campaign_generations(store, campaign)
+    return rows[0][1]["parent"] if rows else None
+
+
+def stopped_records(store: EvidenceStore, campaign: str) -> list[tuple[int, dict[str, Any]]]:
+    """(position, record) of the campaign's `generation_stopped` records, in order."""
+    return [(i, r) for i, r in enumerate(store.records(STOPPED_KIND)) if r.get("campaign") == campaign]
+
+
+def verify_stopped(store: EvidenceStore, n: int) -> list[str]:
+    """Recompute stopped record `n` (position in `store.records("generation_stopped")`): exact shape, its campaign is
+    declared, its budget equals the declared schedule at its index, its index was the next one to complete when it
+    stopped (it is at most the number of completed generations), and every loop record in its ranges has its
+    parent. Returns problems (empty = consistent)."""
+    rows = store.records(STOPPED_KIND)
+    if not _is_int(n) or not 0 <= n < len(rows):
+        return [f"generation_stopped #{n} does not exist"]
+    rec = rows[n]
+    where = f"generation_stopped #{n}"
+    if not isinstance(rec, dict) or set(rec) != _STOP_FIELDS or rec.get("format") != FORMAT \
+            or rec.get("reason") not in STOP_REASONS or not isinstance(rec.get("detail"), str) \
+            or not _is_int(rec.get("generation")) or rec["generation"] < 0 or not _is_int(rec.get("budget")):
+        return [f"{where}: malformed"]
+    refs = rec["refs"]
+    if not isinstance(refs, dict) or set(refs) != {"generation_stats", "lineage", "harness_edit"} or not all(
+            isinstance(r, list) and len(r) == 2 and all(_is_int(x) for x in r) and 0 <= r[0] <= r[1]
+            for r in refs.values()):
+        return [f"{where}: refs are not [start, end) ranges"]
+    try:
+        _, decl, sched = _declaration(store, rec["campaign"])
+        completed = _campaign_generations(store, rec["campaign"])
+    except LedgerError as e:
+        return [f"{where}: {e}"]
+    problems = []
+    if rec["schedule_hash"] != decl["schedule_hash"]:
+        problems.append(f"{where}: schedule hash differs from the campaign declaration")
+    if rec["budget"] != sched.budget_at(rec["generation"]):
+        problems.append(f"{where}: budget {rec['budget']} != declared schedule {sched.budget_at(rec['generation'])}")
+    if rec["generation"] > len(completed):
+        problems.append(f"{where}: generation {rec['generation']} was never the next one to run")
+    elif rec["generation"] < len(completed) and completed[rec["generation"]][1]["parent"] != rec["parent"]:
+        problems.append(f"{where}: its parent differs from the completed generation {rec['generation']}'s")
+    for kind, (lo, hi) in refs.items():
+        recs = store.records(kind)
+        if hi > len(recs):
+            problems.append(f"{where}: {kind} range points past the end of the records")
+        elif any(r.get("parent") != rec["parent"] for r in recs[lo:hi]):
+            problems.append(f"{where}: a {kind} record in its range has another parent")
+    return problems
 
 
 def open_campaign(store: EvidenceStore, campaign: str | None, schedule: AnnealSchedule | None,
