@@ -167,9 +167,9 @@ def test_planted_label_memorising_method_is_not_confirmed_by_K9(tmp_path):
     a.close()
 
 
-@pytest.mark.xfail(strict=True, reason="Kernel K9 gap: labels as a quoted list literal are not detected "
-                                       "(mailbox auditor-to-kstats-01); remove this marker when kstats fixes it")
 def test_planted_label_memorising_method_quoted_literal_k9_gap(tmp_path):
+    """Was a strict xfail (auditor-to-kstats-01) until 2026-10-08: K9's label-run scan now also tokenises across
+    quote and bracket characters (verify/leak._LITERAL_SPLIT)."""
     a = Audit(tmp_path / "memorised_literal", method=_memorised(_probe_labels(tmp_path), literal=True))
     out = a.full()
     (st,) = a.cert(out).resolution["targets"].values()

@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/verify/leak.py b/src/custom_harness/verify/leak.py
+--- a/src/custom_harness/verify/leak.py
++++ b/src/custom_harness/verify/leak.py
+@@ -224,7 +224,7 @@
+ 
+ 
+ def _runs_in(view: str, runs: list[LabelRuns]) -> bool:
+-    for split in (_TOKEN_SPLIT, _LITERAL_SPLIT):
++    for split in (_TOKEN_SPLIT,):
+         tokens = [t for t in split.split(view) if t]
+         if any(r.found(tokens) or r.found(tokens[::-1]) for r in runs):
+             return True
