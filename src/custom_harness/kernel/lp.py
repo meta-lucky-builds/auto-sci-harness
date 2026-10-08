@@ -46,11 +46,19 @@ def _numbers(v: object, what: str, n: int | None) -> list[Fraction]:
     return [parse_rational(e) for e in v]
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A duplicated key would show a reader one value and the checker another (json keeps the last): refused."""
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise LPError(f"duplicate key {sorted({k for k in keys if keys.count(k) > 1})[0]!r}")
+    return dict(pairs)
+
+
 def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
     if len(data) > MAX_BYTES:
         raise LPError(f"document is larger than {MAX_BYTES} bytes")
     try:
-        doc = json.loads(data)
+        doc = json.loads(data, object_pairs_hook=_unique)
     except ValueError as e:
         raise LPError(f"not JSON: {e}") from None
     if not isinstance(doc, dict) or doc.get("format") != fmt:

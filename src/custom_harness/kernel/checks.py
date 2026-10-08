@@ -29,7 +29,7 @@ from ..verify import metrics as M
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
 from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
-from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
+from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value, strict_json
 from .execution import ExecRecord, ExecutionError
 from .ledger import AsOfLedger, Entry, Ledger, verify_chain
 from .reasons import Code, R, Refusal, coded, codes_of, describe, exception_name
@@ -293,10 +293,10 @@ def k0_provenance(ctx: Context) -> CheckResult:
             ev = ctx.store.get_evidence(eid)
             if ev.kind != EvidenceKind.METRIC:
                 raise Refusal(f"kind {ev.kind} is not a metric record")
-            rec = ExecRecord.model_validate(ctx.store.blobs.get_json(ev.payload_ref))
+            rec = ExecRecord.model_validate(strict_json(ctx.store.blobs.get(ev.payload_ref)))
             if rec.claim_hash != ctx.claim_hash:
                 raise Refusal("record belongs to a different claim")
-            preds = ctx.store.blobs.get_json(rec.preds_ref)
+            preds = strict_json(ctx.store.blobs.get(rec.preds_ref))
             if not isinstance(preds, list) or not all(isinstance(p, str) for p in preds):
                 raise Refusal("predictions blob is not a list of strings")
             if not _blob_ok(ctx.store, rec.artifact_hash):
@@ -521,7 +521,7 @@ def _earlier_reproduction_failures(ctx: Context) -> list[str]:
         if e.body.get("claim_hash") != ctx.claim_hash:
             continue
         try:
-            earlier = Certificate.model_validate(ctx.store.blobs.get_json(e.body["blob"]))
+            earlier = Certificate.model_validate(strict_json(ctx.store.blobs.get(e.body["blob"])))
             if earlier.cert_hash() != e.body.get("cert_hash"):
                 raise ValueError("content does not match its ledger entry")
         except (KeyError, ValueError, OSError, ValidationError) as err:
@@ -906,7 +906,7 @@ def k0_computational(ctx: Context) -> CheckResult:
             ev = ctx.store.get_evidence(eid)
             if ev.kind != EvidenceKind.PROOF:
                 raise Refusal(f"kind {ev.kind} is not a certificate record")
-            rec = CertificateRecord.model_validate(ctx.store.blobs.get_json(ev.payload_ref))
+            rec = CertificateRecord.model_validate(strict_json(ctx.store.blobs.get(ev.payload_ref)))
             if rec.claim_hash != ctx.claim_hash:
                 raise Refusal("record belongs to a different claim")
             art = arts.get(rec.artifact_id)

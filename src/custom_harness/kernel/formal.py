@@ -95,11 +95,19 @@ class Statement:
     source: str
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A duplicated key would show a reader one value and the checker another (json keeps the last): refused."""
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise FormalError(f"duplicate key {sorted({k for k in keys if keys.count(k) > 1})[0]!r}")
+    return dict(pairs)
+
+
 def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
     if len(data) > MAX_BYTES:
         raise FormalError(f"document is larger than {MAX_BYTES} bytes")
     try:
-        doc = json.loads(data)
+        doc = json.loads(data, object_pairs_hook=_unique)
     except ValueError as e:
         raise FormalError(f"not JSON: {e}") from None
     if not isinstance(doc, dict) or doc.get("format") != fmt:
@@ -207,7 +215,7 @@ def _toolchain(tool: dict[str, str]) -> list[str]:
     elif version != LEAN_VERSION:
         reasons.append(f"wrong toolchain: Lean {version}, the adapter pins {LEAN_VERSION}")
     try:
-        packages = json.loads(tool["manifest"])["packages"]
+        packages = json.loads(tool["manifest"], object_pairs_hook=_unique)["packages"]
         mathlib = [p for p in packages if p.get("name") == "mathlib"]
     except (ValueError, TypeError, KeyError, AttributeError) as e:
         return [*reasons, f"lake manifest unreadable: {type(e).__name__}"]
@@ -246,7 +254,7 @@ def _result(rec: dict[str, Any], theorem: str) -> tuple[list[str], dict[str, Any
     if len(parts) != 3 or parts[1] != rec["nonce"]:
         return ["the checker result is not bound to this record's nonce"], None
     try:
-        res = json.loads(parts[2])
+        res = json.loads(parts[2], object_pairs_hook=_unique)
         if not isinstance(res, dict) or set(res) != {"theorem", "kind", "statement_match", "axioms", "replayed",
                                                      "problems"}:
             raise ValueError("unexpected keys")

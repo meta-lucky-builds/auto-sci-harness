@@ -28,7 +28,7 @@ from .checks import (
     is_external,
     related_targets,
 )
-from .claim import Claim, EvidenceClass
+from .claim import Claim, EvidenceClass, strict_json
 from .execution import ExecRecord
 from .ledger import AsOfLedger, Entry, Ledger
 from .reasons import Code, UncodedReason, exception_name
@@ -316,7 +316,7 @@ class Kernel:
         edited blob). A forger with write access could still file a self-consistent fake: use verify()."""
         for e in self.ledger.entries("certificate"):
             if e.body.get("cert_hash") == cert_hash:  # a malformed entry never breaks other lookups
-                cert = Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
+                cert = Certificate.model_validate(strict_json(self.store.blobs.get(e.body["blob"])))
                 if cert.cert_hash() != cert_hash or cert.claim_hash != e.body.get("claim_hash"):
                     raise KernelError(f"certificate {cert_hash[:12]}: content does not match its ledger entry")
                 return cert

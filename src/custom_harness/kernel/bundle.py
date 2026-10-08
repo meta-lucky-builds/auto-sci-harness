@@ -29,7 +29,6 @@ task's private/ directory: never mount it, or anything derived from it, into an 
 from __future__ import annotations
 
 import hashlib
-import json
 import platform
 import sys
 import tempfile
@@ -43,7 +42,7 @@ from ..records import Evidence, EvidenceKind, Run, RunStatus, TraceStep
 from ..store.evidence import EvidenceStore
 from .certificate import CHECK_IDS, Certificate
 from .checks import KernelConfig, Replayer
-from .claim import Claim, canonical_json
+from .claim import Claim, canonical_json, strict_json
 from .execution import ExecRecord
 from .kernel import Kernel
 from .ledger import Entry, verify_chain
@@ -87,7 +86,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         evidence.append(ev.model_dump(mode="json"))
         blobs.add(ev.payload_ref)
         try:
-            doc = store.blobs.get_json(ev.payload_ref)
+            doc = strict_json(store.blobs.get(ev.payload_ref))
             if ev.kind == EvidenceKind.PROOF:  # a computational claim's certificate: its artifact bytes travel along
                 blobs.add(CertificateRecord.model_validate(doc).hash)
                 continue
@@ -205,7 +204,10 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
         if "manifest.json" not in reader.infos:
             raise BundleError("bundle has no manifest.json")
         data = reader.read("manifest.json")
-        manifest = json.loads(data)
+        try:
+            manifest = strict_json(data)
+        except ValueError:  # malformed, or a duplicated key two readers would resolve differently
+            raise BundleError("manifest.json is not JSON or has a duplicated key: refused") from None
         bundle_hash = hashlib.sha256(data).hexdigest()
         fmt = manifest.get("format")
         if fmt != FORMAT and fmt not in LEGACY_FORMATS:
@@ -224,8 +226,11 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
             raise
     full = fmt == FORMAT
     try:
-        entries = [Entry.from_row((int(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), float(r[5])))
-                   for r in manifest["ledger"]]
+        try:
+            entries = [Entry.from_row((int(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), float(r[5])))
+                       for r in manifest["ledger"]]
+        except ValueError:  # e.g. an entry body with a duplicated key
+            raise BundleError("a bundled ledger entry is unreadable: refused") from None
         problems += verify_chain(entries, full=full)
         head = entries[-1].hash if entries else None
         ledger_check = (f"unbroken hash chain from genesis: {len(entries)} entries, head {head}" if full else
@@ -249,7 +254,7 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
                                    [*problems, "certificate entry missing from the bundle"], None, ledger_check, head)
         try:
-            original = Certificate.model_validate(store.blobs.get_json(entry.body["blob"]))
+            original = Certificate.model_validate(strict_json(store.blobs.get(entry.body["blob"])))
         except OSError:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
                                    [*problems, "certificate content missing from the bundle"], None, ledger_check,

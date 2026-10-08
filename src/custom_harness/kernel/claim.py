@@ -151,6 +151,19 @@ def exact_value(text: str | None) -> Fraction | None:
     return value if str(value) == text else None
 
 
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"duplicate JSON key {sorted({k for k in keys if keys.count(k) > 1})[0]!r}")
+    return dict(pairs)
+
+
+def strict_json(data: str | bytes) -> Any:
+    """json.loads that refuses a duplicated object key at any depth: one reader would see the first value and
+    another (the stdlib keeps the last) a different document (ValueError, so callers fail closed)."""
+    return json.loads(data, object_pairs_hook=_unique_keys)
+
+
 def canonical_json(obj: Any) -> bytes:
     """One byte string per value: sorted keys, no whitespace, no NaN (rejected, never silently encoded)."""
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()

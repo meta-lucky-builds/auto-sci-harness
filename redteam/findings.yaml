@@ -449,3 +449,25 @@ findings:
             "tests/test_evolve_map_flow.py::test_changing_only_the_body_of_an_existing_map_is_checked_too"]
     museum: redteam/museum/R2-MAP.patch
     status: fixed
+  # ------------------------------------------------------------------ s3-kernel, 2026-10-09
+  - id: JSON-DUP-LP
+    title: an LP problem or certificate with a duplicated JSON key was CERTIFIED-EXACT for the last value while a
+      first-value reader saw another problem (a7fb608 certified c = (1, 1) while the file also states c = (100, 100))
+    invariant: "§4.7 computational class (statement fidelity of the registered instance); §10 inv. 7"
+    capability: A4
+    tests: ["tests/test_kernel_dupkeys.py::test_duplicate_key_problem_is_not_certified_as_the_problem_a_reader_sees",
+            "tests/test_kernel_dupkeys.py::test_duplicate_key_certificate_is_refused",
+            "tests/test_kernel_dupkeys.py::test_lp_and_formal_checkers_refuse_duplicates_directly"]
+    museum: redteam/museum/JSON-DUP-LP.patch
+    status: fixed
+  - id: JSON-DUP-KERNEL
+    title: Kernel-parsed JSON (evidence records, predictions, certificates, ledger bodies, bundle manifests) kept the
+      last of duplicated keys, so a store or bundle writer could show readers and the Kernel different documents
+    invariant: "§10 inv. 7 (every parser fails closed); §4.4 bundle integrity"
+    capability: A4
+    tests: ["tests/test_kernel_dupkeys.py::test_strict_json_refuses_duplicates_at_any_depth",
+            "tests/test_kernel_dupkeys.py::test_ledger_entry_with_a_duplicated_key_is_refused",
+            "tests/test_kernel_dupkeys.py::test_evidence_record_with_a_duplicated_key_fails_k0",
+            "tests/test_kernel_dupkeys.py::test_bundle_manifest_with_a_duplicated_key_is_refused"]
+    museum: redteam/museum/JSON-DUP-KERNEL.patch
+    status: fixed

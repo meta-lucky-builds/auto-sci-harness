@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..store.evidence import EvidenceStore, LedgerRow
-from .claim import canonical_json
+from .claim import canonical_json, strict_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
                    "retraction", "adapter_approval",
@@ -62,7 +62,7 @@ class Entry:
     @staticmethod
     def from_row(row: LedgerRow) -> Entry:
         seq, kind, body, prev, h, at = row
-        return Entry(seq, kind, json.loads(body), prev, h, at)
+        return Entry(seq, kind, strict_json(body), prev, h, at)
 
     def row(self) -> LedgerRow:
         return self.seq, self.kind, canonical_json(self.body).decode(), self.prev, self.hash, self.at
@@ -155,7 +155,7 @@ def check_anchors(entries: list[Entry], path: Path) -> list[str]:
         return [f"anchor file {path} holds no anchor"]
     for i, line in enumerate(lines, 1):
         try:
-            a = json.loads(line)
+            a = strict_json(line)
             n, head = int(a["length"]), str(a["head"])
             if a.get("format") != ANCHOR_FORMAT or n < 0:
                 raise ValueError("not a chh-anchor/1 record")
