@@ -18,6 +18,11 @@ OLD_PATH_PRIVATE_READS = {"research/claims.py": 3}
 # EvidenceStore constructions outside the Kernel process (old path: the CLI opens the store for everything)
 OLD_PATH_STORE_OPENS = {"cli.py": 1}
 COVERED = ["evolve", "runtime/engine.py", "kerneld/client.py"]
+# NOT old-path sites, exempt with a stated reason (2026-10-08): research/preflight.py (GOAL §16.8 zero-call preflight)
+# builds a SCRATCH store in a temporary directory holding only SIMULATED labels it generated itself, and makes one
+# logged read of them so the real K4 sees logged = reported evaluations. It never opens the real store and never reads
+# real held-out data; routing simulated labels through kerneld would add a process and protect nothing.
+SCRATCH_STORE_SITES = {"research/preflight.py": 1}
 
 
 def _files() -> list[Path]:
@@ -44,11 +49,11 @@ def _store_open(node: ast.AST) -> bool:
 
 
 def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites():
-    assert _sites(_private_read) == OLD_PATH_PRIVATE_READS
+    assert _sites(_private_read) == OLD_PATH_PRIVATE_READS | SCRATCH_STORE_SITES
 
 
 def test_store_opens_outside_the_kernel_are_only_the_listed_old_path_sites():
-    assert _sites(_store_open) == OLD_PATH_STORE_OPENS
+    assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES
 
 
 def test_covered_host_modules_have_no_private_read_or_store_open():

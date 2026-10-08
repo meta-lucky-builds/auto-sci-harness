@@ -96,12 +96,26 @@ def test_every_program_runs_a_recorded_revision_in_its_own_new_directory(store, 
     _check(store, root.workspace, Witness.log)
 
 
-@pytest.mark.xfail(strict=True, reason="GAP (verified): a confirm retry after an infrastructure error re-spawns the "
-                   "SAME directory (claims.confirm uses a deterministic '-confirm/<arm>-<seed>' path), so the retried "
-                   "program sees the failed attempt's files. Owner: yield (research/claims.py); fix requested in "
-                   "build16/mailbox/orcompute-to-yield-01. Remove this xfail when fixed.")
 def test_a_retried_confirmation_never_reuses_the_failed_attempts_directory(store, tmp_path, rings_task):  # noqa: F811
     Witness.fail_confirm_exec = 4
     _run(store, tmp_path, rings_task, retry=RetryPolicy(max_attempts=3, backoff_s=0.0))
     assert Witness.confirm_execs > 4, "the infrastructure failure did not happen: the test is not testing anything"
     _check(store, tmp_path / "ws", [e for e in Witness.log if e["has_program"]])
+
+
+@pytest.mark.parametrize("which", ["chh", "chh-audit"])
+def test_cli_sandbox_factories_never_reuse_a_directory_for_the_same_key(tmp_path, which):
+    """Same class as the confirm-retry gap: the evolve Evaluator retries an infra-failed unit under the SAME key
+    (spec, task, seed), and the CLI factories used to map a key to `root / key`, handing the retry the failed
+    attempt's directory (orcompute-to-flowk-01). Every call now gets a new, not yet existing directory."""
+    import argparse
+
+    from custom_harness import cli
+    from custom_harness.audit import cli as audit_cli
+    make = cli._sandbox_factory if which == "chh" else audit_cli._factory
+    factory = make(argparse.Namespace(docker=False, dev_sandbox=True), tmp_path / "sb")
+    a = factory("spec-task-0")
+    (a.workspace / "left_by_failed_attempt.txt").write_text("x")
+    b = factory("spec-task-0")
+    assert a.workspace != b.workspace and a.workspace.parent == b.workspace.parent == tmp_path / "sb"
+    assert not (b.workspace / "left_by_failed_attempt.txt").exists()

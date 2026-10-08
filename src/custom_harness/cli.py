@@ -194,14 +194,7 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
         os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
     run_tag = f"evolve-{spec.id}-{int(time.time())}"
 
-    def factory(key: str):
-        ws = data_dir() / "sandboxes" / run_tag / key
-        if a.docker:
-            from .sandbox.docker import DockerSandbox
-            return DockerSandbox(ws)
-        if a.dev_sandbox:
-            return LocalSandbox(ws, i_understand_no_isolation=True)
-        raise SystemExit("pass --docker (or --dev-sandbox for trusted test code only)")
+    factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
 
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     from .budget import persistent_budget
@@ -215,11 +208,14 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def _sandbox_factory(a: argparse.Namespace, root: Path):
+    """key -> sandbox, every call in a NEW directory (compute.unique_workspaces): the evolve Evaluator retries an
+    infra-failed unit under the same key, and the retry must not inherit the failed attempt's files (GOAL L0)."""
+    from .compute import unique_workspaces
     if a.docker:
         from .sandbox.docker import DockerSandbox
-        return lambda key: DockerSandbox(root / key)
+        return unique_workspaces(DockerSandbox, root)
     if a.dev_sandbox:
-        return lambda key: LocalSandbox(root / key, i_understand_no_isolation=True)
+        return unique_workspaces(lambda ws: LocalSandbox(ws, i_understand_no_isolation=True), root)
     raise SystemExit("pass --docker (or --dev-sandbox for trusted code only)")
 
 
@@ -561,9 +557,31 @@ def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_salts_reveal(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN: reveal a sealed salt campaign on/after its reveal date (GOAL §16.9; also `python -m
+    custom_harness.salts reveal`)."""
+    import datetime as dt
+
+    from .kernel import Kernel
+    from .salts.generate import SaltError
+    from .salts.plan import reveal
+    try:
+        revealed = reveal(a.sealed, Kernel(store).vault, human=a.by, today=dt.date.today())
+    except SaltError as e:
+        raise SystemExit(f"refused: {e}") from None
+    print(json.dumps({"campaign_hash": revealed.campaign_hash, "plant_list": list(revealed.plant_list)}, indent=1))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args[:1] == ["delegate"]:  # the delegation driver (GOAL §15) has its own parser, root and ledger (no store)
+        from .orchestration.cli import main as delegate_main
+        return delegate_main(args[1:])
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
+                   "docs/orchestration.md; same as `python -m custom_harness.orchestration`)")
     r = sub.add_parser("run", help="run a harness spec (YAML)")
     r.add_argument("spec")
     r.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
@@ -686,10 +704,13 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("trace")
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
+    sr = sub.add_parser("salts-reveal", help="HUMAN: open a sealed salt campaign on/after its reveal date")
+    sr.add_argument("sealed")
+    sr.add_argument("--by", required=True, help="the human revealing (recorded in the ledger)")
     lit_cli.add_parsers(sub)
     provenance_cli.add_parsers(sub)
     audit_cli.add_parsers(sub)
-    a = p.parse_args(argv)
+    a = p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -705,7 +726,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
-                "preflight-suite": cmd_preflight_suite,
+                "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()

@@ -91,3 +91,16 @@ def test_module_entry_point(tmp_path: Path):
                         str(tmp_path / "o")], capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["in_flight"] == []
+
+
+def test_chh_delegate_runs_the_delegation_driver(tmp_path: Path, capsys):
+    """`chh delegate <command>` is the same driver CLI, reachable from the main `chh` entry point."""
+    from custom_harness.cli import main as chh
+
+    root, lead_tok = tmp_path / "orch", tmp_path / "lead.tok"
+    assert chh(["delegate", "register-lead", "--root", str(root), "--name", "lead-a",
+                "--token-out", str(lead_tok)]) == 0
+    capsys.readouterr()
+    assert chh(["delegate", "status", "--root", str(root)]) == 0
+    st = json.loads(capsys.readouterr().out)
+    assert "lead-a" in st["sessions"] and st["in_flight"] == []

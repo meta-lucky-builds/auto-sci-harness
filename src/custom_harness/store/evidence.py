@@ -41,6 +41,7 @@ class EvidenceStore:
     def __init__(self, root: Path):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
+        self.root = root  # kerneld is started on the same store (GOAL §16.5.2)
         from ..sandbox.base import protect_path
         protect_path(root)  # blobs hold private labels: no sandbox workspace may overlap the store (invariant 2)
         self.blobs = BlobStore(root / "blobs")
@@ -113,7 +114,10 @@ class EvidenceStore:
         return Evidence.model_validate_json(rows[0][0])
 
     def add_claim(self, claim: Claim) -> None:
-        """Claims can only be created from existing Evidence (Chain-of-Evidence by construction)."""
+        """Claims can only be created from existing Evidence (Chain-of-Evidence by construction): at least one id,
+        and every id must resolve (fail closed: an empty list is refused, not vacuously accepted)."""
+        if not claim.evidence_ids:
+            raise ValueError(f"claim {claim.id} has no evidence: claims come only from evidence (GOAL L2)")
         for ev_id in claim.evidence_ids:
             self.get_evidence(ev_id)
         self._exec("INSERT INTO claims VALUES (?, ?)", (claim.id, claim.model_dump_json()))
@@ -130,6 +134,7 @@ class EvidenceStore:
         return chain_tier(self.get_evidence(e).tier for e in claim.evidence_ids)
 
     def set_claim_status(self, claim_id: str, status: ClaimStatus, detail: str = "") -> None:
+        self.get_claim(claim_id)  # KeyError for an unknown claim: no status without a claim (and its evidence)
         self._exec("INSERT INTO claim_status VALUES (?, ?, ?, ?)", (claim_id, status, detail, time.time()))
 
     def claim_status(self, claim_id: str) -> ClaimStatus:

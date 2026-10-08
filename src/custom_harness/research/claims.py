@@ -23,6 +23,7 @@ import io
 import statistics
 import time
 import tokenize
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -83,7 +84,9 @@ def _kernel(ctx: ModuleContext) -> Kernel:
     """A Kernel whose replayer re-executes in fresh sandboxes of the same kind as the run's sandbox."""
     sb = _sb(ctx)
     root = sb.workspace.parent / f"{sb.workspace.name}-replay"
-    return ctx.kernel(replayer=SandboxReplayer(lambda key: sb.spawn(root / key)))
+    # every replay gets a NEW directory (a uuid suffix): two replayers in one run restart their call counters, and a
+    # reused directory would hand a replay the files of an earlier one (orcompute-to-yield-02)
+    return ctx.kernel(replayer=SandboxReplayer(lambda key: sb.spawn(root / f"{key}-{uuid.uuid4().hex[:8]}")))
 
 
 def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[str, str]:
@@ -274,7 +277,10 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
             if (arm, seed) in done:
                 evidence.append(done[(arm, seed)])
                 continue
-            box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" / f"{p}{arm}-{seed}")
+            # a NEW directory per attempt (uuid suffix): an engine retry after an infrastructure error must never
+            # run next to the failed attempt's files (GOAL L0; orcompute-to-yield-01)
+            box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" /
+                           f"{p}{arm}-{seed}-{uuid.uuid4().hex[:8]}")
             preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
                                       argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
                                                                  "test": (task.test_features_file, test)},

@@ -1,6 +1,6 @@
 # Delegation driver (GOAL §15 last paragraph; OR orx-agent-delegation, enforced in code)
 
-`src/custom_harness/orchestration/`: a library (`Driver`) and CLI (`python -m custom_harness.orchestration`)
+`src/custom_harness/orchestration/`: a library (`Driver`) and CLI (`chh delegate <command>`, or `python -m custom_harness.orchestration`)
 for the §15 multi-agent expansion. It runs no agents and calls no models: callers ask it BEFORE they spawn or spend.
 
 - **Sessions.** The owner/orchestrator registers a *lead* (`register-lead`, which may carry its own spend grants).

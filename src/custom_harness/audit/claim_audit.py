@@ -29,6 +29,7 @@ from ..errors import InfraError
 from ..kernel import (
     DEFAULT_ARGV,
     Certificate,
+    Claim,
     EvidenceClass,
     ExecRecord,
     InputRef,
@@ -44,7 +45,6 @@ from ..literature.cite import Resolver, check_citations, i3_verdict
 from ..records import Run, StepKind, TraceStep
 from ..sandbox.base import Sandbox
 from ..store import EvidenceStore
-from ..verify import metrics as M
 from . import data, gate, wrapper
 from .spec import LoadedSpec
 
@@ -265,31 +265,14 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
                     preds[(arm, ds.dataset_id, seed)] = p
     except InfraError as e:
         return could_not_run(f"infrastructure: {e}", needs_owner=type(e).__name__ == "CandidateImageMissing")
-    # 2. labels through the vault, one logged read per (arm, seed, target), one evaluation record each
-    ids: list[str] = []
-    for ds in loaded.spec.datasets:
-        refs = {"train": InputRef(dataset_id=ds.train_id, file="train.csv",
-                                  blob=vault.dataset(ds.train_id).files["train.csv"].blob),
-                "test": InputRef(dataset_id=ds.dataset_id, file="test_X.csv",
-                                 blob=vault.dataset(ds.dataset_id).files["test_X.csv"].blob)}
-        for seed in seeds:
-            for arm, (h, _) in arms.items():
-                raw = vault.read(ds.dataset_id, "test_y.csv", purpose="evaluate", claim_hash=ch, arm=arm, seed=seed)
-                labels = [r[0] for r in list(csv.reader(io.StringIO(raw.decode("utf-8"))))[1:] if r]
-                p = preds[(arm, ds.dataset_id, seed)]
-                run_rec = Run(harness_id="chh-audit", harness_hash=wrapper.wrapper_hash(), task_id=ds.dataset_id,
-                              seed=seed)
-                store.add_run(run_rec)
-                now = time.time()
-                store.add_step(TraceStep(run_id=run_rec.id, index=0, node_id="audit_arm", kind=StepKind.TOOL,
-                                         input={"arm": arm, "audit_id": loaded.audit_id},
-                                         output={"note": "arm run through the audit contract wrapper"},
-                                         started_at=now, ended_at=now))
-                rec = ExecRecord(claim_hash=ch, arm=arm, artifact_hash=h, argv=DEFAULT_ARGV, inputs=refs,  # type: ignore[arg-type]
-                                 target=ds.dataset_id, label_file="test_y.csv", seed=seed, env=env, limits=limits,
-                                 preds_ref=store.blobs.put_json(p), metric=claim.metric.id,
-                                 score=M.score(claim.metric.id, labels, p), run_id=run_rec.id)
-                ids.append(kernel.record_evaluation(rec))
+    # 2. labels stay behind the kerneld boundary (GOAL §16.5.2): the kerneld process makes the one logged 'evaluate'
+    # read per (arm, seed, target) and returns only the score; one evaluation record each
+    from ..kerneld.client import KernelD
+    try:
+        with KernelD(store.root) as kd:
+            ids = _evaluate_arms(store, kernel, kd, loaded, claim, arms, preds, env, limits)
+    except InfraError as e:  # kerneld unavailable mid-way: some labels may have been read (one look per claim)
+        return could_not_run(f"infrastructure: {e}", labels_read=True)
     # 3. the Kernel decides
     try:
         cert = kernel.certify(claim, ids)
@@ -301,6 +284,42 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
                            "cert_hash": cert.cert_hash(), "label": cert.label.value, "labels_read": True,
                            "report_hash": hashlib.sha256(report.encode()).hexdigest(),
                            "citations": _check_citations(loaded, resolver), "at": time.time()})
+
+
+def _evaluate_arms(store: EvidenceStore, kernel: Kernel, kd: Any, loaded: LoadedSpec, claim: Claim,
+                   arms: dict[str, tuple[str, bytes]], preds: dict[tuple[str, str, int], list[str]],
+                   env: dict[str, str], limits: dict[str, float]) -> list[str]:
+    """One evaluation record per (target, seed, arm); each score comes from kerneld (no label enters this process)."""
+    ch, vault, seeds = claim.claim_hash(), kernel.vault, claim.analysis_plan.seeds
+    ids: list[str] = []
+    for ds in loaded.spec.datasets:
+        refs = {"train": InputRef(dataset_id=ds.train_id, file="train.csv",
+                                  blob=vault.dataset(ds.train_id).files["train.csv"].blob),
+                "test": InputRef(dataset_id=ds.dataset_id, file="test_X.csv",
+                                 blob=vault.dataset(ds.dataset_id).files["test_X.csv"].blob)}
+        for seed in seeds:
+            for arm, (h, _) in arms.items():
+                p = preds[(arm, ds.dataset_id, seed)]
+                run_rec = Run(harness_id="chh-audit", harness_hash=wrapper.wrapper_hash(), task_id=ds.dataset_id,
+                              seed=seed)
+                store.add_run(run_rec)
+                now = time.time()
+                store.add_step(TraceStep(run_id=run_rec.id, index=0, node_id="audit_arm", kind=StepKind.TOOL,
+                                         input={"arm": arm, "audit_id": loaded.audit_id},
+                                         output={"note": "arm run through the audit contract wrapper"},
+                                         started_at=now, ended_at=now))
+                run = kd.open_run(run_rec.id)
+                try:
+                    score = run.held_out_score(ds.dataset_id, "test_y.csv", claim.metric.id, p, claim_hash=ch,
+                                               arm=arm, seed=seed)
+                finally:
+                    run.close()
+                rec = ExecRecord(claim_hash=ch, arm=arm, artifact_hash=h, argv=DEFAULT_ARGV, inputs=refs,  # type: ignore[arg-type]
+                                 target=ds.dataset_id, label_file="test_y.csv", seed=seed, env=env, limits=limits,
+                                 preds_ref=store.blobs.put_json(p), metric=claim.metric.id,
+                                 score=score, run_id=run_rec.id)
+                ids.append(kernel.record_evaluation(rec))
+    return ids
 
 
 def current_report(store: EvidenceStore, outcome: dict[str, Any]) -> str:

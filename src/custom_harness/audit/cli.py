@@ -98,12 +98,13 @@ def _outcome(store: EvidenceStore, loaded: LoadedSpec) -> dict[str, Any]:
 
 
 def _factory(a: argparse.Namespace, root: Path) -> CA.SandboxFactory:
+    from ..compute import unique_workspaces  # every call a NEW directory: a retry never inherits an attempt's files
     from ..sandbox import LocalSandbox
     if a.docker:
         from ..sandbox.docker import DockerSandbox
-        return lambda key: DockerSandbox(root / key)  # the candidate image (no bundled datasets)
+        return unique_workspaces(DockerSandbox, root)  # the candidate image (no bundled datasets)
     if a.dev_sandbox:
-        return lambda key: LocalSandbox(root / key, i_understand_no_isolation=True)
+        return unique_workspaces(lambda ws: LocalSandbox(ws, i_understand_no_isolation=True), root)
     raise SystemExit("pass --docker (or --dev-sandbox for trusted code only)")
 
 
