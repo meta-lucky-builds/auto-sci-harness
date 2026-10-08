@@ -54,8 +54,11 @@ class Edit(BaseModel):
     type: EditType
     ops: list[EditOp]
     rationale: str
-    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids
+    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids (claims.py citation forms)
     predicted: PredictedEffect = Field(default_factory=PredictedEffect)
+    # the JSON-pointer paths the proposer says its ops change (claims.check_claimed_diff); None = not stated, which
+    # the loop refuses (fail closed). Not part of the novelty signature (loop.edit_signature: type + ops only).
+    claimed_change: list[str] | None = None
 
 
 class EditRejected(ValueError):
@@ -81,7 +84,10 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   # audit I3 inputs (research/claims.py: citation_audit)
                                   "citations", "literature_snapshot",
                                   # audit I6 input (research/claims.py: _figure_audit)
-                                  "figures"})
+                                  "figures",
+                                  # critic-answer check and recall (research/critic_answers.py, research/recall.py on
+                                  # branch b-research; referenced by id only here)
+                                  "critic_answers", "critic_evidence", "recalled", "recall_log"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
@@ -91,7 +97,12 @@ RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
 RESERVED_WRITING_MODULES = frozenset({
     "research.setup", "research.profile_data", "research.baseline_dev", "research.socratic_filter",
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
-    "research.replica_dev", "research.report", "research.audit"})
+    "research.replica_dev", "research.report", "research.audit",
+    # b-research (by id only): the critic-answer check and recall write reserved keys
+    "research.critic_evidence", "research.check_critic_answers", "research.recall"})
+# Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
+# critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
+PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
@@ -290,6 +301,9 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
             raise EditRejected(f"edges out of approval node '{nid}' are human-only")
         if _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
             raise EditRejected(f"edges into approval node '{nid}' are human-only")
+    for nid in PINNED_NODES:
+        if nid in spec.nodes and (nid not in new.nodes or new.nodes[nid] != spec.nodes[nid]):
+            raise EditRejected(f"critic-chain node '{nid}' is human-only (its definition cannot be edited or removed)")
     protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
     for nid, node in new.nodes.items():
         if nid in spec.nodes and node == spec.nodes[nid]:
@@ -487,7 +501,7 @@ def check_one_mechanism(edit: Edit, spec: HarnessSpec) -> None:
                            f"{[g if len(g) > 1 else g[0] for g in groups][:6]}; propose them as separate edits")
 
 
-_CLUSTER_ID = re.compile(r"^[CD]\d{1,4}$")
+_CLUSTER_ID = re.compile(r"^[CD]\d{1,4}\Z")  # \Z, not $: `$` also matches before a trailing newline
 _CANARY = re.compile(r"CHH-CANARY-", re.I)
 
 
@@ -546,7 +560,8 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
     tasks_at_risk is screened by the exact-id rule, not the deny list: naming a task is what that field is for."""
     deny = list(deny)
     texts = [(True, json.dumps([o.model_dump() for o in edit.ops], default=str)),
-             *((False, t) for t in (edit.rationale, *edit.evidence, *edit.predicted.failure_clusters_fixed))]
+             *((False, t) for t in (edit.rationale, *edit.evidence, *edit.predicted.failure_clusters_fixed,
+                                    *(edit.claimed_change or ())))]
     for in_ops, text in texts:
         where = "edit ops" if in_ops else "edit text"
         if _token_hit(text, deny):
@@ -560,6 +575,9 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
     clusters = [c for c in edit.predicted.failure_clusters_fixed if _CLUSTER_ID.match(c)]
     risk = [t for t in edit.predicted.tasks_at_risk if t in known]
     evidence = [e for e in edit.evidence if len(e) <= 64][:20]
+    # claimed paths: bounded like evidence. A dropped path is noted; the loop rejects an edit whose citations or
+    # claimed paths were dropped (loop.UNVERIFIABLE_IF_DROPPED), since a dropped FALSE claim could not be checked
+    claimed = None if edit.claimed_change is None else [p for p in edit.claimed_change if len(p) <= 200][:32]
     rationale = edit.rationale[:max_text_chars]
     delta = edit.predicted.expected_delta
     if not math.isfinite(delta):
@@ -570,13 +588,15 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
         notes.append(f"expected_delta clipped/rounded to {clipped}")
     for name, before, after in (("failure_clusters_fixed", edit.predicted.failure_clusters_fixed, clusters),
                                 ("tasks_at_risk", edit.predicted.tasks_at_risk, risk),
-                                ("evidence", edit.evidence, evidence)):
+                                ("evidence", edit.evidence, evidence),
+                                ("claimed_change", edit.claimed_change or [], claimed or [])):
         if len(after) != len(before):
             notes.append(f"{name}: {len(before) - len(after)} item(s) dropped")
     if rationale != edit.rationale:
         notes.append(f"rationale cut to {max_text_chars} chars")
-    clean = edit.model_copy(update={"rationale": rationale, "evidence": evidence, "predicted": PredictedEffect(
-        failure_clusters_fixed=clusters, expected_delta=clipped, tasks_at_risk=risk)})
+    clean = edit.model_copy(update={"rationale": rationale, "evidence": evidence, "claimed_change": claimed,
+                                    "predicted": PredictedEffect(failure_clusters_fixed=clusters,
+                                                                 expected_delta=clipped, tasks_at_risk=risk)})
     return clean, notes
 
 

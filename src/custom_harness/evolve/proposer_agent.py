@@ -46,6 +46,8 @@ from ..runtime.spec import HarnessSpec
 from ..sandbox.base import Sandbox
 from ..store import EvidenceStore
 from . import export_tools
+from .claims import digest_refs, export_refs
+from .diagnosis import link_digest
 from .edits import _CANARY, _LEAK_PATTERNS, DEFAULT_PROTECTED_NODES, Edit, _token_hit, denied_tokens
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask
 from .export import ExportRefused, export_evidence
@@ -78,6 +80,9 @@ class AgentProposal(NamedTuple):
     raw: Any
     decline: str | None
     transcript: list[dict[str, Any]]
+    # every citation this session could resolve: the export actually written (claims.export_refs) plus the ids and
+    # references of the diagnosis as shown (after re-linking against that export). The loop checks citations here.
+    evidence_refs: frozenset[str] = frozenset()
 
 
 def tree_digest(root: Path) -> str:
@@ -150,6 +155,11 @@ class ProposerAgent:
         except (ExportRefused, InfraError, OSError) as e:  # fail closed: no export/sandbox, no agentic proposal
             return AgentProposal([], [f"agentic proposer not run: {type(e).__name__}: {str(e)[:300]}"], None, None,
                                  transcript)
+        # verifier-evidence linkage (diagnosis.py): the prompt shows only signatures whose every reference resolves in
+        # the export this session mounts
+        mounted = export_refs(exp.path)
+        digest = link_digest(digest, mounted)
+        known = frozenset(mounted | digest_refs(digest))
         messages = [Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected)
                             + "\n" + TOOL_PROTOCOL)]
         result: AgentProposal | None = None
@@ -163,17 +173,17 @@ class ProposerAgent:
             if isinstance(obj, dict) and "final" in obj:
                 p = parse_proposal(obj["final"], n_edits, resp)
                 transcript.append({"turn": turn, "final": True, "n_edits": len(p.edits), "problems": len(p.problems)})
-                result = AgentProposal(p.edits, p.problems, resp, p.decline, transcript)
+                result = AgentProposal(p.edits, p.problems, resp, p.decline, transcript, known)
                 break
             reply, entry = self._tool_turn(obj, tools, deny)
             transcript.append({"turn": turn, **entry})
             messages.append(Message(role="user", content=reply))
         if result is None:
             result = AgentProposal([], [f"agentic proposer gave no final answer in {self.max_turns} turns"], None,
-                                   None, transcript)
+                                   None, transcript, known)
         broken = tools.integrity_problems()
         if broken:
-            result = AgentProposal([], [*broken, *result.problems], result.raw, None, transcript)
+            result = AgentProposal([], [*broken, *result.problems], result.raw, None, transcript, known)
         self.sessions.append({"export": str(exp.path), "workspace": str(sandbox.workspace), "transcript": transcript})
         return result
 

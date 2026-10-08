@@ -45,6 +45,7 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -69,8 +70,8 @@ _LINEAGE_VIEW = ("parent", "status", "candidate", "edit", "reason", "problem", "
                  "signature", "claims_check", "rejected_on")
 # generation_stats: counters over lineage statuses only (loop._counters)
 _STATS_VIEW = ("parent", "proposed", "malformed", "declined", "rejected_novelty", "rejected_static",
-               "no_op_or_duplicate", "rejected_smoke", "accepted", "rejected_gate", "raced", "pruned", "gated",
-               "yield")
+               "no_op_or_duplicate", "rejected_claims", "rejected_smoke", "accepted", "rejected_gate", "raced",
+               "pruned", "gated", "yield")
 _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying bundle; private state blob
 # verdict embargo (GOAL §16.5.3): held-out results reach the proposer as verdict labels only. These state keys hold
 # certificate summaries (subject/comparator means, effect, CIs: continuous held-out values) or text rendered from
@@ -78,7 +79,7 @@ _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying 
 _CERT_KEYS = ("certificate", "replica_certificate")
 _EMBARGOED_KEYS = ("report", "report_ref", "publish_blockers", "checklist")
 EMBARGOED = "<embargoed until the target retires>"
-_HEX = re.compile(r"^[0-9a-f]{16,128}$")
+_HEX = re.compile(r"^[0-9a-f]{16,128}\Z")  # \Z, not $: `$` also matches before a trailing newline
 _MAX_PRIVATE_SCAN = 1024 * 1024  # private files above this are matched by hash only
 
 
@@ -185,6 +186,8 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         split = by_id[o.task_id].split
         if split != "evolve":
             excluded[split] += 1
+        elif o.run_id and _record_task(store, o.run_id) != o.task_id:  # the run record says another task: untrusted
+            excluded["task_mismatch"] += 1
         elif o.run_id not in exported:
             exported[o.run_id] = o
     tmp = out_dir.parent / f".{out_dir.name}.partial-{secrets.token_hex(4)}"
@@ -204,6 +207,13 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         raise
     _make_read_only(out_dir)
     return ExportResult(out_dir, len([r for r in exported if r]), dict(excluded), files)
+
+
+def _record_task(store: EvidenceStore, run_id: str) -> str | None:
+    try:
+        return store.get_run(run_id).task_id
+    except KeyError:
+        return None
 
 
 def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], evolve_ids: set[str]) -> list[str]:
@@ -382,6 +392,43 @@ def _audit(root: Path, fp: dict[str, Any]) -> list[str]:
             if any(pp in norm for pp in fp["paths"]):
                 problems.append(f"a task's private directory path found in {rel}")
     return list(dict.fromkeys(problems))
+
+
+def screen_digest(digest: dict[str, Any], store: EvidenceStore, *, runs: Iterable[RunOutcome],
+                  tasks: list[SuiteTask], canaries: Iterable[str] = ()) -> dict[str, Any]:
+    """The export's leak audit (`_audit`, same fingerprints: every task's private files, canaries, label windows,
+    private run-state values, private paths) applied to the diagnosis the proposer reads in its prompt. Fail closed:
+    on any finding the raw cluster example excerpts are dropped; if the rest still fails, only counts remain. The
+    findings are reported as a count (`withheld`), never quoted."""
+    by_id = {t.task_id: t for t in tasks}
+    # the runs the diagnosis can have read: evolve tasks whose run record exists and names the same task (as
+    # propose.diagnose and export_evidence require); a run id with no record has nothing to fingerprint
+    exported = {o.run_id: o for o in runs if o.task_id in by_id and by_id[o.task_id].split == "evolve"
+                and (not o.run_id or _record_task(store, o.run_id) == o.task_id)}
+    fp = _fingerprints(store, tasks, exported, canaries)
+
+    def problems(doc: dict[str, Any]) -> list[str]:
+        tmp = Path(tempfile.mkdtemp(prefix="chh-digest-"))
+        try:
+            _dump(tmp / "digest.json", doc)
+            found = _audit(tmp, fp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        # error signatures are normalised (evaluate._signature: digits -> <n>), which mangles a canary past the
+        # verbatim/fragment match above while its prefix and letters survive: the prefix alone is a finding
+        if CANARY_PREFIX.lower() in json.dumps(doc, default=str).lower():
+            found.append("a canary prefix found in the digest")
+        return found
+
+    found = problems(digest)
+    if not found:
+        return digest
+    lean = {**digest, "clusters": [{k: v for k, v in c.items() if k != "examples"} for c in digest.get("clusters", [])],
+            "withheld": len(found)}
+    if not problems(lean):
+        return lean
+    return {k: digest[k] for k in ("n_runs", "n_excluded_infra", "n_excluded_split") if k in digest} | {
+        "clusters": [], "divergences": [], "no_reference": [], "withheld": len(found)}
 
 
 def _make_read_only(root: Path) -> None:

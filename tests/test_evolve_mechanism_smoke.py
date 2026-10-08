@@ -23,7 +23,7 @@ def _item(path: str, value, *, rationale: str = "allow fix attempts", **kw) -> d
     return {"type": "control_flow", "ops": [{"op": "replace", "path": path, "value_json": json.dumps(value)}],
             "rationale": rationale, "evidence": kw.pop("evidence", ["C0"]),
             "failure_clusters_fixed": kw.pop("clusters", ["C0"]), "expected_delta": kw.pop("delta", 1.0),
-            "tasks_at_risk": kw.pop("at_risk", []), **kw}
+            "tasks_at_risk": kw.pop("at_risk", []), "claimed_change": kw.pop("claimed", [path]), **kw}
 
 
 def _run(store, tmp_path, proposal: dict | str, *, evaluator=None, cfg=None, parent=None):
@@ -64,6 +64,9 @@ def test_exfiltration_through_rationale_evidence_ops_and_prediction_is_refused_o
         _item("/nodes/fix/system", "Remember task g3 when fixing."),
         _item("/nodes/run/params/max_fixes", 2, clusters=["C0", "x:aGVsZC1vdXQ="], delta=0.123456789012,
               at_risk=["e1", "free text: gate mean was -0.31"]),
+        # the same change without the covert cluster text (a dropped citation now rejects the edit, see below)
+        _item("/nodes/run/params/max_fixes", 2, clusters=["C0"], delta=0.123456789012,
+              at_risk=["e1", "free text: gate mean was -0.31"]),
     ]
     res, _ = _run(store, tmp_path, {"edits": edits})
     lineage = store.records("lineage")
@@ -75,7 +78,10 @@ def test_exfiltration_through_rationale_evidence_ops_and_prediction_is_refused_o
     blob = json.dumps(lineage)
     for secret in ("g2 (held-out)", CANARY, "task g3", "aGVsZC1vdXQ=", "gate mean was", "0.123456789"):
         assert secret not in blob, secret
-    # the fourth edit survives, sanitised: diagnosis ids only, campaign task ids only, a rounded bounded delta
+    # the fourth edit: its covert cluster text was dropped by the screen, so a citation went unchecked and the edit
+    # is refused (claims.py, loop.UNVERIFIABLE_IF_DROPPED); the dropped text is still never stored (checked above)
+    assert st[3] == "rejected_claims" and "failure_clusters_fixed" in lineage[3]["reason"], st
+    # the fifth edit survives, sanitised: diagnosis ids only, campaign task ids only, a rounded bounded delta
     rec = store.records("harness_edit")[-1]
     assert rec["clusters_claimed"] == ["C0"] and rec["tasks_at_risk"] == ["e1"]
     assert rec["predicted_delta"] == 0.123
@@ -133,6 +139,7 @@ def test_mechanisms_are_defined_on_the_effect_of_the_ops():
 def test_multi_mechanism_bundle_is_refused_and_single_ones_pass(store, tmp_path):
     two = {"type": "control_flow", "rationale": "two things", "evidence": [], "failure_clusters_fixed": [],
            "expected_delta": 1.0, "tasks_at_risk": [],
+           "claimed_change": ["/nodes/run/params/max_fixes", "/nodes/next/params/max_improves"],
            "ops": [{"op": "replace", "path": "/nodes/run/params/max_fixes", "value_json": "2"},
                    {"op": "replace", "path": "/nodes/next/params/max_improves", "value_json": "3"}]}
     res, _ = _run(store, tmp_path, {"edits": [two]})
@@ -204,7 +211,7 @@ def test_smoke_runs_one_task_through_the_real_loop(store, tmp_path, suite, monke
     cfg = EvolveConfig(n_edits=1, race_rounds=1)
     parent = declared_seed_spec(cfg)
     edit = {"type": "budget_policy", "rationale": "shorter runs", "evidence": [], "failure_clusters_fixed": [],
-            "expected_delta": 0.1, "tasks_at_risk": [],
+            "expected_delta": 0.1, "tasks_at_risk": [], "claimed_change": ["/max_steps"],
             "ops": [{"op": "replace", "path": "/max_steps", "value_json": "4"}]}
     res = evolve_generation(parent, suite, evaluator=ev, proposer=MockBackend([json.dumps({"edits": [edit]})]),
                             store=store, cfg=cfg)

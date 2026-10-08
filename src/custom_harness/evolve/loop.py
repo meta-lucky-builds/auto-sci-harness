@@ -8,7 +8,8 @@ harness-science ledger (incl. per-group results and OOD drop, key "lofo") and pr
 A campaign without a held-out family (/domain) is refused (GOAL invariant 16, fail closed).
 
 M4 pieces (GOAL §5 L6.3/6.6/6.8/6.10): the diagnosis carries first-divergence causal signatures from evolve-split
-runs; each edit's cited cluster/divergence ids are checked against it (`claims_check`); an edit whose normalised
+runs; an edit whose citations do not resolve in what the proposer saw, or whose claimed change is not the real diff
+of its ops, is rejected unevaluated (`claims_check`, status `rejected_claims`, claims.py); an edit whose normalised
 signature equals a previously REJECTED one (static or gate) is refused before any evaluation (novelty gate); the
 proposer may decline (recorded, not an error); acceptance also needs the cost term (candidate cost on the paired gate
 units <= (1 + max_cost_increase) x parent, fail closed without cost data); the ledger records per-task
@@ -38,8 +39,8 @@ from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .branches import BranchConfig, propose_branch
+from .claims import check_claims, digest_refs
 from .critic import FamilySeparatedCritic
-from .diagnosis import check_claims
 from .edits import (
     DEFAULT_PROTECTED_NODES,
     Edit,
@@ -53,7 +54,7 @@ from .edits import (
     withheld,
 )
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
-from .export import proposer_view
+from .export import proposer_view, screen_digest
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
 from .proposer_agent import ProposerAgent
@@ -75,6 +76,8 @@ from .selection import (
 REJECTED_STATUSES = ("rejected_static", "rejected_gate", "rejected_smoke")
 # smoke run (GOAL §5 L6.7): run statuses meaning the harness itself broke on the smoke task
 SMOKE_BROKEN = ("failed", "step_limit", "budget_exceeded")
+# screened edit fields whose dropped items are unchecked claims (claims.py): a drop rejects the edit
+UNVERIFIABLE_IF_DROPPED = ("evidence", "failure_clusters_fixed", "claimed_change")
 
 
 @dataclass
@@ -209,7 +212,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
     # outcomes never feed the diagnosis, which the proposer reads
     references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
-    digest = diagnose(parent_outcomes, store, references=references)
+    digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
+    # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
+    digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
+                           canaries=getattr(proposer, "canaries", ()))
     ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
     if isinstance(proposer, ProposerAgent):
@@ -221,6 +227,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     else:
         proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
     edits, problems = proposal.edits, proposal.problems
+    # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis, or the
+    # one-shot proposer's diagnosis
+    shown = getattr(proposal, "evidence_refs", None)
+    known = set(shown) if shown is not None else digest_refs(digest)
+    claims_by: dict[str, dict[str, Any]] = {}
     rejected_before = rejected_signatures(store)
     deny = denied_tokens(tasks)
     task_ids = {t.task_id for t in tasks}
@@ -245,11 +256,18 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 records.append({"status": "rejected_static", "edit": withheld(edit), "reason": str(e),
                                 **({"signature": sig} if e.about_ops else {})})
             continue
-        base = {"edit": _public(edit, evolve_ids), "signature": sig, "claims_check": check_claims(edit, digest),
+        base = {"edit": _public(edit, evolve_ids), "signature": sig, "claims_check": check_claims(edit, refs=known),
                 **({"screen": notes} if notes else {})}
         if sig in rejected_before:
             records.append({"status": "rejected_novelty", **base,
                             "reason": "identical (normalised) to a previously rejected edit"})
+            continue
+        # a citation or claimed path the screen DROPPED (too long, too many, not an id) can never be checked: the edit
+        # is refused rather than judged on what is left (fail closed; the notes quote no proposer text)
+        unverifiable = [n for n in notes if n.split(":")[0] in UNVERIFIABLE_IF_DROPPED and "dropped" in n]
+        if unverifiable:
+            records.append({"status": "rejected_claims", **base,
+                            "reason": "unverifiable claims: " + "; ".join(unverifiable)})
             continue
         try:
             spec = apply_edit(parent, edit, cfg.protected_nodes)
@@ -260,6 +278,13 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         h = spec.spec_hash()
         if h == parent_hash or h in candidates:
             records.append({"status": "no_op_or_duplicate", **base})
+            continue
+        # GOAL §5 L6.3, enforced: citations resolve in what the proposer saw AND the claimed change is the real diff.
+        # Not a novelty rejection (the same ops honestly claimed are a new proposal): no REJECTED_STATUSES entry.
+        base["claims_check"] = claims_by[h] = check_claims(
+            edit, refs=known, before=parent.model_dump(mode="json"), after=spec.model_dump(mode="json"))
+        if not claims_by[h]["passed"]:
+            records.append({"status": "rejected_claims", **base, "reason": claims_by[h]["reason"]})
             continue
         if critic is not None:
             base["critic"] = critic.review(edit).as_record()
@@ -339,7 +364,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
             regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
             at_risk = set(edit.predicted.tasks_at_risk)  # screened: exact campaign task ids only
-            claims = check_claims(edit, digest)
+            claims = claims_by[best]
             # every unit the acceptance decision rested on, BOTH arms: the fresh evolve re-measurement and the gate
             # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
             used_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in fresh_units + gate_units]
@@ -441,8 +466,8 @@ def _per_task(units: list[Unit], tasks: list[SuiteTask], cand: Callable[[Unit], 
 def _counters(records: list[dict[str, Any]], *, n_proposed: int, n_raced: int, n_survivors: int) -> dict[str, Any]:
     """Yield/prune counters of one generation (L6.10). yield = accepted / proposed; pruned = raced - race survivors."""
     count = {s: sum(r["status"] == s for r in records) for s in (
-        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "rejected_smoke",
-        "accepted", "rejected_gate")}
+        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "rejected_claims",
+        "rejected_smoke", "accepted", "rejected_gate")}
     gated = count["accepted"] + count["rejected_gate"]
     return {"proposed": n_proposed, **count, "raced": n_raced, "pruned": n_raced - n_survivors, "gated": gated,
             "yield": count["accepted"] / n_proposed if n_proposed else 0.0}

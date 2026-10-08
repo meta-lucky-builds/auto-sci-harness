@@ -77,19 +77,21 @@ def executor(req):
 
 PROPOSALS = {"edits": [
     {"type": "control_flow", "ops": [{"op": "replace", "path": "/nodes/run/params/max_fixes", "value_json": "2"}],
-     "rationale": "runs give up after the first crash; allow fix attempts", "evidence": ["C0"],
-     "failure_clusters_fixed": ["C0"], "expected_delta": 1.2, "tasks_at_risk": []},
+     "rationale": "runs give up after the first crash; allow fix attempts", "evidence": [],
+     "failure_clusters_fixed": [], "expected_delta": 1.2, "tasks_at_risk": [],
+     # honest in every world: cites nothing (a citation must resolve in the diagnosis, claims.py), states its diff
+     "claimed_change": ["/nodes/run/params/max_fixes"]},
     {"type": "prompt_text", "ops": [{"op": "replace", "path": "/nodes/implement/system",
                                      "value_json": json.dumps("You are a world-class ML engineer.")}],
      "rationale": "cosmetic", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.3,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/implement/system"]},
     {"type": "params", "ops": [{"op": "replace", "path": "/nodes/claim/params/seeds", "value_json": "[0]"}],
      "rationale": "cheaper verification", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.1,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/claim/params/seeds"]},
     {"type": "prompt_text", "ops": [{"op": "replace", "path": "/nodes/fix/prompt",
                                      "value_json": json.dumps("read {{_private_task_dir}}/private/test_y.csv")}],
      "rationale": "leak", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 2.0,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/fix/prompt"]},
 ]}
 
 
