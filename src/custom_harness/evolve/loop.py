@@ -391,6 +391,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             continue
         candidates[h] = (edit, spec)
         extras[h] = {k: base[k] for k in ("screen", "critic") if k in base}
+        if smoke.infra_failed:  # excluded, not scored (invariant 21: a proxy denies only on evidence): ledgered here
+            extras[h]["smoke"] = {"excluded": "infra", "task": smoke.task_id, "seed": smoke.seed,
+                                  "status": smoke.status, "run_id": smoke.run_id}
 
     accepted_spec, accepted = parent, False
     decision = f"proposer declined: {proposal.decline}" if proposal.decline is not None else "no valid candidates"
@@ -438,11 +441,19 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
                                note="evolve.gate:decision", key=f"{parent_hash}|{best}"))
             rejected_on: str | None
+            # infra_aborted: too many units were lost to infrastructure failures, so there is no verdict at all
+            # (INCONCLUSIVE, owner decision 2026-10-08; GOAL L1 "excluded, not scored"). Never accepted, but not a
+            # policy rejection either: no rejected_on stage, no novelty block, no branch.
+            infra_aborted = False
             if not excl["passed"]:  # the comparison itself is untrustworthy: checked first (fail closed)
                 decision, rejected_on = "rejected: " + excl["reason"], "exclusion_asymmetry"
+            elif not d.accepted and d.infra_aborted:
+                decision, rejected_on, infra_aborted = "inconclusive: " + d.reason, None, True
             elif not d.accepted:
                 decision = d.reason
                 rejected_on = "evolve" if d.reason.startswith("evolve") else "held_out_gate"
+            elif not lofo["passed"] and lofo.get("infra_aborted"):
+                decision, rejected_on, infra_aborted = "inconclusive: " + lofo["reason"], None, True
             elif not lofo["passed"]:
                 decision, rejected_on = "rejected: " + lofo["reason"], "held_out_gate"
             elif not cost["passed"]:
@@ -459,7 +470,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
             used_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in fresh_units + gate_units]
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in used_labels) else "MECHANICAL"
-            records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
+            records.append({"status": "accepted" if ok else ("infra_aborted" if infra_aborted else "rejected_gate"),
+                            "candidate": best,
                             "loop_label": loop_label,
                             "edit": _public(edit, evolve_ids), "race": rr.stats.get(best, {}),
                             "evolve_fresh": d.evolve,
@@ -475,8 +487,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
                 "clusters_claimed": edit.predicted.failure_clusters_fixed, "claims_check": claims,
-                "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
-                "per_task": per_task, "flipped": flipped, "regressed": regressed,
+                "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "infra_aborted": infra_aborted,
+                "signature": edit_signature(edit), "per_task": per_task, "flipped": flipped, "regressed": regressed,
                 "tasks_at_risk": sorted(at_risk), "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
             if ok:
                 accepted_spec, accepted = spec, True
@@ -590,7 +602,7 @@ def _counters(records: list[dict[str, Any]], *, n_proposed: int, n_raced: int, n
     """Yield/prune counters of one generation (L6.10). yield = accepted / proposed; pruned = raced - race survivors."""
     count = {s: sum(r["status"] == s for r in records) for s in (
         "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "rejected_claims",
-        "rejected_smoke", "accepted", "rejected_gate")}
+        "rejected_smoke", "accepted", "rejected_gate", "infra_aborted")}
     gated = count["accepted"] + count["rejected_gate"]
     return {"proposed": n_proposed, **count, "raced": n_raced, "pruned": n_raced - n_survivors, "gated": gated,
             "yield": count["accepted"] / n_proposed if n_proposed else 0.0}
@@ -615,6 +627,9 @@ def _lofo(tasks: list[SuiteTask], families: list[str], domains: list[str], cfg: 
                 failed.append(f"held-out {kind} {name}: {r['reason']}")
     out["passed"] = not failed
     out["reason"] = "; ".join(failed) if failed else "every held-out family/domain non-regressing"
+    groups = [*out["families"].values(), *out["domains"].values()]
+    # inconclusive only when EVERY failing group failed on infrastructure exclusions (a policy failure wins)
+    out["infra_aborted"] = bool(failed) and all(r.get("infra_aborted") for r in groups if not r["passed"])
     return out
 
 

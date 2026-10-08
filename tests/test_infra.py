@@ -208,6 +208,53 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
     assert flaky.new_parent.spec_hash() == clean.new_parent.spec_hash()
 
 
+def test_gate_marks_an_exclusion_failure_as_infra_aborted_not_a_verdict():
+    """Owner decision 2026-10-08: too many infrastructure exclusions make the comparison INCONCLUSIVE; the gate still
+    never accepts, but says so (infra_aborted), so the loop does not record a policy rejection."""
+    units = [("t", s) for s in range(4)]
+    up = {u: 1.0 for u in units}
+    down = {u: (None if u[1] < 2 else 1.0) for u in units}  # half the candidate's units lost to an outage
+    healthy = paired_sample(units, up.get, lambda u: 0.5)
+    outage = paired_sample(units, down.get, lambda u: 0.5)
+    d = gate(outage, healthy, require_evolve_ci=False)
+    assert not d.accepted and d.infra_aborted and "excluded for infrastructure" in d.reason
+    worse = paired_sample(units, lambda u: 0.0, lambda u: 0.5)  # control: a real loss is a policy verdict
+    d2 = gate(worse, worse, require_evolve_ci=False)
+    assert not d2.accepted and not d2.infra_aborted
+
+
+def test_a_persistent_outage_ends_infra_aborted_never_rejected(store, tmp_path, suite, monkeypatch):  # noqa: F811
+    """Owner decision 2026-10-08 (GOAL L1, 'excluded, not scored'): when the candidate's units are lost to an outage
+    past the exclusion threshold, the generation ends INCONCLUSIVE: lineage status `infra_aborted` (no
+    `rejected_gate`, no rejected_on stage), not accepted, and the edit is NOT novelty-blocked for later generations."""
+    from custom_harness.evolve.loop import rejected_signatures
+    from custom_harness.store import EvidenceStore
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    st = EvidenceStore(tmp_path / "persistent")
+    Kernel(st).approve_adapter("ml", approver="pytest")
+    llm = MockBackend(executor)
+    roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
+    # the pre-2026-10-08 outage pattern: exec calls 5 and 6 of every 11 fail, forever. K3 needs 11 consecutive clean
+    # replays, so no certify can ever finish: a permanently degraded environment, not a mid-campaign outage
+    monkeypatch.setattr(FlakyDockerLike, "PERIOD", 11)
+    FlakyDockerLike.count = 0
+    ev = Evaluator(roles, st, lambda key: FlakyDockerLike(tmp_path / "sb" / key, i_understand_no_isolation=True),
+                   suite, retry=NO_WAIT)
+    cfg = EvolveConfig(n_edits=4, race_rounds=2)
+    res = evolve_generation(declared_seed_spec(cfg), suite, evaluator=ev,
+                            proposer=MockBackend([json.dumps(PROPOSALS)]), store=st, cfg=cfg)
+    statuses = [r["status"] for r in st.records("lineage")]
+    edits = st.records("harness_edit")
+    assert ev.infra_failures > 0
+    assert not res.accepted and "infra_aborted" in statuses and "rejected_gate" not in statuses, statuses
+    assert res.decision.startswith("inconclusive"), res.decision
+    assert edits and all(e["infra_aborted"] and not e["accepted"] and e["rejected_on"] is None for e in edits)
+    aborted = [r for r in st.records("lineage") if r["status"] == "infra_aborted"]
+    assert aborted and not {r["signature"] for r in aborted} & set(rejected_signatures(st))  # not novelty-blocked
+    assert st.records("generation_stats")[-1]["infra_aborted"] == len(aborted)
+    st.close()
+
+
 @pytest.mark.skipif(not docker_available(), reason="Docker daemon not running")
 def test_docker_agent_exit_code_125_is_policy_not_infra(tmp_path):
     """Agent code must not be able to fake an infrastructure failure by exiting with Docker's codes."""

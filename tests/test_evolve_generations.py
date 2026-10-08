@@ -229,7 +229,7 @@ def _plant_generation(store, *, accepted=False, rationale="raise the fix budget"
     counters = {"proposed": 1, "malformed": 0, "declined": 1, "rejected_novelty": 0, "rejected_static": 0,
                 "no_op_or_duplicate": 0, "rejected_claims": 0, "rejected_smoke": 0,
                 "accepted": int(accepted),
-                "rejected_gate": int(not accepted), "raced": 1, "pruned": 0, "gated": 1,
+                "rejected_gate": int(not accepted), "infra_aborted": 0, "raced": 1, "pruned": 0, "gated": 1,
                 "yield": 1.0 if accepted else 0.0, **(stats_extra or {})}
     store.append_record("generation_stats", {"parent": ph, **counters})
     return GenerationResult(ph, parent, accepted, "planted", lin, 3, 3, "MECHANICAL", counters)

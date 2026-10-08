@@ -161,6 +161,9 @@ class GateDecision:
     reason: str
     evolve: dict = field(default_factory=dict)
     gate: dict = field(default_factory=dict)
+    # too many units were excluded for infrastructure failures: the comparison is INCONCLUSIVE (never accepted, and
+    # not a policy verdict either; GOAL L1 "excluded, not scored", owner decision 2026-10-08)
+    infra_aborted: bool = False
 
 
 def _as_sample(x: PairedSample | list[float]) -> PairedSample:
@@ -181,9 +184,10 @@ def non_regression(sample: PairedSample, *, non_regression_eps: float = 0.0, max
     m, lo, hi = paired_ci(sample.diffs, seed=2, n_boot=n_boot)
     out |= {"mean_diff": m, "lo": lo, "hi": hi}
     if sample.excluded_frac > max_excluded_frac:
-        reason = (f"{len(sample.excluded)}/{sample.n_units} units excluded for infrastructure failures "
-                  f"(> {max_excluded_frac:.0%})")
-    elif len(sample.diffs) < min_units:
+        return out | {"passed": False, "infra_aborted": True,
+                      "reason": f"{len(sample.excluded)}/{sample.n_units} units excluded for infrastructure "
+                                f"failures (> {max_excluded_frac:.0%})"}
+    if len(sample.diffs) < min_units:
         reason = f"only {len(sample.diffs)} valid paired units (< {min_units}): non-regression cannot be shown"
     elif not lo >= -non_regression_eps:
         reason = f"possible regression (CI lo={lo:.4g} < -{non_regression_eps})"
@@ -215,7 +219,7 @@ def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], 
         if smp.excluded_frac > max_excluded_frac:
             return GateDecision(False, f"{name}: {len(smp.excluded)}/{smp.n_units} units excluded for "
                                        f"infrastructure failures (> {max_excluded_frac:.0%}); decision unreliable",
-                                ev, gt)
+                                ev, gt, infra_aborted=True)
         if len(smp.diffs) < min_units:
             return GateDecision(False, f"{name}: only {len(smp.diffs)} valid paired units (< {min_units})", ev, gt)
     if require_evolve_ci and not elo > 0:

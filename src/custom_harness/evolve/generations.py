@@ -176,7 +176,7 @@ def generation_signal(stats: Mapping[str, Any], lineage: Sequence[Mapping[str, A
     statuses = [r.get("status") for r in rows]
     if any(s not in LINEAGE_STATUSES for s in statuses):
         raise LedgerError("lineage record with an unknown status")
-    for s in ("accepted", "rejected_gate"):
+    for s in ("accepted", "rejected_gate", "infra_aborted"):
         if statuses.count(s) != st[s]:
             raise LedgerError(f"generation_stats {s}={st[s]} disagrees with the lineage ({statuses.count(s)})")
     if st["gated"] != st["accepted"] + st["rejected_gate"] or st["accepted"] > 1:

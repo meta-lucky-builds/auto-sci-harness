@@ -160,9 +160,12 @@ class SmokeTable(CostTable):
         super().__init__(*a, **kw)
         self.status, self.by_spec = status, {}
 
+    only_unit: tuple[str, int] | None = None  # break only on this unit (None = every unit)
+
     def outcome(self, spec, unit):
         key = (spec.spec_hash(), unit[0], unit[1])
-        if key not in self.cache and spec.nodes["run"].params.get("max_improves") == 7:
+        broken = spec.nodes["run"].params.get("max_improves") == 7 and self.only_unit in (None, tuple(unit))
+        if key not in self.cache and broken:
             self.calls += 1
             self.by_spec[spec.spec_hash()] = self.by_spec.get(spec.spec_hash(), 0) + 1
             self.cache[key] = RunOutcome(unit[0], "", unit[1], None if self.status == "infra_failed" else 0.0,
@@ -193,13 +196,25 @@ def test_candidate_failing_smoke_is_rejected_cheaply_and_ledgered(store, tmp_pat
     assert _statuses(store)[-1] == "rejected_novelty"
 
 
-def test_infra_smoke_failure_is_rejected_but_not_novelty_blocked(store, tmp_path):
+def test_infra_smoke_failure_is_excluded_not_rejected_and_not_novelty_blocked(store, tmp_path):
+    """Owner decision 2026-10-08 (keeps 2ce4955): an infra-failed smoke run carries no information, and smoke is a
+    cheap proxy that may only deny on evidence (invariant 21), so it neither denies nor grants. Here only the
+    candidate's SMOKE run hits an outage: the exclusion is ledgered on its race record, it gets the full race (the
+    smoke unit stays excluded, every other unit is scored) and the gate decides on the rest; the edit is never
+    novelty-blocked. (A candidate whose runs fail as "infrastructure" on most units while the parent's do not is
+    a different case: the exclusion-asymmetry rule rejects it, tests/test_exclusion_asymmetry.py.)"""
     ev = _smoke_eval(store, tmp_path, status="infra_failed")
+    ev.only_unit = ("e0", 0)  # the smoke unit (first evolve unit)
+    res, _ = _run(store, tmp_path, {"edits": [BAD]}, evaluator=ev)
+    statuses = _statuses(store)
+    assert "rejected_smoke" not in statuses, statuses
+    raced = next(r for r in store.records("lineage") if r["status"] == "raced")
+    assert raced["smoke"]["excluded"] == "infra" and raced["smoke"]["status"] == "infra_failed"  # ledgered
+    evolve_units = 3 * 2  # e0..e2 x seeds (0, 1)
+    assert raced["race"]["excluded"] == 1 and raced["race"]["n_units"] == evolve_units - 1  # the full race
+    assert res.counters["rejected_smoke"] == 0 and res.counters["raced"] == 1 and res.counters["gated"] == 1
     _run(store, tmp_path, {"edits": [BAD]}, evaluator=ev)
-    rec = store.records("lineage")[-1]
-    assert rec["status"] == "rejected_smoke" and rec["infra"] is True
-    _run(store, tmp_path, {"edits": [BAD]}, evaluator=ev)
-    assert _statuses(store)[-1] == "rejected_smoke"  # tried again (an outage says nothing about the edit)
+    assert "rejected_novelty" not in _statuses(store)  # tried again (an outage says nothing about the edit)
 
 
 def test_smoke_runs_one_task_through_the_real_loop(store, tmp_path, suite, monkeypatch):  # noqa: F811
