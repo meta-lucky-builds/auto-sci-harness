@@ -11,21 +11,17 @@ from __future__ import annotations
 
 import json
 import os
-import random
 import shutil
 import uuid
 from pathlib import Path
 from typing import Any
 
-from ..gateway import ChatRequest, Message
 from ..kernel.execution import OUT_PATH
 from ..runtime import register
-from ..runtime.engine import parse_json_output
 from ..runtime.modules import ModuleContext
 from ..sandbox.base import Sandbox, WorkspaceEscape, check_mount, protect_path, safe_path
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
-from ..verify.ranking import bradley_terry, rankings_to_wins
 from ..verify.stats import paired_example_interval
 from . import tree as T
 from .data import cv_folds, profile, read_predictions
@@ -271,43 +267,10 @@ def baseline_dev(state, params, ctx):
 
 @register("research.tournament")
 def tournament(state, params, ctx):
-    """K-way relative ranking with shuffled presentation order -> Bradley-Terry (PLAN L4.5)."""
-    hyps = state["hypotheses"]["hypotheses"]
-    ids = [h["id"] for h in hyps]
-    if len(set(ids)) != len(ids):
-        raise ValueError("hypothesis ids must be unique")
-    rounds = params.get("rounds", 3)
-    rng = random.Random(state.get("_seed", 0))
-    schema = {"type": "object", "properties": {"ranking": {"type": "array", "items": {"type": "string"}}},
-              "required": ["ranking"]}
-    rankings, rejected = [], 0
-    for _ in range(rounds):
-        order = hyps[:]
-        rng.shuffle(order)
-        listing = "\n".join(f"- id={h['id']}: {h['idea']} (rationale: {h.get('rationale', '')})" for h in order)
-        prompt = (f"Task: {state['task']['description']}\nMetric: {state['task']['metric']}\n"
-                  f"Data profile: {json.dumps(state['profile'])[:6000]}\n\n"
-                  f"Rank ALL of these hypotheses from most to least likely to improve the held-out metric "
-                  f"over the baseline, considering feasibility given the data. Use only the ids.\n{listing}\n"
-                  f'Return JSON {{"ranking": [ids best-first]}}.')
-        resp = ctx.llm("judge", ChatRequest(messages=[Message(role="user", content=prompt)], json_schema=schema))
-        try:
-            ranking = parse_json_output(resp.text)["ranking"]
-        except (ValueError, KeyError, TypeError):
-            rejected += 1
-            continue
-        if sorted(ranking) != sorted(ids):
-            rejected += 1  # not a permutation: discard rather than guess
-            continue
-        rankings.append(ranking)
-    if not rankings:
-        raise RuntimeError("judge produced no valid rankings")
-    strengths = bradley_terry(ids, rankings_to_wins(rankings))
-    ordered = sorted(ids, key=lambda i: -strengths[i])
-    by_id = {h["id"]: h for h in hyps}
-    return {"ranking": {"order": ordered, "bt": strengths, "valid_rounds": len(rankings),
-                        "rejected_rounds": rejected},
-            "queue": [by_id[i] for i in ordered], "current": None}
+    """K-way relative ranking with shuffled presentation order -> Bradley-Terry (PLAN L4.5). The body lives in
+    research/tournament.py (both-order pairwise mode, BT intervals, Improve-weakest / Combine, pinned incumbent)."""
+    from .tournament import tournament_module
+    return tournament_module(state, params, ctx)
 
 
 @register("research.socratic_filter")
