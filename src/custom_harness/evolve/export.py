@@ -69,8 +69,8 @@ _LINEAGE_VIEW = ("parent", "status", "candidate", "edit", "reason", "problem", "
                  "signature", "claims_check", "rejected_on")
 # generation_stats: counters over lineage statuses only (loop._counters)
 _STATS_VIEW = ("parent", "proposed", "malformed", "declined", "rejected_novelty", "rejected_static",
-               "no_op_or_duplicate", "rejected_smoke", "accepted", "rejected_gate", "raced", "pruned", "gated",
-               "yield")
+               "no_op_or_duplicate", "rejected_claims", "rejected_smoke", "accepted", "rejected_gate", "raced",
+               "pruned", "gated", "yield")
 _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying bundle; private state blob
 # verdict embargo (GOAL §16.5.3): held-out results reach the proposer as verdict labels only. These state keys hold
 # certificate summaries (subject/comparator means, effect, CIs: continuous held-out values) or text rendered from

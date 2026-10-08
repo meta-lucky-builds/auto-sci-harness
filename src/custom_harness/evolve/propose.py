@@ -13,20 +13,33 @@ from ..gateway import Backend, ChatRequest, Message
 from ..runtime.engine import parse_json_output
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
-from .diagnosis import pair_divergences
+from .diagnosis import failed_checks, pair_divergences
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditType
 from .evaluate import RunOutcome
 
 
 def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int = 2,
-             excerpt_chars: int = 1500, references: Iterable[RunOutcome] | None = None) -> dict[str, Any]:
+             excerpt_chars: int = 1500, references: Iterable[RunOutcome] | None = None,
+             evolve_ids: set[str] | None = None) -> dict[str, Any]:
     """Cluster failure signatures across runs and attach raw trace excerpts (full traces > scalars, P1).
     Infra-failed runs are left out: the environment breaking is not something a harness edit can fix,
     and showing it would invite edits that 'fix' Docker outages.
 
-    `divergences` (L6.3): for each run that scored below a run of the SAME task among `outcomes` + `references`
-    (callers pass evolve-split outcomes only), the first-divergence causal signature (diagnosis.py), ids D0, D1...;
-    `no_reference` lists tasks with no better-scoring run to compare against."""
+    `divergences` (L6.3): for each run that scored below a run of the SAME task among `outcomes` + `references`,
+    the first-divergence causal signature with its verifier evidence (diagnosis.py), ids D0, D1...; `no_reference`
+    lists tasks with no better-scoring run to compare against; `unlinked` counts signatures dropped because a
+    reference did not resolve.
+
+    `evolve_ids` (the loop always passes it): every outcome or reference of a task outside it is dropped before
+    anything is read (verdict embargo: gate/sealed runs never reach the diagnosis), counted in `n_excluded_split`.
+    Without it the caller vouches that every run is of an evolve-split task."""
+    n_split = 0
+    if evolve_ids is not None:
+        refs_in = list(references or [])
+        n_split = (sum(o.task_id not in evolve_ids for o in outcomes)
+                   + sum(o.task_id not in evolve_ids for o in refs_in))
+        outcomes = [o for o in outcomes if o.task_id in evolve_ids]
+        references = [o for o in refs_in if o.task_id in evolve_ids]
     n_infra = sum(o.infra_failed for o in outcomes)
     outcomes = [o for o in outcomes if not o.infra_failed]
     clusters: Counter[str] = Counter()
@@ -43,15 +56,18 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
                 examples[sig].append({"run_id": o.run_id, "task": o.task_id,
                                       "excerpt": json.dumps(excerpt, default=str)[:excerpt_chars]})
     named = {f"C{i}": sig for i, (sig, _) in enumerate(clusters.most_common())}
-    divergences, no_reference = pair_divergences(outcomes, [*outcomes, *(references or [])], store.trace)
+    divergences, no_reference, unlinked = pair_divergences(
+        outcomes, [*outcomes, *(references or [])], store.trace, checks=lambda r: failed_checks(store, r))
     return {
         "n_runs": len(outcomes),
         "n_excluded_infra": n_infra,
+        "n_excluded_split": n_split,
         "mean_score": sum(o.score or 0.0 for o in outcomes) / max(1, len(outcomes)),  # infra runs removed above
         "verified_rate": sum(o.verified for o in outcomes) / max(1, len(outcomes)),
         # before the clusters: the prompt truncates the digest, and the signatures are the compact part
         "divergences": divergences,
         "no_reference": no_reference,
+        "unlinked": unlinked,
         "clusters": [{"id": cid, "signature": sig, "count": clusters[sig], "examples": examples[sig]}
                      for cid, sig in named.items()],
     }
@@ -72,9 +88,10 @@ EDIT_SCHEMA = {
             "evidence": {"type": "array", "items": {"type": "string"}},
             "failure_clusters_fixed": {"type": "array", "items": {"type": "string"}},
             "expected_delta": {"type": "number"},
-            "tasks_at_risk": {"type": "array", "items": {"type": "string"}}},
+            "tasks_at_risk": {"type": "array", "items": {"type": "string"}},
+            "claimed_change": {"type": "array", "items": {"type": "string"}}},
         "required": ["type", "ops", "rationale", "evidence", "failure_clusters_fixed", "expected_delta",
-                     "tasks_at_risk"]}},
+                     "tasks_at_risk", "claimed_change"]}},
         "decline": {"type": "string"}},
     "required": ["edits"],
 }
@@ -96,7 +113,9 @@ PROTECTED NODES (cannot be edited; verifier/audit changes are human-only): {list
 
 DIAGNOSIS from full traces of the current harness. `clusters` (ids C0, C1...) group failure signatures;
 `divergences` (ids D0, D1...) give, for a failing run, the FIRST DIVERGENCE from a better run of the same task:
-the step, the cause, its criticality and mechanism (error / route / path / truncated), with step references.
+the step, the cause, its criticality and mechanism (error / route / path / truncated / content), the first output
+CONTENT difference (key names), and the verifier evidence (each run's verdict, the Kernel checks that failed), with
+references.
 {json.dumps(digest, indent=1)[:12000]}
 
 PAST EDITS (accepted/rejected, with measured effect; learn from them):
@@ -105,9 +124,15 @@ PAST EDITS (accepted/rejected, with measured effect; learn from them):
 Propose up to {n_edits} DISTINCT edits. Prefer structural edits (contracts, control flow, routing,
 information flow between nodes, context policy, params) over cosmetic prompt rewording.
 Each op is a JSON-pointer operation on the spec; `value_json` is the new value encoded as a JSON string
-(use "null" for remove). Cite cluster (C<n>) and divergence (D<n>) ids in `evidence` and
-`failure_clusters_fixed` (ids the diagnosis does not contain are recorded as unsupported claims), and predict the
-objective change.
+(use "null" for remove). Predict the objective change.
+CITATIONS: `failure_clusters_fixed` holds cluster/divergence ids (C<n>, D<n>); `evidence` holds only citations of
+these forms: C<n>, D<n>, `<run_id>#<step>` (a trace step), `<run_id>#verdict` (a run's verifier outcome),
+`<run_id>#<step>/<check>` (a Kernel check that failed). Every citation must resolve in the diagnosis (or in the
+evidence export, if you can read one); an edit with ANY citation that resolves to nothing is rejected unevaluated.
+CLAIMED CHANGE: `claimed_change` lists the JSON-pointer path of EVERY spec value your ops change, and nothing else
+(dict keys are followed down to the changed value; a list counts as one value, so cite the list's path; an added or
+removed key is its own path). It is compared with the real diff of the spec; a missing or different claim is
+rejected unevaluated.
 Edits identical to a previously rejected edit are refused without evaluation.
 Never mention task-specific values, file names of held-out data, or anything under `_private`.
 If no edit is supported by the evidence, you may DECLINE: return {{"edits": [], "decline": "<reason>"}}.
@@ -144,7 +169,7 @@ def propose(backend: Backend, spec: HarnessSpec, digest: dict, ledger: list[dict
 
 # the typed-edit fields of EDIT_SCHEMA (anything else in a proposer's edit is refused, not ignored)
 _ITEM_KEYS = frozenset({"type", "ops", "rationale", "evidence", "failure_clusters_fixed", "expected_delta",
-                        "tasks_at_risk"})
+                        "tasks_at_risk", "claimed_change"})
 _OP_KEYS = frozenset({"op", "path", "value_json"})
 
 
@@ -169,7 +194,7 @@ def parse_proposal(raw: Any, n_edits: int, resp: Any) -> Proposal:
                    for o in item["ops"]]
             edits.append(Edit.model_validate({
                 "type": item["type"], "ops": ops, "rationale": item["rationale"],
-                "evidence": item.get("evidence", []),
+                "evidence": item.get("evidence", []), "claimed_change": item.get("claimed_change"),
                 "predicted": {"failure_clusters_fixed": item.get("failure_clusters_fixed", []),
                               "expected_delta": item.get("expected_delta", 0.0),
                               "tasks_at_risk": item.get("tasks_at_risk", [])}}))

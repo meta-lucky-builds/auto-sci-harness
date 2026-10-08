@@ -54,8 +54,11 @@ class Edit(BaseModel):
     type: EditType
     ops: list[EditOp]
     rationale: str
-    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids
+    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids (claims.py citation forms)
     predicted: PredictedEffect = Field(default_factory=PredictedEffect)
+    # the JSON-pointer paths the proposer says its ops change (claims.check_claimed_diff); None = not stated, which
+    # the loop refuses (fail closed). Not part of the novelty signature (loop.edit_signature: type + ops only).
+    claimed_change: list[str] | None = None
 
 
 class EditRejected(ValueError):
@@ -504,7 +507,8 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
     tasks_at_risk is screened by the exact-id rule, not the deny list: naming a task is what that field is for."""
     deny = list(deny)
     texts = [(True, json.dumps([o.model_dump() for o in edit.ops], default=str)),
-             *((False, t) for t in (edit.rationale, *edit.evidence, *edit.predicted.failure_clusters_fixed))]
+             *((False, t) for t in (edit.rationale, *edit.evidence, *edit.predicted.failure_clusters_fixed,
+                                    *(edit.claimed_change or ())))]
     for in_ops, text in texts:
         where = "edit ops" if in_ops else "edit text"
         if _token_hit(text, deny):
@@ -518,6 +522,8 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
     clusters = [c for c in edit.predicted.failure_clusters_fixed if _CLUSTER_ID.match(c)]
     risk = [t for t in edit.predicted.tasks_at_risk if t in known]
     evidence = [e for e in edit.evidence if len(e) <= 64][:20]
+    # claimed paths: bounded like evidence (a dropped path then fails the claimed-diff check, never passes it)
+    claimed = None if edit.claimed_change is None else [p for p in edit.claimed_change if len(p) <= 200][:32]
     rationale = edit.rationale[:max_text_chars]
     delta = edit.predicted.expected_delta
     if not math.isfinite(delta):
@@ -528,13 +534,15 @@ def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str
         notes.append(f"expected_delta clipped/rounded to {clipped}")
     for name, before, after in (("failure_clusters_fixed", edit.predicted.failure_clusters_fixed, clusters),
                                 ("tasks_at_risk", edit.predicted.tasks_at_risk, risk),
-                                ("evidence", edit.evidence, evidence)):
+                                ("evidence", edit.evidence, evidence),
+                                ("claimed_change", edit.claimed_change or [], claimed or [])):
         if len(after) != len(before):
             notes.append(f"{name}: {len(before) - len(after)} item(s) dropped")
     if rationale != edit.rationale:
         notes.append(f"rationale cut to {max_text_chars} chars")
-    clean = edit.model_copy(update={"rationale": rationale, "evidence": evidence, "predicted": PredictedEffect(
-        failure_clusters_fixed=clusters, expected_delta=clipped, tasks_at_risk=risk)})
+    clean = edit.model_copy(update={"rationale": rationale, "evidence": evidence, "claimed_change": claimed,
+                                    "predicted": PredictedEffect(failure_clusters_fixed=clusters,
+                                                                 expected_delta=clipped, tasks_at_risk=risk)})
     return clean, notes
 
 

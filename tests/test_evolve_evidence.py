@@ -291,8 +291,12 @@ class CostTable(Evaluator):
         if key not in self.cache:
             self.calls += 1
             arm = "parent" if spec.spec_hash() == self.parent_hash else "cand"
-            self.cache[key] = RunOutcome(unit[0], "", unit[1], self._score(arm, unit[0], unit[1]), False,
-                                         "completed", self._cost(arm, unit[0], unit[1]), [])
+            score = self._score(arm, unit[0], unit[1])
+            # a run that earned nothing carries a failure signature, so the parent's diagnosis has a cluster C0 (the
+            # fixtures that cite C0 cite something real: citations are checked, claims.py)
+            self.cache[key] = RunOutcome(unit[0], "", unit[1], score, False, "completed",
+                                         self._cost(arm, unit[0], unit[1]),
+                                         ["run: gave up after a crash"] if score == 0.0 else [])
         return self.cache[key]
 
 
