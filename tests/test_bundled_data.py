@@ -80,16 +80,22 @@ def test_exporter_image_still_loads_every_real_dataset(tmp_path):
 
 # ---------------------------------------------------------------- (b) every agent-code path selects the candidate
 def _docker_sandbox_calls() -> list[tuple[str, str, ast.Call]]:
-    """Every `DockerSandbox(...)` call in src/ and scripts/, with its outermost enclosing top-level function."""
+    """Every `DockerSandbox(...)` call in src/ and scripts/, with its outermost enclosing top-level function. The
+    class passed AS AN ARGUMENT (e.g. `unique_workspaces(DockerSandbox, root)` or `partial(DockerSandbox, image=X)`)
+    is a construction too: it is reported as the enclosing call, whose keywords are the ones the class receives."""
     out = []
+
+    def is_docker(n: ast.AST) -> bool:
+        return getattr(n, "id", getattr(n, "attr", "")) == "DockerSandbox"
+
     for f in [*(ROOT / "src").rglob("*.py"), *(ROOT / "scripts").rglob("*.py")]:
         rel = str(f.relative_to(ROOT)).replace("\\", "/")
         tree = ast.parse(f.read_text(encoding="utf-8"))
         for top in tree.body:
             name = getattr(top, "name", "<module>")
             for node in ast.walk(top):
-                if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == \
-                        "DockerSandbox":
+                if isinstance(node, ast.Call) and (is_docker(node.func) or any(
+                        isinstance(a, (ast.Name, ast.Attribute)) and is_docker(a) for a in node.args)):
                     out.append((rel, name, node))
     return out
 
