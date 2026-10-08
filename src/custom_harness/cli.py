@@ -328,6 +328,25 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_preflight_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """GOAL §16.8: zero-call certifiability audit of a task suite (no model call, no program run, no private file)."""
+    from .research.preflight import PreflightConfig, suite_audit
+    root = Path(a.suite)
+    single = (root / "task.yaml").exists()
+    dirs = [root] if single else sorted(d for d in root.iterdir() if (d / "task.yaml").exists())
+    rows = suite_audit(dirs, baseline_acc=a.baseline_acc, family_size=a.family,
+                       config=PreflightConfig(n_sims=a.sims))
+    for r in rows:
+        p = "n/a" if r["p_certify"] is None else f"{r['p_certify']:.3f}"
+        print(f"{r['task']:<32} n_dev={r['n_dev']:<5} n_test={r['n_test']:<6} min_effect={r['min_effect']:.4g} "
+              f"P(certify)={p:<6} {r['verdict']}")
+    print(f"assumption: a solution perfect on dev vs a baseline of dev accuracy {a.baseline_acc}; family {a.family}; "
+          f"theta {rows[0]['theta'] if rows else '-'} (UNCALIBRATED). 0 model calls.")
+    if a.json:
+        Path(a.json).write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    return 0
+
+
 def cmd_runs(a: argparse.Namespace, store: EvidenceStore) -> int:
     for r in store.list_runs(a.limit):
         status, detail = store.run_status(r.id)
@@ -590,6 +609,12 @@ def main(argv: list[str] | None = None) -> int:
     bs = sub.add_parser("build-suite", help="write the ML task suite (>= 20 tasks with --docker)")
     bs.add_argument("out")
     bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
+    pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
+    pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
+    pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
+    pf.add_argument("--family", type=int, default=1, help="multiplicity family size per target")
+    pf.add_argument("--sims", type=int, default=100)
+    pf.add_argument("--json", help="also write the rows as JSON")
     sub.add_parser("certificates", help="list Kernel certificates")
     lv = sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain (and external anchors)")
     lv.add_argument("--anchor", action="append", default=[], help="anchor file written by ledger-anchor (repeatable)")
@@ -625,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
+                "preflight-suite": cmd_preflight_suite,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()

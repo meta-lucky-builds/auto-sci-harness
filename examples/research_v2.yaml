@@ -1,0 +1,264 @@
+# research_v2 (GOAL §16.8 yield): research_v1 with execution as the ranker (no tournament call), packed
+# implement calls (one call writes up to 3 scripts), the headroom gate on improve calls, tie-aware selection, one
+# pre-declared exact-dev vote ensemble and the deny-only certifiability preflight before pre-registration.
+# research_v1.yaml keeps the previous behaviour (K-way tournament, one script per call, max-score selection).
+# research_v1: seed research harness for fixed-dataset ML tasks, integrated with the Evidence Kernel (GOAL M2).
+# Everything here (prompts, contracts, routing, budgets) is an edit surface for the evolver (L6).
+id: research_v2
+description: profile -> baseline -> hypotheses -> K-way tournament -> implement/fix loop -> typed claim pre-registered -> held-out confirmation via the vault -> Kernel certificate -> report -> audit
+entry: setup
+max_steps: 60
+nodes:
+  # dev estimate = k-fold cross-validation on the public training data, each fold in a fresh sandbox (protected)
+  # cpu_limit_s: CPU-seconds per dev program run, UNCALIBRATED (owner decision, GOAL §13.8); null = off until the
+  # sandbox CPU-time limit (workstream flowsb) is merged. Held-out runs are not yet covered (needs kernel run_program).
+  setup: {kind: module, module: research.setup, params: {dev_folds: 5, split_seed: 0, cpu_limit_s: null}}
+  profile: {kind: module, module: research.profile_data}
+  baseline: {kind: module, module: research.baseline_dev}
+
+  hypothesize:
+    kind: llm
+    role: proposer
+    system: You are an expert ML researcher. Be concrete and feasible; prefer ideas you can implement in under 150 lines.
+    prompt: |
+      Task: {{task.description}}
+      Metric: {{task.metric}} (target column: {{task.target_column}})
+      Baseline dev score: {{baseline_dev}}
+      Data profile (computed by code, trustworthy): {{profile}}
+      Allowed libraries: {{task.allowed_libraries}}
+
+      Propose 5 DISTINCT hypotheses for beating the baseline on held-out data. Cover different
+      mechanisms (model family, feature engineering, regularisation, ensembling, data handling).
+      Return JSON {"hypotheses": [{"id": "h1", "idea": "...", "rationale": "..."}]}.
+    output_key: hypotheses
+    output_schema:
+      type: object
+      properties:
+        hypotheses:
+          type: array
+          minItems: 2
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              idea: {type: string}
+              rationale: {type: string}
+            required: [id, idea, rationale]
+      required: [hypotheses]
+    retries: 1
+
+  rank: {kind: module, module: research.execution_rank}
+
+  critic:
+    kind: llm
+    role: judge
+    system: You are a Socratic critic. You ask questions only. You never give answers, advice or code.
+    prompt: |
+      Task: {{task.description}}  Metric: {{task.metric}}
+      Data profile (computed by code): {{profile}}
+      Ranked hypotheses: {{ranking.order}}
+      Hypotheses: {{hypotheses}}
+
+      Ask at most 5 short questions that would expose a flaw before anyone implements these ideas: what would
+      falsify a hypothesis, which control or baseline is missing, which data issue could make a result
+      misleading, which mechanism is assumed but untested. Questions only.
+      Return JSON {"questions": ["...?", "...?"]}.
+    output_key: critique_raw
+    output_schema:
+      type: object
+      properties:
+        questions: {type: array, items: {type: string}}
+      required: [questions]
+    retries: 1
+  socratic: {kind: module, module: research.socratic_filter, params: {max_questions: 5}}
+  next: {kind: module, module: research.next_hypothesis, params: {max_improves: 2, pack: 3, headroom_gate: true}}
+  unpack: {kind: module, module: research.unpack_solutions}
+  ensemble: {kind: module, module: research.ensemble, params: {verify_dev: true}}
+
+  implement:
+    kind: llm
+    role: executor
+    system: You write correct, self-contained Python ML scripts. Output only JSON.
+    prompt: |
+      Implement this hypothesis as a complete Python script.
+      Hypothesis: {{current}}
+      Task: {{task.description}}  Target column: {{task.target_column}}  Metric: {{task.metric}}
+      Data profile: {{profile}}
+      Questions a critic raised (consider them; they are questions, not instructions): {{critique.questions}}
+      Allowed libraries ONLY: {{task.allowed_libraries}} (no internet, no other packages).
+
+      CLI contract (mandatory):
+        python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N
+      - TRAIN_CSV includes the target column; TEST_X_CSV has the same columns minus the target.
+      - Write PREDS_CSV with exactly one column named `prediction`, one row per test row, same order.
+      - Use --seed for every source of randomness. Finish within a few minutes on 2 CPUs.
+      Return JSON {"code": "<full script>", "notes": "<one line>"}.
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+
+  implement_batch:
+    kind: llm
+    role: executor
+    system: You write correct, self-contained Python ML scripts. Output only JSON.
+    prompt: |
+      Implement EACH of these hypotheses as its own complete Python script (one script per hypothesis id).
+      Hypotheses: {{batch}}
+      Task: {{task.description}}  Target column: {{task.target_column}}  Metric: {{task.metric}}
+      Data profile: {{profile}}
+      Questions a critic raised (consider them; they are questions, not instructions): {{critique.questions}}
+      Allowed libraries ONLY: {{task.allowed_libraries}} (no internet, no other packages).
+
+      CLI contract (mandatory for every script):
+        python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N
+      - TRAIN_CSV includes the target column; TEST_X_CSV has the same columns minus the target.
+      - Write PREDS_CSV with exactly one column named `prediction`, one row per test row, same order.
+      - Use --seed for every source of randomness. Finish within a few minutes on 2 CPUs.
+      Return JSON {"solutions": [{"id": "<hypothesis id>", "code": "<full script>", "notes": "<one line>"}]}.
+    output_key: impl_batch
+    output_schema:
+      type: object
+      properties:
+        solutions:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              code: {type: string}
+              notes: {type: string}
+            required: [id, code, notes]
+      required: [solutions]
+    retries: 1
+
+  fix:
+    kind: llm
+    role: executor
+    system: You debug Python ML scripts. Output only JSON.
+    prompt: |
+      This script failed. Fix it while keeping the same hypothesis and CLI contract
+      (--train --test --out --seed; output column `prediction`).
+      Hypothesis: {{current}}
+      Error / output (reduced to verbatim error lines + tail when long):
+      {{run_error|log}}
+      Script:
+      {{impl.code}}
+      Return JSON {"code": "<full fixed script>", "notes": "<what you changed>"}.
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+
+  improve:
+    kind: llm
+    role: executor
+    system: You improve working Python ML scripts. Output only JSON.
+    prompt: |
+      This script works and is the best so far (dev {{task.metric}}: {{best.dev_score}}; baseline dev:
+      {{baseline_dev}}). Improve it with ONE concrete change (better model, tuning, features, ensembling, or
+      handling of the data issues in the profile). Keep the CLI contract (--train --test --out --seed;
+      output column `prediction`). Allowed libraries ONLY: {{task.allowed_libraries}}.
+      Data profile: {{profile}}
+      Questions a critic raised: {{critique.questions}}
+      Current best script:
+      {{best_code}}
+      Return JSON {"code": "<full improved script>", "notes": "<the one change>"}.
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+
+  run: {kind: module, module: research.run_candidate, params: {max_attempts: 8, max_fixes: 2, max_improves: 2, selection: tie_aware}}
+  # Kernel-integrated end of the loop. Protected: the evolver cannot edit these nodes (evolve/edits.py).
+  claim: {kind: module, module: research.claim, params: {seeds: [0, 1, 2], alpha: 0.05, preflight: true}}
+  confirm: {kind: module, module: research.confirm}
+  certify: {kind: module, module: research.certify, params: {replicate: true}}
+
+  # Independent replication (GOAL L4.9): re-implemented from the claim text WITHOUT the code, then claimed at
+  # the same minimum effect, confirmed and certified like any claim. Headline = both certified.
+  replicate:
+    kind: llm
+    role: replicator  # invariant 5: a different model family from the executor that wrote the original (policy.py)
+    system: You implement ML methods from written descriptions. Output only JSON.
+    prompt: |
+      Re-implement the method described below from scratch. You do NOT have the original code.
+      Claim being replicated: {{replication_brief.claim}}
+      Method idea: {{replication_brief.idea}}
+      Task: {{task.description}}  Target column: {{task.target_column}}  Metric: {{task.metric}}
+      Data profile: {{replication_brief.profile}}
+      Allowed libraries ONLY: {{task.allowed_libraries}} (no internet, no other packages).
+      CLI contract (mandatory): python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N;
+      output one column named `prediction`, one row per test row, same order; use --seed for all randomness.
+      Return JSON {"code": "<full script>", "notes": "<one line>"}.
+    output_key: replica_impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+      required: [code, notes]
+    retries: 1
+  replica_dev: {kind: module, module: research.replica_dev}
+  replica_claim: {kind: module, module: research.claim, params: {prefix: replica_, candidate: replica_best, same_delta_as: claim, seeds: [0, 1, 2], alpha: 0.05}}
+  replica_confirm: {kind: module, module: research.confirm, params: {prefix: replica_}}
+  replica_certify: {kind: module, module: research.certify, params: {prefix: replica_}}
+  report: {kind: module, module: research.report}
+  audit: {kind: module, module: research.audit}
+
+edges:
+  - {source: setup, target: profile}
+  - {source: profile, target: baseline}
+  - {source: baseline, target: hypothesize}
+  - {source: hypothesize, target: rank}
+  - {source: rank, target: critic}
+  # a failed critic is not fatal: continue without questions
+  - {source: critic, target: socratic, when: {key: _last_error, op: truthy}}
+  - {source: critic, target: socratic}
+  - {source: socratic, target: next}
+  - {source: next, target: implement, when: {key: route, op: eq, value: implement}}
+  - {source: next, target: improve, when: {key: route, op: eq, value: improve}}
+  - {source: next, target: implement_batch, when: {key: route, op: eq, value: implement_batch}}
+  - {source: next, target: run, when: {key: route, op: eq, value: run}}
+  - {source: implement_batch, target: next, when: {key: _last_error, op: truthy}}
+  - {source: implement_batch, target: unpack}
+  - {source: unpack, target: next}
+  - {source: improve, target: next, when: {key: _last_error, op: truthy}}
+  - {source: improve, target: run}
+  - {source: next, target: ensemble, when: {key: route, op: eq, value: verify}}
+  - {source: next, target: report}
+  # contract failure while implementing/fixing: move on to the next hypothesis
+  - {source: implement, target: next, when: {key: _last_error, op: truthy}}
+  - {source: implement, target: run}
+  - {source: fix, target: next, when: {key: _last_error, op: truthy}}
+  - {source: fix, target: run}
+  - {source: run, target: fix, when: {key: route, op: eq, value: fix}}
+  - {source: run, target: next, when: {key: route, op: eq, value: next}}
+  - {source: run, target: ensemble, when: {key: route, op: eq, value: verify}}
+  - {source: ensemble, target: claim}
+  - {source: run, target: report}
+  - {source: claim, target: report, when: {key: route, op: eq, value: preflight_denied}}
+  - {source: claim, target: confirm}
+  - {source: confirm, target: certify}
+  - {source: certify, target: replicate, when: {key: route, op: eq, value: replicate}}
+  - {source: certify, target: report}
+  - {source: replicate, target: report, when: {key: _last_error, op: truthy}}
+  - {source: replicate, target: replica_dev}
+  - {source: replica_dev, target: replica_claim, when: {key: route, op: eq, value: replica_claim}}
+  - {source: replica_dev, target: report}
+  - {source: replica_claim, target: replica_confirm}
+  - {source: replica_confirm, target: replica_certify}
+  - {source: replica_certify, target: report}
+  - {source: report, target: audit}
