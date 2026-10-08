@@ -170,12 +170,21 @@ def test_fixture_campaign_every_number_resolves_and_reproduces(tmp_path):
     w.close()
 
 
+def _plant_claim_without_evidence(store, text: str) -> Claim:
+    """A claim row with no evidence. `add_claim` refuses one since 2026-10-08 (d75497d), so the row is written the
+    way an older store or a tampered database would hold it: axis F must still catch it (defence in depth)."""
+    planted = Claim(text=text, evidence_ids=())
+    with pytest.raises(ValueError, match="no evidence"):
+        store.add_claim(planted)  # the store's own guard refuses it
+    store._exec("INSERT INTO claims VALUES (?, ?)", (planted.id, planted.model_dump_json()))
+    return planted
+
+
 def test_planted_claim_without_evidence_makes_axis_f_fail(tmp_path):
     w, _cert, inputs = _campaign(tmp_path)
     before = build_scorecard(w.store, tmp_path / "before", **inputs)
     assert before["axes"]["F"]["status"] == "pass"
-    planted = Claim(text="our method is SOTA", evidence_ids=())
-    w.store.add_claim(planted)  # the store accepts an empty evidence list: the planted attack lands
+    planted = _plant_claim_without_evidence(w.store, "our method is SOTA")
     assert w.store.get_claim(planted.id).evidence_ids == ()
     card = build_scorecard(w.store, tmp_path / "after", **inputs)
     m = card["axes"]["F"]["claims_without_evidence"]
@@ -222,7 +231,7 @@ def test_check_fails_on_tampered_bundle_or_changed_store(tmp_path):
     assert not rep["reproduced"] and any("recomputation" in p for p in rep["problems"])
     out2 = tmp_path / "card2"
     build_scorecard(w.store, out2, **inputs)
-    w.store.add_claim(Claim(text="added later", evidence_ids=()))
+    _plant_claim_without_evidence(w.store, "added later")
     rep2 = check_scorecard(out2, w.store)
     assert not rep2["reproduced"] and any("store_claims" in p for p in rep2["problems"])
     (out2 / "inputs" / next(iter((out2 / "inputs").iterdir())).name).write_bytes(b"tampered")
