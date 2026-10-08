@@ -227,7 +227,8 @@ def _plant_generation(store, *, accepted=False, rationale="raise the fix budget"
         "lofo": {"ood_drop": {"family:H": -0.5647382910}}, "rejected_on": None if accepted else "held_out_gate",
         "per_task": {"g1": {"split": "gate", "n": 2, "mean_diff": 0.4192837465}}, **(edit_extra or {})})
     counters = {"proposed": 1, "malformed": 0, "declined": 1, "rejected_novelty": 0, "rejected_static": 0,
-                "no_op_or_duplicate": 0, "rejected_smoke": 0, "accepted": int(accepted),
+                "no_op_or_duplicate": 0, "rejected_claims": 0, "rejected_smoke": 0,
+                "accepted": int(accepted),
                 "rejected_gate": int(not accepted), "raced": 1, "pruned": 0, "gated": 1,
                 "yield": 1.0 if accepted else 0.0, **(stats_extra or {})}
     store.append_record("generation_stats", {"parent": ph, **counters})

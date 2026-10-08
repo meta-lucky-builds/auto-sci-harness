@@ -168,8 +168,8 @@ def test_a_dropped_real_claimed_path_does_fail_the_check(store, tmp_path):
     claimed = ["/nodes/run/params/max_fixes"] * 32 + ["/nodes/run/params/max_improves"]  # the 33rd is dropped
     _gen(store, tmp_path, [_item("/nodes/run", run_node, evidence=["C0"], clusters=["C0"], claimed=claimed)])
     (rec, *_) = _lineage(store)
-    assert rec["status"] == "rejected_claims" and rec["claims_check"]["claimed_diff"]["unclaimed"] == [
-        "/nodes/run/params/max_improves"]
+    # refused at the dropped-claims rule (loop.UNVERIFIABLE_IF_DROPPED), before the diff is even computed
+    assert rec["status"] == "rejected_claims" and "claimed_change: 1 item(s) dropped" in rec["reason"], rec
 
 
 # ================================================================ 2. claimed diff
