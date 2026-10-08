@@ -221,6 +221,10 @@ class Engine:
         # TAINTED with those targets; rendering a tainted key into a prompt or tool command is a ledgered release.
         # In-memory per engine (a resumed run re-taints only from steps it runs itself: stated limit).
         self.taint: dict[str, set[str]] = {}
+        # a TRUSTED module may declare that a tainted output key carries at most the verdict bit or a count (e.g. the
+        # replication brief: built from non-target data, its existence is the verdict). Only module outputs can
+        # declare (`_release_alphabets`, never stored in state); any other write of the key clears the declaration.
+        self.release_alphabet: dict[str, str] = {}
         self.releases: Any = None  # None = live releases on the store's ledger
         self._prompt_taint: dict[int, set[str]] = {}
 
@@ -415,11 +419,18 @@ class Engine:
                         read = set(private_reads(self.store, after_seq=seq_before))
                         key = getattr(node, "output_key", None)
                         if key is not None:
+                            self.release_alphabet.pop(key, None)
                             state[key] = out.get("value")
                             carried = read | self._prompt_taint.get(id(node), set())
                             if carried:
                                 self.taint[key] = carried
                         else:
+                            declared = out.pop("_release_alphabets", None)
+                            for k in out:
+                                self.release_alphabet.pop(k, None)
+                            if isinstance(declared, dict):
+                                self.release_alphabet |= {k: a for k, a in declared.items()
+                                                          if k in out and a in ("verdict_bit", "count")}
                             state.update(out)  # module nodes return a dict of state updates
                             if read:
                                 for k in out:
@@ -588,8 +599,9 @@ class Engine:
                     continue
                 targets |= tk
                 rel = self.releases or Releases.live(self.store)
+                alphabet = self.release_alphabet.get(path.split(".")[0]) or alphabet_of(lookup(state, path, None))
                 rel.emit(lookup(state, path, None), targets=tk, channel="prompt",
-                         alphabet=alphabet_of(lookup(state, path, None)), note=note_code("prompt", node_id, path),
+                         alphabet=alphabet, note=note_code("prompt", node_id, path),
                          key=getattr(self, "_run_id", ""))
         return targets
 

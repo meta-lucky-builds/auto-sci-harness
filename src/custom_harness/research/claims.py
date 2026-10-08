@@ -380,7 +380,10 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                             if recs else None},
             f"{p}checklist": checklist, f"{p}publishable": ok, f"{p}publish_blockers": blockers,
             f"{p}memory_after_certify": memory_rec,
-            **({"replication_brief": brief} if brief else {}),
+            **({"replication_brief": brief,
+                # the brief is built from the pre-registered claim, the dev-time idea and the TRAINING profile: no
+                # held-out value; only its existence depends on the target (the verdict bit)
+                "_release_alphabets": {"replication_brief": "verdict_bit"}} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
 
 

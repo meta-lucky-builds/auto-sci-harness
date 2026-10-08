@@ -177,3 +177,41 @@ def test_a_prompt_without_target_derived_values_releases_nothing(store):
     res, _ = _prompt_run(store, "Say hi")
     assert res.status.value == "completed", res.detail
     assert [r for r in released(store, "t-held") if r["channel"] == "prompt"] == []
+
+
+@register("test.release_reader_declared")
+def _reader_declared(state, params, ctx):
+    """Like test.release_reader, plus a structured key built only from NON-target data whose existence is the verdict
+    (the research.certify replication brief): the trusted module declares it carries only the verdict bit."""
+    out = _reader(state, params, ctx)
+    out["brief"] = {"claim": "pre-registered statement", "idea": "dev-time idea"}
+    if params.get("declare"):
+        out["_release_alphabets"] = {"brief": "verdict_bit", "not_an_output": "verdict_bit"}
+    if params.get("bogus"):
+        out["_release_alphabets"] = {"brief": "nonsense"}
+    return out
+
+
+def _declared_run(store, params):
+    from custom_harness.gateway import MockBackend
+    from custom_harness.runtime import Engine
+    spec = HarnessSpec.model_validate({
+        "id": "p", "entry": "m", "nodes": {"m": {"kind": "module", "module": "test.release_reader_declared",
+                                                 "params": params},
+                                           "ask": {"kind": "llm", "prompt": "Brief: {{brief.claim}}",
+                                                   "output_key": "o"}},
+        "edges": [{"source": "m", "target": "ask"}]})
+    res = Engine(spec, backends={"executor": MockBackend(["ok"])}, store=store).run("t", {})
+    assert res.status.value == "completed", res.detail
+    assert "_release_alphabets" not in res.state  # the declaration never becomes state
+    return [r["alphabet"] for r in released(store, "t-held") if r["channel"] == "prompt"]
+
+
+@pytest.mark.parametrize("params,alphabet", [({}, "continuous"), ({"declare": True}, "verdict_bit"),
+                                             ({"bogus": True}, "continuous")])
+def test_a_trusted_module_may_declare_a_key_verdict_bit_only(store, params, alphabet):
+    """Found 2026-10-08 (replication merge break): the replication brief (claim statement, idea, training profile)
+    was released as `continuous` only because certify, which wrote it, had read the target; every replica claim then
+    failed K6 as adaptively exposed. Without a declaration the fail-closed default stays continuous; an unknown
+    alphabet in a declaration is ignored (stays continuous)."""
+    assert _declared_run(store, params) == [alphabet]
