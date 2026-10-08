@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -22,9 +24,18 @@ class BlobStore:
         path = self._path(digest)
         if not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
+            # a temp name per writer: two writers of the same blob (concurrent runs storing identical bytes) used to
+            # share `<digest>.tmp`, so one's os.replace could find it gone (tests/test_evalrace.py)
+            tmp = path.with_name(f"{digest}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
             tmp.write_bytes(data)
-            os.replace(tmp, path)  # atomic; blobs are write-once
+            try:
+                os.replace(tmp, path)  # atomic; blobs are write-once
+            except OSError:
+                # Windows refuses to replace a file another writer has open; the same digest means the same bytes,
+                # so an existing, intact destination is the blob
+                tmp.unlink(missing_ok=True)
+                if not (path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest):
+                    raise
         return digest
 
     def get(self, digest: str) -> bytes:

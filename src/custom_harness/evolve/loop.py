@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -51,7 +52,19 @@ from .edits import (
     screen_prediction,
     withheld,
 )
-from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
+from .evaluate import (
+    DURABLE_KIND,
+    Attempt,
+    ExecutedRun,
+    RunOutcome,
+    SandboxFactory,
+    SuiteTask,
+    check_held_out,
+    execute_run,
+    finish_run,
+)
+from .evaluate import outcome_from_record as _outcome_from
+from .evaluate import outcome_to_record as _outcome_to
 from .export import proposer_view
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
@@ -100,6 +113,15 @@ class EvolveConfig:
     max_rationale_chars: int = 2000
     max_expected_delta: float = 2.0
     delta_decimals: int = 3
+    # race allocation (GOAL §5 L1; control/allocator.py, evalrace.py, voi.py). "batch" = selection.race in a loop
+    # (default). "per_completion" = the completion-driven allocator over the single-writer Evaluator; with
+    # race_slots=1 it evaluates in exactly the batch order. race_slots > 1 runs harness runs concurrently: refused
+    # unless race_concurrency_ack (an owner decision: unit scores depend on Kernel ledger history, so concurrent
+    # orders are not shown to give the batch race's decisions; docs/control_allocation.md).
+    race_allocator: str = "batch"
+    race_slots: int = 1
+    race_concurrency_ack: bool = False
+    race_timeout_s: float = 3600.0
 
 
 @dataclass
@@ -124,7 +146,8 @@ class Evaluator:
     def __init__(self, backends: dict[str, Backend], store: EvidenceStore, sandbox_factory: SandboxFactory,
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
-                 campaign_budget: Budget | None = None, releases: Releases | None = None):
+                 campaign_budget: Budget | None = None, releases: Releases | None = None,
+                 durable_key: str | None = None):
         sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
         if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
             raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
@@ -140,33 +163,100 @@ class Evaluator:
         self.cache: dict[tuple[str, str, int], RunOutcome] = {}
         self.calls = 0  # actual harness runs executed (cache misses, incl. infra re-runs)
         self.infra_failures = 0  # runs that ended INFRA_FAILED (each one excluded, never scored)
+        # SINGLE WRITER (control/evalrace.py): every mutation of the state above (cache, counters, budget charges,
+        # durable unit records, releases) happens in begin()/finish() on ONE thread, the first that calls them.
+        # Only attempt() (the harness run itself) may run on other threads. A second writer thread is refused.
+        self._writer: int | None = None
+        self._in_flight: set[tuple[str, str, int]] = set()
+        # durable unit outcomes (crash/resume): with a key, every finished unit is appended to the store AFTER its
+        # charge, and a new Evaluator with the same key starts from them (never re-run, never charged again)
+        self.durable_key = durable_key
+        if durable_key is not None:
+            for rec in store.records_where(DURABLE_KIND, "durable_key", durable_key):
+                self.cache[(rec["spec_hash"], rec["task_id"], int(rec["seed"]))] = _outcome_from(rec["outcome"])
 
     def outcome(self, spec: HarnessSpec, unit: Unit) -> RunOutcome:
         """A unit whose run failed for infrastructure reasons is re-run (fresh run, same seed) up to
         `infra_retries` times; if it still fails it stays excluded (score None)."""
         key = (spec.spec_hash(), unit[0], unit[1])
-        if key not in self.cache:
-            for _ in range(1 + self.infra_retries):
-                if self.campaign_budget is not None:
-                    self.campaign_budget.check()
-                self.calls += 1
-                since = last_prereg_seq(self.store)
-                out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
-                                  store=self.store, sandbox_factory=self.sandbox_factory,
-                                  budget_limits=self.budget_per_run, retry=self.retry, releases=self.releases)
-                # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
-                # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
-                check_run(self.store, since)
-                if self.campaign_budget is not None:
-                    try:
-                        self.campaign_budget.charge(out.cost)
-                    except BudgetExceeded:
-                        pass  # recorded; the next check() stops the campaign before any further run
-                if not out.infra_failed:
-                    break
-                self.infra_failures += 1
-            self.cache[key] = out
+        n = 0
+        while key not in self.cache:
+            att = self.begin(spec, unit, n)
+            try:
+                ex = self.attempt(att)
+            except BaseException:
+                self.abandon(att)
+                raise
+            self.finish(att, ex)
+            n += 1
         return self.cache[key]
+
+    # ---------------------------------------------------------------- single-writer protocol (evalrace.py)
+    def _own(self) -> None:
+        me = threading.get_ident()
+        if self._writer is None:
+            self._writer = me
+        elif self._writer != me:
+            raise RuntimeError("Evaluator state has a single writer thread; run only attempt() on other threads "
+                               "(control/evalrace.py)")
+
+    def begin(self, spec: HarnessSpec, unit: Unit, n: int = 0) -> Attempt:
+        """Writer thread: start attempt `n` of a unit (campaign budget check first, as before every run)."""
+        self._own()
+        key = (spec.spec_hash(), unit[0], unit[1])
+        if key in self.cache:
+            raise RuntimeError(f"unit {key} is already evaluated")
+        if n == 0 and key in self._in_flight:
+            raise RuntimeError(f"unit {key} is already being evaluated (a duplicate run would be charged twice)")
+        if self.campaign_budget is not None:
+            try:
+                self.campaign_budget.check()
+            except BaseException:
+                self._in_flight.discard(key)
+                raise
+        self._in_flight.add(key)
+        self.calls += 1
+        return Attempt(key, spec, unit, n, last_prereg_seq(self.store))
+
+    def attempt(self, att: Attempt) -> ExecutedRun:
+        """Any thread: the harness run itself (no Evaluator state is touched)."""
+        return execute_run(att.spec, self.tasks[att.unit[0]], att.unit[1], backends=self.backends, store=self.store,
+                           sandbox_factory=self.sandbox_factory, budget_limits=self.budget_per_run, retry=self.retry)
+
+    def finish(self, att: Attempt, ex: ExecutedRun) -> RunOutcome | None:
+        """Writer thread: score, check, charge and record attempt `att`. Returns the unit's final outcome, or None
+        when it failed for infrastructure reasons and has a retry left (the caller begins attempt att.n + 1)."""
+        self._own()
+        out = finish_run(ex, store=self.store, releases=self.releases)
+        # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
+        # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
+        try:
+            check_run(self.store, att.since)
+        except BaseException:
+            self._in_flight.discard(att.key)
+            raise
+        if self.campaign_budget is not None:
+            try:
+                self.campaign_budget.charge(out.cost)
+            except BudgetExceeded:
+                pass  # recorded; the next check() stops the campaign before any further run
+        if out.infra_failed:
+            self.infra_failures += 1
+            if att.n < self.infra_retries:
+                return None
+        self._in_flight.discard(att.key)
+        if self.durable_key is not None:  # after the charge: a crash in between re-runs the unit (a real, second
+            # run, charged once itself); a recorded unit is never re-run nor charged again
+            self.store.append_record(DURABLE_KIND, {"durable_key": self.durable_key, "spec_hash": att.key[0],
+                                                    "task_id": att.key[1], "seed": att.key[2],
+                                                    "outcome": _outcome_to(out)})
+        self.cache[att.key] = out
+        return out
+
+    def abandon(self, att: Attempt) -> None:
+        """Writer thread: an attempt whose run raised (no outcome): it is no longer in flight."""
+        self._own()
+        self._in_flight.discard(att.key)
 
     def score(self, spec: HarnessSpec, unit: Unit) -> float | None:
         return self.outcome(spec, unit).score
@@ -180,6 +270,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
     shares the proposer's family; its review is advisory (recorded, never gating)."""
     cfg = cfg or EvolveConfig()
+    check_race_config(cfg)  # fail closed before any run
     if critic is not None:
         critic.check_proposer(proposer.backend if isinstance(proposer, ProposerAgent) else proposer)
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
@@ -276,8 +367,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     loop_label = "MECHANICAL"
     fixed_k = 0
     if candidates:
-        rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
-                  parent_scores, rounds=cfg.race_rounds, keep=1)
+        rr = _race(candidates, evolve_units, evaluator, parent_scores, cfg)
         fixed_k = rr.evaluations_fixed_k
         survivors = list(rr.survivors)
         for h, (edit, _) in candidates.items():
@@ -365,6 +455,39 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     store.append_record("generation_stats", {"parent": parent_hash, **counters})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
                             evaluator.calls - calls_before, fixed_k, loop_label, counters)
+
+
+RACE_ALLOCATORS = ("batch", "per_completion", "voi")
+
+
+def check_race_config(cfg: EvolveConfig) -> None:
+    """Fail closed on a race configuration that is unknown or not shown to keep the batch race's decisions."""
+    if cfg.race_allocator not in RACE_ALLOCATORS:
+        raise ValueError(f"unknown race_allocator {cfg.race_allocator!r} (known: {RACE_ALLOCATORS})")
+    if isinstance(cfg.race_slots, bool) or not isinstance(cfg.race_slots, int) or cfg.race_slots < 1:
+        raise ValueError("race_slots must be an integer >= 1")
+    if cfg.race_slots > 1 and cfg.race_allocator != "per_completion":
+        raise ValueError("race_slots > 1 needs race_allocator='per_completion'")
+    if cfg.race_slots > 1 and not cfg.race_concurrency_ack:
+        raise ValueError("race_slots > 1 runs harness runs concurrently, whose scores depend on Kernel ledger order "
+                         "(K4 transcript bound): decisions equal to the batch race are not shown. Refused unless "
+                         "race_concurrency_ack=True (owner decision; docs/control_allocation.md)")
+
+
+def _race(candidates: dict[str, tuple[Edit, HarnessSpec]], units: list[Unit], evaluator: Evaluator,
+          parent_scores: dict[Unit, float | None], cfg: EvolveConfig) -> Any:
+    if cfg.race_allocator == "per_completion":
+        from ..control.evalrace import race_evaluator  # local: control/ imports evolve.selection
+        rr, _alloc, _ex = race_evaluator({h: spec for h, (_, spec) in candidates.items()}, units, evaluator,
+                                         parent_scores, slots=cfg.race_slots, rounds=cfg.race_rounds, keep=1,
+                                         timeout_s=cfg.race_timeout_s)
+        return rr
+    if cfg.race_allocator == "voi":  # selection order/allocation only; the acceptance rule below is unchanged
+        from ..control.voi import voi_race
+        return voi_race(list(candidates), units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
+                        parent_scores, rounds=cfg.race_rounds, keep=1)
+    return race(list(candidates), units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
+                parent_scores, rounds=cfg.race_rounds, keep=1)
 
 
 def _public(edit: Edit, evolve_ids: set[str]) -> dict[str, Any]:
