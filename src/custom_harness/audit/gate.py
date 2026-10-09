@@ -12,9 +12,10 @@ which no engine run carries, so the engine can never read them as a run's approv
    Bound to the report hash; only valid after the reply record.
 
 `publish` (`chh audit publish`) is the ONLY code path that writes an export package, and it refuses unless 2 and 3
-exist for the CURRENT report hash and the certificate is not retracted. Trust boundary (stated, as for every
-approval here): trusted host code could append these entries, and nothing stops a person copying local files; the
-ledger names who approved what (accountability, not enforcement).
+exist for the CURRENT report hash and the certificate is not retracted, and (since 2026-10-09) unless the VG
+reporting checklist (audit/checklist.py) is complete: it is shipped as checklist.md next to the report.
+Trust boundary (stated, as for every approval here): trusted host code could append these entries, and nothing
+stops a person copying local files; the ledger names who approved what (accountability, not enforcement).
 """
 
 from __future__ import annotations
@@ -163,13 +164,28 @@ def publish(store: EvidenceStore, outcome: dict[str, Any], report: str, out_dir:
     cert_hash = outcome.get("cert_hash")
     if cert_hash and Kernel(store).status(cert_hash) != "active":
         raise AuditRefused("refused: the certificate behind this verdict was retracted")
+    # VG Table 10 (GOAL §1.3): the reporting checklist travels with the report; a missing item blocks publication
+    from ..publication import blockers as checklist_blockers
+    from .checklist import audit_checklist
+    from .checklist import render as render_audit_checklist
+    if not cert_hash:
+        raise AuditRefused("refused: no certificate behind this outcome, so there is no reporting checklist to "
+                           "publish with it (VG Table 10)")
+    bundle_hash = hashlib.sha256(Path(bundle_path).read_bytes()).hexdigest() if bundle_path is not None else None
+    checklist = audit_checklist(store, outcome, bundle_hash, reply, approval)
+    blocked = checklist_blockers(checklist, is_loop=False)
+    if blocked:
+        raise AuditRefused("refused: reporting checklist incomplete (VG Table 10): " + "; ".join(blocked))
+    checklist_md = render_audit_checklist(checklist)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "report.md").write_text(report, encoding="utf-8", newline="")
+    (out_dir / "checklist.md").write_text(checklist_md, encoding="utf-8", newline="")
     red = redistribution or {}
     manifest: dict[str, Any] = {"audit_id": audit_id, "verdict": outcome["verdict"], "report_sha256": report_hash,
                                 "cert_hash": cert_hash, "right_of_reply": reply, "publication_approval": approval,
-                                "citations": outcome.get("citations")}
+                                "citations": outcome.get("citations"), "checklist": checklist,
+                                "checklist_sha256": hashlib.sha256(checklist_md.encode("utf-8")).hexdigest()}
     if bundle_path is not None:
         manifest["bundle_sha256"] = hashlib.sha256(Path(bundle_path).read_bytes()).hexdigest()
         if red.get("code") and red.get("data"):

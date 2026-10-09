@@ -49,6 +49,8 @@ from ..kernel import (
 from ..kernel.bundle import build_bundle
 from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
+from ..publication import blockers as publication_blockers
+from ..publication import render_loop_item
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..verify import metrics as M
@@ -345,7 +347,14 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                     "replica was checked on dev, then pre-registered at the same minimum effect"),
                      human_in_the_loop="none (fully automated run)",
                      novelty="not performed: the literature module does not exist yet (GOAL M5)")
+    # invariant 10 / VG Table 10: the loop label is a checklist item (the run's label: its MAIN certificate decides)
+    main_label = cert.label.value if not p else (state.get("certificate") or {}).get("label")
+    checklist["loop_label"] = loop_label({"certificate": {"label": main_label}})
     ok, blockers = publishable(cert, checklist)
+    # stricter than the Kernel's `missing` (a blank or non-string answer is no answer) plus the loop-label item
+    extra = [b for b in publication_blockers(checklist, is_loop=True) if b not in blockers]
+    if extra:
+        ok, blockers = False, [*blockers, *extra]
     if not p:  # GOAL L4.8 (deny-only): kept critic questions without an answer citing checked evidence block publishing
         from .critic_answers import critic_gate  # recomputed from the trace, never from run state
         critic_ok, why = critic_gate(ctx)
@@ -659,8 +668,10 @@ _CERTIFIED = ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
 
 def headline(state: dict[str, Any]) -> bool:
     """GOAL L4.9: a headline result = certified AND an independent re-implementation certified at the same bar,
-    where independent includes invariant 5 (the replicator is not of the author's model family)."""
+    where independent includes invariant 5 (the replicator is not of the author's model family), and BOTH are
+    publishable (VG Table 10: a result with a publication blocker is never a headline)."""
     return ((state.get("certificate") or {}).get("label") in _CERTIFIED
+            and state.get("publishable") is True and state.get("replica_publishable") is True
             and (state.get("replica_certificate") or {}).get("label") in _CERTIFIED
             and (state.get("model_policy") or {}).get("invariant_5") == "met")
 
@@ -669,6 +680,17 @@ def loop_label(state: dict[str, Any]) -> str:
     """GOAL §6.1: VALIDATED only if the run's accepted claim was certified on external or future data
     (CERTIFIED-VALIDATED); a run that optimised and confirmed on internal data is MECHANICAL."""
     return "VALIDATED" if (state.get("certificate") or {}).get("label") == "CERTIFIED-VALIDATED" else "MECHANICAL"
+
+
+def _publication_line(state: dict[str, Any], p: str) -> str:
+    """VG Table 10: the report states whether it may be published, and every blocker, from the certify node's
+    `publishable` / `publish_blockers` (anything but an explicit True is NOT publishable: fail closed)."""
+    what = "Replication publication" if p else "Publication"
+    if state.get(f"{p}publishable") is True:
+        return f"**{what}: allowed** (checklist complete, loop label present, certified)"
+    raw = state.get(f"{p}publish_blockers")
+    why = "; ".join(_inline(b, 200) for b in raw) if isinstance(raw, list) and raw else "no publishable record"
+    return f"**{what}: BLOCKED (NOT PUBLISHABLE)**: {why}"
 
 
 def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
@@ -700,8 +722,9 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", "### Kernel checks", ""]
         for kid, res in cert.checks.items():
             lines.append(f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else ""))
-        lines += ["", render_checklist(state.get("checklist") or {}),
-                  f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
+        lines += ["", render_checklist(state.get("checklist") or {}).rstrip("\n"),
+                  render_loop_item(state.get("checklist")), "", _publication_line(state, ""),
+                  "", f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
         rep = state.get("replica_certificate")
         lines += ["## Independent replication", ""]
         if rep:
@@ -709,6 +732,7 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
             lines += [f"**{rcert.label.value}** · certificate `{rep['hash']}`", f"- Claim: {rcert.claim['statement']}"]
             lines += [f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else "")
                       for kid, res in rcert.checks.items() if res.status == "fail"]
+            lines += ["", _publication_line(state, "replica_")]
         elif state.get("replication_refused"):
             lines.append(f"Replication refused: {_inline(state['replication_refused'])}.")
         elif state.get("replica_best"):
