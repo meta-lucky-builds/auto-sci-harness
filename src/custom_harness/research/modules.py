@@ -694,7 +694,9 @@ def run_candidate(state, params, ctx):
             root_snapshot = take_snapshot(_sb(ctx).workspace, ctx.store.blobs)
         elif state.get("tree_node") is None:
             restored = _backtrack_restore(t0, branch_parent, ctx)
-    _ws(ctx, "solution.py").write_text(code, encoding="utf-8")  # kept in the run workspace for the record/audit
+    # kept in the run workspace for the record/audit, byte-identical to the code that runs (write_text would turn
+    # LF into CRLF on Windows, so the frozen workspace would not hold the node's code)
+    _ws(ctx, "solution.py").write_bytes(code.encode("utf-8"))
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), f"attempt{state.get('n_attempts', 0) + 1}")
     s = _score(task, labels, preds)

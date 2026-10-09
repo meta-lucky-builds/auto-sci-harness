@@ -636,7 +636,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
         return {"replica_best": {"hypothesis_id": "replication", "dev_score": None, "dev_preds_ref": None,
                                  "code_ref": ctx.store.blobs.put(code.encode()), "error": f"not independent: {why}"},
                 "route": "report"}
-    _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "replica.py").write_bytes(code.encode("utf-8"))  # byte-identical to the code that runs (no CRLF)
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
