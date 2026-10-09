@@ -19,13 +19,22 @@ Bounds: the miss rate a caller may declare is at most `l3_config.TOL_MAX_MISS_RA
 the Kernel's K1 ceiling (`TOL_CEILING`) is refused (the claim cannot be checked by re-execution at that noise), never
 clipped. `resolve_tolerance` applies the class policy: exact classes never take a tolerance.
 
-Wiring (not done here, other owners): `research/claims.py` would pass `resolve_tolerance(...).value` as
-`AnalysisPlan.reproduce_tolerance`; the noise-floor runs must be produced by the runner. Stated in docs/l3_verifiers.md.
+Purposes: `reproduce` (nominal, perturbed, rebuild) for a re-execution in a possibly rebuilt environment; `seed`
+(plus seed spread); `replay_same_env` (nominal, perturbed) ONLY for a replay in the same environment (image) as the
+original run, which is how the Kernel's K3 replays research-loop evidence. Fewer sources can only give a smaller
+(stricter) tolerance than `reproduce`, never a looser one.
+
+Wiring (s3-verifiers): `claim_tolerance` is the one decision the claim path uses. `research.claim` with
+`calibrate_tolerance: true` measures a noise floor on PUBLIC dev data in trusted code (`research/noise_floor.py`) and
+passes `claim_tolerance(...).value` as `AnalysisPlan.reproduce_tolerance`; without it, or when calibration refuses,
+the tolerance stays 0.0 (identical predictions: the strictest K3). A hand-set tolerance never comes from run state or
+node params. docs/l3_verifiers.md.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -33,7 +42,7 @@ from ..kernel.claim import EvidenceClass
 from . import l3_config as C
 
 SOURCES = ("nominal", "perturbed", "rebuild", "seed")
-PURPOSES = {"reproduce": ("nominal", "perturbed", "rebuild"), "seed": SOURCES}
+PURPOSES = {"reproduce": ("nominal", "perturbed", "rebuild"), "seed": SOURCES, "replay_same_env": ("nominal", "perturbed")}
 
 
 class ToleranceError(ValueError):
@@ -124,3 +133,39 @@ def resolve_tolerance(evidence_class: EvidenceClass, hand_set: float, calibratio
     if not (math.isfinite(hand_set) and 0.0 <= hand_set <= C.TOL_CEILING):
         return Resolved(None, "refused", (f"hand-set tolerance {hand_set} outside [0, {C.TOL_CEILING}]",))
     return Resolved(hand_set, "hand_set", ())
+
+
+def measure(rerun: Callable[[str, int], float | None], reference: float | None, *, purpose: str,
+            n: int) -> NoiseFloor:
+    """Build a noise floor by calling `rerun(source, i)` n times for each source the purpose needs (trusted code
+    supplies `rerun`; e.g. research/noise_floor.py). A failed run (None, non-finite) refuses: an honest re-run that
+    did not produce a number is not evidence that the noise is small."""
+    if purpose not in PURPOSES:
+        raise ToleranceError(f"unknown purpose {purpose!r} (one of {sorted(PURPOSES)})")
+    if reference is None or not math.isfinite(reference):
+        raise ToleranceError("the reference run produced no finite value")
+    runs: dict[str, tuple[float, ...]] = {s: () for s in SOURCES}
+    for s in PURPOSES[purpose]:
+        values = []
+        for i in range(n):
+            v = rerun(s, i)
+            if v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ToleranceError(f"{s} re-run {i} produced no finite value")
+            values.append(float(v))
+        runs[s] = tuple(values)
+    return NoiseFloor(reference=float(reference), **runs)
+
+
+def claim_tolerance(evidence_class: EvidenceClass, floor: NoiseFloor | None, *, miss_rate: float = C.TOL_CLAIM_MISS_RATE,
+                    purpose: str = C.TOL_CLAIM_PURPOSE) -> Resolved:
+    """The K3 tolerance a pre-registered claim gets. No hand-set value enters here (hand_set = 0.0): with no floor,
+    or a floor calibration refuses, the claim keeps 0.0 (identical predictions, the strictest check; for exact
+    classes always). A refusal is reported in `reasons`, never clipped or replaced by a looser value."""
+    if floor is None:
+        return resolve_tolerance(evidence_class, 0.0, None)
+    try:
+        cal = calibrate(floor, miss_rate=miss_rate, purpose=purpose)
+    except ToleranceError as e:
+        r = resolve_tolerance(evidence_class, 0.0, None)
+        return Resolved(r.value, r.source, (*r.reasons, f"calibration refused, tolerance stays 0: {e}"))
+    return resolve_tolerance(evidence_class, 0.0, cal)

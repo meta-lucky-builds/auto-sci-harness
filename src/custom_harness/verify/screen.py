@@ -16,13 +16,19 @@ every submitted LP certificate exactly anyway (K3 via `kernel.lp.check`), so a c
 submitted, never a certificate by itself.
 
 LP instance (reuses the `lp` adapter's exact checker, `kernel.lp.check`): `lp_float_screen` / `lp_exact`.
+
+Claim path (s3-verifiers): `certify_confirmed_lp` is the submission step for computational (exact-class) LP claims. It
+takes only `Confirmed` results (a screen survivor, a bare candidate or a candidate id is refused with TypeError), checks
+that the candidate submitted is byte-for-byte the one the exact checker confirmed (`candidate_hash`), and then goes
+through the Kernel (pre-register, record the certificate artifact, certify), which re-checks it exactly (K3). A screen
+pass alone therefore never reaches a certificate (invariant 21).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
@@ -155,3 +161,30 @@ def lp_float_screen(problem: dict[str, Any], slack: float = C.SCREEN_FLOAT_SLACK
         dual = sum(bi * yi for bi, yi in zip(b, y, strict=True))
         return abs(primal - dual) <= slack * max(1.0, abs(v)) and abs(primal - v) <= slack * max(1.0, abs(v))
     return screen
+
+
+def certify_confirmed_lp(kernel: Any, confirmed: Sequence[Confirmed], candidates: Mapping[str, LPCandidate],
+                         claim_for: Callable[[str, LPCandidate], Any]) -> dict[str, Any]:
+    """Submit exactly the gate-confirmed LP candidates to the Kernel: {candidate id: Kernel certificate}.
+    `claim_for(cid, candidate)` builds the computational claim (trusted code). Refuses (TypeError / ValueError), before
+    anything is registered, anything that is not a `Confirmed` from this gate, a confirmation without its candidate,
+    or a candidate whose content differs from the one confirmed."""
+    items = list(confirmed)
+    for c in items:
+        if not isinstance(c, Confirmed):
+            raise TypeError(f"only exact-gate confirmations are submitted, not {type(c).__name__} (a float screen "
+                            "pass never grants)")
+        if c.checker != "lp":
+            raise ValueError(f"confirmation {c.candidate_id!r} is from checker {c.checker!r}, not the lp checker")
+        cand = candidates.get(c.candidate_id)
+        if not isinstance(cand, LPCandidate) or _hash(cand) != c.candidate_hash:
+            raise ValueError(f"candidate {c.candidate_id!r} is not the one the exact checker confirmed")
+    out: dict[str, Any] = {}
+    for c in items:
+        cand = candidates[c.candidate_id]
+        claim = claim_for(c.candidate_id, cand)
+        kernel.preregister(claim)
+        aid = kernel.vault.register_artifact(f"lp-certificate-{c.candidate_hash[:16]}",
+                                             canonical_json(cand.certificate), "certificate").artifact_id
+        out[c.candidate_id] = kernel.certify(claim, [kernel.record_certificate(claim, aid)])
+    return out

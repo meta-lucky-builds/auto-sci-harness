@@ -28,6 +28,11 @@ TOL_MAX_MISS_RATE = 0.10  # UNCALIBRATED (owner decision, GOAL §13.8)
 # A calibrated tolerance never exceeds the Kernel's own ceiling on declared re-execution tolerances (K1): a noise
 # floor above it means the claim cannot be checked by re-execution, and calibration refuses.
 TOL_CEILING = KernelConfig().max_reproduce_tolerance
+# The claim path (`tolerance.claim_tolerance`, used by research.claim): its declared miss rate and noise sources.
+# The research loop's K3 replays run in the same sandbox environment as the confirm runs, so the rebuild source is not
+# part of the purpose (fewer sources = a smaller, stricter tolerance). Never read from node params or run state.
+TOL_CLAIM_MISS_RATE = 0.10  # UNCALIBRATED (owner decision, GOAL §13.8)
+TOL_CLAIM_PURPOSE = "replay_same_env"  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 # ---------------------------------------------------------------- float screen -> exact certificate (screen.py)
 # Slack of the FLOAT screen only. It can only change what is pruned, never what is certified (the exact checker
