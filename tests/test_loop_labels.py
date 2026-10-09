@@ -68,7 +68,10 @@ def test_runtime_check_flags_unlabelled_and_mislabelled_instances(store):
     _run(store, {"report": "# r\n\n" + line.format("VALIDATED"),  # claims VALIDATED on internal data
                  "certificate": {"label": "CERTIFIED-INTERNAL"}, "checklist": {"loop_label": "VALIDATED"}})
     _run(store, {"report": "# r without a label line\n"})
-    _run(store, {"report": "# r\n\n" + line.format("MECHANICAL"), "certificate": {"label": "CERTIFIED-INTERNAL"}})
+    # a run from before the checklist item existed: labelled by its report line (the missing item is axis F's)
+    _run(store, {"report": "# r\n\n" + line.format("MECHANICAL"), "certificate": {"label": "CERTIFIED-INTERNAL"},
+                 "checklist": {"seeds": "[0]"}})
+    _run(store, {"report": "# r\n\n" + line.format("MECHANICAL"), "certificate": {"label": "CERTIFIED-VALIDATED"}})
     store.append_record("harness_edit", {"parent": "p", "accepted": False})
     store.append_record("lineage", {"parent": "p", "status": "accepted", "candidate": "c"})
     store.append_record("lineage", {"parent": "p", "status": "raced", "candidate": "c"})  # not a loop decision
@@ -78,9 +81,9 @@ def test_runtime_check_flags_unlabelled_and_mislabelled_instances(store):
     probs = sorted(i["problem"] for i in a["unlabelled"])
     assert len(a["unlabelled"]) == 7, probs
     assert any("report states loop label 'VALIDATED', the certificate gives MECHANICAL" in p for p in probs)
+    assert any("report states loop label 'MECHANICAL', the certificate gives VALIDATED" in p for p in probs)
     assert any("report states loop label None" in p for p in probs)
-    assert "certified run without a checklist" in probs
     assert any("does not resolve" in p for p in probs)
-    assert a["counts"]["research_run"] == {"MECHANICAL": 1, "VALIDATED": 0, "unlabelled": 3}
+    assert a["counts"]["research_run"] == {"MECHANICAL": 2, "VALIDATED": 0, "unlabelled": 3}
     assert a["counts"]["lineage"] == {"MECHANICAL": 0, "VALIDATED": 0, "unlabelled": 1}
     assert next(i for i in a["instances"] if not i["problem"])["ref"].startswith(f"run:{good}:")

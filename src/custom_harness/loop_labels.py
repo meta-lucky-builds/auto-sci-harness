@@ -1,9 +1,10 @@
 """Invariant 10 check: every loop instance in reports, ledgers and the scorecard carries MECHANICAL or VALIDATED.
 
 Loop instances and where their label lives (GOAL §6.1):
-  research run        an inner research loop. Its report has the line `Loop label (GOAL §6.1): **X**`, and a run with
-                      a certificate has `checklist.loop_label` (publication.py). Both must equal the label recomputed
-                      from the run's certificate (`research.claims.loop_label`), so a wrong label fails too.
+  research run        an inner research loop. Its report has the line `Loop label (GOAL §6.1): **X**`, which must
+                      equal the label recomputed from the run's certificate (`research.claims.loop_label`), so a
+                      wrong label fails too; `checklist.loop_label` (publication.py, since 2026-10-09), when
+                      present, must agree as well (its absence blocks publication: axis F, not this check).
   evolve generation   `generation_stats` (one per generation; since 2026-10-09 it carries `loop_label`), its decision
                       records (`harness_edit`; `lineage` rows with status accepted / rejected_gate / infra_aborted)
                       and the driver's gen<N>.json summary. A `generation_ledger` record carries no label field (its
@@ -80,10 +81,10 @@ def audit_store(store: EvidenceStore) -> dict[str, Any]:
         if text != want:
             why = f"report states loop label {text!r}, the certificate gives {want}"
         cl = state.get("checklist")
-        if state.get("certificate") and isinstance(cl, dict) and cl.get("loop_label") != want:
+        # the checklist item exists since 2026-10-09 (publication.py; its ABSENCE is a publication blocker, counted
+        # on axis F); when present it must agree
+        if isinstance(cl, dict) and "loop_label" in cl and cl.get("loop_label") != want:
             why = why or f"checklist loop_label {cl.get('loop_label')!r}, the certificate gives {want}"
-        if state.get("certificate") and not isinstance(cl, dict):
-            why = why or "certified run without a checklist"
         add("research_run", ref, text, why)
     bad = [i for i in inst if i["problem"]]
     counts: dict[str, dict[str, int]] = {}
