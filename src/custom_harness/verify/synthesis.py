@@ -82,7 +82,7 @@ class SynthesisError(ValueError):
     pass
 
 
-# ------------------------------------------------------------------ the fixed, human-owned fault suites
+# ------------------------------------------------------------------ the fixed fault suites (all AGENT-AUTHORED)
 @dataclass(frozen=True)
 class Case:
     id: str
@@ -390,10 +390,11 @@ class Validation:
 
 
 def validate(verifier: SynthesizedVerifier) -> Validation:
-    """Fault-injection validation against the FIXED human-owned suite of the verifier's problem."""
+    """Fault-injection validation against the FIXED suite of the verifier's problem (see `suite_status` for
+    whether a human approved it)."""
     suite = SUITES.get(verifier.problem)
     if suite is None or suite.problem != verifier.problem:
-        return Validation(verifier.hash(), None, (), (), (f"no human-owned fault suite for {verifier.problem!r}",))
+        return Validation(verifier.hash(), None, (), (), (f"no fault suite for {verifier.problem!r}",))
     errors = []
     for half in ("public_golden", "sealed_golden"):
         if len(getattr(suite, half)) < C.SYNTH_MIN_GOLDEN_PER_HALF:
