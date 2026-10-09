@@ -224,12 +224,15 @@ def test_v1_backtracking_freezes_every_answer_and_restores_parents_byte_exactly(
         assert man["files"]["solution.py"]["blob"] == n.code_hash, n.id
     events = _events(store, s)
     checkouts = [e for e in events if e["op"] == "checkout"]
-    # h_noise crashed, its unchanged re-run was refused, the node died: the loop backtracked to the root's snapshot
-    # before the next option ran (logged), never continuing from the dead branch's workspace
     assert checkouts and all(e["snapshot"] == tree.node(e["node"]).snapshot for e in checkouts)
-    dead = next(a["tree_node"] for a in s["attempts"] if a.get("tree_refused") == "REPAIR_UNLEDGERED")
-    i_dead = max(i for i, e in enumerate(events) if e.get("node") == dead)
-    assert any(e["op"] == "checkout" and e["node"] == "root" for e in events[i_dead:])
+    # every dead branch (a node that ran and is not the incumbent: here the non-improving refinements) was
+    # backtracked to its parent's snapshot right after its last run, never left as the live workspace
+    best = s["best"]["tree_node"]
+    dead = [n for n in tree.nodes.values() if n.id not in ("root", best) and n.attempts]
+    assert dead
+    for n in dead:
+        last = max(i for i, e in enumerate(events) if e.get("node") == n.id and e["op"] in ("attempt", "abandon"))
+        assert any(e["op"] == "checkout" and e["node"] == n.parent for e in events[last:]), n.id
     assert s["certificate"]["label"] == "CERTIFIED-INTERNAL" and s["audit"]["passed"], s["audit"]
 
 
@@ -315,7 +318,8 @@ def test_v1_curriculum_moves_on_only_after_dev_racing_shows_a_plateau(store, tmp
     assert not [e for e in events if e["op"] == "refused" and e["code"] == "CURRICULUM_ORDER"]
 
 
-KNN_NEAR = KNN_RADIUS.replace("def knn(x, k=15):", "def knn(x, k=25):")  # a near-twin rival: same idea, k differs
+# a near rival: same idea, another k; it differs from k=15 on some rows in both directions, so neither wins dev racing
+KNN_NEAR = KNN_RADIUS.replace("def knn(x, k=15):", "def knn(x, k=9):")
 
 
 def test_v1_revival_lets_a_dead_end_incumbent_be_refined_only_when_the_flag_is_on(store, tmp_path, rings_task,  # noqa: F811
@@ -324,11 +328,11 @@ def test_v1_revival_lets_a_dead_end_incumbent_be_refined_only_when_the_flag_is_o
         text = req.messages[-1].content
         if "Propose 5 DISTINCT hypotheses" in text:
             return json.dumps({"hypotheses": [{"id": "h_a", "idea": "radius kNN k=15", "rationale": "rings"},
-                                              {"id": "h_b", "idea": "radius kNN k=25", "rationale": "rings"}]})
+                                              {"id": "h_b", "idea": "radius kNN k=9", "rationale": "rings"}]})
         if "Rank ALL of these hypotheses" in text:
             return json.dumps({"ranking": ["h_a", "h_b"]})
         if "Implement this hypothesis" in text:
-            return json.dumps({"code": KNN_NEAR if "k=25" in text else KNN_RADIUS, "notes": "knn"})
+            return json.dumps({"code": KNN_NEAR if "k=9" in text else KNN_RADIUS, "notes": "knn"})
         return scripted_llm(req)
 
     res = _run(_spec(V1, {}, {"revive": True}), store, tmp_path, MockBackend(llm), monkeypatch)
@@ -353,11 +357,11 @@ def test_v1_without_the_revive_flag_the_same_dead_end_is_not_refined(store, tmp_
         text = req.messages[-1].content
         if "Propose 5 DISTINCT hypotheses" in text:
             return json.dumps({"hypotheses": [{"id": "h_a", "idea": "radius kNN k=15", "rationale": "rings"},
-                                              {"id": "h_b", "idea": "radius kNN k=25", "rationale": "rings"}]})
+                                              {"id": "h_b", "idea": "radius kNN k=9", "rationale": "rings"}]})
         if "Rank ALL of these hypotheses" in text:
             return json.dumps({"ranking": ["h_a", "h_b"]})
         if "Implement this hypothesis" in text:
-            return json.dumps({"code": KNN_NEAR if "k=25" in text else KNN_RADIUS, "notes": "knn"})
+            return json.dumps({"code": KNN_NEAR if "k=9" in text else KNN_RADIUS, "notes": "knn"})
         return scripted_llm(req)
 
     res = _run(_spec(V1), store, tmp_path, MockBackend(llm), monkeypatch)
