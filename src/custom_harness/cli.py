@@ -242,15 +242,23 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
         print(json.dumps({"reproduced": False, "refused": "artifacts: " + "; ".join(arts.fatal[:10]),
                           "artifacts": arts.to_json()}, indent=1))
         return 1
+    roots = [Path(r) for r in getattr(a, "artifact_root", None) or []]
+
+    def local(sha: str) -> bytes | None:  # a large artifact the bundle lists but does not carry: this machine's copy
+        for f in [store.blobs._path(sha), *(r / sha for r in roots)]:
+            if f.is_file():
+                return f.read_bytes()
+        return None
     try:
-        report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
+        report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory), artifact_source=local)
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
         print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
         return 1
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems, "artifacts": arts.to_json()}, indent=1))
+                      "problems": report.problems, "missing_artifacts": report.missing_artifacts,
+                      "artifacts": arts.to_json()}, indent=1))
     return 0 if report.reproduced else 1
 
 

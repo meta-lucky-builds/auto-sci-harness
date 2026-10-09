@@ -62,6 +62,7 @@ class Code(StrEnum):
     K3_REPLAY_DIFFERS = "K3_REPLAY_DIFFERS"
     K3_ADAPTER_CHECK = "K3_ADAPTER_CHECK"  # an approved adapter's exact checker rejected the certificate
     K3_INPUTS = "K3_INPUTS"
+    K3_NONINTERFERENCE = "K3_NONINTERFERENCE"  # §16.5.4: decisions depend on a declared copy of the truth
     # K4 statistically valid procedure
     K4_NO_RECORDS = "K4_NO_RECORDS"
     K4_OUTSIDE_PLAN = "K4_OUTSIDE_PLAN"

@@ -26,6 +26,7 @@ from ..records import EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..verify import leak
 from ..verify import metrics as M
+from ..verify import noninterference as ni
 from ..verify.stats import Interval, mean_t_interval, paired_example_interval
 from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
@@ -491,10 +492,47 @@ def k3_reproduced(ctx: Context) -> CheckResult:
         if failure is not None:
             reasons.append(failure)
             break
+    if not reasons:
+        for eid, rec in chosen:
+            reasons += _noninterference(ctx, eid, rec, obs)
     obs.append(f"re-executed {done} time(s) over {len(chosen)} record(s) ({plan.reproduce}); "
                f"zero-failure demonstration: {need} clean replay(s) needed for failure rate <= {eps:g} at "
                f"confidence {1 - beta:g} (assumes independent replays)")
     return _result(reasons, obs)
+
+
+def truth_copies(ledger: Ledger, target: str) -> dict[tuple[str, str], list[str]]:
+    """§16.5.4: the declared agent-reachable copies of `target`'s truth: (dataset id, public file) -> label columns."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for e in ledger.entries("truth_copy"):
+        if e.body.get("target") == target:
+            key = (str(e.body.get("dataset_id")), str(e.body.get("file")))
+            out.setdefault(key, []).append(str(e.body.get("column")))
+    return out
+
+
+def _noninterference(ctx: Context, eid: str, rec: ExecRecord, obs: list[str]) -> list[str]:
+    """§16.5.4 (invariant 18), a required K3 sub-check when the record's inputs hold a declared copy of its target's
+    truth: re-run with every declared copy flipped, then constant, and compare DECISIONS with the stored production
+    output (McNemar fallback for nondeterministic programs). Any irregularity fails closed."""
+    declared = truth_copies(ctx.ledger, rec.target)
+    copies = [ni.TruthCopy(role, col) for role, ref in sorted(rec.inputs.items())
+              for col in declared.get((ref.dataset_id, ref.file), [])]
+    if not copies:
+        return []
+    where = f"non-interference of {rec.arm} seed {rec.seed} on {rec.target}"
+    run_inputs = getattr(ctx.replayer, "run_inputs", None)
+    if run_inputs is None:
+        return [R(Code.K3_NONINTERFERENCE, f"{where}: the replayer cannot replace inputs (fail closed)")]
+    files = {c.name: ctx.vault.read_public(rec.inputs[c.name].dataset_id, rec.inputs[c.name].file) for c in copies}
+    try:
+        rep = ni.replay_noninterference(lambda fs: run_inputs(rec, ctx.vault, fs), files, copies, ctx.preds[eid],
+                                        regression=rec.metric in ("rmse", "mae"))
+    except (ExecutionError, VaultError, OSError) as e:
+        return [R(Code.K3_NONINTERFERENCE, f"{where} failed: {exception_name(e)}")]
+    obs.append(f"{where}: {rep.summary()}")
+    return [] if rep.ok else [R(Code.K3_NONINTERFERENCE, f"{where}: {rep.mode}, "
+                                                         f"{','.join(r.value for r in rep.reasons)}")]
 
 
 def _replay_once(ctx: Context, eid: str, rec: ExecRecord) -> str | None:

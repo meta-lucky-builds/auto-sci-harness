@@ -471,3 +471,22 @@ findings:
             "tests/test_kernel_dupkeys.py::test_bundle_manifest_with_a_duplicated_key_is_refused"]
     museum: redteam/museum/JSON-DUP-KERNEL.patch
     status: fixed
+  - id: ALPHA-ORDER
+    title: on an alpha-account target K4 multiplied the slot level by k/N at certify time, so two identical paired
+      arms got different levels depending on which was registered and certified first (R2-2 under Kernel 1.2)
+    invariant: "§10 inv. 17 (verdict terms fixed at registration); §16.4 per-target alpha-accounts"
+    capability: A1
+    tests: ["tests/test_kernel_alpha_slots.py::test_identical_arms_get_identical_fixed_levels_in_either_order",
+            "tests/test_kernel_alpha_slots.py::test_releases_are_paid_in_slots_and_exhaustion_retires_the_target"]
+    museum: redteam/museum/ALPHA-ORDER.patch
+    status: fixed
+  - id: SCOPE-STATEMENT
+    title: a computational claim worded as a physical one ("this circuit will work when built", scope "holds_in
+      physical world") was CERTIFIED-EXACT with that prose (reported by s3-domain, verified on 4e676e9)
+    invariant: "§10 inv. 14 (no claim above its evidence class)"
+    capability: A0
+    tests: ["tests/test_kernel_scope_statement.py::test_lp_claim_worded_as_a_physical_claim_is_not_certified",
+            "tests/test_kernel_scope_statement.py::test_circuit_shaped_claim_worded_as_a_physical_claim_is_not_certified",
+            "tests/test_kernel_scope_statement.py::test_an_adapter_without_a_scope_rendering_fails_k1"]
+    museum: redteam/museum/SCOPE-STATEMENT.patch
+    status: fixed

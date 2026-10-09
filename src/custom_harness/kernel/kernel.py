@@ -189,6 +189,19 @@ class Kernel:
         return self.ledger.append("mint", {"dataset_id": dataset_id, "frozen_hash": frozen_hash, "beacon": beacon,
                                            "task_id": task_id})
 
+    def declare_truth_copy(self, target: str, dataset_id: str, file: str, column: str, declarer: str) -> Entry:
+        """Trusted host code (task registration) declares that public file `dataset_id/file`, column `column`, carries
+        a copy of `target`'s held-out truth (possibly encoded) that a program could receive. K3 then requires the
+        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks."""
+        rec = self.vault.dataset(dataset_id)
+        if target not in self.vault.datasets() or file not in rec.files or rec.files[file].private:
+            raise KernelError("a truth copy is a PUBLIC file of a registered dataset, for a registered target")
+        header = self.store.blobs.get(rec.files[file].blob).decode("utf-8", errors="replace").splitlines()[:1]
+        if not declarer.strip() or not header or column not in header[0].split(","):
+            raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
+        return self.ledger.append("truth_copy", {"target": target, "dataset_id": dataset_id, "file": file,
+                                                 "column": column, "declarer": declarer})
+
     def releases(self, target_dataset_id: str) -> list[Entry]:
         """Releases on the target and on every target sharing its held-out examples (the K4 family)."""
         related = related_targets(self.vault, target_dataset_id)

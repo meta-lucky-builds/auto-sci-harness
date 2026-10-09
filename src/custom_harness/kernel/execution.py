@@ -18,7 +18,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, SerializerFunctionWrapHandler, model_serializer
 
+from ..errors import InfraError
 from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
+from ..sandbox.hermetic import CPU_WALL_BACKSTOP
 from .vault import Vault
 
 DEFAULT_ARGV = ("{python}", "{entrypoint}", "--train", "{train}", "--test", "{test}", "--out", "{out}",
@@ -79,9 +81,13 @@ def parse_predictions(data: bytes) -> list[str]:
 
 
 def run_program(sandbox: Sandbox, *, code: bytes, entrypoint: str, argv: tuple[str, ...],
-                inputs: dict[str, tuple[str, bytes]], seed: int, timeout_s: float) -> tuple[list[str] | None, str]:
+                inputs: dict[str, tuple[str, bytes]], seed: int, timeout_s: float,
+                cpu_s: float | None = None) -> tuple[list[str] | None, str]:
     """Run one program in a sandbox workspace. Returns (predictions or None, diagnostic text).
-    Every host-side workspace path goes through safe_path (agent code may plant links)."""
+    Every host-side workspace path goes through safe_path (agent code may plant links).
+    `cpu_s` (GOAL §16.8): charge CPU seconds instead of wall time (wall backstop CPU_WALL_BACKSTOP x cpu_s). A wall
+    backstop that fired on a contended host, or whose contention witness is unavailable, is INFRA (InfraError: the
+    caller retries, no verdict), never the program's failure; one on an idle host is the program's (it slept)."""
     ws = sandbox.workspace
     safe_path(ws, entrypoint).write_bytes(code)
     paths: dict[str, str] = {}
@@ -100,7 +106,13 @@ def run_program(sandbox: Sandbox, *, code: bytes, entrypoint: str, argv: tuple[s
         cmd = [part.format(**values) for part in argv]
     except (KeyError, IndexError) as e:
         raise ExecutionError(f"argv template refers to an unknown placeholder: {e}") from e
-    res = sandbox.exec(cmd, timeout_s=timeout_s)
+    if cpu_s is None:
+        res = sandbox.exec(cmd, timeout_s=timeout_s)
+    else:
+        res = sandbox.exec(cmd, timeout_s=CPU_WALL_BACKSTOP * cpu_s, cpu_s=cpu_s)
+        if res.timed_out and not res.cpu_exceeded and res.contended is not False:
+            raise InfraError(f"wall backstop without a CPU overrun (contended={res.contended}): host load, not the "
+                             f"program", transient=True)
     diag = f"rc={res.returncode} timed_out={res.timed_out} stderr_tail={res.stderr[-1500:]!r}"
     if res.returncode != 0:
         return None, diag
@@ -126,16 +138,23 @@ class SandboxReplayer:
         self.nonce = secrets.token_hex(4)
 
     def replay(self, record: ExecRecord, vault: Vault) -> list[str] | None:
+        return self.run_inputs(record, vault, {})
+
+    def run_inputs(self, record: ExecRecord, vault: Vault, replace: dict[str, bytes]) -> list[str] | None:
+        """A replay with the bytes of the input roles in `replace` swapped (§16.5.4 non-interference worlds)."""
         self.calls += 1
         inputs: dict[str, tuple[str, bytes]] = {}
         for role, ref in record.inputs.items():
             data = vault.read_public(ref.dataset_id, ref.file)
             if vault.store.blobs.put(data) != ref.blob:
                 raise ExecutionError(f"input {role} ({ref.dataset_id}/{ref.file}) no longer matches the record")
-            inputs[role] = (ref.file, data)
+            inputs[role] = (ref.file, replace.get(role, data))
         sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.nonce}-"
                                        f"{self.calls}")
+        timeout = float(record.limits.get("timeout_s", 900))
+        # §16.8: Kernel replays are charged CPU time (the recorded CPU limit, else the recorded wall limit as CPU), so
+        # a loaded machine raises InfraError (no certificate, retry) instead of failing K3 as a policy verdict
         preds, _ = run_program(sandbox, code=vault.store.blobs.get(record.artifact_hash), entrypoint=record.entrypoint,
-                               argv=record.argv, inputs=inputs, seed=record.seed,
-                               timeout_s=float(record.limits.get("timeout_s", 900)))
+                               argv=record.argv, inputs=inputs, seed=record.seed, timeout_s=timeout,
+                               cpu_s=float(record.limits.get("cpu_s", timeout)))
         return preds
