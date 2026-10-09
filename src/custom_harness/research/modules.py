@@ -777,6 +777,12 @@ def ensemble(state, params, ctx):
     sign = 1.0 if task.higher_is_better else -1.0
     others = sorted((a for a in _selectable(attempts) if a["n"] != best["n"]),
                     key=lambda a: (-sign * a["dev_score"], a["n"]))
+    if params.get("members") == "diversity":  # GOAL §8.11: members only from the error-decorrelated set
+        div = state.get("diversity")
+        if not (isinstance(div, dict) and div.get("enabled") and isinstance(div.get("kept"), list)):
+            return {"ensemble": {**rec, "reason": "members: diversity, but no diversity record (fail closed)"}}
+        rec["diversity_excluded"] = [a["n"] for a in others if a["n"] not in div["kept"]]
+        others = [a for a in others if a["n"] in div["kept"]]
     members = distinct_members([best, *others], ctx, ENSEMBLE_SIZE)
     rec["members"] = [a["n"] for a in members]
     if len(members) < ENSEMBLE_SIZE or members[0] is not best:

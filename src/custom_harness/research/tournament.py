@@ -327,6 +327,31 @@ def run_tournament(pool: Sequence[Hyp], *, mode: str = "kway", judge_k: JudgeK |
                        "Bradley-Terry with a position term over both-order pairs") + "; Wald intervals"}
 
 
+# ---------------------------------------------------------------- execution outranks the judge (GOAL §16.8, §1.1)
+def constrain_to_execution(llm_order: Sequence[str], exec_scores: Mapping[str, float | None], *,
+                           higher_is_better: bool) -> list[str]:
+    """An LLM ranking constrained by execution: it may only DOWNGRADE, never override.
+
+    `llm_order` is a permutation of the candidate ids; `exec_scores` holds the dev score of every candidate that has
+    EXECUTION evidence (a missing or None score = not executed / failed: no evidence). Rule: the positions the LLM gave
+    to executed candidates are refilled with those candidates sorted by their execution score (best first; equal
+    scores keep the LLM's relative order). Hence for any two executed candidates a, b with a strictly better dev
+    score, a comes before b whatever the judge said; the judge decides only (i) the order of candidates with equal
+    execution scores and (ii) where unexecuted candidates sit, which may push an executed candidate later (a
+    downgrade) but never lifts it above a candidate that executes better. Deterministic."""
+    order = list(llm_order)
+    if len(set(order)) != len(order):
+        raise ValueError("the LLM ranking repeats an id")
+    sign = 1.0 if higher_is_better else -1.0
+    executed = [i for i in order if exec_scores.get(i) is not None]
+    pos = {i: k for k, i in enumerate(order)}
+    ranked = sorted(executed, key=lambda i: (-sign * float(exec_scores[i] or 0.0), pos[i]))
+    slots = [k for k, i in enumerate(order) if exec_scores.get(i) is not None]
+    for k, i in zip(slots, ranked, strict=True):
+        order[k] = i
+    return order
+
+
 # ---------------------------------------------------------------- the `research.tournament` module body
 def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -> dict[str, Any]:
     """Body of `research.tournament` (registered in research/modules.py, which delegates here). Defaults reproduce

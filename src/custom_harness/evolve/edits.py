@@ -87,7 +87,11 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "figures",
                                   # critic-answer check and recall (research/critic_answers.py, research/recall.py;
                                   # tests/test_evolve_hardening.py checks these keys are really written)
-                                  "critic_answers", "critic_evidence", "recalled", "recall_log"})
+                                  "critic_answers", "critic_evidence", "recalled", "recall_log",
+                                  # hypothesis front (research/front.py): what admission enforces, its record, the
+                                  # ranked problems, the run's literature pool and the diversity record
+                                  "hypothesis_front", "hypothesis_admission", "problems", "literature_pool",
+                                  "diversity"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
@@ -99,7 +103,9 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
     "research.replica_dev", "research.report", "research.audit",
     # the critic-answer check and recall write reserved keys (ids checked against the registry by a test)
-    "research.critic_evidence", "research.check_critic_answers", "research.recall"})
+    "research.critic_evidence", "research.check_critic_answers", "research.recall",
+    # hypothesis front (research/front.py)
+    "research.formulate", "research.hypothesis_front", "research.admit_rank", "research.diversity_select"})
 # Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
 # critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
 PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
