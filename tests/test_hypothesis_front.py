@@ -183,7 +183,8 @@ def test_the_ensemble_draws_members_only_from_the_decorrelated_set(tmp_path):
 
 # ---------------------------------------------------------------- 3. quotas, inspiration, mechanisms: admission
 FRONT = {"enabled": True, "quota": {"topics": ["model family", "feature engineering"], "cap": 1, "caps": {}},
-         "inspiration": {"source_area": "ecology"}, "min_inspired": 1, "min_mechanisms": 1}
+         "inspiration": {"source_area": "ecology"}, "min_inspired": 1, "min_mechanisms": 1,
+         "mechanisms": [{"id": "mech-a", "cites": [RETRIEVED_A], "quote": "q", "title": "t"}]}
 
 
 def test_a_quota_violation_is_rejected_not_logged():
@@ -213,6 +214,57 @@ def test_a_set_without_forced_inspiration_or_cited_mechanism_is_rejected():
     assert [h["id"] for h in kept] == ["h1"] and rec["mechanisms_waived"] is True
     with pytest.raises(AdmissionRefused, match="no hypothesis"):
         admit([{"id": "h9", "topic": "nope"}], {**FRONT, "min_inspired": 0, "min_mechanisms": 0}, set())
+
+
+def test_only_a_shown_mechanism_satisfies_the_mechanism_quota():
+    """Review M2: citing a retrieved paper that yielded no shown mechanism is admissible but is not using one."""
+    from custom_harness.research.hypotheses import AdmissionRefused, admit
+    other = [{"id": "h1", "topic": "model family", "inspired_by": "ecology", "mechanism_cites": [RETRIEVED_B]}]
+    with pytest.raises(AdmissionRefused, match="mechanism"):
+        admit(other, FRONT, {RETRIEVED_A, RETRIEVED_B})
+    kept, rec = admit(other + [{"id": "h2", "topic": "feature engineering", "mechanism_cites": [RETRIEVED_A]}],
+                      FRONT, {RETRIEVED_A, RETRIEVED_B})
+    assert rec["mechanism_citing"] == 1 and [h["id"] for h in kept] == ["h1", "h2"]
+
+
+def test_a_node_with_other_queries_does_not_reuse_the_cached_pool():
+    """Review M1: the pool cache is keyed by the declared search, not only by snapshot and session."""
+    from custom_harness.research.front import literature_pool
+    cached = {"snapshot": None, "session": "r1", "queries": [], "limit": 5, "sources": None,
+              "records": [{"ids": ["doi:10.5555/stale"], "title": "stale", "abstract": "stale"}], "errors": []}
+    ctx = SimpleNamespace(run_id="r1")
+    assert literature_pool({"input": {}, "literature_pool": cached}, {}, ctx) is cached
+    fresh = literature_pool({"input": {}, "literature_pool": cached}, {"literature_queries": [Q]}, ctx)
+    assert fresh is not cached and fresh["queries"] == [Q] and fresh["records"] == []
+
+
+def test_baseline_predictions_are_mapped_from_fold_order_to_file_order(tmp_path):
+    """Review L2: the scan pairs each file row with ITS baseline prediction (checked through the folds' valid_x
+    bytes, a channel independent of the folds' row indices), and a label mismatch refuses the mapping."""
+    import csv
+    import io
+
+    from custom_harness.research.data import cv_folds
+    from custom_harness.research.formulator import FormulatorError
+    from custom_harness.research.front import baseline_in_file_order
+    n = 37
+    body = "x,y\n" + "".join(f"{i},{'a' if (i * 7) % 3 else 'b'}\n" for i in range(n))
+    p = tmp_path / "train.csv"
+    p.write_text(body, encoding="utf-8")
+    folds = cv_folds(p, "y", 5, 3, True)
+    oof = [row[0] for f in folds for row in list(csv.reader(io.StringIO(f["valid_x"].decode())))[1:]]
+    store = EvidenceStore(tmp_path / "s")
+    state = {"task": {"id": "t", "title": "t", "description": "d", "metric": "accuracy", "target_column": "y"},
+             "dev_scheme": {"k": 5, "seed": 3, "stratified": True},
+             "_private_dev_labels_ref": store.blobs.put_json(
+                 {"private_dev_labels": [y for f in folds for y in f["labels"]]}),
+             "baseline_dev_preds_ref": store.blobs.put_json(oof)}
+    ctx = SimpleNamespace(store=store)
+    assert oof != [str(i) for i in range(n)]  # fold order really differs from file order
+    assert baseline_in_file_order(state, ctx, body.encode()) == [str(i) for i in range(n)]
+    bad = dict(state, _private_dev_labels_ref=store.blobs.put_json({"private_dev_labels": ["a"] * n}))
+    with pytest.raises(FormulatorError, match="mapping refused"):
+        baseline_in_file_order(bad, ctx, body.encode())
 
 
 def test_the_inspiration_distance_is_forced_to_three():
@@ -362,6 +414,11 @@ def test_admit_rank_tournament_cannot_lift_a_worse_executed_hypothesis():
     # default: no tournament, no call, proposer order
     calls.clear()
     assert admit_rank(state, {}, ctx)["ranking"]["order"] == ["h_a", "h_b", "h_c"] and calls == []
+    # review M3: tournament parameters that would add (operators) or delete (max_pool) hypotheses are refused
+    for bad in ({"operators": ["combine"]}, {"generations": 2}, {"max_pool": 2}):
+        with pytest.raises(ValueError, match="may only reorder"):
+            admit_rank(state, {"tournament": {"rounds": 1, **bad}}, ctx)
+    assert calls == []
 
 
 def test_v2_opt_in_tournament_orders_the_queue_but_execution_picks_the_incumbent(store, tmp_path, rings_task,  # noqa: F811
@@ -396,6 +453,17 @@ def test_ranking_and_front_steps_are_relays_not_citable_evidence(module):
                      output={"queue": [{"id": "h1", "idea": "model-written text"}]}, started_at=1.0, ended_at=2.0)
     v = vet_step(step, before_index=9, private_reads=[])
     assert not v.ok and v.code == NOT_EVIDENCE
+
+
+def test_the_front_nodes_are_pinned_against_evolution():
+    """Review M5: an edit cannot switch the front, the Formulator or the tournament opt-in by a parameter."""
+    from custom_harness.evolve import Edit, EditOp, EditRejected, EditType, apply_edit
+    spec = HarnessSpec.model_validate(yaml.safe_load(V2.read_text(encoding="utf-8")))
+    for path, value in (("/nodes/front/params/enabled", True), ("/nodes/front/params/cap", 9),
+                        ("/nodes/formulate/params/enabled", True), ("/nodes/rank/params/tournament", {"rounds": 3})):
+        with pytest.raises(EditRejected, match="human-only"):
+            apply_edit(spec, Edit(type=EditType.PARAMS, ops=[EditOp(op="replace", path=path, value=value)],
+                                  rationale="weaken the front"))
 
 
 def test_front_state_is_reserved_for_trusted_modules():

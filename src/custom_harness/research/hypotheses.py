@@ -301,7 +301,7 @@ def admit(hypotheses: Sequence[Mapping[str, Any]], front: Mapping[str, Any], ret
       2. its `topic` must be declared, and the topic's cap not yet reached (`apply_topic_quota`).
     For the set (raises AdmissionRefused, so the whole set is rejected):
       3. at least `min_inspired` admitted hypotheses set `inspired_by` to the forced distance-3 source area;
-      4. at least `min_mechanisms` admitted hypotheses cite a retrieved mechanism (0 when no mechanism was mined:
+      4. at least `min_mechanisms` admitted hypotheses cite the paper of a SHOWN mechanism (0 when none was mined:
          the waiver is recorded);
       5. at least one hypothesis is admitted."""
     quota = TopicQuota.model_validate(front["quota"])
@@ -322,7 +322,10 @@ def admit(hypotheses: Sequence[Mapping[str, Any]], front: Mapping[str, Any], ret
     rejected.extend(dropped)
     source = _norm((front.get("inspiration") or {}).get("source_area"))
     n_inspired = sum(1 for h in kept if source is not None and _norm(h.get("inspired_by")) == source)
-    n_mech = sum(1 for h in kept if _cites(h))
+    # a hypothesis counts toward the mechanism quota only if it cites a SHOWN mechanism's paper (citing another
+    # retrieved paper is allowed, but is not "using a literature-mined mechanism")
+    shown = {i for m in front.get("mechanisms") or () for i in m.get("cites") or ()}
+    n_mech = sum(1 for h in kept if set(_cites(h) or ()) & shown)
     min_inspired = int(front.get("min_inspired", 0))
     min_mech = int(front.get("min_mechanisms", 0))
     record = {"enabled": True, "admitted": [h.get("id") for h in kept], "rejected": rejected,

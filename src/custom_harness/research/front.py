@@ -34,6 +34,7 @@ from .formulator import (
     CellGrammar,
     FeatureRule,
     FormulatorError,
+    check_dev_public,
     formulate_from_vault,
     mine_literature,
     rank_problems,
@@ -63,17 +64,22 @@ def _lit_store() -> Any:
     return SnapshotStore(data_dir() / "literature")
 
 
-def retrieved_ids(session: str | None) -> frozenset[str]:
-    """The ids of this run's retrieval log, RE-DERIVED from the stored responses (RetrievalLog.entries verifies every
-    entry). No session, or any integrity error: the empty set (fail closed: nothing counts as retrieved)."""
+def retrieved_ids_checked(session: str | None) -> tuple[frozenset[str], str | None]:
+    """(ids of this run's retrieval log, RE-DERIVED from the stored responses (RetrievalLog.entries verifies every
+    entry), error). No session: (empty, None). Any integrity error: (empty, the error): fail closed, nothing counts
+    as retrieved, and the caller can say WHY (an integrity failure is not "nothing retrieved")."""
     from ..literature.http import LiteratureError
     from ..literature.retrieval import RetrievalLog
     if not session:
-        return frozenset()
+        return frozenset(), None
     try:
-        return RetrievalLog(_lit_store(), session).retrieved_ids()
-    except (LiteratureError, OSError, ValueError):
-        return frozenset()
+        return RetrievalLog(_lit_store(), session).retrieved_ids(), None
+    except (LiteratureError, OSError, ValueError) as e:
+        return frozenset(), f"retrieval log integrity error (nothing counts as retrieved): {e}"[:300]
+
+
+def retrieved_ids(session: str | None) -> frozenset[str]:
+    return retrieved_ids_checked(session)[0]
 
 
 def literature_pool(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
@@ -83,12 +89,14 @@ def literature_pool(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCo
     snapshot's date (`text_as_of`). Every failure is recorded and leaves the pool empty (fail closed)."""
     snap = (state.get("input") or {}).get("literature_snapshot")
     snap = snap if isinstance(snap, str) and snap else None
-    cached = state.get("literature_pool")
-    if isinstance(cached, dict) and cached.get("snapshot") == snap and cached.get("session") == ctx.run_id:
-        return cached
     queries = [q for q in (params.get("literature_queries") or []) if isinstance(q, str) and q.strip()]
-    pool: dict[str, Any] = {"snapshot": snap, "session": ctx.run_id, "queries": queries, "records": [],
-                            "errors": [], "as_of": None}
+    limit = int(params.get("literature_limit", 5))
+    sources = sorted(params.get("literature_sources") or []) or None
+    key = {"snapshot": snap, "session": ctx.run_id, "queries": queries, "limit": limit, "sources": sources}
+    cached = state.get("literature_pool")
+    if isinstance(cached, dict) and all(cached.get(k) == v for k, v in key.items()):
+        return cached  # the SAME declared search already ran in this run (a node with other queries searches anew)
+    pool: dict[str, Any] = {**key, "records": [], "errors": [], "as_of": None}
     if snap is None:
         pool["note"] = "no frozen literature snapshot in the run input (literature_snapshot): nothing retrieved"
         return pool
@@ -102,9 +110,8 @@ def literature_pool(state: dict[str, Any], params: dict[str, Any], ctx: ModuleCo
     try:
         store = _lit_store()
         client = offline_client(store, snap)
-        loop = RetrievalLoop(client, RetrievalLog(store, ctx.run_id), max_rounds=len(queries),
-                             limit=int(params.get("literature_limit", 5)),
-                             sources=params.get("literature_sources") or None)
+        loop = RetrievalLoop(client, RetrievalLog(store, ctx.run_id), max_rounds=len(queries), limit=limit,
+                             sources=sources)
     except (LiteratureError, OSError, ValueError) as e:
         pool["errors"].append(f"snapshot unusable: {e}"[:300])
         return pool
@@ -189,6 +196,7 @@ def formulate(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext)
     try:
         grammar = auto_grammar(state, params)
         ds = state["datasets"]["train"]
+        check_dev_public(kernel.vault, ds, task.train_file)  # the Formulator's guards, BEFORE any byte is read
         preds = baseline_in_file_order(state, ctx, kernel.vault.read_public(ds, task.train_file))
         res = formulate_from_vault(kernel, ds, task.train_file, grammar, metric=task.metric,
                                    baseline_predictions=preds)
@@ -196,10 +204,13 @@ def formulate(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext)
         scan = {"run": True, "grammar_digest": res.grammar_digest, "grammar_seq": res.grammar_seq,
                 "scan_size": res.scan_size, "permutations": res.permutations, "alpha": res.alpha,
                 "threshold": res.threshold, "candidates": len(data_cands)}
-    except FormulatorError as e:
-        notes.append(f"dev anomaly scan not run: {e}")
+    except (FormulatorError, ValueError, KeyError, OSError) as e:  # an optional stage: record, never fail the run
+        notes.append(f"dev anomaly scan not run: {type(e).__name__}: {e}"[:500])
     pool = literature_pool(state, params, ctx)
-    proposals = mine_literature(pool["records"], retrieved_ids(pool["session"] if pool["snapshot"] else None))
+    got, err = retrieved_ids_checked(pool["session"] if pool["snapshot"] else None)
+    if err:
+        notes.append(err)
+    proposals = mine_literature(pool["records"], got)
     ranked = rank_problems(kernel.ledger, proposals, data_cands, data_metric=task.metric)
     top_k = int(params.get("top_k", 5))
     return {"problems": {"enabled": True, "ranked": [r.model_dump(mode="json") for r in ranked[:top_k]],
@@ -245,7 +256,8 @@ def hypothesis_front(state: dict[str, Any], params: dict[str, Any], ctx: ModuleC
     insp = inspiration(str(params.get("task_area", "tabular learning")), seed=int(state.get("_seed", 0)),
                        distance=DEFAULTS.inspiration_distance)
     pool = literature_pool(state, params, ctx)
-    mechs = mine_mechanisms(pool["records"], retrieved_ids(pool["session"] if pool["snapshot"] else None))
+    got, err = retrieved_ids_checked(pool["session"] if pool["snapshot"] else None)
+    mechs = mine_mechanisms(pool["records"], got)
     shown = mechs[:int(params.get("max_mechanisms", 8))]
     front: dict[str, Any] = {
         "enabled": True, "quota": quota.model_dump(mode="json"), "inspiration": insp.model_dump(mode="json"),
@@ -253,7 +265,8 @@ def hypothesis_front(state: dict[str, Any], params: dict[str, Any], ctx: ModuleC
         "mechanisms": [m.model_dump(mode="json") for m in shown],
         "min_mechanisms": max(1, int(params.get("min_mechanisms", 1))) if shown else 0,
         "mechanisms_waived": not shown, "session": pool["session"] if pool["snapshot"] else None,
-        "snapshot": pool["snapshot"], "literature_notes": [pool[k] for k in ("note",) if k in pool] + pool["errors"]}
+        "snapshot": pool["snapshot"],
+        "literature_notes": [pool[k] for k in ("note",) if k in pool] + pool["errors"] + ([err] if err else [])}
     problems = list((state.get("problems") or {}).get("ranked") or [])[:int(params.get("problems_shown", 5))]
     front["prompt"] = _render(front, problems)
     return {"hypothesis_front": front, "literature_pool": pool}
@@ -291,6 +304,11 @@ def admit_rank(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     if not hyps:
         raise AdmissionRefused("no hypothesis to rank")
     t = params.get("tournament")
+    if t and (t.get("operators") or int(t.get("generations", 1)) != 1 or t.get("max_pool") is not None):
+        # Improve-weakest / Combine write NEW hypotheses (never admitted) and pruning DELETES admitted ones on the
+        # judge's say: both would let the LLM do more than reorder. Refused (fail closed).
+        raise ValueError("research_v2's opt-in tournament may only reorder the admitted hypotheses: operators, "
+                         "generations != 1 and max_pool are refused")
     if not t:
         ranking: dict[str, Any] = {"order": [h["id"] for h in hyps],
                                    "method": "execution (dev cross-validation ranks; no tournament call)"}
@@ -299,12 +317,16 @@ def admit_rank(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         out = tournament_module({**state, "hypotheses": {"hypotheses": hyps}}, dict(t), ctx)
         llm_order = list(out["ranking"]["order"])
         by_id = {h["id"]: h for h in out["queue"]}
+        if sorted(llm_order) != sorted(h["id"] for h in hyps):
+            raise ValueError("the tournament changed the set of admitted hypotheses (refused)")
         order = constrain_to_execution(llm_order, _executed_scores(state),
                                        higher_is_better=_task(state).higher_is_better)
         queue = [by_id[i] for i in order]
         ranking = {**out["ranking"], "order": order, "llm_order": llm_order,
-                   "method": f"opt-in tournament ({out['ranking'].get('method')}) ordering the queue only; execution "
-                             "evidence outranks it (it may only downgrade) and dev racing picks the incumbent"}
+                   "method": f"opt-in tournament ({out['ranking'].get('method')}) ordering the queue only. In "
+                             "research_v2 rank runs BEFORE any execution, so the judge decides the try order; it "
+                             "cannot change which candidate becomes the incumbent (dev evidence decides) and, where "
+                             "execution evidence exists, it may only downgrade"}
     return {"ranking": ranking, "queue": queue, "current": None, "hypothesis_admission": admission}
 
 

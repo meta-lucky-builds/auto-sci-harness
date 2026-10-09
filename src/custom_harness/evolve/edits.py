@@ -108,7 +108,9 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.formulate", "research.hypothesis_front", "research.admit_rank", "research.diversity_select"})
 # Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
 # critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
-PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
+# The hypothesis-front nodes of research_v2 (research/front.py) are pinned for the same reason: an edit could switch
+# the quotas or the Formulator off, loosen a cap, or opt in to the (call-costing) tournament by a parameter.
+PINNED_NODES = ("socratic", "critic_evidence", "check_answers", "formulate", "front", "rank")
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 

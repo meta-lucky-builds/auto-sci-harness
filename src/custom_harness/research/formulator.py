@@ -573,15 +573,11 @@ def rank_problems(ledger: Any, proposals: Sequence[ProblemProposal], data_candid
 # ---------------------------------------------------------------- vault entry point
 
 
-def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellGrammar, *,
-                         metric: str | None = None, baseline_predictions: list[str] | None = None,
-                         n_confirm: int | None = None, config: L4Config = DEFAULTS) -> FormulationResult:
-    """Scan one PUBLIC file of a DEV dataset in the vault. Refused, before any byte is fetched: a dataset whose role
-    is not dev; a private file; a file whose bytes equal any file of a held-out dataset. The grammar is committed to
-    the ledger first (`register_artifact`, kind `formulator-grammar`), so the record shows it preceded the scan."""
+def check_dev_public(vault: Any, dataset_id: str, file: str) -> None:
+    """The Formulator's read guards (no byte is fetched): the dataset's role is dev, the file is public, and its
+    bytes equal no held-out file (relabelled held-out data). Raises FormulatorError."""
     from ..kernel import DatasetRole
     from ..kernel.vault import HELD_OUT_ROLES
-    vault = kernel.vault
     rec = vault.dataset(dataset_id)
     if rec.role != DatasetRole.DEV:
         raise FormulatorError(f"{dataset_id!r} has role {rec.role.value!r}: the Formulator scans dev data only")
@@ -593,6 +589,16 @@ def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellG
     held_blobs = {f.blob for d in vault.datasets().values() if d.role in HELD_OUT_ROLES for f in d.files.values()}
     if ref.blob in held_blobs:
         raise FormulatorError(f"{dataset_id}/{file} has the same bytes as a held-out file: refused")
+
+
+def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellGrammar, *,
+                         metric: str | None = None, baseline_predictions: list[str] | None = None,
+                         n_confirm: int | None = None, config: L4Config = DEFAULTS) -> FormulationResult:
+    """Scan one PUBLIC file of a DEV dataset in the vault. Refused, before any byte is fetched: a dataset whose role
+    is not dev; a private file; a file whose bytes equal any file of a held-out dataset. The grammar is committed to
+    the ledger first (`register_artifact`, kind `formulator-grammar`), so the record shows it preceded the scan."""
+    vault = kernel.vault
+    check_dev_public(vault, dataset_id, file)
     body = json.dumps(grammar.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     art = vault.register_artifact(f"formulator-grammar@{grammar.digest()[:16]}", body, "formulator-grammar")
     table = list(csv.reader(io.StringIO(vault.read_public(dataset_id, file).decode("utf-8-sig"), newline="")))
