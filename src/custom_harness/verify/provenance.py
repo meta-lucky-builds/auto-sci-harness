@@ -22,10 +22,13 @@ crossdomain-final.md, E2). Legitimacy is semantic, so the defence is semantic to
 
 Reason codes are a closed set (:data:`REASON_CODES`); they never carry free text or data values.
 
-Ruling store: INTERIM. Rulings live in a hash-chained append-only JSONL file,
-``data_dir()/provenance/rulings.jsonl``, until the Kernel gets a ledger kind for them (requested from workstream
-kstats). The chain detects an edited, reordered or deleted line, but NOT the removal of trailing lines (no anchor
-outside the file); the Kernel ledger kind is the fix for that.
+Ruling store: the Kernel ledger, kind ``feature_ruling`` (:data:`RULING_KIND`). The only writer of a new ruling is
+:func:`record_ruling`, the backend of the HUMAN-only ``chh rule-feature``; every ruling names a non-empty human
+approver. The ledger chain detects an edited, reordered or deleted entry; an external anchor (``chh ledger-anchor``,
+then ``chh feature-screen --anchor FILE``) also detects the removal of trailing entries, which the earlier interim
+JSONL store (``data_dir()/provenance/rulings.jsonl``, :func:`rulings_path`) could not. That file is no longer read by
+the gate; :func:`migrate_interim_rulings` (HUMAN-run ``chh feature-rulings-migrate``) imports it once, only if its
+chain verifies, and leaves it in place untouched (docs/feature_rulings_ledger.md).
 """
 
 from __future__ import annotations
@@ -45,6 +48,8 @@ from typing import Any
 import yaml
 
 from ..config import data_dir
+from ..kernel.ledger import KINDS, Ledger, check_anchors, verify_chain
+from ..store.evidence import EvidenceStore
 from .metrics import CLASSIFICATION
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -105,7 +110,9 @@ REASON_CODES = frozenset({
     GATE_REPORT_MISMATCH,
 })
 
-GENESIS = "0" * 64
+GENESIS = "0" * 64  # first `prev` of the interim JSONL chain (migration only)
+RULING_KIND = "feature_ruling"  # Kernel ledger kind (kernel/ledger.py KINDS)
+RULING_FIELDS = ("data_digest", "feature", "tags_hash", "report_hash", "ruling", "approver", "note", "timestamp")
 
 
 class ProvenanceError(ValueError):
@@ -365,7 +372,7 @@ def report_body_hash(report: Mapping[str, Any]) -> str:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# rulings (INTERIM hash-chained JSONL store; see module docstring)
+# rulings (Kernel ledger kind `feature_ruling`; see module docstring)
 # ----------------------------------------------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -374,7 +381,60 @@ class RulingSet:
     chain_ok: bool = True
 
 
+def _has_human_approver(r: Mapping[str, Any]) -> bool:
+    """A ruling counts as a human's only when it names one: a non-empty, non-whitespace string approver."""
+    approver = r.get("approver")
+    return isinstance(approver, str) and approver.strip() != ""
+
+
+def load_rulings(store: EvidenceStore, *, anchors: Sequence[Path] = ()) -> RulingSet:
+    """Every ``feature_ruling`` body in the Kernel ledger. ``chain_ok`` is False (fail closed) when the full ledger
+    chain does not verify, a body is not strict JSON, or any anchor file is unreadable or no longer matches the
+    chain (the anchor is what detects removed trailing entries). Bodies are returned as written; :func:`gate`
+    ignores a ``legitimate`` ruling without a human approver."""
+    try:
+        entries = Ledger(store).entries()
+    except ValueError:  # a body that is not (strict) JSON: the ledger was written outside Ledger.append
+        return RulingSet([], False)
+    problems = verify_chain(entries, full=True)
+    for anchor in anchors:
+        try:
+            problems += check_anchors(entries, Path(anchor))
+        except OSError:
+            problems.append("anchor file unreadable")
+    rulings = [dict(e.body) for e in entries if e.kind == RULING_KIND and isinstance(e.body, dict)]
+    return RulingSet(rulings, not problems)
+
+
+def record_ruling(task_dir: Path, feature: str, ruling: str, approver: str, note: str = "", *,
+                  store: EvidenceStore, anchors: Sequence[Path] = ()) -> dict[str, Any]:
+    """Backend of the HUMAN-only ``chh rule-feature`` command; that command is the way a ruling is recorded.
+    Appends a ``feature_ruling`` Kernel ledger entry bound to the CURRENT screen report of ``task_dir`` (data
+    digest, tags hash, report hash) and naming the human approver. Refuses an empty approver, a ruling outside
+    the closed set, an item the screen does not route, and a ledger whose chain (or any given anchor) fails."""
+    if not isinstance(approver, str) or not approver.strip():
+        raise ProvenanceError("a ruling needs a named human approver")
+    if ruling not in RULINGS:
+        raise ProvenanceError("ruling must be 'legitimate' or 'leak'")
+    report = screen(Path(task_dir))
+    if feature not in report["routed"]:
+        raise ProvenanceError(f"{feature!r} is not routed to a human (refused features cannot be ruled legitimate)")
+    if not load_rulings(store, anchors=anchors).chain_ok:
+        raise ProvenanceError("the ledger chain is tampered (or an anchor does not match); refusing to append")
+    body: dict[str, Any] = {
+        "data_digest": report["data_digest"], "feature": feature, "tags_hash": report["tags_hash"],
+        "report_hash": report["report_hash"], "ruling": ruling, "approver": approver.strip(), "note": str(note),
+        "timestamp": datetime.now(UTC).isoformat(), "recorded_by": "chh rule-feature",
+    }
+    e = Ledger(store).append(RULING_KIND, body)
+    return {**e.body, "seq": e.seq, "hash": e.hash}
+
+
+# ---------------------------------------------------------------- the earlier INTERIM JSONL store (migration only)
+
 def rulings_path() -> Path:
+    """The INTERIM hash-chained JSONL store used before the ledger kind. Read only by the migration; never written,
+    never read by the gate."""
     return data_dir() / "provenance" / "rulings.jsonl"
 
 
@@ -382,8 +442,9 @@ def _line_hash(entry: Mapping[str, Any]) -> str:
     return _sha({k: v for k, v in entry.items() if k != "hash"})
 
 
-def load_rulings(path: Path | None = None) -> RulingSet:
-    """Read and verify the chain. Any unparsable line, wrong ``prev`` link or wrong ``hash`` marks it tampered."""
+def load_interim_rulings(path: Path | None = None) -> RulingSet:
+    """Read and verify the interim chain. Any unparsable line, wrong ``prev`` link or wrong ``hash`` marks it
+    tampered. A removed TRAILING line is not detectable here (no anchor outside the file)."""
     path = path or rulings_path()
     if not path.exists():
         return RulingSet()
@@ -399,40 +460,61 @@ def load_rulings(path: Path | None = None) -> RulingSet:
         if not isinstance(entry, dict) or entry.get("prev") != prev or entry.get("hash") != _line_hash(entry):
             ok = False
         out.append(entry)
-        prev = str(entry.get("hash"))
+        prev = str(entry.get("hash")) if isinstance(entry, dict) else prev
     return RulingSet(out, ok)
 
 
-def verify_chain(path: Path | None = None) -> bool:
-    return load_rulings(path).chain_ok
+def _interim_problem(entry: Mapping[str, Any]) -> str | None:
+    if not _has_human_approver(entry):
+        return "no human approver"
+    if entry.get("ruling") not in RULINGS:
+        return "ruling outside the closed set"
+    if not all(isinstance(entry.get(k), str) for k in RULING_FIELDS):
+        return "missing or non-string field"
+    return None
 
 
-def record_ruling(task_dir: Path, feature: str, ruling: str, approver: str, note: str = "", *,
-                  path: Path | None = None) -> dict[str, Any]:
-    """Backend of the HUMAN-only ``chh rule-feature`` command; that command is the way a ruling is recorded.
-    Binds the ruling to the CURRENT screen report of ``task_dir`` (data digest, tags hash, report hash)."""
-    if not approver or not approver.strip():
-        raise ProvenanceError("a ruling needs a named human approver")
-    if ruling not in RULINGS:
-        raise ProvenanceError("ruling must be 'legitimate' or 'leak'")
-    report = screen(Path(task_dir))
-    if feature not in report["routed"]:
-        raise ProvenanceError(f"{feature!r} is not routed to a human (refused features cannot be ruled legitimate)")
-    path = path or rulings_path()
-    existing = load_rulings(path)
-    if not existing.chain_ok:
-        raise ProvenanceError("the ruling chain is tampered; refusing to append")
-    entry: dict[str, Any] = {
-        "prev": existing.rulings[-1]["hash"] if existing.rulings else GENESIS,
-        "data_digest": report["data_digest"], "feature": feature, "tags_hash": report["tags_hash"],
-        "report_hash": report["report_hash"], "ruling": ruling, "approver": approver.strip(), "note": note,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
-    entry["hash"] = _line_hash(entry)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="") as f:
-        f.write(json.dumps(entry, sort_keys=True) + "\n")
-    return entry
+def migrate_interim_rulings(store: EvidenceStore, by: str, path: Path | None = None, *,
+                            anchors: Sequence[Path] = ()) -> dict[str, Any]:
+    """Import the interim JSONL rulings into the ledger (backend of the HUMAN-run ``chh feature-rulings-migrate``).
+
+    All or nothing, fail closed: refuses a file whose chain does not verify, or holding any ruling a human could not
+    have recorded through ``record_ruling`` (no approver, ruling outside the closed set, missing field). Each
+    imported entry keeps the original approver, note and timestamp and adds ``migrated_from`` (path, 1-based line,
+    the line's chain hash) and ``migrated_by``. Idempotent: lines already imported (same line hash) are skipped.
+    The file is LEFT IN PLACE, unmodified, and is not read by the gate afterwards."""
+    if not isinstance(by, str) or not by.strip():
+        raise ProvenanceError("migration needs a named human operator (--by)")
+    path = Path(path) if path is not None else rulings_path()
+    summary: dict[str, Any] = {"path": str(path), "imported": 0, "already_imported": 0,
+                               "file": "left in place, unmodified; no longer read"}
+    if not path.exists():
+        return {**summary, "file": "absent"}
+    interim = load_interim_rulings(path)
+    if not interim.chain_ok:
+        raise ProvenanceError(f"the interim ruling chain {path} is tampered; nothing imported (fail closed)")
+    for i, e in enumerate(interim.rulings, 1):
+        if (problem := _interim_problem(e)) is not None:
+            raise ProvenanceError(f"interim ruling line {i}: {problem}; nothing imported (fail closed)")
+    current = load_rulings(store, anchors=anchors)
+    if not current.chain_ok:
+        raise ProvenanceError("the ledger chain is tampered (or an anchor does not match); nothing imported")
+    done = {r["migrated_from"].get("line_hash") for r in current.rulings if isinstance(r.get("migrated_from"), dict)}
+    ledger = Ledger(store)
+    for i, e in enumerate(interim.rulings, 1):
+        if e["hash"] in done:
+            summary["already_imported"] += 1
+            continue
+        body = {k: e[k] for k in RULING_FIELDS}
+        body.update(recorded_by="chh feature-rulings-migrate", migrated_by=by.strip(),
+                    migrated_from={"path": str(path), "line": i, "line_hash": e["hash"]})
+        ledger.append(RULING_KIND, body)
+        summary["imported"] += 1
+    return summary
+
+
+if RULING_KIND not in KINDS:  # import-time contract with kernel/ledger.py
+    raise ImportError(f"the Kernel ledger has no {RULING_KIND!r} kind")
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -445,8 +527,9 @@ def gate(report: Mapping[str, Any], rulings: RulingSet | Iterable[Mapping[str, A
     Refuses when: the report's hash does not match its body; any feature was refused; the ruling chain is tampered;
     any routed item lacks a ``legitimate`` ruling bound to this report (same data digest, tags hash and report hash);
     or any ruling on a routed item of this data says ``leak``. A ``leak`` ruling counts even when the tags or the
-    report changed since (re-tagging must not erase a leak finding); a ``legitimate`` ruling for other data, tags or
-    report is stale and does not count."""
+    report changed since (re-tagging must not erase a leak finding), and even without an approver (it can only
+    block); a ``legitimate`` ruling for other data, tags or report is stale and does not count, and one without a
+    human approver (a non-empty string) is ignored."""
     rs = rulings if isinstance(rulings, RulingSet) else RulingSet([dict(r) for r in rulings])
     codes: set[str] = set()
     if report.get("report_hash") != report_body_hash(report):
@@ -461,7 +544,7 @@ def gate(report: Mapping[str, Any], rulings: RulingSet | Iterable[Mapping[str, A
         if any(r.get("ruling") == "leak" for r in same_data):
             codes.add(GATE_LEAK_RULING)
         if not any(r.get("ruling") == "legitimate" and r.get("tags_hash") == report["tags_hash"]
-                   and r.get("report_hash") == report["report_hash"] and str(r.get("approver", "")).strip()
+                   and r.get("report_hash") == report["report_hash"] and _has_human_approver(r)
                    for r in same_data):
             codes.add(GATE_MISSING_RULING)
     return sorted(codes)
