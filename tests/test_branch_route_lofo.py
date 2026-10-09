@@ -12,13 +12,13 @@ import os
 from pathlib import Path
 
 import pytest
-from test_router import CA, NAMES, SEEDS, TRUNK, Script, _branches, _gate_tasks
 
 from custom_harness.evolve import Evaluator, EvolveConfig, SuiteTask, evolve_generation
 from custom_harness.evolve.branches import BRANCH_KIND, BranchConfig, BranchRefused, lofo_note, propose_branch
 from custom_harness.evolve.router import RouteRefused, build_router
 from custom_harness.gateway import MockBackend
 from custom_harness.kerneld.releases import Releases, released
+from test_router import CA, NAMES, SEEDS, TRUNK, Script, _branches, _gate_tasks
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -105,7 +105,7 @@ def test_router_refuses_records_without_a_released_passing_lofo_bit(store, tmp_p
         bad = json.loads(json.dumps(ra)) | {"trunk": t.spec_hash()}
         mutate(bad)
         store.append_record(BRANCH_KIND, bad)
-        with pytest.raises(RouteRefused, match="leave-one-family/domain-out|whitelist"):
+        with pytest.raises(RouteRefused, match=r"leave-one-family/domain-out|whitelist"):
             build_router(store, t)
     # well-formed, but the LOFO bit was never released on one of its targets: the ledger re-check refuses it
     t = _spec("lofo-trunk-unledgered")

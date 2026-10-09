@@ -9,7 +9,12 @@ Rules (all fail closed):
     ("2026-10-08") counts as the END of that day (it may have been produced at any time that day); a date-only
     watermark counts as the START of its day. A datetime without a timezone, an unparsable date or no date at all is
     UNDATED, and undated means unrevealed, whatever the watermark.
-  - The watermark only moves forward, never past the clock (`now`), and each move is a store record.
+  - The watermark only moves forward, never past the clock (`now`), and each move is a store record. Reading it
+    re-validates EVERY record of the stream (each at or before its recording time and the clock, none backwards),
+    so a record appended to the store around `advance` fails closed instead of revealing early.
+  - Wiring (evolve/driver.py `reveals`): before the campaign the seal is checked against every task directory and
+    the output directory too (`check_mounts`); before each generation the visible labels are written to the
+    stream's destination inside a declared mount (`write_revealed`).
   - Each reveal is ledgered: the first time an item becomes visible, one Kernel `release` entry (channel `export`,
     alphabet of the label value: kerneld/releases.alphabet_of) on the stream's registered target dataset, plus a
     `reveal` store record naming the item, its date and the watermark that released it. A reveal that cannot be
@@ -132,9 +137,32 @@ class TemporalReveal:
         return [json.loads(ln) for ln in self._file.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
     # ------------------------------------------------------------------ the watermark
+    def check_mounts(self, paths: Iterable[Path]) -> None:
+        """Refuse (fail closed) if the seal overlaps any of `paths`: the caller's actual evolver mounts (the driver
+        passes every task directory and its output directory), checked in addition to the declared `mounts`."""
+        for p in paths:
+            q = Path(p).resolve()
+            if _inside(self.root, q) or _inside(q, self.root):
+                raise RevealRefused(f"sealed labels at {self.root} overlap an evolver mount {q}")
+
     def watermark(self) -> datetime | None:
+        """The current watermark, re-validated from EVERY record of this stream (not only the last): each must
+        parse, be at or before the instant it was recorded and the clock, and none may move backwards. A record
+        that breaks any rule (e.g. one appended to the store directly, bypassing `advance`) fails closed."""
         recs = [r for r in self.store.records(WATERMARK_KIND) if r.get("stream") == self.stream_id]
-        return watermark_time(recs[-1]["watermark"]) if recs else None
+        now = datetime.fromtimestamp(self.clock(), tz=UTC)
+        cur: datetime | None = None
+        for r in recs:
+            at = r.get("at")
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                raise RevealRefused("watermark record without a recording time (fail closed)")
+            wm = watermark_time(r.get("watermark", ""))
+            if wm > datetime.fromtimestamp(at, tz=UTC) or wm > now:
+                raise RevealRefused("a watermark record is ahead of its recording time or the clock (fail closed)")
+            if cur is not None and wm < cur:
+                raise RevealRefused("watermark records move backwards (fail closed)")
+            cur = wm
+        return cur
 
     def advance(self, value: str) -> datetime:
         wm = watermark_time(value)
@@ -173,14 +201,23 @@ class TemporalReveal:
             out.append({"item_id": r["item_id"], "label": r["label"], "date": r["date"]})
         return out
 
-    def write_revealed(self, dest: Path) -> Path:
-        """Write the visible labels to `dest` (a file inside an evolver mount); refuses a destination in the seal."""
+    def check_destination(self, dest: Path) -> Path:
+        """The resolved destination, refused unless it lies outside the seal and inside a declared mount."""
         self._check_seal()
         dest = Path(dest).resolve()
         if _inside(dest, self.root):
             raise RevealRefused("revealed labels are written outside the seal")
         if not any(_inside(dest, m) for m in self.mounts):
             raise RevealRefused("revealed labels go to an evolver mount (name it in `mounts`)")
+        return dest
+
+    def n_revealed(self) -> int:
+        """How many items of this stream have been released so far (count of `reveal` records)."""
+        return len(self._revealed_before())
+
+    def write_revealed(self, dest: Path) -> Path:
+        """Write the visible labels to `dest` (a file inside an evolver mount); refuses a destination in the seal."""
+        dest = self.check_destination(dest)
         rows = self.visible()
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")

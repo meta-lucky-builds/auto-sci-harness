@@ -189,6 +189,7 @@ def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
+    from .evolve.branches import BranchConfig
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
@@ -209,7 +210,7 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     campaign = persistent_budget(store, a.campaign_id or run_tag, {k: v for k, v in limits.items() if v is not None})
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
            store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag,
-           campaign_budget=campaign)
+           campaign_budget=campaign, branching=BranchConfig(cluster_key=a.branch_by) if a.branch_by else None)
     print(f"outputs: {data_dir() / 'evolve' / run_tag}")
     return 0
 
@@ -585,6 +586,13 @@ def main(argv: list[str] | None = None) -> int:
     if args[:1] == ["delegate"]:  # the delegation driver (GOAL §15) has its own parser, root and ledger (no store)
         from .orchestration.cli import main as delegate_main
         return delegate_main(args[1:])
+    from .evolve import cli as evolve_cli
+    if args[:1] == ["evolve"] and args[1:2] and args[1] in evolve_cli.SUBCOMMANDS:  # read-only L6.9 views
+        es = EvidenceStore(data_dir() / "store")
+        try:
+            return evolve_cli.main(args[1:], es)
+        finally:
+            es.close()
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
@@ -617,6 +625,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
+    ev.add_argument("--branch-by", choices=["family", "domain"],
+                    help="L6.9: make branches of gate-rejected cluster winners and record the route table "
+                         "(see `chh evolve branches|route SPEC`)")
     rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure) "
                                          "or a run paused at an approval node")
     rr.add_argument("run_id")
