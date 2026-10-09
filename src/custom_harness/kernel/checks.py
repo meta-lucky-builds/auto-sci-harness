@@ -14,7 +14,7 @@ import json
 import math
 import statistics
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from types import MappingProxyType
@@ -236,11 +236,19 @@ def fixed(ctx: Context) -> dict[str, Any]:
     return fixed_terms(ledger, Vault(ctx.store, ledger), ctx.claim, ctx.config)
 
 
+def slot_charge(ledger: Ledger, vault: Vault, account: alpha.Account, cfg: KernelConfig) -> int:
+    """Slots a claim registered NOW on the account's target family pays: the transcripts reachable from the releases
+    logged so far (at least 1). Fixed at registration (recorded in its alpha_reserve entry)."""
+    rel = releases_on(ledger, related_targets(vault, account.dataset_id))
+    return max(1, transcript_bound([max((at for at, _ in rel), default=0) + 1], rel, cfg.count_alphabet))
+
+
 def target_level(ctx: Context, target: str) -> tuple[float, int, list[str]]:
     """K4's fixed per-target level, the effective multiplicity it implies, and coded reasons. Without an alpha-account:
     alpha / max(n_comparisons, N), where N = the transcript bound over the claims on the target family (= their count
     under the verdict embargo; today's rule). With an account: the slot level alpha_T / S_T (and the declared level),
-    divided down by N / k when releases let later claims depend on earlier verdicts."""
+    fixed whatever the order of claims and releases, because releases were paid in slots at registration
+    (alpha.py); an account that paid more than it holds (a ledger written around preregister) fails closed."""
     plan, reasons = ctx.claim.analysis_plan, list[str]()
     related = related_targets(ctx.vault, target)
     fam, rel = family(ctx.ledger, related), releases_on(ctx.ledger, related)
@@ -253,10 +261,11 @@ def target_level(ctx: Context, target: str) -> tuple[float, int, list[str]]:
     reasons += [R(Code.K4_NO_SLOT, f"{target}: an alpha-account (opened at ledger seq {a.seq} on {a.dataset_id!r}) "
                                    f"covers this target but the claim holds no slot in it") for a in accts
                 if not alpha.holds_slot(ctx.ledger, a, ctx.claim_hash)]
-    k = sum(1 for e in fam if not exposed(e.seq, rel))
+    reasons += [R(Code.K4_ACCOUNT_OVERDRAWN, f"{target}: the alpha-account opened at ledger seq {a.seq} paid "
+                                             f"{alpha.charged(ctx.ledger, a)} slot(s) of {a.slots}")
+                for a in accts if alpha.charged(ctx.ledger, a) > a.slots]
     if any(not alpha.holds_slot(ctx.ledger, a, str(e.body.get("claim_hash"))) for e in fam for a in accts):
         level = min(level, plan.alpha / max(plan.n_comparisons, n_bound))  # a claim outside the account: Bonferroni
-    level *= k / n_bound if n_bound else 1.0
     return level, max(1, round(plan.alpha / level)), reasons
 
 
@@ -926,6 +935,32 @@ def _exact_spec(ctx: Context) -> adapters.AdapterSpec | None:
     return adapters.REGISTRY[ctx.adapter["name"]][0] if ctx.adapter is not None else None
 
 
+def statement_reasons(ctx: Context, phrase: Callable[[], str] | None) -> list[str]:
+    """Computational and formal claims (invariant 14): no scope conditions (a certificate or a proof holds for the
+    registered instance or the approved statement only) and the statement is exactly the adapter's rendering, so no
+    prose (e.g. "this circuit works when built") rides on an exact result. An adapter without a rendering fails."""
+    c, reasons = ctx.claim, []
+    if c.scope.conditions:
+        reasons.append(R(Code.K1_SCOPE, f"a {c.evidence_class.value} claim has no scope conditions (it holds for the "
+                                        f"registered subject only), got {sorted(c.scope.conditions)}"))
+    if phrase is None:
+        return [*reasons, R(Code.K1_STATEMENT, "the adapter renders no scope phrase: the statement cannot be checked")]
+    try:
+        want = phrase()
+    except (OSError, ValueError) as err:
+        return [*reasons, R(Code.K1_UNREADABLE, f"subject unreadable: {exception_name(err)}")]
+    if c.statement != want:
+        reasons.append(R(Code.K1_STATEMENT, f"the statement must be exactly the adapter's scope rendering {want!r}"))
+    return reasons
+
+
+def _phrase(ctx: Context, *args: Any) -> Callable[[], str] | None:
+    spec = _exact_spec(ctx)
+    module = importlib.import_module(spec.exact_module) if spec is not None and spec.exact_module else None
+    fn = getattr(module, "scope_phrase", None)
+    return None if fn is None else lambda: str(fn(ctx.store.blobs.get(ctx.claim.subject.hash), *args))
+
+
 def k1_computational(ctx: Context) -> CheckResult:
     c, reasons = ctx.claim, []
     if c.kind != ClaimKind.COMPUTED_VALUE:
@@ -961,6 +996,9 @@ def k1_computational(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
     if c.risk.prior_probability is not None:
         reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be unset: K7 does not apply to computational claims"))
+    value = exact_value(c.value)
+    if ctx.adapter is not None and value is not None:  # (without them K1 already fails)
+        reasons += statement_reasons(ctx, _phrase(ctx, value))
     return _result(reasons + p0_reasons(ctx))
 
 
@@ -1073,6 +1111,8 @@ def k1_formal(ctx: Context) -> CheckResult:
     if c.risk.prior_probability is not None:
         reasons.append(R(Code.K1_RISK_PRIOR,
             "risk prior must be unset: no K7 rule exists for formal claims (owner decision pending)"))
+    if ctx.adapter is not None:
+        reasons += statement_reasons(ctx, _phrase(ctx))
     return _result(reasons + p0_reasons(ctx))
 
 

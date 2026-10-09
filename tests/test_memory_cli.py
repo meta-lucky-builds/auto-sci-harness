@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from fractions import Fraction
 
 import pytest
 
@@ -21,6 +22,7 @@ from custom_harness.kernel import (
     Scope,
     canonical_json,
 )
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.memory import Kind, MemoryStore, Proposal, Status
 from kernel_world import World
 from test_memory import LP_CERT, LP_PROBLEM
@@ -31,7 +33,8 @@ os.environ.setdefault("CHH_ALLOW_UNISOLATED", "1")
 def _lp_cert(w: World, tag: str, value: str = "13/5") -> str:
     problem = {**LP_PROBLEM, "comment": tag}
     ref = ArtifactRef(artifact_id=tag, hash=w.vault.register_artifact(tag, canonical_json(problem), "problem").hash)
-    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {tag} is {value}", subject=ref, comparator=ref,
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(canonical_json(problem), Fraction(value)), subject=ref,
+                comparator=ref,
                 metric=MetricRef(id="lp_optimum", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),

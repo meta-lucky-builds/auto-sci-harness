@@ -319,6 +319,30 @@ def cmd_approve_role(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_alpha(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh alpha open` is a HUMAN action (GOAL §16.4): it gives a held-out target a fixed budget of slots, each claim
+    tested at alpha / slots and releases paid in slots (kernel/alpha.py). The ledger entry names the approver; no
+    production code path opens an account. `chh alpha status` only reads."""
+    from .kernel import Kernel, KernelError, VaultError
+    from .kernel import alpha as A
+    from .kernel.checks import related_targets, slot_charge
+    kernel = Kernel(store)
+    try:
+        if a.alpha_cmd == "open":
+            e = kernel.open_alpha_account(a.dataset_id, a.alpha, a.slots, approver=a.approver)
+            print(json.dumps({"opened": a.dataset_id, "alpha": a.alpha, "slots": a.slots, "approver": a.approver,
+                              "ledger_seq": e.seq}))
+            return 0
+        accts = A.accounts(kernel.ledger, related_targets(kernel.vault, a.dataset_id))
+    except (KernelError, VaultError) as e:
+        raise SystemExit(f"NOT done: {e}") from e
+    print(json.dumps([{"dataset_id": x.dataset_id, "opened_seq": x.seq, "alpha": x.alpha, "slots": x.slots,
+                       "slot_level": x.level, "charged": A.charged(kernel.ledger, x),
+                       "next_claim_charge": slot_charge(kernel.ledger, kernel.vault, x, kernel.config),
+                       "retired": A.retired(kernel.ledger, x)} for x in accts], indent=1))
+    return 0 if accts else 1
+
+
 def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .kernel import Ledger
     from .kernel.predictions import calibration, score_predictions, vds
@@ -658,6 +682,15 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("dataset_id")
     ar.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
     ar.add_argument("--note", default="", help="why this data is external/future (provenance)")
+    al = sub.add_parser("alpha", help="per-target alpha-accounts: HUMAN `open`, read-only `status` (GOAL 16.4)")
+    alsub = al.add_subparsers(dest="alpha_cmd", required=True)
+    alo = alsub.add_parser("open", help="HUMAN: open an alpha-account on a held-out target before its first claim")
+    alo.add_argument("dataset_id")
+    alo.add_argument("--alpha", type=float, required=True, help="familywise level alpha_T of the target")
+    alo.add_argument("--slots", type=int, required=True, help="slots S_T (each claim tested at alpha_T / S_T)")
+    alo.add_argument("--approver", required=True, help="the human opening it (recorded in the ledger)")
+    als = alsub.add_parser("status", help="accounts covering a target: slots charged, next charge, retired")
+    als.add_argument("dataset_id")
     fz = sub.add_parser("finalize", help="HUMAN: one-shot evaluation of the frozen final harness on the sealed split")
     fz.add_argument("spec")
     fz.add_argument("--suite", required=True)
@@ -730,7 +763,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
-                "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role,
+                "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role, "alpha": cmd_alpha,
                 "approve-statement": cmd_approve_statement, "ledger-anchor": cmd_ledger_anchor,
                 "finalize": cmd_finalize, "evolve": cmd_evolve, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,

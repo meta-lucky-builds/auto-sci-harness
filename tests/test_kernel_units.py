@@ -11,6 +11,7 @@ import math
 import os
 import time
 import zipfile
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -40,8 +41,10 @@ from custom_harness.kernel import (
 from custom_harness.kernel import checks as K
 from custom_harness.kernel.bundle import build_bundle, reproduce_bundle
 from custom_harness.kernel.checklist import ITEMS, fill, missing, publishable, render
+from custom_harness.kernel.claim import exact_value
 from custom_harness.kernel.execution import ExecutionError, SandboxReplayer, parse_predictions
 from custom_harness.kernel.ledger import Entry, verify_chain
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.kernel.predictions import calibration, score_predictions, vds
 from custom_harness.records import Cost, Evidence, EvidenceKind
 from custom_harness.sandbox import LocalSandbox
@@ -760,7 +763,9 @@ def lp_claim(w: World, *, value: str | None = "13/5", problem: dict | None = Non
              **changes) -> Claim:
     data = canonical_json(problem or LP_PROBLEM)
     ref = ArtifactRef(artifact_id=artifact_id, hash=w.vault.register_artifact(artifact_id, data, "problem").hash)
-    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {artifact_id} is {value}", subject=ref,
+    exact = exact_value(value)  # K1 (invariant 14): the statement is exactly the adapter's rendering
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(data, exact) if exact is not None else "n/a",
+                subject=ref,
                 comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),
@@ -940,7 +945,6 @@ def test_n_a_outside_the_table_fails_closed(lpw, base, monkeypatch):
 
 
 def test_lp_adapter_validation_and_checker(lpw):
-    from fractions import Fraction
 
     from custom_harness.kernel import adapters as A
     from custom_harness.kernel import lp

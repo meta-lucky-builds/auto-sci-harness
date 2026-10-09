@@ -147,6 +147,27 @@ def _bonferroni_borderline_task(task_dir: Path) -> float:
     return floor
 
 
+SLOT_ALPHA, SLOTS = 0.05, 2**16  # every claim at 0.05 / 65536; the runs' releases are paid in slots
+
+
+def _open_alpha_account(store, task_dir: Path) -> str:
+    """Register the task's held-out data exactly as research.setup will (same id and bytes: idempotent there) and
+    open its alpha-account before the first claim (a HUMAN action; `pytest-human` stands in for the approver)."""
+    from custom_harness.evolve.multiplicity import held_out_target_id
+    from custom_harness.kernel import DatasetRole, Kernel
+    from custom_harness.research.task import load_task
+    task, target = load_task(task_dir), held_out_target_id(task_dir)
+    canary = task_dir / "private" / task.canary_file
+    kernel = Kernel(store)
+    kernel.vault.register_dataset(
+        target, DatasetRole.TEST, public={task.test_features_file: (task_dir / "public" / task.test_features_file)
+                                          .read_bytes()},
+        private={task.test_labels_file: (task_dir / "private" / task.test_labels_file).read_bytes()},
+        canary=canary.read_text(encoding="utf-8").strip() if canary.exists() else None)
+    kernel.open_alpha_account(target, SLOT_ALPHA, SLOTS, approver="pytest-human")
+    return target
+
+
 def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp_path, rings_task,  # noqa: F811
                                                                        monkeypatch):
     """The Kernel's Bonferroni family for a held-out target is every claim pre-registered on it SO FAR (K4), and
@@ -172,6 +193,7 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
         assert cand.spec_hash() != parent.spec_hash()
         return parent, cand
 
+    target = _open_alpha_account(store, rings_task)
     # 1. Undeclared campaign (the original attack setting): the FIRST run already registers 2 claims (claim +
     # replica_claim) on the target, more than the declared 1, so its certification strictness depended on what ran
     # before it. Secure: the evaluation is refused, its outcome never used.
@@ -181,7 +203,11 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
         ev.score(cand, ("rings", 0))
     assert not ev.cache and ev.calls == 1  # the run happened (attack exercised) and its outcome was discarded
 
-    # 2. Declared campaign: both arms are certified at the SAME constant family size, whatever ran first.
+    # 2. Declared campaign: both arms are certified at the SAME constant level, whatever ran first. Since Kernel 1.2
+    # the runs release verdict bits (evolution score, replication brief), so the claim count no longer fixes K4's
+    # level on a target WITHOUT an account (docs/r2-2_transcript_bound.md); the fix (docs/alpha_accounts.md) is the
+    # per-target alpha-account opened by a human (here a test stand-in, before the first claim on the target): every
+    # claim is tested at alpha_T / S_T and the releases are paid in slots at registration.
     declared = 2 + 2 * 2  # the 2 claims of the refused run above + 2 runs x 2 claim nodes
     parent, cand = arms(declared)
     ev = Evaluator({r: llm for r in ALL_ROLES}, store, _sandbox_factory(tmp_path), [task])
@@ -196,9 +222,8 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
 
     def why(o):
         return {k: (r.status, r.reasons or r.observations) for k, r in cert(o).checks.items() if k in ("K4", "K6")}
-    for o in (oc, op):  # the attack's lever is K4's family size: show it is the declared constant in both arms
-        obs = cert(o).checks["K4"].observations
-        assert any(f"{declared} claim(s) tested on this target" in x for x in obs), obs
+    levels = {o.run_id: cert(o).resolution["targets"][target]["alpha_eff"] for o in (oc, op)}
+    assert all(v == pytest.approx(SLOT_ALPHA / SLOTS) for v in levels.values()), levels  # fixed in both arms
     assert sample.diffs == [pytest.approx(0.0)], (
         f"identical harnesses: candidate {oc.score} ({oc.cert_label}) vs parent {op.score} ({op.cert_label}); "
         f"paired diff {sample.diffs}; min_effect {floor:.4g}; candidate {why(oc)}; parent {why(op)}")

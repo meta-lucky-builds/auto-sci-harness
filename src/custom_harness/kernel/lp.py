@@ -14,6 +14,7 @@ fractions.Fraction; this module never creates a float. It is deliberately small:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from fractions import Fraction
@@ -88,6 +89,14 @@ def parse(problem: bytes, certificate: bytes) -> tuple[Problem, list[Fraction], 
     c, a, b = parse_problem(problem)
     doc = _load(certificate, "chh-lp-certificate/1", {"x", "y"})
     return (c, a, b), _numbers(doc["x"], "'x'", len(c)), _numbers(doc["y"], "'y'", len(b))
+
+
+def scope_phrase(problem: bytes, value: Fraction) -> str:
+    """K1: the only statement an LP claim may carry (no free prose can widen it beyond the registered instance)."""
+    c, a, _ = parse_problem(problem)
+    return (f"the optimum of LP instance {hashlib.sha256(problem).hexdigest()[:12]} (maximise c^T x subject to A x <= "
+            f"b, x >= 0; {len(a)} constraint(s), {len(c)} variable(s)) is exactly {value}; nothing beyond this "
+            f"instance is claimed")
 
 
 def _dot(u: list[Fraction], v: list[Fraction]) -> Fraction:

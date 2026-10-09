@@ -70,6 +70,7 @@ class Code(StrEnum):
     K4_SELECTIVE_REPORTING = "K4_SELECTIVE_REPORTING"
     K4_UNLOGGED = "K4_UNLOGGED"
     K4_NO_SLOT = "K4_NO_SLOT"  # an alpha-account exists on the target but the claim holds no slot in it
+    K4_ACCOUNT_OVERDRAWN = "K4_ACCOUNT_OVERDRAWN"  # the account's slot charges exceed its slots (fail closed)
     K4_PLAN_CODE_DIVERGENCE = "K4_PLAN_CODE_DIVERGENCE"  # §16.6: the executed test differs from the registered one
     # K5 comparator integrity
     K5_WRONG_CODE = "K5_WRONG_CODE"

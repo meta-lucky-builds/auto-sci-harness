@@ -316,6 +316,13 @@ def check(statement: bytes, record: bytes) -> list[str]:
     return reasons
 
 
+def scope_phrase(statement: bytes) -> str:
+    """K1: the only statement a formal claim may carry (no free prose can widen it beyond the approved statement)."""
+    st = parse_statement(statement)
+    return (f"Lean 4 theorem {st.theorem} (approved statement {hashlib.sha256(statement).hexdigest()[:12]}) holds, "
+            f"given Lean's kernel and the axioms listed on the certificate; nothing beyond this statement is claimed")
+
+
 def axioms_used(record: bytes) -> list[str]:
     """The axioms the checker reported (for the certificate's assumption list); [] when the record is unusable."""
     try:

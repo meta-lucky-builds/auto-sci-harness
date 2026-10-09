@@ -463,7 +463,10 @@ def test_record_release_and_k4_k6_use_it(tmp_path):
     w.close()
 
 
-def test_release_with_alpha_account_divides_the_slot_level(tmp_path):
+def test_release_with_alpha_account_is_paid_in_slots_not_in_level(tmp_path):
+    """R2-2 (2026-10-09, docs/alpha_accounts.md): this test used to assert that a release divided the slot level by
+    N/k ("alpha 0.01333" = 0.02 * 2/3), which made the level of an earlier claim depend on later claims and releases.
+    The release is now paid in slots at the later claim's registration; the level stays alpha_T / S_T."""
     w = World(tmp_path / "rel2", seed=10, n_train=120, n_test=120)
     k = w.kernel
     w.register_target("acct", DatasetRole.TEST)
@@ -475,7 +478,9 @@ def test_release_with_alpha_account_divides_the_slot_level(tmp_path):
     k.record_release("acct", "report", "verdict_bit", "report.verdict")
     k.preregister(w.claim(good, comp, delta=0.21, n_boot=1000, **FAST, targets=("acct",)))
     obs = next(o for o in k.certify(c1, ids, record=False).checks["K4"].observations if "Bonferroni" in o)
-    assert "alpha 0.01333" in obs  # 0.02 * k/N = 0.02 * 2/3
+    assert "alpha 0.02" in obs  # alpha_T / S_T, whatever came later
+    assert [e.body["charge"] for e in k.ledger.entries("alpha_reserve")] == [1, 2]  # the release cost a slot
+    assert k.ledger.entries("alpha_retire")  # 1 + 2 = 3 slots: the target retired
     w.close()
 
 

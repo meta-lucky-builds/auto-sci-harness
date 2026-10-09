@@ -27,6 +27,7 @@ from .checks import (
     fixed_terms,
     is_external,
     related_targets,
+    slot_charge,
 )
 from .claim import Claim, EvidenceClass, strict_json
 from .execution import ExecRecord
@@ -120,12 +121,18 @@ class Kernel:
         spent = sorted({a.dataset_id for a in accounts.values() if alpha.retired(self.ledger, a)})
         if spent:
             raise KernelError(f"target(s) {spent} are retired (alpha-account closed): register on fresh data")
+        charge = {s: slot_charge(self.ledger, self.vault, a, self.config) for s, a in accounts.items()}
+        short = sorted({a.dataset_id for s, a in accounts.items()
+                        if charge[s] > a.slots - alpha.charged(self.ledger, a)})
+        if short:  # releases made this claim cost more slots than remain: refused, never tested at a looser level
+            raise KernelError(f"the alpha-account of target(s) {short} cannot pay this claim's slot charge (releases "
+                              f"since it opened): register on fresh data")
         entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms})
         for a in sorted(accounts.values(), key=lambda a: a.seq):
             n = len(alpha.reservations(self.ledger, a)) + 1
             self.ledger.append("alpha_reserve", {"account": a.seq, "dataset_id": a.dataset_id, "claim_hash": h,
-                                                 "slot": n, "level": a.level})
-            if n >= a.slots:
+                                                 "slot": n, "level": a.level, "charge": charge[a.seq]})
+            if alpha.charged(self.ledger, a) >= a.slots:
                 self.ledger.append("alpha_retire", {"account": a.seq, "dataset_id": a.dataset_id,
                                                     "code": "slots_exhausted", "approver": None})
         return entry

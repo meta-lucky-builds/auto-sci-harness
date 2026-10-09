@@ -46,7 +46,11 @@ def _first_wins(data: bytes):
 
 def _lp_certify(w: World, problem: bytes, cert: bytes, value: str = "13/5"):
     ref = ArtifactRef(artifact_id="inst", hash=w.vault.register_artifact("inst", problem, "problem").hash)
-    doc = Claim(kind="improvement", statement="optimum", subject=ref, comparator=ref,
+    try:
+        statement = lp.scope_phrase(problem, Fraction(value))
+    except ValueError:  # an unreadable instance has no rendering (K1 then fails it as unreadable)
+        statement = "unreadable"
+    doc = Claim(kind="improvement", statement=statement, subject=ref, comparator=ref,
                 metric=MetricRef(id="lp_optimum", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),

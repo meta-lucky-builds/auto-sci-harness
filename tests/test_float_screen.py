@@ -12,6 +12,7 @@ import pytest
 from custom_harness.kernel import ArtifactRef, Claim, ClaimKind, Effect, MetricRef, Scope, canonical_json, lp
 from custom_harness.kernel.certificate import Label
 from custom_harness.kernel.claim import AnalysisPlan
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.verify import screen as G
 from kernel_world import World
 
@@ -86,7 +87,7 @@ def test_randomised_near_optimal_candidates_confirmed_iff_exact_checker_accepts(
 def _lp_claim(w: World, artifact_id: str) -> Claim:
     data = canonical_json(TINY)
     ref = ArtifactRef(artifact_id=artifact_id, hash=w.vault.register_artifact(artifact_id, data, "problem").hash)
-    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {artifact_id} is 1/10", subject=ref,
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(data, Fraction(1, 10)), subject=ref,
                 comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),
