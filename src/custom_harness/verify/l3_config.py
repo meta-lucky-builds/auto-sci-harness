@@ -10,7 +10,8 @@ from ..tiers import Tier
 
 # ---------------------------------------------------------------- verifier synthesis (synthesis.py)
 # A fault suite (agent-authored or human-approved) is usable only with at least this many golden cases and planted
-# faults in EACH half (public: shown to the authoring model; sealed: never shown). Fewer would let a verifier pass by luck.
+# faults in EACH half (public: shown to the authoring model; sealed: never shown). Fewer would let a verifier pass
+# by luck.
 SYNTH_MIN_GOLDEN_PER_HALF = 2  # UNCALIBRATED (owner decision, GOAL §13.8)
 SYNTH_MIN_FAULTS_PER_HALF = 2  # UNCALIBRATED (owner decision, GOAL §13.8)
 # A synthesized verifier is executable code (natural tier T1); until a human review is ledgered it is capped at T2
