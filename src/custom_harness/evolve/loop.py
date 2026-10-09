@@ -443,6 +443,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             race_cfg = replace(race_cfg, race_rounds=1)
         if abl.off("voi-allocation") and race_cfg.race_allocator == "voi":  # ablation: the batch race instead
             race_cfg = replace(race_cfg, race_allocator="batch")
+        if abl.off("per-completion-race") and race_cfg.race_allocator == "per_completion":
+            race_cfg = replace(race_cfg, race_allocator="batch", race_slots=1)  # ablation: the batch race instead
         rr = _race(candidates, evolve_units, evaluator, parent_scores, race_cfg)
         fixed_k = rr.evaluations_fixed_k
         survivors = list(rr.survivors)

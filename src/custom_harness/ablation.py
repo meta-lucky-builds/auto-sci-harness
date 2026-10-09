@@ -136,6 +136,12 @@ _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
                      "(selection.race) instead of control/voi.voi_race. A no-op under the default "
                      "race_allocator='batch': an ablation of this row must run with race_allocator='voi'",
            test=_T_EVOLVE + "test_voi_allocation_switch"),
+    Switch(name="per-completion-race", capability="openresearch-alphaxiv",
+           turns_off="evolve/loop.py evolve_generation: with race_allocator='per_completion', the race runs as the "
+                     "sequential batch race (selection.race, race_slots=1) instead of the completion-driven "
+                     "allocator (control/evalrace.race_evaluator). A no-op under the default race_allocator='batch': "
+                     "an ablation of this row must run with race_allocator='per_completion'",
+           test=_T_EVOLVE + "test_per_completion_race_switch"),
 )
 
 _T = "tests/test_ablation_switches_research.py::"
@@ -146,7 +152,8 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test=_T + "test_cross_task_memory_switch_renders_no_memory"),
     Switch(name="skills_paged_recall", capability="evomaster",
            turns_off="research/memory_wiring.py recall_memory withholds the skill kinds (playbook, method) from the "
-                     "query; research/recall.py recall refuses every page request (code 'ablated')",
+                     "query; research/recall.py recall refuses every page request (code 'ablated'; research.recall is "
+                     "in no shipped spec, so that half is reached only by a spec with a research.recall node)",
            test=_T + "test_skills_paged_recall_switch_withholds_skills_and_refuses_pages"),
     Switch(name="playbook_dead_ends", capability="auto-recsys",
            turns_off="research/memory_wiring.py recall_memory withholds playbook and dead-end entries from the query",
@@ -156,11 +163,14 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test=_T + "test_method_library_switch_withholds_methods"),
     Switch(name="data_profile_kway_rank", capability="scider",
            turns_off="research/modules.py profile_data computes no profile (an 'ablated' marker instead); "
-                     "research/tournament.py tournament_module makes no judge call and keeps the proposer's order",
+                     "research/tournament.py tournament_module (only in specs with a research.tournament node, e.g. "
+                     "examples/research_v1.yaml; research_v2 ranks by execution) makes no judge call and keeps the "
+                     "proposer's order",
            test=_T + "test_data_profile_kway_rank_switch_skips_profile_and_ranking"),
     Switch(name="btl_tournament", capability="robin",
            turns_off="research/tournament.py tournament_module: no judge call, no Bradley-Terry fit; the queue keeps "
-                     "the proposer's order",
+                     "the proposer's order (only in specs with a research.tournament node, e.g. "
+                     "examples/research_v1.yaml; under research_v2.yaml, which ranks by execution, it changes nothing)",
            test=_T + "test_btl_tournament_switch_keeps_the_proposer_order"),
     Switch(name="experiment_tree_repair_improve", capability="ai-scientist-v1-v2",
            turns_off="research/modules.py run_candidate never routes to `fix` (a failed node is abandoned, no "
@@ -168,11 +178,13 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test=_T + "test_experiment_tree_switch_removes_repairs_and_improve_rounds"),
     Switch(name="multi_source_retrieval", capability="feynman",
            turns_off="literature/client.py LiteratureClient.search asks only the first source of its order (no "
-                     "fallback across sources); lookups are unchanged",
+                     "fallback across sources); lookups are unchanged. Library level only: no run path calls search, "
+                     "so no ablation run exercises this switch yet",
            test=_T + "test_multi_source_retrieval_switch_disables_source_fallback"),
     Switch(name="reward_variance_selection", capability="aworld-rl",
            turns_off="weights/selection.py select_by_reward_variance ignores the variance: every task in task-id "
-                     "order, none excluded",
+                     "order, none excluded. Library level only: nothing in a run calls weights/, so no ablation run "
+                     "exercises this switch yet",
            test=_T + "test_reward_variance_selection_switch_selects_uniformly"),
 )
 

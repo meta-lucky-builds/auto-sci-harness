@@ -120,7 +120,8 @@ capabilities:
   ablation:
     switch: skills_paged_recall
     not_covered:
-      context manager: 'not switched: the head/tail + handle archive of over-long values is done by the engine''s prompt rendering (runtime/template.py, runtime/engine.py), which reads no AblationSet in this branch; an off arm also needs a defined rule for an over-long value without a handle'
+      context manager: 'switched by `observation-pack`, which belongs to row sol-pi (one switch per row): runtime/engine.py -> runtime/template.render keeps no archive handle and no `|log` reducer; the head/tail truncation limit itself is a fixed prompt bound and is not switched'
+      paged recall in the shipped specs: research.recall (the page-refusal half of this switch) is a node of neither examples/research_v1.yaml nor research_v2.yaml, so only a spec with a research.recall node reaches it; the skill-withholding half (research.recall_memory) is in both
 - id: weng-survey
   source: Weng survey
   capability: Decision observability, optimiser-of-optimiser
@@ -158,6 +159,8 @@ capabilities:
   ablation:
     switch: data_profile_kway_rank
     not_covered:
+      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml only; research_v2.yaml ranks by execution (research.execution_rank), so there only the profiling half of this switch acts
+      replication profile: the replication brief's trusted profile (research/claims.py _trusted_profile) is still computed
       trajectory data: 'an offline export only (weights/trajectory.py, weights/export.py) that takes trajectories as inputs and is not wired to runs: no run produces or consumes it, so there is nothing in a run to switch off'
 - id: scienceflow
   source: ScienceFlow
@@ -170,7 +173,7 @@ capabilities:
   capability: DAG kernel, full-text index, KG, provider adapters
   home: L0, L4.3, gateway
   ablation:
-    not_ablatable: 'DAG kernel = the runtime graph interpreter (runtime/engine.py) that runs every capability, and provider adapters = the model gateway (gateway/) through which every model call passes with its provenance: no run exists without either; full-text index: not built (literature/fulltext.py is a remote Europe PMC search whose quote-span support serves the citation verifier, an integrity mechanism); KG: not built'
+    not_ablatable: 'DAG kernel = the runtime graph interpreter (runtime/engine.py) that runs every capability, and provider adapters = the model gateway (gateway/) through which every model call passes with its provenance: no run exists without either; full-text index: not built (literature/fulltext.py is a remote Europe PMC full-text keyword search reached only from the literature CLI, plus optional full text on lookups for quote-span checks; the in-run citation audit uses an offline client without full text); KG: not built (memory/model.py relations link memory entries only; no literature or concept graph)'
 - id: auto-recsys
   source: Auto-RecSys
   capability: Cognition vs procedure split, playbook with dead-ends
@@ -186,8 +189,8 @@ capabilities:
   ablation:
     switch: method_library
     not_covered:
-      actor-critic: 'the critic -> defend chain (research/socratic.py, research/critic_answers.py) changes no route, queue or certificate; its only effect is the deny-only publish blocker recomputed in research.certify (critic_gate), pinned against edits (evolve/edits.py PINNED_NODES): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
-      rubric decomposition: the judge panel's rubric (verify/judge.py JudgePanel) is a deny-only T5 verifier that no run uses (JudgePanel is constructed nowhere in src; panel_status is REFUSED with one model family); the tournament's per-dimension rankings (research/tournament.py `dimensions`) are not switched by this switch
+      actor-critic: 'the critic -> defend chain (research/socratic.py, research/critic_answers.py) changes no route, queue, score or certificate; its only effect is the deny-only publish blocker recomputed from the trace in research.certify (critic_answers.critic_gate, which also blocks when the filter round failed or was disabled); its filter and check nodes (socratic, critic_evidence, check_answers) are pinned against edits (evolve/edits.py PINNED_NODES): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      rubric decomposition: the judge panel's rubric (verify/judge.py JudgePanel) is a deny-only T5 verifier that no run uses (JudgePanel is constructed nowhere in src; panel_status is REFUSED unless >= 3 non-author model families are configured); the tournament's per-dimension rankings (research/tournament.py `dimensions`) are not switched by this switch
 - id: matagent
   source: MatAgent
   capability: Human-in-the-loop gates
@@ -201,6 +204,7 @@ capabilities:
   ablation:
     switch: multi_source_retrieval
     not_covered:
+      multi-source retrieval in a run: 'not reachable: literature search runs only from the literature CLI (literature/cli.py) and library callers, and live_client / offline_client take no AblationSet; the only in-run client (research/claims.py citation_audit) resolves IDs on an offline snapshot. The switch is tested at library level only'
       citation verifier: 'K0 / audit I3 (literature/cite.py; ID lookups across sources are its resolution path and stay unchanged): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: the-station
   source: The Station
@@ -230,14 +234,15 @@ capabilities:
   ablation:
     switch: btl_tournament
     not_covered:
+      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml only; under research_v2.yaml (execution ranking) this switch changes nothing
       lab-in-loop: 'the physical claim path (research/physical.py) runs through human approval nodes (protocol_review, data_received) and the human-only `chh return-data`: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
-      replicated analysis + consensus: 'replication agreement is required for a CERTIFIED headline claim (research/claims.py certify, the replica_* nodes): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      replicated analysis + consensus: 'the headline label (research/claims.py headline, printed by research.report) requires the claim certificate AND one independent replica certificate (replica_* nodes) both CERTIFIED and invariant 5 met: an integrity/reporting requirement, never switched off in production; consensus over more than one replicate analysis: not built'
 - id: ahois
   source: AHOIS
   capability: Socratic question-only critic, physical bench
   home: L4.8, L6.5, L3 T3
   ablation:
-    not_ablatable: 'the Socratic critic changes no route, queue or certificate: its only effects are the question-only safety filter (research/socratic.py) and the deny-only publish blocker (research/critic_answers.py critic_gate, recomputed in research.certify), both pinned against edits (evolve/edits.py PINNED_NODES); the physical bench runs through human approval nodes (research/physical.py): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+    not_ablatable: 'the Socratic critic changes no route, queue or certificate: its only effects are the question-only safety filter (research/socratic.py) and the deny-only publish blocker (research/critic_answers.py critic_gate); the filter and check nodes are pinned against edits (evolve/edits.py PINNED_NODES) and the gate is recomputed from the trace inside the protected research.certify; the physical bench runs through human approval nodes (research/physical.py): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: scienceide
   source: ScienceIDE
   capability: Codebase → verifiable environments, fault injection, calibrated tolerances, floor-normalised reward
@@ -251,13 +256,14 @@ capabilities:
   ablation:
     switch: reward_variance_selection
     not_covered:
+      reward-variance task selection in a run: 'not reachable: weights/selection.py is called from nowhere in src (L8 is an offline data side, weights/__init__.py: not wired into any loop); the switch is tested at library level only'
       stateful verifier: not built (no stateful T1 verifier in verify/ or kernel/)
 - id: prime-agent
   source: Prime Agent
   capability: Memory hierarchy, long durable runs, recursive spawn ledger
   home: L5, L0/L1
   ablation:
-    not_ablatable: 'memory hierarchy: not built as a hierarchy (one store with kinds and a derivation graph, memory/store.py; its recall is switched under evoscientist''s `cross_task_memory`); long durable runs: per-step checkpoints and resume (runtime/engine.py) are the substrate the trace, run bundle and audit are built from (L2), so a run without them could not be audited; recursive spawn ledger: not built'
+    not_ablatable: 'memory hierarchy: not built as a hierarchy (one store with kinds and a derivation graph, memory/store.py; its recall is switched under evoscientist''s `cross_task_memory`); long durable runs: per-step checkpoints and resume (runtime/engine.py) are the substrate the trace, run bundle and audit are built from (L2), so a run without them could not be audited; recursive spawn ledger: not built in the system under test (orchestration/driver.py keeps a spawn ledger for the developer delegation driver, GOAL §15, and refuses nested spawns)'
 - id: researchbench-sde
   source: ResearchBench / SDE
   capability: Research-judgment evaluation
@@ -269,7 +275,7 @@ capabilities:
   capability: Checkpoint, resume, fan-out, interrupts
   home: L0
   ablation:
-    not_ablatable: 'checkpoint and resume are the runtime substrate the trace, run bundle and audit are built from (runtime/engine.py, L2), so a run without them could not be audited; fan-out (MapNode) is a graph construct of the spec whose declared reducer needs every branch, not a switchable behaviour; interrupts are human approval nodes: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+    not_ablatable: 'checkpoint and resume are the runtime substrate the trace, run bundle and audit are built from (runtime/engine.py, L2), so a run without them could not be audited; fan-out (runtime/spec.py MapNode: sequential branches, a declared reducer that needs every branch; used by no shipped spec) is a graph construct, not a switchable behaviour; interrupts are human approval nodes: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: vg-audit-2608-05179
   source: VG audit (2608.05179)
   capability: Verification ladder, reporting checklist, mechanical vs validated
@@ -281,4 +287,13 @@ capabilities:
   capability: Experiment-tree lifecycle and shape, fixed run contract, per-completion loop, compute backends, PubMed/bioRxiv/full-text retrieval with fixed windows, large-artifact manifest, figure scripts,
     delegation hygiene, bring-your-coding-agent front-ends
   home: L4.7, L1, L0, L4.3, L2, §15, gateway
-  ablation: null
+  ablation:
+    switch: per-completion-race
+    not_covered:
+      experiment-tree lifecycle and shape: 'repairs and improve rounds are switched by `experiment_tree_repair_improve` (row ai-scientist-v1-v2, one switch per row); the rest of the lifecycle and shape (immutable answered nodes, ledgered repairs, confirm-before-promote, shape diagnostics; research/tree.py) is fail-closed record integrity: no switch'
+      fixed run contract: 'research/tree.py refuses a run reported under another contract (CONTRACT_MISMATCH): record integrity, no switch'
+      compute backends: 'compute/ (declared isolation classes, recorded revisions) is the sandbox / isolation substrate, reached from the CLIs (cli.py, audit/cli.py): an integrity mechanism (GOAL L0), no switch'
+      PubMed/bioRxiv/full-text retrieval with fixed windows: 'no run path searches literature (literature/ is CLI and library; see row feynman), and the fixed as-of window is a leak guard (invariant 18): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      large-artifact manifest and figure scripts: 'the run bundle''s artifact manifest (store/run_bundle.py) and the figure audit (figures/, audit I6 in research.audit) are audit mechanisms: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      delegation hygiene: 'orchestration/ is the developer delegation driver (GOAL §15), not behaviour of the system under test: nothing in a run to switch'
+      bring-your-coding-agent front-ends: 'provider adapters (gateway/codex_cli.py, gateway/openai_compat.py): no run exists without a backend, no switch'

@@ -317,6 +317,42 @@ def test_voi_allocation_switch(tmp_path, monkeypatch):
         [c["race"] for c in on["res"].candidates if c["status"] == "raced"]
 
 
+# ===================================================================== openresearch-alphaxiv: per-completion-race
+def test_per_completion_race_switch(tmp_path, monkeypatch):
+    """Off: with race_allocator='per_completion' the race runs as the sequential batch race (the completion-driven
+    allocator control/evalrace.race_evaluator is not called)."""
+    from custom_harness.control import evalrace
+    from custom_harness.evolve.selection import race
+    calls: list[int] = []
+
+    def spy(candidates, units, evaluator, parent_scores, *, slots, rounds, keep=1, timeout_s=3600.0):
+        # stands in for the threaded allocator (the scripted table evaluator has no begin/finish): records the call
+        # and decides with the same race over the same scores
+        calls.append(slots)
+        return race(list(candidates), units, lambda h, u: evaluator.score(candidates[h], u), parent_scores,
+                    rounds=rounds, keep=keep), None, None
+    monkeypatch.setattr(evalrace, "race_evaluator", spy)
+    cfg = EvolveConfig(seeds=(0, 1), n_edits=2, race_rounds=2, race_allocator="per_completion", race_slots=2)
+
+    def run(name, off=()):
+        return _gen(tmp_path, name, off=off, proposer=MockBackend([_proposal(EDIT0, PROPOSALS["edits"][1])]),
+                    cfg=cfg)
+
+    def raced(r):
+        return [c["race"] for c in r["res"].candidates if c["status"] == "raced"]
+    on = run("on")
+    assert calls == [2]  # production: the per-completion allocator with its 2 slots
+    off = run("off", {"per-completion-race"})
+    assert calls == [2]  # the allocator did not run
+    assert len(raced(off)) == 2 and raced(off) == raced(on)  # the batch race decides the same way on these scores
+    ctl = run("ctl", {OTHER})
+    assert calls == [2, 2] and raced(ctl) == raced(on)
+    batch = _gen(tmp_path, "batch", off={"per-completion-race"},
+                 proposer=MockBackend([_proposal(EDIT0, PROPOSALS["edits"][1])]),
+                 cfg=EvolveConfig(seeds=(0, 1), n_edits=2, race_rounds=2))
+    assert calls == [2, 2] and raced(batch) == raced(on)  # under the default batch allocator: a no-op
+
+
 # ===================================================================== milo / sia: the L7 orchestrator
 def _orch(tmp_path, name, off=()):
     st = _store(tmp_path, name)
