@@ -762,8 +762,17 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
         rep = t.report()
         tree = {"tree_report": {"shape": rep["shape"], "selection": rep["selection"], "head": rep["head"]},
                 "tree_seq": t.seq}
+    figs: dict[str, Any] = {}
+    if params.get("figure", False):  # GOAL L2: a figure rendered by a script stored next to it, re-rendered by I6
+        from ..figures.report_figure import FIGURE_NAME, make_report_figure
+        root = data_dir() / "figures" / ctx.run_id
+        box = _sb(ctx).spawn(data_dir() / "sandboxes" / f"figure-make-{ctx.run_id}-{time.time_ns()}")
+        fig = make_report_figure(state, ctx.kernel(), ctx.store, box, root / FIGURE_NAME)
+        if fig is not None:
+            figs = {"figures": [*(state.get("figures") or []), fig]}
+            state = {**state, **figs}
     text = render_report(state, ctx)
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree}
+    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree, **figs}
 
 
 # ------------------------------------------------------------------ audit
@@ -821,7 +830,12 @@ def _figure_audit(state: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     from ..figures import audit_figures
     allowed = {str(e) for e in [*(state.get("evidence_ids") or []), *(state.get("replica_evidence_ids") or [])]}
     root = data_dir() / "sandboxes" / f"figure-audit-{ctx.run_id}-{time.time_ns()}"
-    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed)
+    certs = {str(c["hash"]) for c in (state.get("certificate"), state.get("replica_certificate"))
+             if isinstance(c, dict) and isinstance(c.get("hash"), str)}
+    kernel = ctx.kernel()
+    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed,
+                         certificate_of=lambda h: kernel.certificate(h).model_dump(mode="json"),
+                         allowed_certificates=certs)
 
 
 def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:

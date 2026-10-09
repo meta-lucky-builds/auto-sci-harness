@@ -221,7 +221,8 @@ nodes:
   replica_claim: {kind: module, module: research.claim, params: {prefix: replica_, candidate: replica_best, same_delta_as: claim, seeds: [0, 1, 2], alpha: 0.05}}
   replica_confirm: {kind: module, module: research.confirm, params: {prefix: replica_}}
   replica_certify: {kind: module, module: research.certify, params: {prefix: replica_}}
-  report: {kind: module, module: research.report}
+  # figure: the held-out effect with its interval, rendered by a script stored next to it; I6 re-renders it
+  report: {kind: module, module: research.report, params: {figure: true}}
   audit: {kind: module, module: research.audit}
 
 edges:
