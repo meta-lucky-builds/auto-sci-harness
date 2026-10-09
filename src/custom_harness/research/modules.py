@@ -214,7 +214,7 @@ def setup(state, params, ctx: ModuleContext):
     protect_path(task_dir / "private")
     check_mount(_sb(ctx).workspace)
     _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
-    for name in (task.train_file, task.test_features_file):
+    for name in (task.train_file, task.test_features_file, *task.aux_files):
         shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
     shutil.copy2(task_dir / task.baseline_file, _ws(ctx, "baseline.py"))
     # Dev estimate = k-fold cross-validation over the public training file (params: dev_folds, split_seed).
@@ -247,8 +247,15 @@ def setup(state, params, ctx: ModuleContext):
 
 @register("research.profile_data")
 def profile_data(state, params, ctx):
-    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it)."""
-    return {"profile": profile(_ws(ctx, f"data/{_task(state).train_file}"), _task(state).target_column)}
+    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it), plus the
+    key graph over the agent-visible DEV tables (training file + declared aux tables; never the held-out features or
+    labels), rendered for prompts as quoted data (research/keys.py)."""
+    from . import keys as K
+    task = _task(state)
+    tables = {name: _ws(ctx, f"data/{name}") for name in (task.train_file, *task.aux_files)}
+    kg = K.key_graph(tables)
+    return {"profile": profile(_ws(ctx, f"data/{task.train_file}"), task.target_column), "key_graph": kg,
+            "key_graph_quoted": K.quoted(kg)}
 
 
 @register("research.baseline_dev")

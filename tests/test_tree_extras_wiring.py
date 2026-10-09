@@ -39,7 +39,8 @@ def _preds(errors: int, offset: int = 0) -> list[str]:
 
 def _ok(code: str, *, errors: int, seed: int, offset: int = 0) -> RunOutcome:
     p = _preds(errors, offset)
-    return RunOutcome(CONTRACT, T.code_hash(code), seed, "ok", sum(a == b for a, b in zip(p, LABELS)) / N, p)
+    acc = sum(a == b for a, b in zip(p, LABELS, strict=True)) / N
+    return RunOutcome(CONTRACT, T.code_hash(code), seed, "ok", acc, p)
 
 
 @pytest.fixture
