@@ -12,9 +12,10 @@ human-owned one:
    a suite: it is looked up by problem. AUTHORSHIP: every suite in code is AGENT-AUTHORED (`AGENT_AUTHORED`). The
    two example suites were written by an AI agent, earlier labelled with the owner's name by mistake; no code field
    can declare a suite human-written. A suite counts as human-approved only through a ledgered HUMAN suite review
-   (`record_suite_review`, ledger kind `verifier_review`, subject "suite", bound to the suite hash). Each half has a PUBLIC part (shown to the author model) and a SEALED part
-   (never shown), so a verifier that memorises the visible cases fails on the sealed ones. Passing = every golden
-   accepted AND every planted fault rejected, with at least the configured number of each in each half.
+   (`record_suite_review`, ledger kind `verifier_review`, subject "suite", bound to the suite hash). Each half has
+   a PUBLIC part (shown to the author model) and a SEALED part (never shown), so a verifier that memorises the
+   visible cases fails on the sealed ones. Passing = every golden accepted AND every planted fault
+   rejected, with at least the configured number of each in each half.
 3. Tier (`tier`). Validated and not reviewed: capped at T2 (`SYNTH_UNREVIEWED_TIER_CAP`). It reaches its natural T1
    only with BOTH a human review recorded in the Kernel ledger (kind `verifier_review`) for exactly this verifier
    hash and suite hash, AND a ledgered human approval of that suite (hash): a verifier validated against an

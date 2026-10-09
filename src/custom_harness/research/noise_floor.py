@@ -29,8 +29,8 @@ from typing import Any
 
 from ..kernel.claim import EvidenceClass
 from ..runtime.modules import ModuleContext
-from ..verify import tolerance as TOL
 from ..verify import l3_config as L3
+from ..verify import tolerance as TOL
 
 
 def _shuffled_rows(data: bytes, seed: int) -> bytes:

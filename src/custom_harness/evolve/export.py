@@ -55,6 +55,8 @@ from typing import Any
 from ..kerneld.releases import Releases, private_reads
 from ..store import EvidenceStore
 from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
+from ..weights.goodhart import scan as goodhart_scan
+from ..weights.goodhart import sealed_fingerprints
 from .evaluate import RunOutcome, SuiteTask
 
 FORMAT = "chh-evidence-export/1"
@@ -348,7 +350,9 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
             state = doc.get("state", doc) if isinstance(doc, dict) else {}
             secrets_ += _private_values(state)
     return {"hashes": hashes, "contents": contents, "windows": windows, "paths": sorted(set(paths)),
-            "canaries": sorted(set(found)), "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True)}
+            "canaries": sorted(set(found)), "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True),
+            # L8 (s3-verifiers): owner-only coupled-Goodhart reports (they hold sealed scores, invariant 18)
+            "goodhart": sealed_fingerprints(store)}
 
 
 def _strings(obj: Any, keys: list[str]) -> Iterable[str]:
@@ -388,6 +392,7 @@ def _audit(root: Path, fp: dict[str, Any]) -> list[str]:
                 problems.append(f"a private run-state value found in {rel}")
             if any(c in text for c in fp["contents"]):
                 problems.append(f"verbatim content of a task's private file found in {rel}")
+            problems += [f"{what} found in {rel}" for what in goodhart_scan(text, fp.get("goodhart", {}))]
             norm = text.replace("\\", "/").lower()
             if any(pp in norm for pp in fp["paths"]):
                 problems.append(f"a task's private directory path found in {rel}")

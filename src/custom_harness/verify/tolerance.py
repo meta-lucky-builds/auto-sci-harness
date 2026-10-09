@@ -42,7 +42,8 @@ from ..kernel.claim import EvidenceClass
 from . import l3_config as C
 
 SOURCES = ("nominal", "perturbed", "rebuild", "seed")
-PURPOSES = {"reproduce": ("nominal", "perturbed", "rebuild"), "seed": SOURCES, "replay_same_env": ("nominal", "perturbed")}
+PURPOSES = {"reproduce": ("nominal", "perturbed", "rebuild"), "seed": SOURCES,
+            "replay_same_env": ("nominal", "perturbed")}
 
 
 class ToleranceError(ValueError):
@@ -156,7 +157,8 @@ def measure(rerun: Callable[[str, int], float | None], reference: float | None, 
     return NoiseFloor(reference=float(reference), **runs)
 
 
-def claim_tolerance(evidence_class: EvidenceClass, floor: NoiseFloor | None, *, miss_rate: float = C.TOL_CLAIM_MISS_RATE,
+def claim_tolerance(evidence_class: EvidenceClass, floor: NoiseFloor | None, *,
+                    miss_rate: float = C.TOL_CLAIM_MISS_RATE,
                     purpose: str = C.TOL_CLAIM_PURPOSE) -> Resolved:
     """The K3 tolerance a pre-registered claim gets. No hand-set value enters here (hand_set = 0.0): with no floor,
     or a floor calibration refuses, the claim keeps 0.0 (identical predictions, the strictest check; for exact

@@ -357,7 +357,8 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
         if not critic_ok:
             ok, blockers = False, [*blockers, why]
     from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
-    memory_rec = after_certify(kernel, state, h, ctx.secrets)
+    memory_rec = after_certify(kernel, state, h, ctx.secrets, run_id=ctx.run_id, spawn=_perturbed_spawn(ctx),
+                               targets=_dev_targets(state), candidate_key="replica_best" if p else "best")
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))
             for e in cert.evidence_ids]
     target = claim.generalization_targets[0]
@@ -395,6 +396,23 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                 # held-out value; only its existence depends on the target (the verdict bit)
                 "_release_alphabets": {"replication_brief": "verdict_bit"}} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
+
+
+def _perturbed_spawn(ctx: ModuleContext) -> Any:
+    """Fresh sandboxes for the skill writer's perturbed evaluator (memory_wiring.exploit_check); None without one."""
+    if ctx.sandbox is None:
+        return None
+    sb = _sb(ctx)
+    root = sb.workspace.parent / f"{sb.workspace.name}-perturbed"
+    return lambda name: sb.spawn(root / f"{name}-{uuid.uuid4().hex[:8]}")
+
+
+def _dev_targets(state: dict[str, Any]) -> dict[str, str] | None:
+    """The public development dataset and its target column (trusted: from the task spec and the vault ids)."""
+    try:
+        return {state["datasets"]["train"]: _task(state).target_column}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[str, Any]:
