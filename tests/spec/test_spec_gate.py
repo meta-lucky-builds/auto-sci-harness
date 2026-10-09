@@ -131,7 +131,15 @@ def test_validation_sets_split_into_stable_disjoint_halves():
         assert sorted(halves["dev"] + halves["sealed"]) == sealed.items(name)
         assert halves["dev"] and halves["sealed"]  # both halves exist
     assert len(sealed.items("claim-suite")) == 51
-    assert sealed.split("honest-corpus") == {"dev": [], "sealed": []}  # not built: stated
+    # the honest corpus (built 2026-10-09 by scripts/honest_corpus.py): halves per PAIR, from the committed manifest
+    halves = sealed.split("honest-corpus")
+    assert halves["dev"] and halves["sealed"] and set(halves["dev"]).isdisjoint(halves["sealed"])
+    assert sorted(halves["dev"] + halves["sealed"]) == sealed.items("honest-corpus")
+    man = json.loads((ROOT / sealed.CORPUS_MANIFEST).read_text(encoding="utf-8"))
+    for e in man["items"]:
+        assert e["half"] == sealed.half_of("honest-corpus", e["pair"])
+        if e["half"] == "sealed":  # sealed labels are never committed: only a commitment hash
+            assert "expected" not in e and set(e) == {"id", "pair", "half", "digest", "commitment"}
 
 
 def test_every_sealed_look_is_ledgered_and_an_edited_look_breaks_the_chain(tmp_path):
