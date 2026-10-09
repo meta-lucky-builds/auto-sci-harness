@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -250,8 +251,20 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems, "artifacts": arts.to_json()}, indent=1))
+                      "problems": report.problems, "artifacts": arts.to_json(),
+                      "headline": _headline(report.certificate)}, indent=1))
     return 0 if report.reproduced else 1
+
+
+def _headline(cert: Any) -> dict[str, Any] | None:
+    """The headline numbers of the RE-DERIVED certificate (GOAL §2.4): label, tier and, per held-out target, the
+    effect estimate and its interval, as the reproducing machine computed them (None without a certificate)."""
+    if cert is None:
+        return None
+    targets = (cert.resolution or {}).get("targets") or {}
+    return {"label": cert.label.value, "tier": cert.tier,
+            "targets": {t: {k: v.get(k) for k in ("estimate", "lo", "hi")} for t, v in sorted(targets.items())
+                        if isinstance(v, dict)}}
 
 
 def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
