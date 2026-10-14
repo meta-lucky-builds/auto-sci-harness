@@ -55,6 +55,7 @@ def measure_dev_noise_floor(state: dict[str, Any], ctx: ModuleContext, code: byt
     task, labels = _task(state), _dev_labels(state, ctx)
 
     def score(st: dict[str, Any], name: str) -> float | None:
+        ctx.budget.check()  # BudgetExceeded propagates: the run's caps bound the calibration too
         preds, _ = _dev_predict(ctx, st, code, name, seed=0)
         return _score(task, labels, preds)
 

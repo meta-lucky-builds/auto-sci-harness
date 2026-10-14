@@ -44,11 +44,18 @@ def test_claim_tolerance_is_exact_without_a_floor_and_never_takes_a_hand_set_val
         assert T.claim_tolerance(exact, honest_floor()).value == 0.0
     assert T.claim_tolerance(EvidenceClass.PHYSICAL, honest_floor()).value is None
     # a floor calibration refuses (too few runs; noise above the Kernel ceiling) keeps the strict 0.0, not a clip
-    few = T.NoiseFloor(reference=0.8, nominal=(0.8,) * 3, perturbed=(0.8,) * 3, rebuild=(), seed=())
+    few = T.NoiseFloor(reference=0.8, nominal=(0.8001,) * 3, perturbed=(0.8,) * 3, rebuild=(), seed=())
     loud = T.NoiseFloor(reference=0.8, nominal=(0.85,) * 9, perturbed=(0.8,) * 9, rebuild=(), seed=())
     for f in (few, loud):
         r = T.claim_tolerance(EvidenceClass.DATA, f)
         assert r.value == 0.0 and any("calibration refused" in x for x in r.reasons), r
+    # review H1: identical nominal re-runs keep the exact K3 (identical predictions), even when the shuffled-rows
+    # source is noisy (a tolerance > 0 would switch K3 from comparing predictions to comparing scores)
+    det = T.NoiseFloor(reference=0.8, nominal=(0.8,) * 9, perturbed=tuple(0.8 + 0.001 * i for i in range(9)),
+                       rebuild=(), seed=())
+    assert T.calibrate(det, miss_rate=0.1, purpose=C.TOL_CLAIM_PURPOSE).tolerance > 0  # the trap is real
+    r = T.claim_tolerance(EvidenceClass.DATA, det)
+    assert r.value == 0.0 and any("identical" in x for x in r.reasons), r
     # the claim purpose never needs rebuild runs, and is never looser than the full reproduce purpose
     f = honest_floor()
     full = T.NoiseFloor(f.reference, f.nominal, f.perturbed, tuple(f.reference + 0.001 for _ in f.nominal), ())
@@ -87,8 +94,10 @@ def test_planted_drift_is_rejected_by_k3_and_honest_reruns_pass(tmp_path):
             cert = w.kernel.certify(c, w.evaluate_all(c, score_offset=offset))
             return cert.checks["K3"].status
 
+        # each call is a DIFFERENT claim (delta): re-certifying one claim hash is subject to the Kernel's own rules
+        # for earlier certificates of that claim, which this test is not about
         assert k3(0.2, tol, 0.0) == "pass"  # honest: the replay reproduces the recorded score
-        assert k3(0.2, tol, tol / 2) == "pass"  # an honest re-run inside the measured noise passes
+        assert k3(0.19, tol, tol / 2) == "pass"  # an honest re-run inside the measured noise passes
         # the attack: a 0.01 drift between the recorded score and what the program reproduces ...
         assert k3(0.21, C.TOL_CEILING, 0.01) == "pass"  # ... passes the Kernel's hand-set ceiling (0.02)
         assert k3(0.22, tol, 0.01) == "fail"  # ... and is rejected by the calibrated tolerance
@@ -103,6 +112,15 @@ def test_research_claim_freezes_a_calibrated_tolerance(store, tmp_path, rings_ta
     doc = yaml.safe_load((ROOT / "examples/research_v1.yaml").read_text(encoding="utf-8"))
     doc["nodes"]["claim"]["params"]["calibrate_tolerance"] = True
     spec = HarnessSpec.model_validate(doc)
+    from custom_harness.research import noise_floor as NF
+    real, measured = NF.measure_dev_noise_floor, []
+
+    def jittered(*a, **k):  # the REAL measurement runs; its nominal spread is then widened a little, so the value
+        f = real(*a, **k)  # frozen into the claim is > 0 and the test can tell it from the default 0.0
+        measured.append(f)
+        return T.NoiseFloor(f.reference, tuple(v + 1e-4 * (i + 1) for i, v in enumerate(f.nominal)), f.perturbed,
+                            (), ())
+    monkeypatch.setattr(NF, "measure_dev_noise_floor", jittered)
     llm = MockBackend(scripted_llm)
     res = Engine(spec, backends={"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store=store,
                  sandbox=LocalSandbox(tmp_path / "ws", i_understand_no_isolation=True)).run(
@@ -111,14 +129,15 @@ def test_research_claim_freezes_a_calibrated_tolerance(store, tmp_path, rings_ta
     s = res.state
     rec = s["tolerance"]
     n = T.min_runs(C.TOL_CLAIM_MISS_RATE)
-    assert rec["source"] == "calibrated" and rec["runs_per_source"] == n, rec
+    assert len(measured) == 1 and len(measured[0].nominal) == len(measured[0].perturbed) == n  # real dev re-runs
+    assert rec["source"] == "calibrated" and rec["runs_per_source"] == n and rec["value"] > 0, rec
     assert len(rec["floor"]["nominal"]) == len(rec["floor"]["perturbed"]) == n
     claim = Claim.model_validate(s["claim"])
-    assert claim.analysis_plan.reproduce_tolerance == rec["value"]  # frozen into the pre-registration
+    assert claim.analysis_plan.reproduce_tolerance == rec["value"] > 0  # frozen into the pre-registration
     from custom_harness.kernel import Kernel
     regs = [e.body for e in Kernel(store).ledger.entries("prereg") if e.body.get("claim_hash") == s["claim_hash"]]
     assert regs and regs[0]["claim"]["analysis_plan"]["reproduce_tolerance"] == rec["value"]
-    assert s["certificate"]["label"] != Label.REJECTED.value or "K3" not in s["certificate"]["failed"]
+    assert "K3" not in s["certificate"]["failed"], s["certificate"]  # an honest (deterministic) program reproduces
     # the replica claim (no calibrate param) keeps the strict 0.0
     if s.get("replica_claim"):
         assert Claim.model_validate(s["replica_claim"]).analysis_plan.reproduce_tolerance == 0.0
@@ -160,6 +179,11 @@ def test_a_screen_pass_never_grants_only_exact_confirmations_are_certified(tmp_p
         for bad in (["fp"], [FP], [("fp", FP)], [res]):
             with pytest.raises(TypeError, match="never grants"):
                 G.certify_confirmed_lp(w.kernel, bad, cands, _claim_for(w))
+        # review L2: dataclasses.replace copies the gate token; such a copy is still refused
+        import dataclasses
+        forged = dataclasses.replace(G.submittable(res)[0], candidate_id="fp", candidate_hash=G._hash(FP))
+        with pytest.raises(TypeError, match="not issued"):
+            G.certify_confirmed_lp(w.kernel, [forged], cands, _claim_for(w))
         # a confirmation whose candidate was swapped afterwards is refused
         with pytest.raises(ValueError, match="not the one"):
             G.certify_confirmed_lp(w.kernel, G.submittable(res), {"good": FP}, _claim_for(w))

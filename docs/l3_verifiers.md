@@ -26,9 +26,11 @@ Parameters: `src/custom_harness/verify/l3_config.py` (the one config place; UNCA
   claim alone; an independent second verifier (other author and other family; a human-owned check counts) must agree.
 - Wired: `research.synthesize_verifier` (params `problem`, `role` default `verifier_author`) calls the model through
   `ModuleContext.llm` (budgeted, traced), stores the spec as a blob and returns `{problem, ref, verifier_hash,
-  suite_hash, suite_authorship, validated, tier, error}`. State is a hint only: `usable_tier(ctx, ref)` re-parses the
-  stored spec, re-validates it and recomputes the tier from the ledger. Only the validation BIT is returned (which sealed
-  case failed is never shown). Limit: repeated synthesis can learn one bit per attempt about the sealed half.
+  suite_authorship, validated, tier, error}`. State is a hint only: `usable_tier(ctx, ref)` re-parses the stored
+  spec, re-validates it and recomputes the tier from the ledger. Only the validation BIT is returned (which sealed case
+  failed is never shown; no suite hash either, since it covers the sealed cases). OPEN (review M4, invariants 18/20):
+  repeated synthesis can learn one bit per attempt about the sealed half, these looks are not ledgered, and the module
+  is not pinned to human-only nodes.
 - Not built: a `chh review-verifier` / `chh review-suite` CLI; a consumer that uses synthesized verdicts in a claim.
 
 ## Calibrated tolerances (`verify/tolerance.py`, `research/noise_floor.py`)
@@ -40,6 +42,10 @@ Parameters: `src/custom_harness/verify/l3_config.py` (the one config place; UNCA
   `TOL_MAX_MISS_RATE`, or a floor above the Kernel's K1 ceiling are refused, never clipped.
 - `claim_tolerance(class, floor)` is the claim path's one decision: no hand-set value enters; without a floor, or when
   calibration refuses, the tolerance is 0.0 (identical predictions on replay, the strictest K3); exact classes are 0.
+  When every nominal re-run equals the reference (the program is deterministic on identical inputs, which is what a
+  same-environment replay gives it) the tolerance also stays 0.0, whatever the shuffled-rows source shows: a tolerance
+  above 0 switches K3 from comparing predictions to comparing scores (kernel/checks.py), so it is used only for programs
+  that are measurably non-deterministic on identical inputs (review finding H1).
 - Wired: `research.claim` with `calibrate_tolerance: true` (the node is protected from harness edits) measures the
   candidate's noise floor on PUBLIC dev data (`_dev_predict`: reference + n nominal re-runs + n re-runs with each fold's
   training rows shuffled, n = `min_runs(TOL_CLAIM_MISS_RATE)` = 9), and freezes `claim_tolerance(DATA, floor).value`

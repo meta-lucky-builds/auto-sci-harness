@@ -165,6 +165,13 @@ def claim_tolerance(evidence_class: EvidenceClass, floor: NoiseFloor | None, *,
     classes always). A refusal is reported in `reasons`, never clipped or replaced by a looser value."""
     if floor is None:
         return resolve_tolerance(evidence_class, 0.0, None)
+    if floor.nominal and all(v == floor.reference for v in floor.nominal):
+        # identical nominal re-runs: the program is deterministic on identical inputs, which is what a same-environment
+        # replay gives it. A tolerance > 0 would switch K3 from comparing PREDICTIONS to comparing scores, so the exact
+        # check stays (other sources, e.g. shuffled training rows, never widen a same-input replay check)
+        r = resolve_tolerance(evidence_class, 0.0, None)
+        return Resolved(r.value, r.source, (*r.reasons, "nominal re-runs identical: exact K3 (identical predictions) "
+                                                        "kept"))
     try:
         cal = calibrate(floor, miss_rate=miss_rate, purpose=purpose)
     except ToleranceError as e:

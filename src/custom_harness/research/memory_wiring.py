@@ -86,20 +86,20 @@ def write_skill(kernel: Kernel, state: dict[str, Any], cert_hash: str, secrets: 
                 candidate_key: str = "best") -> dict[str, Any]:
     """The production skill write for this run's certificate (memory/writer.py). Returns a record for state."""
     if kernel.certificate(cert_hash).label not in CERTIFIED:
-        return {"written": False, "reason": "not a certified outcome"}
+        return {"proposed": False, "reason": "not a certified outcome"}
     if not run_id or spawn is None or not targets:
-        return {"written": False, "reason": "no perturbed evaluator available (sandbox spawn / target column): "
-                                            "skills are not written without the exploit check"}
+        return {"proposed": False, "reason": "no perturbed evaluator available (sandbox spawn / target column): "
+                                             "skills are not written without the exploit check"}
     best = state.get(candidate_key)
     if not isinstance(best, dict) or not isinstance(best.get("code_ref"), str):
-        return {"written": False, "reason": f"no certified candidate {candidate_key!r} in state"}
+        return {"proposed": False, "reason": f"no certified candidate {candidate_key!r} in state"}
     store = MemoryStore(kernel, namespace=ns, exploit_check=exploit_check(kernel, spawn, dict(targets)))
     try:
         r = SkillWriter(store).write_playbook(cert_hash, run_id=run_id, method=_hypothesis_text(state, best),
                                               method_subject_hash=best["code_ref"], secrets=secrets)
     except (WriterRefused, MemoryRefused) as e:
-        return {"written": False, "reason": str(e)[:300]}
-    return {"written": True, "entry": r.entry_id, "status": r.status.value, "passed": r.passed,
+        return {"proposed": False, "reason": str(e)[:300]}
+    return {"proposed": True, "entry": r.entry_id, "status": r.status.value, "passed": r.passed,
             "reasons": [x[:200] for x in r.reasons[:3]]}
 
 
@@ -116,8 +116,11 @@ def after_certify(kernel: Kernel, state: dict[str, Any], cert_hash: str, secrets
         store = MemoryStore(kernel, namespace=ns)
         out["harvested"] = [{"entry": r.entry_id, "status": r.status.value, "passed": r.passed}
                             for r in SkillWriter(store).write_negatives(secrets=secrets)]
-        out["skill"] = write_skill(kernel, state, cert_hash, secrets, ns, run_id=run_id, spawn=spawn,
-                                   targets=targets, candidate_key=candidate_key)
+        try:  # a skill-writer failure is recorded and never stops outcome counting (nor the certify node)
+            out["skill"] = write_skill(kernel, state, cert_hash, secrets, ns, run_id=run_id, spawn=spawn,
+                                       targets=targets, candidate_key=candidate_key)
+        except Exception as e:  # noqa: BLE001  memory never changes a certificate or a route
+            out["skill"] = {"proposed": False, "reason": f"skill writer failed: {type(e).__name__}: {e}"[:300]}
         for eid in (state.get("memory") or {}).get("skills") or []:
             try:
                 m = store.record_outcome(eid, cert_hash)

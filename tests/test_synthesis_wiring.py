@@ -47,8 +47,11 @@ def test_every_suite_in_code_is_agent_authored_never_the_owners():
         assert suite.author.startswith("agent:"), name  # who wrote it: an agent, not the owner
         assert not hasattr(suite, "owner"), name  # the old field claimed the owner's name
         assert "owner (custom-harness)" not in json.dumps([suite.author, suite.description]), name
-    # the authorship marker is part of the content hash: a suite cannot be relabelled without a new hash
-    assert '"authorship"' not in S.SUITES["sort"].author_view()
+    # the author is part of the content hash: relabelling a suite (e.g. as the owner's) gives a new hash, so no
+    # review of the agent-authored suite carries over to the relabelled one
+    import dataclasses
+    suite = S.SUITES["sort"]
+    assert dataclasses.replace(suite, author="owner").hash() != suite.hash()
 
 
 def test_an_agent_authored_suite_cannot_lift_the_cap(store):

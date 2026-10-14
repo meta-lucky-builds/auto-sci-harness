@@ -38,6 +38,9 @@ from ..kernel.claim import canonical_json
 from . import l3_config as C
 
 _GATE = object()  # only screen_then_certify holds this
+# every confirmation the gate issued (its full content): `dataclasses.replace` copies the token, so a forged copy with
+# another id/hash/value passes __post_init__ but is not in this set (certify_confirmed_lp checks it)
+_ISSUED: set[tuple[str, str, str, Fraction | None]] = set()
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,10 @@ def screen_then_certify[T](candidates: Sequence[tuple[str, T]], *, screen: Calla
         except Exception as e:  # noqa: BLE001  a crashing exact checker refutes (fail closed)
             reasons = [f"exact checker crashed: {type(e).__name__}"]
         if isinstance(reasons, list) and not reasons:
-            confirmed.append(Confirmed(candidate_id=cid, checker=checker, value=_value(cand),
-                                       candidate_hash=_hash(cand), _token=_GATE))
+            conf = Confirmed(candidate_id=cid, checker=checker, value=_value(cand), candidate_hash=_hash(cand),
+                             _token=_GATE)
+            _ISSUED.add((conf.candidate_id, conf.checker, conf.candidate_hash, conf.value))
+            confirmed.append(conf)
         else:
             why = tuple(str(r) for r in reasons) if isinstance(reasons, list) else (
                 f"exact checker returned {type(reasons).__name__}, not a list of reasons",)
@@ -170,10 +175,16 @@ def certify_confirmed_lp(kernel: Any, confirmed: Sequence[Confirmed], candidates
     anything is registered, anything that is not a `Confirmed` from this gate, a confirmation without its candidate,
     or a candidate whose content differs from the one confirmed."""
     items = list(confirmed)
+    if len({c.candidate_id for c in items if isinstance(c, Confirmed)}) != len(items):
+        if not all(isinstance(c, Confirmed) for c in items):
+            raise TypeError("only exact-gate confirmations are submitted (a float screen pass never grants)")
+        raise ValueError("duplicate confirmations")
     for c in items:
         if not isinstance(c, Confirmed):
             raise TypeError(f"only exact-gate confirmations are submitted, not {type(c).__name__} (a float screen "
                             "pass never grants)")
+        if (c.candidate_id, c.checker, c.candidate_hash, c.value) not in _ISSUED:
+            raise TypeError(f"confirmation {c.candidate_id!r} was not issued by the exact gate (a copy or forgery)")
         if c.checker != "lp":
             raise ValueError(f"confirmation {c.candidate_id!r} is from checker {c.checker!r}, not the lp checker")
         cand = candidates.get(c.candidate_id)
@@ -182,6 +193,8 @@ def certify_confirmed_lp(kernel: Any, confirmed: Sequence[Confirmed], candidates
     out: dict[str, Any] = {}
     for c in items:
         cand = candidates[c.candidate_id]
+        if _hash(cand) != c.candidate_hash:  # re-checked at use: the mapping or certificate dict may have changed
+            raise ValueError(f"candidate {c.candidate_id!r} changed after the check")
         claim = claim_for(c.candidate_id, cand)
         kernel.preregister(claim)
         aid = kernel.vault.register_artifact(f"lp-certificate-{c.candidate_hash[:16]}",

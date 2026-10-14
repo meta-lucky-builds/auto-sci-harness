@@ -203,18 +203,32 @@ def test_after_certify_runs_the_writer_and_refuses_without_an_evaluator(sw):
     ns = f"ac{next(_ns)}"
     rec = after_certify(sw.kernel, state, sw.honest, (), ns, run_id=sw.runs["honest"], spawn=None,
                         targets={"train": "label"})
-    assert rec["error"] is None and rec["skill"]["written"] is False and "exploit check" in rec["skill"]["reason"]
+    assert rec["error"] is None and rec["skill"]["proposed"] is False and "exploit check" in rec["skill"]["reason"]
     n = itertools.count()
     root = sw.w.root / f"ac{next(_ns)}"
     rec = after_certify(sw.kernel, state, sw.honest, (), ns, run_id=sw.runs["honest"],
                         spawn=lambda name: LocalSandbox(root / f"{name}-{next(n)}", i_understand_no_isolation=True),
                         targets={"train": "label"})
-    assert rec["error"] is None and rec["skill"]["written"] is True, rec
-    # the production store uses the human-owned tier table: a T2 research certificate is below the T1 skill floor
-    assert rec["skill"]["status"] == "rejected" and any("tier floor" in r for r in rec["skill"]["reasons"]), rec
+    # the production store uses the human-owned tier table: a T2 research certificate is below the T1 skill floor,
+    # so the writer refuses before proposing (review M5: no wasted re-derivation or perturbed evaluation)
+    assert rec["error"] is None and rec["skill"]["proposed"] is False, rec
+    assert "skill tier floor" in rec["skill"]["reason"], rec
     # a certificate of another run is refused even through the wiring
     other = after_certify(sw.kernel, state, sw.honest, (), f"ac{next(_ns)}", run_id=sw.runs["exploit"],
                           spawn=lambda name: LocalSandbox(root / f"x{name}-{next(n)}", i_understand_no_isolation=True),
                           targets={"train": "label"})
-    assert other["skill"]["written"] is False and "not produced by run" in other["skill"]["reason"]
+    assert other["skill"]["proposed"] is False and "not produced by run" in other["skill"]["reason"]
+    # review M2: a crashing writer is recorded and does not stop the rest of after_certify
+    import custom_harness.research.memory_wiring as MWI
+
+    def boom(*a, **k):
+        raise OSError("disk")
+    orig = MWI.write_skill
+    MWI.write_skill = boom
+    try:
+        crashed = after_certify(sw.kernel, state, sw.honest, (), f"ac{next(_ns)}", run_id=sw.runs["honest"],
+                                spawn=None, targets=None)
+    finally:
+        MWI.write_skill = orig
+    assert crashed["error"] is None and "skill writer failed: OSError" in crashed["skill"]["reason"], crashed
 

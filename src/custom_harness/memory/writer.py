@@ -8,7 +8,10 @@ allowlisted modules (tests/test_memory.py static check), and the writer's identi
 What it checks BEFORE anything is proposed (a refusal raises `WriterRefused`; nothing is stored):
   - an exploit check is configured on the store (the gate would refuse the skill anyway; the writer never proposes one
     that cannot be checked);
-  - the certificate exists, is CERTIFIED, re-derives (`Kernel.verify`) and is not retracted;
+  - the certificate exists, is CERTIFIED and is not retracted (the gate re-derives it with `Kernel.verify`; the
+    writer does not repeat that expensive step);
+  - the certificate's tier meets the store's skill floor (checked before proposing, so a certificate the gate would
+    reject on its tier costs no re-derivation and no perturbed evaluation);
   - every evidence record of the certificate was produced by THIS run (`run_id`): a run cannot write a skill from
     another run's certificate;
   - the method text it quotes belongs to the certified subject: the caller states the content hash of the code the
@@ -30,7 +33,7 @@ from collections.abc import Sequence
 
 from ..kernel import Claim, ExecRecord, KernelError
 from .model import GateResult, Kind, MemoryRefused, Proposal
-from .store import CERTIFIED, MemoryStore, harvest_negatives
+from .store import CERTIFIED, MemoryStore, cert_tier, harvest_negatives
 
 WRITER = "skill-writer"
 MAX_METHOD_CHARS = 2000
@@ -70,8 +73,10 @@ class SkillWriter:
         retracted = {e.body.get("cert_hash") for e in self.kernel.ledger.entries("retraction")}
         if cert_hash in retracted:
             raise WriterRefused(f"certificate {cert_hash[:12]} is retracted")
-        if self.kernel.verify(cert_hash):
-            raise WriterRefused(f"certificate {cert_hash[:12]} does not re-derive")
+        floor = self.store.policy.floors.get(Kind.PLAYBOOK)
+        if floor is None or cert_tier(cert) > floor:
+            raise WriterRefused(f"certificate {cert_hash[:12]} has tier {cert_tier(cert).name}, below the skill tier "
+                                f"floor {floor.name if floor is not None else 'none'} (nothing proposed)")
         runs = self._evidence_runs(cert.evidence_ids)
         if not cert.evidence_ids or runs != {run_id}:
             raise WriterRefused(f"certificate {cert_hash[:12]} was not produced by run {run_id!r} alone")

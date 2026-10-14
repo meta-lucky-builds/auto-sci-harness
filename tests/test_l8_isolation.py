@@ -41,6 +41,8 @@ def test_reports_are_recorded_owner_only_and_fingerprinted(store):
     assert repr(POINTS[0].sealed_score) in fp["numbers"] and repr(report.slope) in fp["numbers"]
     for short in ("0.0", "1", "0.5", "1.0", "0.71"):  # too short to fingerprint without false positives
         assert short not in fp["numbers"]
+    for p in POINTS:  # review M3: the A-scores (the evolver's own fitness) and times are not owner-only
+        assert repr(p.a_score) not in fp["numbers"] and repr(p.t) not in fp["numbers"]
     n = _readable_number(fp)
     assert GH.scan(f"score {n} on gate", fp) and not GH.scan(f"score {n}9 on gate", fp)  # whole numbers only
 
@@ -114,7 +116,7 @@ def test_only_the_export_audit_imports_the_goodhart_module_outside_weights():
                     found.setdefault(rel, set()).add("<module>")
             elif isinstance(node, ast.Name) and node.id in NAMES:
                 found.setdefault(rel, set()).add(node.id)
-            elif isinstance(node, ast.Attribute) and node.attr in NAMES:
+            elif isinstance(node, ast.Attribute) and (node.attr in NAMES or node.attr == "goodhart"):
                 found.setdefault(rel, set()).add(node.attr)
     assert found == ALLOWED, found
 

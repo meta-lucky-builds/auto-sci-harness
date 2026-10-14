@@ -26,7 +26,14 @@ skill and every entry deriving from it (`MemoryStore.sync`).
 
 ## Stated limits / owner decisions
 - With the human-owned tier table (`tiers.DEFAULT_POLICY[ADMIT_SKILL]` = T1), research (T2) certificates are below the
-  skill floor: in production every written skill is REJECTED by the gate until the owner sets a T2 skill floor.
+  skill floor: in production the writer refuses every research skill before proposing it (no re-derivation, no
+  perturbed evaluation is spent) until the owner sets a T2 skill floor.
+- OPEN (review M1): the quoted method text is read from the run-state key `hypotheses`, which evolve/edits.py does not
+  reserve, so an added node could rewrite the idea text after the claim. Admission is unaffected (text is data,
+  screened, quoted); the fix is to reserve `hypotheses` and `memory` in `RESERVED_OUTPUT_KEYS` (b-evolve's file) or to
+  hash the idea text into the claim record at claim time.
+- A writer failure is recorded in `memory_after_certify.skill` and never stops negative harvesting, outcome counting or
+  the certify node (review M2).
 - The perturbed evaluator re-runs programs (k-fold, several seeds): it costs sandbox time on every certified outcome.
 - Who may import `custom_harness.memory` is pinned by tests/test_memory.py; the writer lives inside the package.
 

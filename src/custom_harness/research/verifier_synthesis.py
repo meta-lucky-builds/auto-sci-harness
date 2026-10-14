@@ -6,13 +6,15 @@
 traced). Trusted code then parses it, runs the fault-injection validation against the problem's suite and computes
 its tier from the Kernel ledger. The spec is stored as a blob; state gets a record:
 
-    verifier_synthesis: {problem, ref, verifier_hash, suite_hash, suite_authorship, validated, tier, error}
+    verifier_synthesis: {problem, ref, verifier_hash, suite_authorship, validated, tier, error}
 
 What state carries is a HINT for the next nodes, never trusted: `usable_tier(ctx, ref)` re-reads the blob,
 re-parses it through the vocabulary, re-validates it and recomputes the tier from the ledger at every use, so a
 later (evolvable) node that rewrites `tier` in state changes nothing. Validation is reported as one bit
 (`validated`); which golden cases or planted faults failed is NOT put in state (the sealed half must stay unseen by
-the author). Stated limit: a loop that re-runs synthesis can still learn one bit per attempt about the sealed half.
+the author), and no hash over the suite (it covers the sealed cases and would allow offline guess-checking).
+Stated limits (open, GOAL invariants 18/20): a loop that re-runs synthesis can still learn one bit per attempt about the
+sealed half, and these looks at the sealed half are not ledgered yet; the module is not pinned to human-only nodes.
 
 The tier is capped at T2 (`l3_config.SYNTH_UNREVIEWED_TIER_CAP`) unless a human approved both the verifier and its
 suite in the ledger; every suite in code is AGENT-AUTHORED, so today every synthesized verifier is at most T2.
@@ -44,8 +46,8 @@ def usable_tier(ctx: ModuleContext, ref: str) -> Tier | None:
 def synthesize_verifier(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     problem = str(params.get("problem", ""))
     role = str(params.get("role", ROLE))
-    out: dict[str, Any] = {"problem": problem, "ref": None, "verifier_hash": None, "suite_hash": None,
-                           "suite_authorship": None, "validated": False, "tier": None, "error": None}
+    out: dict[str, Any] = {"problem": problem, "ref": None, "verifier_hash": None, "suite_authorship": None,
+                           "validated": False, "tier": None, "error": None}
     backend = ctx.backends.get(role) or ctx.backends.get("executor")
     if backend is None:
         out["error"] = f"no backend bound to role {role!r}"
@@ -62,7 +64,7 @@ def synthesize_verifier(state: dict[str, Any], params: dict[str, Any], ctx: Modu
     ledger = ctx.kernel().ledger
     val = S.validate(v)
     t = S.tier(v, ledger)
-    out.update(ref=ctx.store.blobs.put_json(S.to_record(v)), verifier_hash=v.hash(), suite_hash=val.suite_hash,
+    out.update(ref=ctx.store.blobs.put_json(S.to_record(v)), verifier_hash=v.hash(),
                suite_authorship=S.suite_status(problem, ledger), validated=val.passed,
                tier=t.name if t is not None else None)
     return {"verifier_synthesis": out}
