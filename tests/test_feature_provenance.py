@@ -1,8 +1,9 @@
 """GOAL §16.5 item 6: feature provenance (tags, refusal, dominance screen, human ruling, gate).
 
-Synthetic tasks only (generated here); conftest points CHH_DATA_DIR at a per-test tmp dir, so the ruling store is
-isolated. Attack tests first assert that the planted leak really leaks (alone it predicts the target with accuracy
->= 0.9 on train) before asserting the screen routes it.
+Synthetic tasks only (generated here); conftest points CHH_DATA_DIR at a per-test tmp dir and the ``store`` fixture
+is a per-test Kernel evidence store, so rulings (Kernel ledger kind ``feature_ruling``) are isolated. Attack tests
+first assert that the planted leak really leaks (alone it predicts the target with accuracy >= 0.9 on train) before
+asserting the screen routes it.
 """
 
 from __future__ import annotations
@@ -18,6 +19,10 @@ import pytest
 import yaml
 
 from custom_harness import cli
+from custom_harness.config import data_dir
+from custom_harness.kernel import Ledger
+from custom_harness.kernel.ledger import write_anchor
+from custom_harness.store import EvidenceStore
 from custom_harness.verify import provenance as prov
 
 N_TRAIN, N_TEST = 400, 200
@@ -96,7 +101,7 @@ def _plant(kind: str, variant: int, tmp: Path) -> tuple[Path, str, float]:
 
 # ---------------------------------------------------------------------------------------------------- attacks
 
-def test_planted_raw_data_leaks_are_routed_to_a_human(tmp_path):
+def test_planted_raw_data_leaks_are_routed_to_a_human(tmp_path, store):
     routed = 0
     for kind in ("id", "post"):
         for v in range(5):
@@ -106,11 +111,11 @@ def test_planted_raw_data_leaks_are_routed_to_a_human(tmp_path):
             assert report["features"][col]["tags"]["availability"] == "pre_outcome"  # mis-tagged, not refused
             assert not report["refused"]
             routed += col in report["routed"]
-            assert prov.gate(report, prov.load_rulings()) != []
+            assert prov.gate(report, prov.load_rulings(store)) != []
     assert routed == 10  # 10/10 routed (spec floor: >= 8/10)
 
 
-def test_correctly_tagged_post_outcome_and_identifier_columns_are_refused(tmp_path):
+def test_correctly_tagged_post_outcome_and_identifier_columns_are_refused(tmp_path, store):
     for kind, tag, code in (("id", {"availability": "pre_outcome", "role": "identifier"}, prov.REFUSE_IDENTIFIER),
                             ("post", {"availability": "post_outcome", "role": "measurement"},
                              prov.REFUSE_POST_OUTCOME)):
@@ -122,9 +127,9 @@ def test_correctly_tagged_post_outcome_and_identifier_columns_are_refused(tmp_pa
         report = prov.screen(d)
         assert report["refused"] == {col: [code]}
         assert col not in report["routed"]
-        assert prov.GATE_REFUSED in prov.gate(report, prov.load_rulings())
+        assert prov.GATE_REFUSED in prov.gate(report, prov.load_rulings(store))
         with pytest.raises(prov.ProvenanceError):  # a refused feature cannot be ruled legitimate
-            prov.record_ruling(d, col, "legitimate", "alice")
+            prov.record_ruling(d, col, "legitimate", "alice", store=store)
 
 
 def test_honest_tasks_are_rarely_routed(tmp_path):
@@ -165,12 +170,12 @@ def test_screen_never_reads_test_labels(tmp_path):
     assert prov.screen(d) == before
 
 
-def test_reason_codes_are_a_closed_set(tmp_path):
+def test_reason_codes_are_a_closed_set(tmp_path, store):
     d, _, _ = _plant("id", 3, tmp_path)
     report = prov.screen(d)
     codes = {c for v in report["routed"].values() for c in v} | {c for v in report["refused"].values() for c in v}
     assert codes and codes <= prov.REASON_CODES
-    assert set(prov.gate(report, prov.load_rulings())) <= prov.REASON_CODES
+    assert set(prov.gate(report, prov.load_rulings(store))) <= prov.REASON_CODES
 
 
 # ---------------------------------------------------------------------------------------------------- tags
@@ -210,55 +215,226 @@ def _routed_task(tmp_path: Path) -> tuple[Path, str]:
     return d, col
 
 
-def test_gate_refuses_without_ruling_and_passes_with_matching_legitimate(tmp_path):
+def test_gate_refuses_without_ruling_and_passes_with_matching_legitimate(tmp_path, store):
     d, col = _routed_task(tmp_path)
-    assert prov.gate(prov.screen(d), prov.load_rulings()) == [prov.GATE_MISSING_RULING]
-    prov.record_ruling(d, col, "legitimate", "alice", "outcome-independent assay")
-    assert prov.gate(prov.screen(d), prov.load_rulings()) == []
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == [prov.GATE_MISSING_RULING]
+    prov.record_ruling(d, col, "legitimate", "alice", "outcome-independent assay", store=store)
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == []
 
 
-def test_gate_refuses_a_leak_ruling(tmp_path):
+def test_gate_refuses_a_leak_ruling(tmp_path, store):
     d, col = _routed_task(tmp_path)
-    prov.record_ruling(d, col, "legitimate", "alice")
-    prov.record_ruling(d, col, "leak", "bob", "measured after diagnosis")
-    assert prov.GATE_LEAK_RULING in prov.gate(prov.screen(d), prov.load_rulings())
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
+    prov.record_ruling(d, col, "leak", "bob", "measured after diagnosis", store=store)
+    assert prov.GATE_LEAK_RULING in prov.gate(prov.screen(d), prov.load_rulings(store))
 
 
-def test_gate_refuses_stale_rulings(tmp_path):
+def test_gate_refuses_stale_rulings(tmp_path, store):
     d, col = _routed_task(tmp_path)
-    prov.record_ruling(d, col, "legitimate", "alice")
-    assert prov.gate(prov.screen(d), prov.load_rulings()) == []
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == []
     # different tags (same data): the ruling no longer counts
     tags = yaml.safe_load((d / "features.yaml").read_text("utf-8"))
     tags["features"][col]["source"] = "re-described"
     (d / "features.yaml").write_text(yaml.safe_dump(tags), "utf-8")
-    assert prov.gate(prov.screen(d), prov.load_rulings()) == [prov.GATE_MISSING_RULING]
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == [prov.GATE_MISSING_RULING]
     # different data (one train row changed): stale too
     d2, col2 = _routed_task(tmp_path / "second")
-    prov.record_ruling(d2, col2, "legitimate", "alice")
+    prov.record_ruling(d2, col2, "legitimate", "alice", store=store)
     train = d2 / "public" / "train.csv"
     lines = train.read_text("utf-8").splitlines()
     lines[1] = lines[1].replace(lines[1].split(",")[0], "0.123456", 1)
     train.write_text("\n".join(lines) + "\n", "utf-8")
-    assert prov.gate(prov.screen(d2), prov.load_rulings()) == [prov.GATE_MISSING_RULING]
+    assert prov.gate(prov.screen(d2), prov.load_rulings(store)) == [prov.GATE_MISSING_RULING]
 
 
-def test_gate_refuses_an_edited_report(tmp_path):
+def test_gate_refuses_an_edited_report(tmp_path, store):
     d, col = _routed_task(tmp_path)
-    prov.record_ruling(d, col, "legitimate", "alice")
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
     report = prov.screen(d)
     report["refused"] = {}
     report["routed"] = {}
-    assert prov.GATE_REPORT_MISMATCH in prov.gate(report, prov.load_rulings())
+    assert prov.GATE_REPORT_MISMATCH in prov.gate(report, prov.load_rulings(store))
+
+
+# ---------------------------------------------------------------------------------------------------- ledger store
+
+def _ruling_entries(store: EvidenceStore) -> list[dict]:
+    return [e.body for e in Ledger(store).entries(prov.RULING_KIND)]
+
+
+def _sql(store: EvidenceStore, statement: str, *args: object) -> None:
+    with store._db:
+        store._db.execute(statement, args)
+
+
+def test_rulings_land_in_the_kernel_ledger_not_the_interim_file(tmp_path, store):
+    d, col = _routed_task(tmp_path)
+    out = prov.record_ruling(d, col, "legitimate", "  alice  ", "outcome-independent assay", store=store)
+    report = prov.screen(d)
+    [body] = _ruling_entries(store)
+    assert {k: body[k] for k in ("data_digest", "feature", "tags_hash", "report_hash", "ruling", "approver",
+                                 "note")} == {
+        "data_digest": report["data_digest"], "feature": col, "tags_hash": report["tags_hash"],
+        "report_hash": report["report_hash"], "ruling": "legitimate", "approver": "alice",
+        "note": "outcome-independent assay"}
+    assert body["timestamp"] and "migrated_from" not in body
+    assert out["hash"] == Ledger(store).head()
+    assert not prov.rulings_path().exists()
+    assert Ledger(store).verify() == []
 
 
 @pytest.mark.parametrize("tamper", ["edit", "delete_middle", "garbage"])
-def test_gate_refuses_a_tampered_chain(tmp_path, tamper):
+def test_gate_refuses_a_tampered_chain(tmp_path, store, tamper):
     d, col = _routed_task(tmp_path)
     for who in ("alice", "bob", "carol"):
-        prov.record_ruling(d, col, "legitimate", who)
-    assert prov.verify_chain() and prov.gate(prov.screen(d), prov.load_rulings()) == []
+        prov.record_ruling(d, col, "legitimate", who, store=store)
+    rs = prov.load_rulings(store)
+    assert rs.chain_ok and prov.gate(prov.screen(d), rs) == []
+    seqs = [e.seq for e in Ledger(store).entries(prov.RULING_KIND)]
+    if tamper == "edit":
+        body = dict(_ruling_entries(store)[0], note="edited")
+        _sql(store, "UPDATE ledger SET body = ? WHERE seq = ?", json.dumps(body, sort_keys=True), seqs[0])
+    elif tamper == "delete_middle":
+        _sql(store, "DELETE FROM ledger WHERE seq = ?", seqs[1])
+    else:
+        _sql(store, "UPDATE ledger SET body = ? WHERE seq = ?", "{not json", seqs[1])
+    assert not prov.load_rulings(store).chain_ok
+    assert prov.GATE_CHAIN_TAMPERED in prov.gate(prov.screen(d), prov.load_rulings(store))
+    with pytest.raises(prov.ProvenanceError, match="tampered"):
+        prov.record_ruling(d, col, "legitimate", "dave", store=store)
+
+
+def test_record_refuses_empty_approver(tmp_path, store):
+    d, col = _routed_task(tmp_path)
+    for who in ("", "   ", "\t\n"):
+        with pytest.raises(prov.ProvenanceError, match="approver"):
+            prov.record_ruling(d, col, "legitimate", who, store=store)
+    assert not prov.rulings_path().exists()
+    assert _ruling_entries(store) == []
+
+
+@pytest.mark.parametrize("ruling", ["Legitimate", "ok", "", "leak "])
+def test_record_refuses_rulings_outside_the_closed_set(tmp_path, store, ruling):
+    d, col = _routed_task(tmp_path)
+    with pytest.raises(prov.ProvenanceError, match="ruling must be"):
+        prov.record_ruling(d, col, ruling, "alice", store=store)
+    assert _ruling_entries(store) == []
+
+
+@pytest.mark.parametrize("approver", [None, "", "   ", 7, ["alice"]])
+def test_gate_ignores_a_ledger_ruling_without_a_human_approver(tmp_path, store, approver):
+    """A feature_ruling entry not written through record_ruling (no recorded human) never lets a feature through."""
+    d, col = _routed_task(tmp_path)
+    report = prov.screen(d)
+    body = {k: report[k] for k in ("data_digest", "tags_hash", "report_hash")}
+    body.update(feature=col, ruling="legitimate", note="", timestamp="2026-10-09T00:00:00+00:00")
+    if approver is not None:
+        body["approver"] = approver
+    Ledger(store).append(prov.RULING_KIND, body)
+    rs = prov.load_rulings(store)
+    assert rs.chain_ok
+    assert prov.gate(report, rs) == [prov.GATE_MISSING_RULING]
+
+
+def test_gate_ignores_a_ledger_ruling_outside_the_closed_set(tmp_path, store):
+    d, col = _routed_task(tmp_path)
+    report = prov.screen(d)
+    body = {k: report[k] for k in ("data_digest", "tags_hash", "report_hash")}
+    body.update(feature=col, ruling="Legitimate", approver="alice", note="", timestamp="t")
+    Ledger(store).append(prov.RULING_KIND, body)
+    assert prov.gate(report, prov.load_rulings(store)) == [prov.GATE_MISSING_RULING]
+
+
+def test_a_leak_ruling_counts_even_without_an_approver(tmp_path, store):
+    """Fail closed both ways: a 'leak' entry is never ignored (it can only block, never pass)."""
+    d, col = _routed_task(tmp_path)
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
+    report = prov.screen(d)
+    body = {k: report[k] for k in ("data_digest", "tags_hash", "report_hash")}
+    body.update(feature=col, ruling="leak", note="", timestamp="t")
+    Ledger(store).append(prov.RULING_KIND, body)
+    assert prov.gate(report, prov.load_rulings(store)) == [prov.GATE_LEAK_RULING]
+
+
+def _write_interim(path: Path, rows: list[dict]) -> list[dict]:
+    """The pre-ledger interim store format (hash-chained JSONL), written the way the old record_ruling wrote it."""
+    out, prev = [], prov.GENESIS
+    for r in rows:
+        e = {"prev": prev, **r}
+        e["hash"] = prov._line_hash(e)
+        out.append(e)
+        prev = e["hash"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in out), "utf-8")
+    return out
+
+
+def _interim_row(d: Path, col: str, ruling: str, approver: str, ts: str) -> dict:
+    report = prov.screen(d)
+    return {"data_digest": report["data_digest"], "feature": col, "tags_hash": report["tags_hash"],
+            "report_hash": report["report_hash"], "ruling": ruling, "approver": approver, "note": "n", "timestamp": ts}
+
+
+def test_removed_trailing_ruling_is_detected_through_the_ledger_anchor_not_the_jsonl(tmp_path, store):
+    d, col = _routed_task(tmp_path)
+    # the interim JSONL: dropping the trailing 'leak' line leaves a chain that still verifies (the old weakness)
+    path = tmp_path / "interim" / "rulings.jsonl"
+    _write_interim(path, [_interim_row(d, col, "legitimate", "alice", "t1"), _interim_row(d, col, "leak", "bob", "t2")])
+    lines = path.read_text("utf-8").splitlines()
+    path.write_text(lines[0] + "\n", "utf-8")
+    assert prov.load_interim_rulings(path).chain_ok  # undetectable in the JSONL
+    # the ledger: anchor after the leak ruling, then remove it
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
+    prov.record_ruling(d, col, "leak", "bob", "measured after diagnosis", store=store)
+    anchor = tmp_path / "anchors" / "ledger.anchor"
+    write_anchor(Ledger(store), anchor, tmp_path / "store")
+    last = Ledger(store).entries()[-1]
+    assert last.kind == prov.RULING_KIND and last.body["ruling"] == "leak"
+    _sql(store, "DELETE FROM ledger WHERE seq = ?", last.seq)
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == []  # without an anchor: the same blind spot
+    rs = prov.load_rulings(store, anchors=[anchor])
+    assert not rs.chain_ok
+    assert prov.gate(prov.screen(d), rs) == [prov.GATE_CHAIN_TAMPERED]
+    with pytest.raises(prov.ProvenanceError, match="tampered"):
+        prov.record_ruling(d, col, "legitimate", "carol", store=store, anchors=[anchor])
+
+
+def test_unreadable_anchor_fails_closed(tmp_path, store):
+    d, col = _routed_task(tmp_path)
+    prov.record_ruling(d, col, "legitimate", "alice", store=store)
+    assert not prov.load_rulings(store, anchors=[tmp_path / "no_such.anchor"]).chain_ok
+
+
+# ---------------------------------------------------------------------------------------------------- migration
+
+def test_migration_imports_a_verified_interim_chain_and_leaves_the_file(tmp_path, store):
+    d, col = _routed_task(tmp_path)
     path = prov.rulings_path()
+    lines = _write_interim(path, [_interim_row(d, col, "legitimate", "alice", "2026-10-07T10:00:00+00:00"),
+                                  _interim_row(d, "f0", "leak", "bob", "2026-10-07T11:00:00+00:00")])
+    before = path.read_bytes()
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == [prov.GATE_MISSING_RULING]  # JSONL is not read
+    out = prov.migrate_interim_rulings(store, "operator", path=path)
+    assert out["imported"] == 2 and out["already_imported"] == 0
+    bodies = _ruling_entries(store)
+    assert [(b["approver"], b["timestamp"], b["ruling"]) for b in bodies] == [
+        ("alice", "2026-10-07T10:00:00+00:00", "legitimate"), ("bob", "2026-10-07T11:00:00+00:00", "leak")]
+    assert [b["migrated_from"] for b in bodies] == [
+        {"path": str(path), "line": i + 1, "line_hash": e["hash"]} for i, e in enumerate(lines)]
+    assert all(b["migrated_by"] == "operator" for b in bodies)
+    assert prov.gate(prov.screen(d), prov.load_rulings(store)) == []
+    assert path.read_bytes() == before  # never deleted or rewritten
+    again = prov.migrate_interim_rulings(store, "operator", path=path)
+    assert again["imported"] == 0 and again["already_imported"] == 2
+    assert len(_ruling_entries(store)) == 2
+
+
+@pytest.mark.parametrize("tamper", ["edit", "delete_middle", "garbage"])
+def test_migration_refuses_a_tampered_interim_file(tmp_path, store, tamper):
+    d, col = _routed_task(tmp_path)
+    path = prov.rulings_path()
+    _write_interim(path, [_interim_row(d, col, "legitimate", w, "t") for w in ("alice", "bob", "carol")])
     lines = path.read_text("utf-8").splitlines()
     if tamper == "edit":
         e = json.loads(lines[0])
@@ -269,18 +445,30 @@ def test_gate_refuses_a_tampered_chain(tmp_path, tamper):
     else:
         lines.insert(1, "{not json")
     path.write_text("\n".join(lines) + "\n", "utf-8")
-    assert not prov.verify_chain()
-    assert prov.GATE_CHAIN_TAMPERED in prov.gate(prov.screen(d), prov.load_rulings())
+    before = path.read_bytes()
     with pytest.raises(prov.ProvenanceError, match="tampered"):
-        prov.record_ruling(d, col, "legitimate", "dave")
+        prov.migrate_interim_rulings(store, "operator", path=path)
+    assert _ruling_entries(store) == []
+    assert path.read_bytes() == before
 
 
-def test_record_refuses_empty_approver(tmp_path):
+@pytest.mark.parametrize("field,value", [("approver", ""), ("approver", "  "), ("ruling", "maybe"),
+                                         ("feature", 3)])
+def test_migration_refuses_an_interim_ruling_a_human_could_not_have_recorded(tmp_path, store, field, value):
     d, col = _routed_task(tmp_path)
-    for who in ("", "   "):
-        with pytest.raises(prov.ProvenanceError, match="approver"):
-            prov.record_ruling(d, col, "legitimate", who)
-    assert not prov.rulings_path().exists()
+    path = prov.rulings_path()
+    _write_interim(path, [_interim_row(d, col, "legitimate", "alice", "t"),
+                          {**_interim_row(d, col, "legitimate", "bob", "t"), field: value}])
+    with pytest.raises(prov.ProvenanceError):
+        prov.migrate_interim_rulings(store, "operator", path=path)
+    assert _ruling_entries(store) == []
+
+
+def test_migration_needs_a_named_operator_and_tolerates_no_file(tmp_path, store):
+    with pytest.raises(prov.ProvenanceError, match="operator"):
+        prov.migrate_interim_rulings(store, "  ")
+    assert prov.migrate_interim_rulings(store, "operator")["imported"] == 0
+    assert _ruling_entries(store) == []
 
 
 # ---------------------------------------------------------------------------------------------------- CLI
@@ -295,12 +483,22 @@ def _rule(d: Path, col: str) -> list[str]:
             "--note", "checked the protocol"]
 
 
+def _cli_rulings() -> list[dict]:
+    """Rulings in the store the CLI uses (data_dir()/store)."""
+    s = EvidenceStore(data_dir() / "store")
+    try:
+        return _ruling_entries(s)
+    finally:
+        s.close()
+
+
 def test_cli_rule_feature_refuses_without_tty(tmp_path, monkeypatch):
     d, col = _routed_task(tmp_path)
     monkeypatch.setattr("sys.stdin", io.StringIO(col + "\n"))  # not a terminal, even with the right answer
     with pytest.raises(SystemExit, match="interactive terminal"):
         cli.main(_rule(d, col))
     assert not prov.rulings_path().exists()
+    assert _cli_rulings() == []
 
 
 def test_cli_rule_feature_refuses_wrong_confirmation(tmp_path, monkeypatch):
@@ -309,6 +507,7 @@ def test_cli_rule_feature_refuses_wrong_confirmation(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="confirmation"):
         cli.main(_rule(d, col))
     assert not prov.rulings_path().exists()
+    assert _cli_rulings() == []
 
 
 def test_cli_rule_feature_records_with_tty_and_confirmation(tmp_path, monkeypatch, capsys):
@@ -318,8 +517,38 @@ def test_cli_rule_feature_records_with_tty_and_confirmation(tmp_path, monkeypatc
     assert col in out["report"]["routed"] and out["gate"] == [prov.GATE_MISSING_RULING]
     monkeypatch.setattr("sys.stdin", _Tty(col + "\n"))
     assert cli.main(_rule(d, col)) == 0
-    entry = prov.load_rulings().rulings[-1]
+    entry = _cli_rulings()[-1]
     assert (entry["feature"], entry["ruling"], entry["approver"]) == (col, "legitimate", "alice")
     capsys.readouterr()
     assert cli.main(["feature-screen", str(d)]) == 0
     assert json.loads(capsys.readouterr().out)["gate"] == []
+    # with an anchor: a later removal of the ruling is caught by `chh feature-screen --anchor`
+    anchor = tmp_path / "anchors" / "a.jsonl"
+    assert cli.main(["ledger-anchor", str(anchor)]) == 0
+    s = EvidenceStore(data_dir() / "store")
+    try:
+        _sql(s, "DELETE FROM ledger WHERE seq = (SELECT MAX(seq) FROM ledger)")
+    finally:
+        s.close()
+    capsys.readouterr()
+    assert cli.main(["feature-screen", str(d), "--anchor", str(anchor)]) == 1
+    assert prov.GATE_CHAIN_TAMPERED in json.loads(capsys.readouterr().out)["gate"]
+
+
+def test_cli_migrate_is_a_human_action(tmp_path, monkeypatch, capsys):
+    d, col = _routed_task(tmp_path)
+    path = prov.rulings_path()
+    _write_interim(path, [_interim_row(d, col, "legitimate", "alice", "t")])
+    monkeypatch.setattr("sys.stdin", io.StringIO("1\n"))
+    with pytest.raises(SystemExit, match="interactive terminal"):
+        cli.main(["feature-rulings-migrate", "--by", "operator"])
+    monkeypatch.setattr("sys.stdin", _Tty("2\n"))
+    with pytest.raises(SystemExit, match="confirmation"):
+        cli.main(["feature-rulings-migrate", "--by", "operator"])
+    assert _cli_rulings() == []
+    monkeypatch.setattr("sys.stdin", _Tty("1\n"))
+    assert cli.main(["feature-rulings-migrate", "--by", "operator"]) == 0
+    assert [b["approver"] for b in _cli_rulings()] == ["alice"]
+    assert path.exists()
+
+

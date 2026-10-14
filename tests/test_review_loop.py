@@ -148,10 +148,33 @@ def _bonferroni_borderline_task(task_dir: Path) -> float:
     return floor
 
 
+SLOT_ALPHA, SLOTS = 0.05, 2**16  # every claim at 0.05 / 65536; the runs' releases are paid in slots
+
+
+def _open_alpha_account(store, task_dir: Path) -> str:
+    """Register the task's held-out data exactly as research.setup will (same id and bytes: idempotent there) and
+    open its alpha-account before the first claim (a HUMAN action; `pytest-human` stands in for the approver)."""
+    from custom_harness.evolve.multiplicity import held_out_target_id
+    from custom_harness.kernel import DatasetRole, Kernel
+    from custom_harness.research.task import load_task
+    task, target = load_task(task_dir), held_out_target_id(task_dir)
+    canary = task_dir / "private" / task.canary_file
+    kernel = Kernel(store)
+    kernel.vault.register_dataset(
+        target, DatasetRole.TEST, public={task.test_features_file: (task_dir / "public" / task.test_features_file)
+                                          .read_bytes()},
+        private={task.test_labels_file: (task_dir / "private" / task.test_labels_file).read_bytes()},
+        canary=canary.read_text(encoding="utf-8").strip() if canary.exists() else None)
+    kernel.open_alpha_account(target, SLOT_ALPHA, SLOTS, approver="pytest-human")
+    return target
+
+
 @pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=(
     "R2-2 violated under Kernel 1.2: K4 transcript bound grows with verdict-bit releases, so paired arms are "
     "certified at order-dependent levels; fix = §16.4 α-account charging (s3-kernel); see "
-    "docs/r2-2_transcript_bound.md"))
+    "docs/r2-2_transcript_bound.md. int17 merge: s3-kernel's account fix is merged (step 2 below opens an account), "
+    "but evolve/multiplicity.check_run still mirrors the NO-account transcript bound, so step 2 still halts with "
+    "MultiplicityDrift; marker kept (stricter side) until check_run is made account-aware: docs/int17_test_plan.md"))
 def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp_path, rings_task,  # noqa: F811
                                                                        monkeypatch):
     """The Kernel's Bonferroni family for a held-out target is every claim pre-registered on it SO FAR (K4), and
@@ -185,12 +208,25 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
         ev.score(cand, ("rings", 0))
     assert not ev.cache and ev.calls == 1  # the run happened (attack exercised) and its outcome was discarded
 
-    # 2. Declared campaign: both arms are certified at the SAME constant family size, whatever ran first.
-    declared = 2 + 2 * 2  # the 2 claims of the refused run above + 2 runs x 2 claim nodes
+    # 2. Declared campaign: both arms are certified at the SAME constant level, whatever ran first. Since Kernel 1.2
+    # the runs release verdict bits (evolution score, replication brief), so the claim count no longer fixes K4's
+    # level on a target WITHOUT an account (docs/r2-2_transcript_bound.md); the fix (docs/alpha_accounts.md) is the
+    # per-target alpha-account opened by a human (here a test stand-in) BEFORE the first claim on the target: every
+    # claim is tested at alpha_T / S_T and the releases are paid in slots at registration. The account needs a target
+    # with no claim yet, so this step runs on a second rings task (other data, other target id). Stated cost: the
+    # releases make the slot charges grow exponentially (docs/alpha_accounts.md), so S_T is large and the level
+    # strict; the guarantee asserted here is the R2-2 one (identical levels and paired difference 0).
+    rings_b = tmp_path / "rings_b"
+    subprocess.run([sys.executable, str(ROOT / "examples/tasks/make_rings_task.py"), str(rings_b), "--n-train", "400",
+                    "--n-test", "300", "--seed", "777"], check=True, capture_output=True)
+    floor = _bonferroni_borderline_task(rings_b)
+    target = _open_alpha_account(store, rings_b)
+    task_b = SuiteTask("rings_b", rings_b, "evolve", family="rings")
+    declared = 2 * 2  # 2 runs x 2 claim nodes on the account target
     parent, cand = arms(declared)
-    ev = Evaluator({r: llm for r in ALL_ROLES}, store, _sandbox_factory(tmp_path), [task])
-    sample = paired_sample([("rings", 0)], lambda u: ev.score(cand, u), lambda u: ev.score(parent, u))
-    oc, op = ev.outcome(cand, ("rings", 0)), ev.outcome(parent, ("rings", 0))
+    ev = Evaluator({r: llm for r in ALL_ROLES}, store, _sandbox_factory(tmp_path), [task_b])
+    sample = paired_sample([("rings_b", 0)], lambda u: ev.score(cand, u), lambda u: ev.score(parent, u))
+    oc, op = ev.outcome(cand, ("rings_b", 0)), ev.outcome(parent, ("rings_b", 0))
     assert oc.status == op.status == "completed", (oc.failure_signatures, op.failure_signatures)
 
     def cert(o):
@@ -200,9 +236,8 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
 
     def why(o):
         return {k: (r.status, r.reasons or r.observations) for k, r in cert(o).checks.items() if k in ("K4", "K6")}
-    for o in (oc, op):  # the attack's lever is K4's family size: show it is the declared constant in both arms
-        obs = cert(o).checks["K4"].observations
-        assert any(f"{declared} claim(s) tested on this target" in x for x in obs), obs
+    levels = {o.run_id: cert(o).resolution["targets"][target]["alpha_eff"] for o in (oc, op)}
+    assert all(v == pytest.approx(SLOT_ALPHA / SLOTS) for v in levels.values()), levels  # fixed in both arms
     assert sample.diffs == [pytest.approx(0.0)], (
         f"identical harnesses: candidate {oc.score} ({oc.cert_label}) vs parent {op.score} ({op.cert_label}); "
         f"paired diff {sample.diffs}; min_effect {floor:.4g}; candidate {why(oc)}; parent {why(op)}")

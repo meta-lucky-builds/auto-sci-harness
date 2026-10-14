@@ -6,15 +6,15 @@ exception inside a check is a failure of that check, never a pass (see kernel.Ke
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import importlib
 import io
 import json
 import math
-import statistics
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from types import MappingProxyType
@@ -25,24 +25,30 @@ from pydantic import ValidationError
 from ..records import EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..verify import leak
-from ..verify import metrics as M
-from ..verify.stats import Interval, mean_t_interval, paired_example_interval
+from ..verify import noninterference as ni
 from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
-from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value
+from .claim import (
+    SUPPORTED_KINDS,
+    AnalysisPlan,
+    Claim,
+    ClaimKind,
+    EvidenceClass,
+    canonical_json,
+    exact_value,
+    strict_json,
+)
 from .execution import ExecRecord, ExecutionError
 from .ledger import AsOfLedger, Entry, Ledger, verify_chain
 from .reasons import Code, R, Refusal, coded, codes_of, describe, exception_name
 from .releases import Alphabet, exposed, transcript_bound
 from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRecord, Vault, VaultError
 
-_NORMAL = statistics.NormalDist()
 # K2: an INTEGRITY read (building leak fingerprints) never feeds a model; it is listed on the certificate, not counted
 # as peeking. TRUST BOUNDARY (docs/kernel.md): purposes are declared by trusted host code, so a host that mislabels a
 # peek as "leakscan" is not caught. "reproduce" is NOT excused: nothing on a live store reads with it (bundles are
 # re-checked on a fresh store with purpose "kernel"), so excusing it would only widen the trusted surface.
 INTEGRITY_PURPOSES = frozenset({"leakscan"})
-SCORE_TOLERANCE = 1e-9  # reported vs recomputed score: anything larger is a different number
 
 
 class Replayer(Protocol):
@@ -56,7 +62,10 @@ class KernelConfig:
     # 1.1: domain adapters (K1), evidence classes, shared-example checks (K4/K6), K7 fail-closed
     # 1.2 (§16): closed reason codes, q >= p0 (K1), alpha-accounts and releases (K4/K6), K3 reliability
     # demonstration, plan-code divergence (K4), replayed evidence refused (K0), self-reported tier cap
-    version: str = "1.2"
+    # 1.3 (s3-kernel): strict JSON, alpha slots pay releases (K4), K1 statement = adapter rendering (exact/formal),
+    # K3 non-interference and CPU-time replays, core/adapter split. A certificate of 1.2 that re-derives differently
+    # is then reported STALE ("other rules"), never "forged" (Kernel.verify_status)
+    version: str = "1.3"
     min_seeds: int = 3
     max_alpha: float = 0.2
     min_boot: int = 1000
@@ -72,15 +81,10 @@ class KernelConfig:
     self_reported_tier_cap: int = 4  # UNCALIBRATED (owner decision, GOAL §13.8)
     delta_floor: float = 0.02  # UNCALIBRATED (owner decision, GOAL §13.8): min_effect floor on minted targets
     nonstat_p0: float = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): VDS p0 for classes without a null level
-
-
-@dataclass
-class TargetStats:
-    seed: Interval
-    example: Interval
-    alpha_eff: float
-    met: bool  # the claim's criterion holds on this target
-    p_null: float | None = None
+    # §16.10 bounded nulls (docs/bounded_null.md): the declared power range and the plasmode's confidence 1 - gamma
+    min_power: float = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8)
+    max_power: float = 0.95  # UNCALIBRATED (owner decision, GOAL §13.8): 0.95 -> 45 plantings at gamma 0.1
+    plasmode_gamma: float = 0.1  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 
 @dataclass
@@ -97,10 +101,11 @@ class Context:
     records: list[tuple[str, ExecRecord]] = field(default_factory=list)
     preds: dict[str, list[str]] = field(default_factory=dict)  # evidence id -> predictions
     labels: dict[str, list[str]] = field(default_factory=dict)  # target -> labels
-    stats: dict[str, TargetStats] = field(default_factory=dict)
+    stats: dict[str, Any] = field(default_factory=dict)  # target -> the adapter's statistics (ml.TargetStats)
     prereg: Entry | None = None
     adapter: dict[str, Any] | None = None  # the approved adapter K1 resolved for this claim
     certificates: list[ArtifactRecord] = field(default_factory=list)  # computational: certificate artifacts (K0)
+    exclusion: dict[str, Any] | None = None  # §16.10: a bounded-null claim's exclusion statement, set by K7
 
     @property
     def sign(self) -> float:
@@ -116,6 +121,27 @@ class Context:
             rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))
             self.labels[target] = [r[0] for r in rows[1:] if r]
         return self.labels[target]
+
+    def material(self) -> str:
+        """The plan-matched evidence (a claim target and a planned seed), fixed once the evidence is: it seeds K3's
+        replay choice and K7's plasmode, so neither can be known or steered in advance (R1-F2)."""
+        targets, seeds_planned = set(self.claim.generalization_targets), set(self.claim.analysis_plan.seeds)
+        return "|".join(sorted(r.preds_ref for _, r in self.records if r.target in targets and r.seed in seeds_planned))
+
+
+def procedures(ctx: Context) -> Any:
+    """The domain adapter's procedures for this claim (K1, K3-K8), found by the REGISTRY (evidence class and metric:
+    adapters.procedures_for), not by the approval, which K1 judges. The core holds no domain logic."""
+    return importlib.import_module(adapters.procedures_for(ctx.claim.evidence_class, ctx.claim.metric.id))
+
+
+def __getattr__(name: str) -> Any:
+    """Names that moved to the ML adapter's procedures (kernel/ml.py) on 2026-10-09, still importable from here."""
+    moved = {"TargetStats": "TargetStats", "_criterion": "criterion", "plan_code_divergence": "plan_code_divergence",
+             "REGISTERED_TESTS": "REGISTERED_TESTS", "SCORE_TOLERANCE": "SCORE_TOLERANCE"}
+    if name in moved:
+        return getattr(importlib.import_module(".ml", __package__), moved[name])
+    raise AttributeError(name)
 
 
 def _result(reasons: list[str], observations: list[str] | None = None) -> CheckResult:
@@ -236,11 +262,19 @@ def fixed(ctx: Context) -> dict[str, Any]:
     return fixed_terms(ledger, Vault(ctx.store, ledger), ctx.claim, ctx.config)
 
 
+def slot_charge(ledger: Ledger, vault: Vault, account: alpha.Account, cfg: KernelConfig) -> int:
+    """Slots a claim registered NOW on the account's target family pays: the transcripts reachable from the releases
+    logged so far (at least 1). Fixed at registration (recorded in its alpha_reserve entry)."""
+    rel = releases_on(ledger, related_targets(vault, account.dataset_id))
+    return max(1, transcript_bound([max((at for at, _ in rel), default=0) + 1], rel, cfg.count_alphabet))
+
+
 def target_level(ctx: Context, target: str) -> tuple[float, int, list[str]]:
     """K4's fixed per-target level, the effective multiplicity it implies, and coded reasons. Without an alpha-account:
     alpha / max(n_comparisons, N), where N = the transcript bound over the claims on the target family (= their count
     under the verdict embargo; today's rule). With an account: the slot level alpha_T / S_T (and the declared level),
-    divided down by N / k when releases let later claims depend on earlier verdicts."""
+    fixed whatever the order of claims and releases, because releases were paid in slots at registration
+    (alpha.py); an account that paid more than it holds (a ledger written around preregister) fails closed."""
     plan, reasons = ctx.claim.analysis_plan, list[str]()
     related = related_targets(ctx.vault, target)
     fam, rel = family(ctx.ledger, related), releases_on(ctx.ledger, related)
@@ -253,10 +287,11 @@ def target_level(ctx: Context, target: str) -> tuple[float, int, list[str]]:
     reasons += [R(Code.K4_NO_SLOT, f"{target}: an alpha-account (opened at ledger seq {a.seq} on {a.dataset_id!r}) "
                                    f"covers this target but the claim holds no slot in it") for a in accts
                 if not alpha.holds_slot(ctx.ledger, a, ctx.claim_hash)]
-    k = sum(1 for e in fam if not exposed(e.seq, rel))
+    reasons += [R(Code.K4_ACCOUNT_OVERDRAWN, f"{target}: the alpha-account opened at ledger seq {a.seq} paid "
+                                             f"{alpha.charged(ctx.ledger, a)} slot(s) of {a.slots}")
+                for a in accts if alpha.charged(ctx.ledger, a) > a.slots]
     if any(not alpha.holds_slot(ctx.ledger, a, str(e.body.get("claim_hash"))) for e in fam for a in accts):
         level = min(level, plan.alpha / max(plan.n_comparisons, n_bound))  # a claim outside the account: Bonferroni
-    level *= k / n_bound if n_bound else 1.0
     return level, max(1, round(plan.alpha / level)), reasons
 
 
@@ -293,10 +328,10 @@ def k0_provenance(ctx: Context) -> CheckResult:
             ev = ctx.store.get_evidence(eid)
             if ev.kind != EvidenceKind.METRIC:
                 raise Refusal(f"kind {ev.kind} is not a metric record")
-            rec = ExecRecord.model_validate(ctx.store.blobs.get_json(ev.payload_ref))
+            rec = ExecRecord.model_validate(strict_json(ctx.store.blobs.get(ev.payload_ref)))
             if rec.claim_hash != ctx.claim_hash:
                 raise Refusal("record belongs to a different claim")
-            preds = ctx.store.blobs.get_json(rec.preds_ref)
+            preds = strict_json(ctx.store.blobs.get(rec.preds_ref))
             if not isinstance(preds, list) or not all(isinstance(p, str) for p in preds):
                 raise Refusal("predictions blob is not a list of strings")
             if not _blob_ok(ctx.store, rec.artifact_hash):
@@ -338,10 +373,7 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_MIN_EFFECT, "minimum effect must be a finite number > 0"))
     if c.value is not None:
         reasons.append(R(Code.K1_VALUE, "only computed_value claims carry an exact value"))
-    if c.metric.id not in M.METRICS:
-        reasons.append(R(Code.K1_METRIC, f"metric {c.metric.id!r} is not registered"))
-    elif M.HIGHER_IS_BETTER[c.metric.id] != c.metric.higher_is_better:
-        reasons.append(R(Code.K1_METRIC, f"metric {c.metric.id!r} direction does not match the registry"))
+    reasons += procedures(ctx).metric_reasons(c)
     # GOAL §4.7 / invariant 13: only a human-approved adapter, unchanged since its approval, may check this class
     ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
     reasons += coded(Code.K1_ADAPTER, why)
@@ -379,6 +411,10 @@ def k1_well_formed(ctx: Context) -> CheckResult:
     if not (0 < eps <= cfg.max_eps_max and 0 < beta <= cfg.max_beta):
         reasons.append(R(Code.K1_RELIABILITY, f"K3 reliability requirement must have eps_max in (0, {cfg.max_eps_max}] "
                                               f"and beta in (0, {cfg.max_beta}]"))
+    power = plan.power
+    if power is not None and not (c.kind == ClaimKind.NEGATIVE_RESULT and cfg.min_power <= power <= cfg.max_power):
+        reasons.append(R(Code.K1_POWER, f"a declared power is for negative_result claims only, in [{cfg.min_power}, "
+                                        f"{cfg.max_power}]"))
     return _result(reasons + p0_reasons(ctx))
 
 
@@ -455,12 +491,7 @@ def k3_reproduced(ctx: Context) -> CheckResult:
     obs: list[str] = []
     if not ctx.records:
         return _result([R(Code.K3_NO_RECORDS, "no usable evaluation records")])
-    for eid, rec in ctx.records:
-        recomputed = M.score(rec.metric, ctx.label_values(rec.target), ctx.preds[eid])
-        if not abs(recomputed - rec.score) <= SCORE_TOLERANCE:
-            reasons.append(R(Code.K3_SCORE_MISMATCH,
-                f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
-                           f"the stored predictions give {recomputed!r}"))
+    reasons += procedures(ctx).recompute(ctx)
     reasons += _earlier_reproduction_failures(ctx)
     if ctx.replayer is None:
         return _result([*reasons, R(Code.K3_NO_REPLAYER,
@@ -482,15 +513,52 @@ def k3_reproduced(ctx: Context) -> CheckResult:
         if failure is not None:
             reasons.append(failure)
             break
+    if not reasons:
+        for eid, rec in chosen:
+            reasons += _noninterference(ctx, eid, rec, obs)
     obs.append(f"re-executed {done} time(s) over {len(chosen)} record(s) ({plan.reproduce}); "
                f"zero-failure demonstration: {need} clean replay(s) needed for failure rate <= {eps:g} at "
                f"confidence {1 - beta:g} (assumes independent replays)")
     return _result(reasons, obs)
 
 
+def truth_copies(ledger: Ledger, target: str) -> dict[tuple[str, str], list[str]]:
+    """§16.5.4: the declared agent-reachable copies of `target`'s truth: (dataset id, public file) -> label columns."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for e in ledger.entries("truth_copy"):
+        if e.body.get("target") == target:
+            key = (str(e.body.get("dataset_id")), str(e.body.get("file")))
+            out.setdefault(key, []).append(str(e.body.get("column")))
+    return out
+
+
+def _noninterference(ctx: Context, eid: str, rec: ExecRecord, obs: list[str]) -> list[str]:
+    """§16.5.4 (invariant 18), a required K3 sub-check when the record's inputs hold a declared copy of its target's
+    truth: re-run with every declared copy flipped, then constant, and compare DECISIONS with the stored production
+    output (McNemar fallback for nondeterministic programs). Any irregularity fails closed."""
+    declared = truth_copies(ctx.ledger, rec.target)
+    copies = [ni.TruthCopy(role, col) for role, ref in sorted(rec.inputs.items())
+              for col in declared.get((ref.dataset_id, ref.file), [])]
+    if not copies:
+        return []
+    where = f"non-interference of {rec.arm} seed {rec.seed} on {rec.target}"
+    run_inputs = getattr(ctx.replayer, "run_inputs", None)
+    if run_inputs is None:
+        return [R(Code.K3_NONINTERFERENCE, f"{where}: the replayer cannot replace inputs (fail closed)")]
+    files = {c.name: ctx.vault.read_public(rec.inputs[c.name].dataset_id, rec.inputs[c.name].file) for c in copies}
+    try:
+        rep = ni.replay_noninterference(lambda fs: run_inputs(rec, ctx.vault, fs), files, copies, ctx.preds[eid],
+                                        regression=procedures(ctx).is_regression(rec.metric))
+    except (ExecutionError, VaultError, OSError) as e:
+        return [R(Code.K3_NONINTERFERENCE, f"{where} failed: {exception_name(e)}")]
+    obs.append(f"{where}: {rep.summary()}")
+    return [] if rep.ok else [R(Code.K3_NONINTERFERENCE, f"{where}: {rep.mode}, "
+                                                         f"{','.join(r.value for r in rep.reasons)}")]
+
+
 def _replay_once(ctx: Context, eid: str, rec: ExecRecord) -> str | None:
     """One re-execution of a record: None if it reproduced, else the coded reason."""
-    plan, where = ctx.claim.analysis_plan, f"re-execution of {rec.arm} seed {rec.seed}"
+    where = f"re-execution of {rec.arm} seed {rec.seed}"
     assert ctx.replayer is not None
     try:
         again = ctx.replayer.replay(rec, ctx.vault)
@@ -498,16 +566,8 @@ def _replay_once(ctx: Context, eid: str, rec: ExecRecord) -> str | None:
         return R(Code.K3_REPLAY_ERROR, f"{where} failed: {exception_name(e)}")
     if again is None:
         return R(Code.K3_REPLAY_NO_OUTPUT, f"{where} produced no predictions")
-    if plan.reproduce_tolerance == 0.0:
-        return None if again == ctx.preds[eid] else R(Code.K3_REPLAY_DIFFERS, f"{where} produced different predictions")
-    try:
-        score = M.score(rec.metric, ctx.label_values(rec.target), again)
-    except ValueError as e:
-        return R(Code.K3_REPLAY_ERROR, f"{where} not scorable: {exception_name(e)}")
-    if abs(score - rec.score) > plan.reproduce_tolerance:
-        return R(Code.K3_REPLAY_DIFFERS, f"{where}: {score!r} vs reported {rec.score!r} (tolerance "
-                                         f"{plan.reproduce_tolerance})")
-    return None
+    failure: str | None = procedures(ctx).replay_failure(ctx, eid, rec, again, where)
+    return failure
 
 
 def _earlier_reproduction_failures(ctx: Context) -> list[str]:
@@ -521,7 +581,7 @@ def _earlier_reproduction_failures(ctx: Context) -> list[str]:
         if e.body.get("claim_hash") != ctx.claim_hash:
             continue
         try:
-            earlier = Certificate.model_validate(ctx.store.blobs.get_json(e.body["blob"]))
+            earlier = Certificate.model_validate(strict_json(ctx.store.blobs.get(e.body["blob"])))
             if earlier.cert_hash() != e.body.get("cert_hash"):
                 raise ValueError("content does not match its ledger entry")
         except (KeyError, ValueError, OSError, ValidationError) as err:
@@ -541,10 +601,7 @@ def replay_seed(ctx: Context, rec: ExecRecord) -> int:
     is fixed, so a claimant cannot know in advance which seed will be checked. (Re-running evaluations to
     steer it would leave unreported held-out reads, which K4 rejects.) Only PLAN-MATCHED records (a claim target
     and a planned seed) enter the hash: extra records cannot steer it (R1-F2), and K4 rejects them anyway."""
-    targets, seeds_planned = set(ctx.claim.generalization_targets), set(ctx.claim.analysis_plan.seeds)
-    material = "|".join(sorted(r.preds_ref for _, r in ctx.records
-                               if r.target in targets and r.seed in seeds_planned))
-    digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
+    digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{ctx.material()}".encode()).digest()
     seeds = sorted(ctx.claim.analysis_plan.seeds)
     return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
 
@@ -597,67 +654,14 @@ def k4_statistics(ctx: Context) -> CheckResult:
         if dup or any(s != sorted(plan.seeds) for s in (sorted(s for a, s in keys if a == arm)
                                                          for arm in ("subject", "comparator"))):
             continue
-        by = ctx.by_target(target)
-        seeds = sorted(plan.seeds)
-        subj = [by[("subject", s)][1].score for s in seeds]
-        comp = [by[("comparator", s)][1].score for s in seeds]
-        seed_ci = mean_t_interval([ctx.sign * (a - b) for a, b in zip(subj, comp, strict=True)],
-                                  alpha=2 * alpha_eff)
-        labels = ctx.label_values(target)
-        ex_ci = paired_example_interval(M.METRICS[c.metric.id], labels,
-                                        [ctx.preds[by[("subject", s)][0]] for s in seeds],
-                                        [ctx.preds[by[("comparator", s)][0]] for s in seeds],
-                                        higher_is_better=c.metric.higher_is_better, alpha=2 * alpha_eff,
-                                        n_boot=plan.n_boot, seed=0)
-        reasons += plan_code_divergence(ctx, target, alpha_eff, seed_ci, ex_ci, len(labels))
-        ctx.stats[target] = TargetStats(seed_ci, ex_ci, alpha_eff, _criterion(c, seed_ci, ex_ci))
-        obs.append(f"{target}: effect {ex_ci.estimate:+.4g}; examples {1 - 2 * alpha_eff:.4g} BCa "
-                   f"[{ex_ci.lo:+.4g}, {ex_ci.hi:+.4g}]; seeds t [{seed_ci.lo:+.4g}, {seed_ci.hi:+.4g}]"
-                   + (" (seed-invariant: seed interval degenerate, not used)" if seed_ci.degenerate else ""))
+        # the registered test, its plan-code divergence check and the criterion: the adapter's statistics design
+        ctx.stats[target], why, line = procedures(ctx).statistics(ctx, target, alpha_eff)
+        reasons += why
+        obs.append(line)
     return _result(reasons, obs)
 
 
-# §16.6 (the COMPare lesson): the test the Kernel EXECUTED must be the test the claim REGISTERED. Each registered test
-# id names the interval methods that implement it; K4 compares what the statistics code actually returned (method,
-# level, sample size) with what the registered plan, read back from the ledger, requires.
-REGISTERED_TESTS: Mapping[str, tuple[str, str]] = MappingProxyType({"paired_t_seeds+bca_examples": ("t", "bca")})
-
-
-def plan_code_divergence(ctx: Context, target: str, alpha_eff: float, seed_ci: Interval, ex_ci: Interval,
-                         n_examples: int) -> list[str]:
-    try:
-        registered = Claim.model_validate(ctx.prereg.body["claim"]).analysis_plan if ctx.prereg else None
-    except (KeyError, ValidationError):
-        registered = None
-    if registered is None or registered != ctx.claim.analysis_plan:
-        return [R(Code.K4_PLAN_CODE_DIVERGENCE, f"{target}: no registered analysis plan matches the claim's")]
-    want = REGISTERED_TESTS.get(registered.test)
-    executed = ((seed_ci.method, seed_ci.alpha, seed_ci.n), (ex_ci.method, ex_ci.alpha, ex_ci.n))
-    expected = None if want is None else ((want[0], 2 * alpha_eff, len(registered.seeds)),
-                                          (want[1], 2 * alpha_eff, n_examples))
-    if executed != expected:
-        return [R(Code.K4_PLAN_CODE_DIVERGENCE, f"{target}: executed test {executed} is not the registered test "
-                                                f"{registered.test!r} {expected}")]
-    return []
-
-def _criterion(c: Claim, seed: Interval, ex: Interval) -> bool:
-    d = c.effect.min_effect
-    if ex.degenerate:
-        return False  # no example-level variation: the effect cannot be bounded
-    use_seed = not seed.degenerate
-    if c.kind in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT):
-        return ex.lo >= d and (not use_seed or seed.lo >= d)
-    if c.kind == ClaimKind.NEGATIVE_RESULT:
-        return ex.hi < d and (not use_seed or seed.hi < d)
-    if c.kind == ClaimKind.EQUIVALENCE:
-        return -d < ex.lo and ex.hi < d and (not use_seed or (-d < seed.lo and seed.hi < d))
-    return False
-
-
 # ------------------------------------------------------------------ K5 comparator integrity
-_PAIRED_FIELDS = ("inputs", "target", "label_file", "argv", "env", "limits", "metric", "entrypoint")
-
-
 def k5_comparator(ctx: Context) -> CheckResult:
     reasons: list[str] = []
     c = ctx.claim
@@ -670,24 +674,7 @@ def k5_comparator(ctx: Context) -> CheckResult:
         if rec.metric != c.metric.id:
             reasons.append(R(Code.K5_WRONG_METRIC,
                 f"{eid}: scored with {rec.metric!r}, the claim's metric is {c.metric.id!r}"))
-    if c.kind == ClaimKind.IMPROVEMENT:
-        reg = ctx.vault.artifacts().get(c.comparator.artifact_id)
-        if reg is not None and reg.kind != "baseline":
-            reasons.append(R(Code.K5_NOT_BASELINE,
-                f"improvement claims must be against a registered baseline; comparator "
-                           f"{c.comparator.artifact_id!r} is registered as {reg.kind!r}"))
-    for target in c.generalization_targets:
-        by = ctx.by_target(target)
-        for seed in c.analysis_plan.seeds:
-            s, k = by.get(("subject", seed)), by.get(("comparator", seed))
-            if s is None or k is None:
-                continue  # missing records are K4/K6 failures
-            diff = [f for f in _PAIRED_FIELDS if getattr(s[1], f) != getattr(k[1], f)]
-            if diff:
-                reasons.append(R(Code.K5_NOT_PAIRED,
-                    f"{target} seed {seed}: subject and comparator differ in {diff} (not run under "
-                               f"identical conditions)"))
-    return _result(reasons)
+    return _result(reasons + procedures(ctx).conformance(ctx))  # the domain's conformance rules
 
 
 # ------------------------------------------------------------------ K6 held-out confirmation
@@ -759,41 +746,8 @@ def is_external(ctx: Context) -> bool:
 
 # ------------------------------------------------------------------ K7 risk
 def k7_risk(ctx: Context) -> CheckResult:
-    """Success must have been improbable under a no-effect noise model (and under the declared prior).
-    p_null(target) = P(effect >= min_effect | true effect 0), normal model with the target's resampling SE.
-
-    Negative-result and equivalence claims FAIL (fail closed): at their claimed bound, success is at most alpha
-    for any bound, so no noise model can tell a vacuous bound ("does not improve by 0.9 accuracy") from a tight one;
-    that needs a prior over effects, which v1 does not have. Such claims are reported, never certified."""
-    c = ctx.claim
-    if c.kind not in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT):
-        return _result([R(Code.K7_NO_RISK_MODEL,
-            f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
-                        f"(one that could not have failed) cannot be detected without a prior over effects")])
-    missing = sorted(set(c.generalization_targets) - set(ctx.stats))
-    if missing:  # KD2 (assure): risk is judged on every target, never on the subset that has statistics
-        return _result([R(Code.K7_NO_STATS, f"no statistics to assess risk on {missing} (see K4)")])
-    reasons: list[str] = []
-    p_values = []
-    for target, st in ctx.stats.items():
-        ex = st.example
-        z = _NORMAL.inv_cdf(1 - st.alpha_eff)
-        se = (ex.hi - ex.lo) / (2 * z)
-        if ex.degenerate or not se > 0:
-            reasons.append(R(Code.K7_NO_SPREAD, f"{target}: no resampling spread, the noise model is undefined"))
-            continue
-        st.p_null = 1 - _NORMAL.cdf(c.effect.min_effect / se)
-        p_values.append(st.p_null)
-    if reasons:
-        return _result(reasons)
-    p_used = max([*p_values, c.risk.prior_probability or 0.0])
-    bits = -math.log2(p_used) if p_used > 0 else math.inf
-    obs = [f"P(success | no effect) <= {p_used:.3g} -> {bits:.2f} bits (minimum {ctx.config.min_risk_bits})"]
-    if bits < ctx.config.min_risk_bits:
-        reasons.append(R(Code.K7_TRIVIALLY_SAFE,
-            f"trivially safe claim: success was {p_used:.3g} likely without any real effect "
-                       f"({bits:.2f} bits < {ctx.config.min_risk_bits}); raise the minimum effect or the sample size"))
-    return _result(reasons, obs)
+    """Success must have been improbable under the domain's noise model (the adapter's risk procedure)."""
+    return _result(*procedures(ctx).risk(ctx))
 
 
 # ------------------------------------------------------------------ K8 background consistency
@@ -801,16 +755,7 @@ def k8_background(ctx: Context) -> CheckResult:
     reasons: list[str] = []
     datasets = ctx.vault.datasets()
     for eid, rec in ctx.records:
-        lo, hi = M.METRIC_RANGE[rec.metric] if rec.metric in M.METRIC_RANGE else (-math.inf, math.inf)
-        if not (math.isfinite(rec.score) and lo <= rec.score <= hi):
-            reasons.append(R(Code.K8_RANGE,
-                f"{eid}: score {rec.score!r} outside the range of {rec.metric} [{lo}, {hi}]"))
-        preds = ctx.preds[eid]
-        if len(preds) != len(ctx.label_values(rec.target)):
-            reasons.append(R(Code.K8_LENGTH,
-                f"{eid}: {len(preds)} predictions for {len(ctx.label_values(rec.target))} labels"))
-        if any(p.strip() == "" for p in preds):
-            reasons.append(R(Code.K8_EMPTY, f"{eid}: empty prediction values"))
+        reasons += procedures(ctx).record_bounds(ctx, eid, rec)  # the domain's bounds (metric range, outputs)
         target = datasets[rec.target]
         if rec.label_file not in target.files or not target.files[rec.label_file].private:
             reasons.append(R(Code.K8_LABEL_FILE,
@@ -906,7 +851,7 @@ def k0_computational(ctx: Context) -> CheckResult:
             ev = ctx.store.get_evidence(eid)
             if ev.kind != EvidenceKind.PROOF:
                 raise Refusal(f"kind {ev.kind} is not a certificate record")
-            rec = CertificateRecord.model_validate(ctx.store.blobs.get_json(ev.payload_ref))
+            rec = CertificateRecord.model_validate(strict_json(ctx.store.blobs.get(ev.payload_ref)))
             if rec.claim_hash != ctx.claim_hash:
                 raise Refusal("record belongs to a different claim")
             art = arts.get(rec.artifact_id)
@@ -924,6 +869,32 @@ def k0_computational(ctx: Context) -> CheckResult:
 
 def _exact_spec(ctx: Context) -> adapters.AdapterSpec | None:
     return adapters.REGISTRY[ctx.adapter["name"]][0] if ctx.adapter is not None else None
+
+
+def statement_reasons(ctx: Context, phrase: Callable[[], str] | None) -> list[str]:
+    """Computational and formal claims (invariant 14): no scope conditions (a certificate or a proof holds for the
+    registered instance or the approved statement only) and the statement is exactly the adapter's rendering, so no
+    prose (e.g. "this circuit works when built") rides on an exact result. An adapter without a rendering fails."""
+    c, reasons = ctx.claim, []
+    if c.scope.conditions:
+        reasons.append(R(Code.K1_SCOPE, f"a {c.evidence_class.value} claim has no scope conditions (it holds for the "
+                                        f"registered subject only), got {sorted(c.scope.conditions)}"))
+    if phrase is None:
+        return [*reasons, R(Code.K1_STATEMENT, "the adapter renders no scope phrase: the statement cannot be checked")]
+    try:
+        want = phrase()
+    except (OSError, ValueError) as err:
+        return [*reasons, R(Code.K1_UNREADABLE, f"subject unreadable: {exception_name(err)}")]
+    if c.statement != want:
+        reasons.append(R(Code.K1_STATEMENT, f"the statement must be exactly the adapter's scope rendering {want!r}"))
+    return reasons
+
+
+def _phrase(ctx: Context, *args: Any) -> Callable[[], str] | None:
+    spec = _exact_spec(ctx)
+    module = importlib.import_module(spec.exact_module) if spec is not None and spec.exact_module else None
+    fn = getattr(module, "scope_phrase", None)
+    return None if fn is None else lambda: str(fn(ctx.store.blobs.get(ctx.claim.subject.hash), *args))
 
 
 def k1_computational(ctx: Context) -> CheckResult:
@@ -961,6 +932,9 @@ def k1_computational(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
     if c.risk.prior_probability is not None:
         reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be unset: K7 does not apply to computational claims"))
+    value = exact_value(c.value)
+    if ctx.adapter is not None and value is not None:  # (without them K1 already fails)
+        reasons += statement_reasons(ctx, _phrase(ctx, value))
     return _result(reasons + p0_reasons(ctx))
 
 
@@ -1012,6 +986,15 @@ def k8_computational(ctx: Context) -> CheckResult:
     return _result(coded(Code.K8_ADAPTER_BOUNDS, list(module.bounds(problem, cert, value))))
 
 
+def _reader_texts(data: bytes) -> list[str]:
+    """What a reader of the document can see: its bytes as UTF-8 and, when json can parse it (UTF-8/16/32, a BOM,
+    \\u escapes), every parsed key and string, duplicates included, re-encoded canonically (s3-domain red team)."""
+    texts = [data.decode("utf-8", errors="ignore")]
+    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding: bytes only
+        texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
+    return texts
+
+
 def k9_computational(ctx: Context) -> CheckResult:
     """No canary token and no private file's bytes in the problem instance or the certificate."""
     datasets = ctx.vault.datasets()
@@ -1022,8 +1005,9 @@ def k9_computational(ctx: Context) -> CheckResult:
     for role, digest in scanned:
         if digest in private:
             reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} IS a private file ({private[digest]})"))
-        reasons += coded(Code.K9_LEAK,
-            leak.scan_text(ctx.store.blobs.get(digest).decode("utf-8", errors="ignore"), role, canaries, []))
+        found = [f for text in _reader_texts(ctx.store.blobs.get(digest)) for f in leak.scan_text(text, role,
+                                                                                                canaries, [])]
+        reasons += coded(Code.K9_LEAK, list(dict.fromkeys(found)))
     return _result(reasons, [f"scanned the instance and {len(ctx.certificates)} certificate(s) for "
                              f"{len(canaries)} canary token(s) and {len(private)} private file(s)"])
 
@@ -1073,6 +1057,8 @@ def k1_formal(ctx: Context) -> CheckResult:
     if c.risk.prior_probability is not None:
         reasons.append(R(Code.K1_RISK_PRIOR,
             "risk prior must be unset: no K7 rule exists for formal claims (owner decision pending)"))
+    if ctx.adapter is not None:
+        reasons += statement_reasons(ctx, _phrase(ctx))
     return _result(reasons + p0_reasons(ctx))
 
 

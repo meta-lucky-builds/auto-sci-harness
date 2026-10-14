@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ..store.evidence import EvidenceStore, LedgerRow
-from .claim import canonical_json
+from .claim import canonical_json, strict_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
                    "retraction", "adapter_approval",
@@ -38,6 +38,7 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    # §16.2 minted targets (Kernel.record_mint); bodies owned by other workstreams: human feature-
                    # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
                    "mint", "feature_ruling", "role_exam",
+                   "truth_copy",  # §16.5.4: a declared agent-reachable copy of a target's truth (declare_truth_copy)
                    "tree_event",  # L4.7 experiment-tree events (research/tree.py owns the body)
                    "salt_commitment", "salt_reveal",  # §16.9 salt campaigns (salts/plan.py owns the bodies)
                    # L9 HUMAN actions written by the studio CLI (`chh kill`, `chh tier-policy set`)
@@ -62,7 +63,7 @@ class Entry:
     @staticmethod
     def from_row(row: LedgerRow) -> Entry:
         seq, kind, body, prev, h, at = row
-        return Entry(seq, kind, json.loads(body), prev, h, at)
+        return Entry(seq, kind, strict_json(body), prev, h, at)
 
     def row(self) -> LedgerRow:
         return self.seq, self.kind, canonical_json(self.body).decode(), self.prev, self.hash, self.at
@@ -155,7 +156,7 @@ def check_anchors(entries: list[Entry], path: Path) -> list[str]:
         return [f"anchor file {path} holds no anchor"]
     for i, line in enumerate(lines, 1):
         try:
-            a = json.loads(line)
+            a = strict_json(line)
             n, head = int(a["length"]), str(a["head"])
             if a.get("format") != ANCHOR_FORMAT or n < 0:
                 raise ValueError("not a chh-anchor/1 record")

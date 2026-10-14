@@ -88,11 +88,14 @@ class AnalysisPlan(_Model):
     # Kernel's preset, frozen into the pre-registration. Omitted from dumps when unset (older claims keep their hash).
     eps_max: float | None = None
     beta: float | None = None
+    # negative_result only (§16.10, docs/bounded_null.md): the declared power 1 - beta of the registered test to detect
+    # an effect of min_effect on the targets, proven at K7 by a plasmode. None = no bounded-null certificate (K7 fails)
+    power: float | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_reliability(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         doc: dict[str, Any] = handler(self)
-        for key in ("eps_max", "beta"):
+        for key in ("eps_max", "beta", "power"):
             if doc.get(key) is None:
                 doc.pop(key, None)
         return doc
@@ -149,6 +152,19 @@ def exact_value(text: str | None) -> Fraction | None:
         return None
     value = Fraction(text)
     return value if str(value) == text else None
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"duplicate JSON key {sorted({k for k in keys if keys.count(k) > 1})[0]!r}")
+    return dict(pairs)
+
+
+def strict_json(data: str | bytes) -> Any:
+    """json.loads that refuses a duplicated object key at any depth: one reader would see the first value and
+    another (the stdlib keeps the last) a different document (ValueError, so callers fail closed)."""
+    return json.loads(data, object_pairs_hook=_unique_keys)
 
 
 def canonical_json(obj: Any) -> bytes:

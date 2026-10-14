@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/lp.py b/src/custom_harness/kernel/lp.py
+index 60ce656..7bf61a7 100644
+--- a/src/custom_harness/kernel/lp.py
++++ b/src/custom_harness/kernel/lp.py
+@@ -58,7 +58,7 @@ def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
+     if len(data) > MAX_BYTES:
+         raise LPError(f"document is larger than {MAX_BYTES} bytes")
+     try:
+-        doc = json.loads(data, object_pairs_hook=_unique)
++        doc = json.loads(data)
+     except ValueError as e:
+         raise LPError(f"not JSON: {e}") from None
+     if not isinstance(doc, dict) or doc.get("format") != fmt:
