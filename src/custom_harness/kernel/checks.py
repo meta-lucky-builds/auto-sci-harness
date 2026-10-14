@@ -19,7 +19,6 @@ import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from fractions import Fraction
 from types import MappingProxyType
 from typing import Any, Protocol
 
@@ -437,9 +436,8 @@ NOISE_SOURCES = ("nominal", "perturbed", "rebuild", "seed")
 
 
 def tolerance_reasons(ctx: Context) -> list[str]:
-    """K1 (s3-verifiers): a reproduce tolerance > 0 is accepted only up to the tolerance that the cited noise-floor
-    record gives when K1 re-reads it and re-calibrates it with verify.tolerance.claim_tolerance (the owner's fixed
-    miss rate and sources, l3_config), so no hand-set or inflated tolerance can loosen K3."""
+    """K1 (s3-verifiers): a tolerance > 0 at most what the cited noise-floor record gives when re-read and re-calibrated
+    by verify.tolerance.claim_tolerance (owner-fixed miss rate and sources): no hand-set tolerance loosens K3."""
     plan = ctx.claim.analysis_plan
     if plan.reproduce_tolerance == 0:
         return []
@@ -938,6 +936,31 @@ def _phrase(ctx: Context, *args: Any) -> Callable[[], str] | None:
     return None if fn is None else lambda: str(fn(ctx.store.blobs.get(ctx.claim.subject.hash), *args))
 
 
+def exact_form(ctx: Context, what: str, replaces: str, checker: str) -> list[str]:
+    """K1 of the exact classes: the approved adapter (resolved into ctx.adapter) declares its `checker`; no comparator,
+    datasets, plan, effect or risk prior; a probability in (0, 1)."""
+    c, e = ctx.claim, ctx.claim.effect
+    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
+    reasons, spec = coded(Code.K1_ADAPTER, why), _exact_spec(ctx)
+    if spec is not None and spec.exact_module is None:
+        reasons.append(R(Code.K1_ADAPTER, f"adapter {spec.name!r} declares no {checker}"))
+    if c.comparator != c.subject:
+        reasons.append(R(Code.K1_COMPARATOR, f"a {what} has no comparator: by convention the comparator must be the "
+                                             f"subject"))
+    if c.development or c.generalization_targets or c.scope.datasets:
+        reasons.append(R(Code.K1_DATASETS, f"a {what} uses no datasets: development, generalization targets and scope "
+                                           f"datasets must be empty"))
+    if c.analysis_plan != AnalysisPlan(seeds=()):
+        reasons.append(R(Code.K1_PLAN, f"the analysis plan must be empty (no seeds, defaults): {replaces}"))
+    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
+        reasons.append(R(Code.K1_EFFECT, "effect fields other than the declared probability must be 0"))
+    if not 0 < e.probability < 1:
+        reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
+    if c.risk.prior_probability is not None:
+        reasons.append(R(Code.K1_RISK_PRIOR, f"risk prior must be unset: no K7 rule applies to a {what}"))
+    return reasons
+
+
 def k1_computational(ctx: Context) -> CheckResult:
     c, reasons = ctx.claim, []
     if c.kind != ClaimKind.COMPUTED_VALUE:
@@ -946,33 +969,12 @@ def k1_computational(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_VALUE,
             f"value {c.value!r} must be an exact rational in lowest terms, 'p' or 'p/q' (no decimals, "
                        f"no floats)"))
-    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
-    reasons += coded(Code.K1_ADAPTER, why)
+    reasons += exact_form(ctx, "computed value (the problem instance)", "an exact certificate replaces statistics",
+                          "exact certificate checker")
     spec = _exact_spec(ctx)
-    if spec is not None and spec.exact_module is None:
-        reasons.append(R(Code.K1_ADAPTER, f"adapter {spec.name!r} declares no exact certificate checker"))
-    elif spec is not None and importlib.import_module(str(spec.exact_module)).HIGHER_IS_BETTER != \
-            c.metric.higher_is_better:
+    if spec is not None and spec.exact_module is not None and \
+            importlib.import_module(spec.exact_module).HIGHER_IS_BETTER != c.metric.higher_is_better:
         reasons.append(R(Code.K1_METRIC, f"metric {c.metric.id!r} direction does not match the adapter"))
-    if c.comparator != c.subject:
-        reasons.append(R(Code.K1_COMPARATOR,
-            "a computed value has no comparator: by convention the comparator must be the subject (the "
-                       "problem instance)"))
-    if c.development or c.generalization_targets or c.scope.datasets:
-        reasons.append(R(Code.K1_DATASETS,
-            "a computational claim uses no datasets: development, generalization targets and scope "
-                       "datasets must be empty"))
-    if c.analysis_plan != AnalysisPlan(seeds=()):
-        reasons.append(R(Code.K1_PLAN,
-            "the analysis plan must be empty (no seeds, defaults): an exact certificate replaces statistics"))
-    e = c.effect
-    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
-        reasons.append(R(Code.K1_EFFECT,
-            "effect fields other than the declared probability must be 0 (the claimed value is `value`)"))
-    if not 0 < e.probability < 1:
-        reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
-    if c.risk.prior_probability is not None:
-        reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be unset: K7 does not apply to computational claims"))
     value = exact_value(c.value)
     if ctx.adapter is not None and value is not None:  # (without them K1 already fails)
         reasons += statement_reasons(ctx, _phrase(ctx, value))
@@ -992,20 +994,26 @@ def k2_computational(ctx: Context) -> CheckResult:
     return _result(reasons, list(base.observations))
 
 
-def _exact_inputs(ctx: Context) -> tuple[Any, bytes, bytes, Fraction] | list[str]:
+def _exact_inputs(ctx: Context, checker: str = "an exact certificate checker", record: str = "certificate",
+                  valued: bool = True) -> tuple[Any, ...] | list[str]:
+    """(checker module, subject bytes, record bytes[, exact value]) for K3/K8 of the exact classes, or reasons."""
     spec, value = _exact_spec(ctx), exact_value(ctx.claim.value)
     module = spec.exact_module if spec is not None else None
     reasons = []
     if module is None:
-        reasons.append(R(Code.K3_INPUTS, "no approved adapter with an exact certificate checker (see K1)"))
-    if value is None:
+        reasons.append(R(Code.K3_INPUTS, f"no approved adapter with {checker} (see K1)"))
+    if valued and value is None:
         reasons.append(R(Code.K3_INPUTS, "the claimed value is not an exact rational (see K1)"))
     if len(ctx.certificates) != 1:
-        reasons.append(R(Code.K3_INPUTS, "no single resolved certificate (see K0)"))
-    if module is None or value is None or reasons:
+        reasons.append(R(Code.K3_INPUTS, f"no single resolved {record} (see K0)"))
+    if module is None or reasons:
         return reasons
     return (importlib.import_module(module), ctx.store.blobs.get(ctx.claim.subject.hash),
-            ctx.store.blobs.get(ctx.certificates[0].hash), value)
+            ctx.store.blobs.get(ctx.certificates[0].hash), *((value,) if valued else ()))
+
+
+def _formal_inputs(ctx: Context) -> tuple[Any, ...] | list[str]:
+    return _exact_inputs(ctx, "a Lean record checker", "check record", valued=False)
 
 
 def k3_computational(ctx: Context) -> CheckResult:
@@ -1013,26 +1021,22 @@ def k3_computational(ctx: Context) -> CheckResult:
     got = _exact_inputs(ctx)
     if isinstance(got, list):
         return _result(got)
-    module, problem, cert, value = got
     return _result(coded(Code.K3_ADAPTER_CHECK,
-        list(module.check(problem, cert, value))), [f"certificate re-checked exactly by {module.__name__}"])
+        list(got[0].check(*got[1:]))), [f"certificate re-checked exactly by {got[0].__name__}"])
 
 
-def k8_computational(ctx: Context) -> CheckResult:
-    """The adapter's registered sanity bounds (dimensions, number sizes, the claimed value included)."""
-    got = _exact_inputs(ctx)
+def k8_exact(ctx: Context) -> CheckResult:
+    """The adapter's registered sanity bounds (computational: dimensions and number sizes, the claimed value
+    included; formal: source and output sizes)."""
+    got = _exact_inputs(ctx) if ctx.claim.evidence_class != EvidenceClass.FORMAL else _formal_inputs(ctx)
     if isinstance(got, list):
         return _result(got)
-    module, problem, cert, value = got
-    return _result(coded(Code.K8_ADAPTER_BOUNDS, list(module.bounds(problem, cert, value))))
+    return _result(coded(Code.K8_ADAPTER_BOUNDS, list(got[0].bounds(*got[1:]))))
 
 
 def reader_texts(data: bytes, *, source: bool = False) -> list[str]:
-    """What a reader of the bytes can see (s3-domain red team; s4: program sources): the bytes as UTF-8, also with NUL
-    bytes dropped (UTF-16/32 spellings of ASCII); when json parses it (UTF-8/16/32, a BOM, \\u escapes) every parsed
-    key and string re-encoded canonically; for program `source` that Python parses (a coding cookie, \\u \\x \\N{}
-    octal escapes, adjacent literals) the decoded source and its string and bytes literals in source order, joined
-    by newlines and joined directly (a canary split over literals). Runtime-built strings are not seen (stated)."""
+    """What a reader of the bytes sees (UTF-8, NULs dropped, parsed JSON, and for Python `source` the decoded source
+    and its literals in source order, joined by newlines and directly): docs/kernel_s4.md, item 1."""
     texts = [data.decode("utf-8", errors="ignore"), data.replace(b"\0", b"").decode("utf-8", errors="ignore")]
     with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding
         texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
@@ -1066,7 +1070,7 @@ def k9_computational(ctx: Context) -> CheckResult:
 
 COMPUTATIONAL_CHECKS: dict[str, Any] = {
     "K0": k0_computational, "K1": k1_computational, "K2": k2_computational, "K3": k3_computational,
-    "K8": k8_computational, "K9": k9_computational,
+    "K8": k8_exact, "K9": k9_computational,
 }
 
 
@@ -1080,52 +1084,17 @@ def k1_formal(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_KIND, f"a formal claim must be of kind 'theorem', not {c.kind.value!r}"))
     if c.value is not None:
         reasons.append(R(Code.K1_VALUE, "a theorem claim carries no value"))
-    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
-    reasons += coded(Code.K1_ADAPTER, why)
-    spec = _exact_spec(ctx)
-    if spec is not None and spec.exact_module is None:
-        reasons.append(R(Code.K1_ADAPTER, f"adapter {spec.name!r} declares no Lean record checker"))
+    reasons += exact_form(ctx, "theorem (the statement; K7 owner decision pending)", "a proof replaces statistics",
+                          "Lean record checker")
     approved = [e for e in ctx.ledger.entries("statement_approval")
                 if e.body.get("hash") == c.subject.hash and str(e.body.get("approver", "")).strip()]
     if not approved:
         reasons.append(R(Code.K1_STATEMENT,
             f"statement {c.subject.artifact_id!r} (hash {c.subject.hash[:12]}) has no human approval: run "
                        f"`chh approve-statement` (models can never approve a statement)"))
-    if c.comparator != c.subject:
-        reasons.append(R(Code.K1_COMPARATOR,
-            "a theorem has no comparator: by convention the comparator must be the subject (the statement)"))
-    if c.development or c.generalization_targets or c.scope.datasets:
-        reasons.append(R(Code.K1_DATASETS,
-            "a formal claim uses no datasets: development, generalization targets and scope datasets "
-                       "must be empty"))
-    if c.analysis_plan != AnalysisPlan(seeds=()):
-        reasons.append(R(Code.K1_PLAN,
-            "the analysis plan must be empty (no seeds, defaults): a proof replaces statistics"))
-    e = c.effect
-    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
-        reasons.append(R(Code.K1_EFFECT, "effect fields other than the declared probability must be 0"))
-    if not 0 < e.probability < 1:
-        reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
-    if c.risk.prior_probability is not None:
-        reasons.append(R(Code.K1_RISK_PRIOR,
-            "risk prior must be unset: no K7 rule exists for formal claims (owner decision pending)"))
     if ctx.adapter is not None:
         reasons += statement_reasons(ctx, _phrase(ctx))
     return _result(reasons + p0_reasons(ctx))
-
-
-def _formal_inputs(ctx: Context) -> tuple[Any, bytes, bytes] | list[str]:
-    spec = _exact_spec(ctx)
-    module = spec.exact_module if spec is not None else None
-    reasons = []
-    if module is None:
-        reasons.append(R(Code.K3_INPUTS, "no approved adapter with a Lean record checker (see K1)"))
-    if len(ctx.certificates) != 1:
-        reasons.append(R(Code.K3_INPUTS, "no single resolved check record (see K0)"))
-    if module is None or reasons:
-        return reasons
-    return (importlib.import_module(module), ctx.store.blobs.get(ctx.claim.subject.hash),
-            ctx.store.blobs.get(ctx.certificates[0].hash))
 
 
 def k3_formal(ctx: Context) -> CheckResult:
@@ -1139,17 +1108,8 @@ def k3_formal(ctx: Context) -> CheckResult:
     return _result(reasons, [f"Lean check record re-checked by {module.__name__}", *axioms])
 
 
-def k8_formal(ctx: Context) -> CheckResult:
-    """The adapter's registered sanity bounds (source and output sizes)."""
-    got = _formal_inputs(ctx)
-    if isinstance(got, list):
-        return _result(got)
-    module, statement, record = got
-    return _result(coded(Code.K8_ADAPTER_BOUNDS, list(module.bounds(statement, record))))
-
-
 FORMAL_CHECKS: dict[str, Any] = {
-    "K0": k0_computational, "K1": k1_formal, "K2": k2_computational, "K3": k3_formal, "K8": k8_formal,
+    "K0": k0_computational, "K1": k1_formal, "K2": k2_computational, "K3": k3_formal, "K8": k8_exact,
     "K9": k9_computational,
 }
 

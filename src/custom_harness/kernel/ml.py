@@ -64,10 +64,8 @@ _RELATION = {ClaimKind.IMPROVEMENT: "beats {c} by at least {d}", ClaimKind.ABLAT
 
 
 def scope_phrase(c: Claim, roles: Mapping[str, str]) -> str:
-    """The data class's scope vocabulary (K1, invariant 14; s3-kernel: data claims had none): the ONLY statement a data
-    claim may make. Datasets: the generalization targets, in claim order; splits: each target's registered role and
-    its held-out examples; population: what the targets are an i.i.d. sample of; metric phrase: kind, comparator,
-    metric, direction and min_effect (repr, never rounded). Nothing else: no prose, no scope conditions."""
+    """The data class's scope vocabulary (K1, invariant 14): the ONLY statement a data claim may make (datasets, splits,
+    population, metric phrase; min_effect by repr, never rounded). docs/kernel_s4.md, item 4."""
     relation = _RELATION.get(c.kind, "?").format(c=c.comparator.artifact_id, d=repr(c.effect.min_effect))
     held = ", ".join(f"{t} (split {roles.get(t, '?')})" for t in c.generalization_targets)
     return (f"{c.subject.artifact_id} {relation} in {c.metric.id} ({'higher' if c.metric.higher_is_better else 'lower'}"

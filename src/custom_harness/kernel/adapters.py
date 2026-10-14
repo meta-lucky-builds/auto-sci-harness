@@ -130,10 +130,8 @@ def _stamps(paths: Iterable[Path]) -> Stamps:
 
 
 def adapter_hash(spec: AdapterSpec) -> str:
-    """Cached per process (s3-assure: ~0.7 s of a ~2 s certify), keyed by the spec and sys.path, and recomputed in
-    full when any covered file's (mtime_ns, size, inode) changed. Cached only when the import closure and the stamps
-    are unchanged across the computation (no edit raced it). Residual: an edit that restores all three stamps is not
-    seen until the process restarts (the process runs the code it imported then anyway)."""
+    """Cached per process by (spec, sys.path); recomputed when a covered file's (mtime_ns, size, inode) changed, cached
+    only if no edit raced the computation. Residual and measurement: docs/kernel_s4.md, item 9."""
     key = (spec, tuple(sys.path))
     hit = _HASHES.get(key)
     with contextlib.suppress(OSError):  # a covered file gone: recompute (fails closed there)

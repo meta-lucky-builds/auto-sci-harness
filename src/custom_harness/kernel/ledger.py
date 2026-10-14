@@ -129,10 +129,8 @@ _DEVICE = re.compile(r"^\\\\[?.]\\(?:(UNC)\\|(?=[A-Za-z]:))", re.I)  # \\?\C:...
 
 
 def inside(a: Path | str, b: Path | str, *, on_error: bool) -> bool:
-    """`a` is `b` or lies under it, whatever the spelling (s3-evolve red team, the evolve/reveal.py approach): by path
-    after stripping the Windows device prefixes \\\\?\\ and \\\\.\\ (Path.resolve keeps them), then by file identity of
-    every existing ancestor of `a` (8.3 short names, case, admin shares, \\\\?\\GLOBALROOT, junctions). An OSError
-    in the identity test returns `on_error`: each caller passes its fail-closed direction."""
+    """`a` is `b` or under it, whatever the spelling: by path without Windows device prefixes, then by file identity of
+    every existing ancestor (8.3, case, shares, GLOBALROOT). OSError -> `on_error`, the caller's fail-closed side."""
     a, b = (Path(_DEVICE.sub(lambda m: "\\\\" if m.group(1) else "", os.fspath(p))).resolve() for p in (a, b))
     if a == b or b in a.parents:
         return True
