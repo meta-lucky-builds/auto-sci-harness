@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -301,12 +302,49 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
         print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
         return 1
-    print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
+    headline = _headline(report.certificate)
+    # GOAL §2.4: every headline number must reproduce, not only the label and the check statuses
+    original, problems = _original_headline(Path(a.bundle)), list(report.problems)
+    if headline is not None and (original is None or original["targets"] != headline["targets"]):
+        problems.append(f"headline numbers differ from the bundled certificate: originally "
+                        f"{original['targets'] if original else 'unreadable'}, now {headline['targets']}")
+    ok = report.reproduced and len(problems) == len(report.problems)
+    print(json.dumps({"reproduced": ok, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems, "missing_artifacts": report.missing_artifacts,
-                      "artifacts": arts.to_json()}, indent=1))
-    return 0 if report.reproduced else 1
+                      "problems": problems, "missing_artifacts": report.missing_artifacts,
+                      "artifacts": arts.to_json(), "headline": headline, "original_headline": original}, indent=1))
+    return 0 if ok else 1
+
+
+def _original_headline(path: Path) -> dict[str, Any] | None:
+    """The headline numbers of the ORIGINAL certificate as bundled (read under the bundle caps), or None."""
+    import zipfile
+
+    from .kernel import Certificate
+    from .store.run_bundle import BoundedZip, RunBundleError
+    try:
+        with zipfile.ZipFile(path) as z:
+            r = BoundedZip(z)
+            man = json.loads(r.read("manifest.json"))
+            row = next(x for x in man["ledger"] if x[1] == "certificate"
+                       and json.loads(x[2]).get("cert_hash") == man["cert_hash"])
+            cert = Certificate.model_validate(json.loads(r.read(f"blobs/{json.loads(row[2])['blob']}")))
+    except (OSError, ValueError, KeyError, IndexError, StopIteration, TypeError, zipfile.BadZipFile,
+            RunBundleError):
+        return None
+    return _headline(cert)
+
+
+def _headline(cert: Any) -> dict[str, Any] | None:
+    """The headline numbers of the RE-DERIVED certificate (GOAL §2.4): label, tier and, per held-out target, the
+    effect estimate and its interval, as the reproducing machine computed them (None without a certificate)."""
+    if cert is None:
+        return None
+    targets = (cert.resolution or {}).get("targets") or {}
+    return {"label": cert.label.value, "tier": cert.tier,
+            "targets": {t: {k: v.get(k) for k in ("estimate", "lo", "hi")} for t, v in sorted(targets.items())
+                        if isinstance(v, dict)}}
 
 
 def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:

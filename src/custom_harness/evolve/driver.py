@@ -104,7 +104,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
             led = gen_ledger.record(res)
             log(json.dumps({"campaign": campaign, "ledger_generation": led["generation"], "budget": led["budget"],
                             "stalled": led["stall"]["stalled"]}))
-        summary = {"generation": gi, "accepted": res.accepted, "decision": res.decision,
+        summary = {"generation": gi, "loop_label": res.loop_label, "accepted": res.accepted, "decision": res.decision,
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,
                    "candidates": [{k: c.get(k) for k in ("status", "reason", "survived")} | (
