@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Any, cast
 
+from ..ablation import NO_ABLATION
 from ..verify.ranking import BTFit, Choice, binom_two_sided_p, fit_bt, pair_choice, ranking_to_choices, wilson_interval
 
 Hyp = dict[str, Any]
@@ -328,6 +329,11 @@ def run_tournament(pool: Sequence[Hyp], *, mode: str = "kway", judge_k: JudgeK |
 
 
 # ---------------------------------------------------------------- the `research.tournament` module body
+# Ablation switches (custom_harness/ablation.py) that turn the tournament off: Robin's BTL tournament, and SciDER's
+# K-way ranking (together with data profiling, research.profile_data).
+ABLATION_SWITCHES = ("btl_tournament", "data_profile_kway_rank")
+
+
 def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -> dict[str, Any]:
     """Body of `research.tournament` (registered in research/modules.py, which delegates here). Defaults reproduce
     the original module: K-way over the whole pool, 3 shuffled rounds, judge role `judge`, rejected rounds counted.
@@ -389,6 +395,15 @@ def tournament_module(state: dict[str, Any], params: dict[str, Any], ctx: Any) -
     unknown = ops - {"improve_weakest", "combine"}
     if unknown:
         raise ValueError(f"unknown tournament operators: {sorted(unknown)}")
+    ablation = getattr(ctx, "ablation", NO_ABLATION)  # a context without one (test doubles) is production
+    off = [s for s in ABLATION_SWITCHES if ablation.off(s)]
+    if off:  # ablation run (custom_harness/ablation.py): no judge call, no fit; the proposer's order is kept
+        ids = [h.get("id") for h in hyps]
+        if len(set(ids)) != len(ids):
+            raise ValueError("hypothesis ids must be unique")
+        return {"ranking": {"order": ids, "valid_rounds": 0, "rejected_rounds": 0, "mode": "ablated",
+                            "method": f"tournament switched off ({', '.join(off)}): the proposer's order is kept"},
+                "queue": list(hyps), "current": None}
     if len(hyps) == 1:  # nothing to compare (an evolved spec may drop minItems): no judge call, no fit
         return {"ranking": {"order": [hyps[0]["id"]], "valid_rounds": 0, "rejected_rounds": 0, "mode": "single",
                             "method": "single hypothesis: nothing to rank"}, "queue": list(hyps), "current": None}

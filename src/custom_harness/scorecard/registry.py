@@ -7,7 +7,10 @@ The shipped registry (`benchmarks.yaml`) is EMPTY: every real benchmark (Termina
 MLE-bench, ResearchBench, ...) needs a download, which is an owner decision. Tests use fixture registries.
 
 The capability registry (`capabilities.yaml`) lists every capability the coverage contract (GOAL §9) claims, each with
-the ablation switch that turns it off (`ablation`), or null when no switch exists yet. A capability with no switch, or
+its `ablation` record (`AblationRecord`): either `switch` = the name of a switch in the closed registry
+(custom_harness.ablation.SWITCHES), with `not_covered` listing any part of the row the switch does not turn off and
+why; or `not_ablatable` = the exact reason no switch exists. A row counts as having a switch ONLY when its switch is in
+the closed registry for that row and `not_covered` is empty (`switch_fact`). A capability without such a switch, or
 with no recorded ablation run, is reported as an invariant-12 gap on the scorecard; it is never left out.
 """
 
@@ -19,7 +22,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+
+from ..ablation import SWITCHES
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_BENCHMARKS = HERE / "benchmarks.yaml"
@@ -48,13 +53,64 @@ class PinnedBenchmark(BaseModel):
         return f"{self.name}@{self.version}"
 
 
+class AblationRecord(BaseModel):
+    """Exactly one of: `switch` (a name in the closed registry; `not_covered` = row parts it does not turn off, each
+    with its reason) or `not_ablatable` (the exact reason no switch exists)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    switch: str | None = None
+    not_covered: dict[str, str] = {}
+    not_ablatable: str | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> AblationRecord:
+        if (self.switch is None) == (self.not_ablatable is None):
+            raise ValueError("an ablation record names exactly one of `switch` or `not_ablatable`")
+        if self.not_ablatable is not None and (not self.not_ablatable.strip() or self.not_covered):
+            raise ValueError("`not_ablatable` needs a non-empty reason and no `not_covered`")
+        if any(not str(v).strip() for v in self.not_covered.values()):
+            raise ValueError("every `not_covered` part needs its reason")
+        return self
+
+
 class Capability(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     id: str
     source: str  # the surveyed system it comes from (GOAL §9)
     capability: str
     home: str
-    ablation: str | None = None  # the switch that disables it; None = no switch exists yet (an invariant-12 gap)
+    # None = no record yet (an invariant-12 gap); a bare string is read as {switch: <string>}
+    ablation: AblationRecord | None = None
+
+    @field_validator("ablation", mode="before")
+    @classmethod
+    def _bare_switch(cls, v: Any) -> Any:
+        return {"switch": v} if isinstance(v, str) else v
+
+
+def switch_fact(cap_id: str, ablation: Any) -> dict[str, Any]:
+    """What the scorecard needs about one row's ablation, as plain JSON. `has_switch` is True ONLY when the row names
+    a switch that is in the closed registry FOR THIS ROW, with a test, and nothing of the row is left uncovered.
+    A malformed record is reported as such (never as a switch)."""
+    try:
+        rec = Capability.model_validate({"id": cap_id, "source": "", "capability": "", "home": "",
+                                         "ablation": ablation}).ablation
+    except ValueError as e:
+        return {"has_switch": False, "switch": None, "why": f"malformed ablation record: {str(e).splitlines()[0]}"}
+    if rec is None:
+        return {"has_switch": False, "switch": None, "why": "no ablation switch"}
+    if rec.not_ablatable is not None:
+        return {"has_switch": False, "switch": None, "why": f"not ablatable: {rec.not_ablatable}"}
+    sw = SWITCHES.get(str(rec.switch))
+    if sw is None or sw.capability != cap_id:
+        return {"has_switch": False, "switch": rec.switch,
+                "why": f"switch {rec.switch!r} is not in the closed registry for this capability"}
+    if not sw.test.strip():
+        return {"has_switch": False, "switch": rec.switch, "why": f"switch {rec.switch!r} names no test"}
+    if rec.not_covered:
+        return {"has_switch": False, "switch": rec.switch, "test": sw.test, "not_covered": dict(rec.not_covered),
+                "why": f"partial switch: {rec.switch!r} does not turn off {sorted(rec.not_covered)}"}
+    return {"has_switch": True, "switch": rec.switch, "test": sw.test}
 
 
 def content_hash(directory: Path) -> str:

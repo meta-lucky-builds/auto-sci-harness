@@ -44,6 +44,7 @@ from typing import Any
 
 import jsonschema
 
+from ..ablation import NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded, Campaign
 from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
@@ -294,7 +295,7 @@ class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
                  retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None,
-                 campaign: Campaign | None = None, map_workers: int = 1):
+                 campaign: Campaign | None = None, ablation: AblationSet = NO_ABLATION, map_workers: int = 1):
         # invariant 5, checked before any model call; an override (argument or CHH_ALLOW_SAME_FAMILY=1) is
         # recorded in every run's state as NOT MET and reported in every certificate checklist
         allowed = allow_same_family if allow_same_family is not None else (
@@ -307,6 +308,11 @@ class Engine:
             if isinstance(node, MapNode):
                 get_reducer(node.reducer)
         self.spec = spec
+        # capability switches OFF for this engine's runs (custom_harness/ablation.py): only the scorecard runner's
+        # ablation entry point makes a non-empty set; every run it starts is marked ABLATED in its record
+        if not isinstance(ablation, AblationSet):
+            raise TypeError("ablation must be an AblationSet (custom_harness.ablation)")
+        self.ablation = ablation
         # fan-out parallelism, OPT-IN (`chh run|resume --map-workers N`; default 1 = sequential): only a map whose body
         # is an LLM node runs its branches' model calls on up to N worker threads (`_ParallelBranches`); every other
         # map, and every map with N = 1, runs its branches sequentially. Results are committed on this thread in item
@@ -371,7 +377,8 @@ class Engine:
         state = {"input": inputs, "_seed": seed, "model_policy": self.model_policy}
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash, task_id=task_id, seed=seed,
                   inputs_ref=self.store.blobs.put_json(state),
-                  workspace=str(self.sandbox.workspace) if self.sandbox is not None else None)
+                  workspace=str(self.sandbox.workspace) if self.sandbox is not None else None,
+                  ablated=self.ablation.names)
         self.store.add_run(run)
         _note_nested(run.id)
         if self.campaign is not None:
@@ -440,6 +447,7 @@ class Engine:
         if kill is not None:
             raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not forked (it would continue "
                              f"under a new id)")
+        self._check_ablation(run_id, "forked")
         steps = self.store.trace(run_id)
         step = next((s for s in steps if s.index == step_index), None)
         if step is None or step.checkpoint_ref is None:
@@ -466,7 +474,7 @@ class Engine:
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash,
                   task_id=task_id or parent.task_id, seed=parent.seed, inputs_ref=parent.inputs_ref,
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None,
-                  forked_from=(run_id, step_index))
+                  forked_from=(run_id, step_index), ablated=self.ablation.names)
         self.store.add_run(run)
         _note_nested(run.id)
         body = {"parent_run_id": run_id, "step": step_index, "child_run_id": run.id, "patch_keys": sorted(patch),
@@ -511,6 +519,7 @@ class Engine:
             raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not resumable")
         if run.harness_hash != self.spec_hash:
             raise ValueError("resume needs the exact harness spec the run started with")
+        self._check_ablation(run_id, "resumed")
         resumable = (status in (RunStatus.RUNNING, RunStatus.INFRA_FAILED, RunStatus.PAUSED)
                      or (status == RunStatus.FAILED and detail.startswith("engine crash")))
         if not resumable:
@@ -583,6 +592,14 @@ class Engine:
             cost=spent, started_at=now, ended_at=now, checkpoint_ref=cp_ref))
         self.budget.spent = self.budget.spent + spent
         return index + 1
+
+    def _check_ablation(self, run_id: str, what: str) -> None:
+        """A run continues (resume) or is forked only under the ablation it was started with: an ablated run is never
+        laundered into a production run, and a production run never continues ablated."""
+        recorded = self.store.run_ablated(run_id)
+        if recorded != self.ablation.names:
+            raise ValueError(f"run {run_id} was started with ablation {list(recorded)}; it cannot be {what} under "
+                             f"ablation {list(self.ablation.names)}")
 
     def _started(self, run_id: str, note: str = "") -> None:
         owner = {"pid": os.getpid(), "host": socket.gethostname()}
@@ -1171,7 +1188,8 @@ class Engine:
             # the command runs over the workspace: its output also carries every label written into it
             self._step_label[id(node)] = (self._release_rendered(node_id, list(node.command), state)
                                           | set(self._ts.workspace))
-            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
+            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction,
+                          observation_pack=not self.ablation.off("observation-pack")) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
             if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
                 raise ValueError(f"tool command exceeded a sandbox limit: {res.limit_exceeded}")
@@ -1183,7 +1201,7 @@ class Engine:
             # modules apply (e.g. the L5 memory screen) refuse them; they are never module-visible state otherwise
             mctx = ModuleContext(run_id=run_id, store=self.store, backends=self.backends,
                                  budget=self.budget, sandbox=self.sandbox, secrets=tuple(_private_values(state)),
-                                 archive_taint=MappingProxyType(self.archive_taint))
+                                 archive_taint=MappingProxyType(self.archive_taint), ablation=self.ablation)
             # the engine records what the module reads (state keys, context surfaces); the module reports nothing
             tracked = TrackedState(state)
             touched: set[str] = set()
@@ -1331,10 +1349,12 @@ class Engine:
             return digest
 
         messages = []
+        pack = not self.ablation.off("observation-pack")  # ablation switch (custom_harness/ablation.py)
         if node.system:
             messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction,
-                                                                  archive)))
-        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive)))
+                                                                  archive, observation_pack=pack)))
+        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive,
+                                                            observation_pack=pack)))
         return messages, archived
 
 

@@ -94,7 +94,18 @@ class EvidenceStore:
         rows = self._rows("SELECT body FROM runs ORDER BY rowid DESC LIMIT ?", (limit,))
         return [Run.model_validate_json(r[0]) for r in rows]
 
+    def run_ablated(self, run_id: str | None) -> tuple[str, ...]:
+        """The ablation switches recorded on the run (custom_harness/ablation.py); () for a production run or an id
+        with no run record."""
+        from ..ablation import run_ablated
+        return run_ablated(self, run_id)
+
     def add_step(self, step: TraceStep) -> None:
+        # the ABLATED marker comes from the run record, never from the writer: every step of an ablated run carries
+        # it, and no step of a production run can claim it
+        off = self.run_ablated(step.run_id)
+        if tuple(step.ablated) != off:
+            step = step.model_copy(update={"ablated": off})
         self._exec("INSERT INTO steps VALUES (?, ?, ?)", (step.run_id, step.index, step.model_dump_json()))
 
     def trace(self, run_id: str) -> list[TraceStep]:

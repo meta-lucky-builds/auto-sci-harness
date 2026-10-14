@@ -35,7 +35,10 @@ The downgrade-only controller gate is documented separately in `docs/control_dow
   - A crash between the charge and the record makes the unit run again on resume. That second run really happens and
     is charged once itself, so no run is charged twice (`test_a_crash_between_charge_and_record...`).
   - The record is host-only and is not among the kinds the evidence export writes.
-  - Not wired into the driver/CLI. A whole generation is still not resumable, because the proposer is called again.
+  - Wired 2026-10-08 (branch w2-wiring, `evolve/durable.py`): with a campaign the driver keys the Evaluator by it
+    and persists each generation's proposal before any candidate runs, so a re-run with the same `--campaign-id`
+    resumes the interrupted generation without asking the proposer again
+    (`tests/test_evolve_durable_resume.py`: killed mid-race, resumed, same decisions, same spend, same run count).
 - **Blob store.** Each writer uses its own temp name. When Windows refuses the rename, the writer retries; an intact
   destination with the same digest counts as the blob.
 - **Wiring** (`EvolveConfig`, checked by `check_race_config` before any run, fail closed):

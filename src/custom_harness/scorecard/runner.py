@@ -7,8 +7,13 @@ is recorded separately by `record_as_reported` as a `scorecard_as_reported` reco
 "as reported", and uses it for a verdict only when no re-run of that baseline exists, labelled as such (GOAL §2.3).
 
 `run_ablation` re-runs our system with one capability switched off (`disabled`) on the same items: invariant 12's
-ablation. Comparisons are paired over the identical item set (refused otherwise), with a seeded paired-bootstrap
-percentile interval of the mean difference, so a verdict is reproducible byte for byte.
+ablation. `ablation_set` is THE entry point that switches capabilities off (custom_harness/ablation.py): the only
+place a non-empty AblationSet can be made. The system receives it as `disabled` and threads it into the code it
+drives (`Engine(ablation=...)`, `Evaluator(ablation=...)`, ...); every run made under it is marked ABLATED, and
+nothing an ablated run produces is certified, persisted or accepted.
+
+Comparisons are paired over the identical item set (refused otherwise), with a seeded paired-bootstrap percentile
+interval of the mean difference, so a verdict is reproducible byte for byte.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ import time
 from collections.abc import Mapping
 from typing import Any, Literal, Protocol
 
+from ..ablation import NO_ABLATION, SWITCHES, AblationSet
 from ..store.evidence import EvidenceStore
 from . import config as C
 from .registry import PinnedBenchmark, Registry, ScorecardError
@@ -30,12 +36,22 @@ Role = Literal["ours", "baseline", "ablation"]
 
 
 class System(Protocol):
-    """A system under test. `run` returns one finite score per item id (e.g. 1.0 pass / 0.0 fail)."""
+    """A system under test. `run` returns one finite score per item id (e.g. 1.0 pass / 0.0 fail). `disabled` is the
+    AblationSet to thread into the code it drives (NO_ABLATION for a production or baseline run)."""
 
     name: str
     version: str  # a content hash or pinned version of the system (code + config)
 
-    def run(self, items: list[dict[str, Any]], disabled: frozenset[str]) -> Mapping[str, float]: ...
+    def run(self, items: list[dict[str, Any]], disabled: AblationSet) -> Mapping[str, float]: ...
+
+
+def ablation_set(switches: frozenset[str] | set[str] | tuple[str, ...]) -> AblationSet:
+    """The scorecard runner's ablation entry point: the ONLY way to switch capabilities off. Every name must be in
+    the closed registry (custom_harness.ablation.SWITCHES)."""
+    unknown = sorted(set(switches) - set(SWITCHES))
+    if unknown:
+        raise ScorecardError(f"unknown ablation switch(es) {unknown}: not in the closed registry")
+    return AblationSet(switches)
 
 
 def load_items(registry: Registry, bench: PinnedBenchmark) -> list[dict[str, Any]]:
@@ -58,7 +74,7 @@ def run_system(store: EvidenceStore, registry: Registry, bench: PinnedBenchmark,
     if role != "ablation" and disabled:
         raise ScorecardError("only an ablation run may disable capabilities")
     items = load_items(registry, bench)
-    raw = dict(system.run(items, frozenset(disabled)))
+    raw = dict(system.run(items, ablation_set(frozenset(disabled)) if disabled else NO_ABLATION))
     want = {str(i["id"]) for i in items}
     if set(raw) != want:
         raise ScorecardError(f"{system.name} on {bench.key}: scores for {len(set(raw) & want)}/{len(want)} items, "

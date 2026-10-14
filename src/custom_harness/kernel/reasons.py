@@ -40,6 +40,7 @@ class Code(StrEnum):
     K1_PROBABILITY_BELOW_P0 = "K1_PROBABILITY_BELOW_P0"  # §16.4: q < p0 is refused (F2)
     K1_RISK_PRIOR = "K1_RISK_PRIOR"
     K1_RELIABILITY = "K1_RELIABILITY"
+    K1_POWER = "K1_POWER"  # §16.10: declared power out of range, or on a kind without a bounded-null certificate
     K1_DELTA_FLOOR = "K1_DELTA_FLOOR"  # §16.2: a minted target with a large test set needs min_effect >= the floor
     K1_STATEMENT = "K1_STATEMENT"
     K1_SCOPE = "K1_SCOPE"
@@ -62,6 +63,7 @@ class Code(StrEnum):
     K3_REPLAY_DIFFERS = "K3_REPLAY_DIFFERS"
     K3_ADAPTER_CHECK = "K3_ADAPTER_CHECK"  # an approved adapter's exact checker rejected the certificate
     K3_INPUTS = "K3_INPUTS"
+    K3_NONINTERFERENCE = "K3_NONINTERFERENCE"  # §16.5.4: decisions depend on a declared copy of the truth
     # K4 statistically valid procedure
     K4_NO_RECORDS = "K4_NO_RECORDS"
     K4_OUTSIDE_PLAN = "K4_OUTSIDE_PLAN"
@@ -70,6 +72,7 @@ class Code(StrEnum):
     K4_SELECTIVE_REPORTING = "K4_SELECTIVE_REPORTING"
     K4_UNLOGGED = "K4_UNLOGGED"
     K4_NO_SLOT = "K4_NO_SLOT"  # an alpha-account exists on the target but the claim holds no slot in it
+    K4_ACCOUNT_OVERDRAWN = "K4_ACCOUNT_OVERDRAWN"  # the account's slot charges exceed its slots (fail closed)
     K4_PLAN_CODE_DIVERGENCE = "K4_PLAN_CODE_DIVERGENCE"  # §16.6: the executed test differs from the registered one
     # K5 comparator integrity
     K5_WRONG_CODE = "K5_WRONG_CODE"
@@ -91,6 +94,8 @@ class Code(StrEnum):
     K7_NO_STATS = "K7_NO_STATS"
     K7_NO_SPREAD = "K7_NO_SPREAD"
     K7_TRIVIALLY_SAFE = "K7_TRIVIALLY_SAFE"
+    K7_NOT_PLANTABLE = "K7_NOT_PLANTABLE"  # §16.10: no effect of min_effect can exist on the target (vacuous bound)
+    K7_INSENSITIVE = "K7_INSENSITIVE"  # §16.10: a planted effect of min_effect was missed (declared power not proven)
     # K8 background consistency
     K8_RANGE = "K8_RANGE"
     K8_LENGTH = "K8_LENGTH"

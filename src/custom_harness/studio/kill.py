@@ -10,6 +10,11 @@ FAILED at once. From then on:
   evidence or certify for a killed run. A certificate whose issuing began before the kill but was recorded after it
   is retracted at once, with the reason recorded. So no certificate recorded after the kill stays active.
 
+Automated (non-human) stops: an LLM controller acts only through the downgrade-only gate (control/downgrade.py,
+wired by studio/controller.py). A kill it applies is ledgered as a `controller_action` record, never as `run_kill`
+(owner decision: `run_kill` stays human-only). `kill_entry` returns either, so the engine, resume, fork and the
+run-guarded Kernel stop a controller-killed run exactly like a human-killed one.
+
 Honest limits:
 - A step already in flight when the kill lands runs to its end. Its model calls are spent and recorded, but its
   output does not drive any further step.
@@ -20,7 +25,8 @@ Honest limits:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from ..kernel import Kernel, KernelError
@@ -38,17 +44,66 @@ class KillRefused(ValueError):
     pass
 
 
-def kill_entry(store: EvidenceStore, run_id: str) -> Entry | None:
-    """The first intact human kill of `run_id`, or None."""
+def human_kill_entry(store: EvidenceStore, run_id: str) -> Entry | None:
+    """The first intact HUMAN kill (`run_kill` ledger entry) of `run_id`, or None."""
     for e in Ledger(store).entries(KILL_KIND):
         if e.intact() and e.body.get("run_id") == run_id and str(e.body.get("by", "")).strip():
             return e
     return None
 
 
-def killed_detail(entry: Entry) -> str:
+@dataclass(frozen=True)
+class ControllerStop:
+    """An automated controller's kill of a run, applied by the downgrade-only gate (control/downgrade.py) and
+    ledgered as a `controller_action` record (NEVER as `run_kill`, which stays human-only). `n` = its position in
+    `store.records("controller_action")`."""
+
+    n: int
+    body: dict[str, Any]
+
+
+def controller_stop(store: EvidenceStore, run_id: str) -> ControllerStop | None:
+    """The first kill of `run_id` that the downgrade gate APPLIED (code-checked evidence), or None."""
+    from ..control.downgrade import ACTION_KIND, EVIDENCE_KINDS
+    for i, r in enumerate(store.records(ACTION_KIND)):
+        if (r.get("action_type") == "kill" and r.get("outcome") == "applied" and r.get("reason") == "ok"
+                and r.get("target_id") == run_id and r.get("evidence_kind") in EVIDENCE_KINDS):
+            return ControllerStop(i, r)
+    return None
+
+
+def kill_entry(store: EvidenceStore, run_id: str) -> Entry | ControllerStop | None:
+    """What stops `run_id`: the first intact human kill, else the first kill applied by the downgrade gate for an
+    automated controller, else None. Every engine check (before each step, at the end, resume, fork) and the
+    run-guarded Kernel read this, so both stop a run the same way; only the human one is a `run_kill` entry."""
+    return human_kill_entry(store, run_id) or controller_stop(store, run_id)
+
+
+def killed_detail(entry: Entry | ControllerStop) -> str:
+    if isinstance(entry, ControllerStop):
+        return (f"stopped by an automated controller ({entry.body.get('controller_id')}, downgrade gate, evidence "
+                f"{entry.body.get('evidence_kind')}, controller_action record #{entry.n})")
     return (f"killed by a human ({entry.body.get('by')}, reason {entry.body.get('reason_code')}, "
             f"run_kill ledger seq {entry.seq})")
+
+
+def controller_kill_effect(store: EvidenceStore) -> Callable[[str, str], None]:
+    """The `kill(run_id, code)` callback the downgrade gate applies for an automated controller (studio/controller.py
+    builds the gate with it). It only marks the run FAILED (the gate then appends the `controller_action` record that
+    every engine check honours); it writes no `run_kill` entry. Refused (raises, so the gate ledgers effect_error) for
+    a code outside the gate's closed set or a run that is no longer killable."""
+    from ..control.downgrade import EVIDENCE_KINDS
+
+    def kill(run_id: str, code: str) -> None:
+        kind = code.removeprefix("controller_")
+        if not code.startswith("controller_") or kind not in EVIDENCE_KINDS:
+            raise KillRefused(f"not a downgrade-gate kill code: {code!r}")
+        status, detail = store.run_status(run_id)
+        if not _killable(status, detail) or kill_entry(store, run_id) is not None:
+            raise KillRefused(f"run {run_id} is already {status.value}: nothing to stop")
+        store.set_run_status(run_id, RunStatus.FAILED, f"stopped by an automated controller (downgrade gate, "
+                                                       f"evidence {kind}); see the controller_action record")
+    return kill
 
 
 def _killable(status: RunStatus, detail: str) -> bool:
@@ -67,7 +122,7 @@ def kill_run(store: EvidenceStore, run_id: str, *, by: str, reason_code: str = "
         status, detail = store.run_status(run_id)
     except KeyError:
         raise KillRefused(f"no run {run_id!r} in this store") from None
-    existing = kill_entry(store, run_id)
+    existing = human_kill_entry(store, run_id)
     if existing is not None:
         return existing
     if not _killable(status, detail):
@@ -104,6 +159,10 @@ class RunGuardedKernel(Kernel):
         kill = kill_entry(self.store, self.run_id)
         if kill is not None:
             raise KernelError(f"{what} refused: run {self.run_id} was {killed_detail(kill)}")
+        # an ABLATED run (custom_harness/ablation.py) pre-registers, records and certifies nothing (fail closed)
+        off = self.store.run_ablated(self.run_id)
+        if off:
+            raise KernelError(f"{what} refused: run {self.run_id} is ABLATED (switched off: {', '.join(off)})")
 
     def preregister(self, claim: Claim) -> Entry:
         self._refuse_if_killed("pre-registration")

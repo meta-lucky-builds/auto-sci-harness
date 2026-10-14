@@ -37,7 +37,7 @@ class Witness(LocalSandbox):
     def spawn(self, workspace):
         return Witness(workspace, fresh=not Path(workspace).exists())
 
-    def exec(self, command, timeout_s=600, env=None):
+    def exec(self, command, timeout_s=600, env=None, *, cpu_s=None):
         progs = [c for c in command if c.endswith(".py") and (self.workspace / c).is_file()]
         code = (self.workspace / progs[0]).read_bytes() if progs else b""
         Witness.log.append({"ws": Path(self.workspace).resolve(), "fresh": self.fresh, "root": self.root,
@@ -47,7 +47,7 @@ class Witness(LocalSandbox):
             if Witness.confirm_execs == Witness.fail_confirm_exec:
                 (self.workspace / "left_by_failed_attempt.txt").write_text("state from the attempt that failed")
                 raise InfraError("Cannot connect to the Docker daemon", transient=True)
-        return super().exec(command, timeout_s, env)
+        return super().exec(command, timeout_s, env, cpu_s=cpu_s)
 
 
 @pytest.fixture(autouse=True)

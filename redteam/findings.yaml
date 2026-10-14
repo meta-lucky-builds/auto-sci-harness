@@ -449,3 +449,54 @@ findings:
             "tests/test_evolve_map_flow.py::test_changing_only_the_body_of_an_existing_map_is_checked_too"]
     museum: redteam/museum/R2-MAP.patch
     status: fixed
+  # ------------------------------------------------------------------ s3-kernel, 2026-10-09
+  - id: JSON-DUP-LP
+    title: an LP problem or certificate with a duplicated JSON key was CERTIFIED-EXACT for the last value while a
+      first-value reader saw another problem (a7fb608 certified c = (1, 1) while the file also states c = (100, 100))
+    invariant: "§4.7 computational class (statement fidelity of the registered instance); §10 inv. 7"
+    capability: A4
+    tests: ["tests/test_kernel_dupkeys.py::test_duplicate_key_problem_is_not_certified_as_the_problem_a_reader_sees",
+            "tests/test_kernel_dupkeys.py::test_duplicate_key_certificate_is_refused",
+            "tests/test_kernel_dupkeys.py::test_lp_and_formal_checkers_refuse_duplicates_directly"]
+    museum: redteam/museum/JSON-DUP-LP.patch
+    status: fixed
+  - id: JSON-DUP-KERNEL
+    title: Kernel-parsed JSON (evidence records, predictions, certificates, ledger bodies, bundle manifests) kept the
+      last of duplicated keys, so a store or bundle writer could show readers and the Kernel different documents
+    invariant: "§10 inv. 7 (every parser fails closed); §4.4 bundle integrity"
+    capability: A4
+    tests: ["tests/test_kernel_dupkeys.py::test_strict_json_refuses_duplicates_at_any_depth",
+            "tests/test_kernel_dupkeys.py::test_ledger_entry_with_a_duplicated_key_is_refused",
+            "tests/test_kernel_dupkeys.py::test_evidence_record_with_a_duplicated_key_fails_k0",
+            "tests/test_kernel_dupkeys.py::test_bundle_manifest_with_a_duplicated_key_is_refused"]
+    museum: redteam/museum/JSON-DUP-KERNEL.patch
+    status: fixed
+  - id: ALPHA-ORDER
+    title: on an alpha-account target K4 multiplied the slot level by k/N at certify time, so two identical paired
+      arms got different levels depending on which was registered and certified first (R2-2 under Kernel 1.2)
+    invariant: "§10 inv. 17 (verdict terms fixed at registration); §16.4 per-target alpha-accounts"
+    capability: A1
+    tests: ["tests/test_kernel_alpha_slots.py::test_identical_arms_get_identical_fixed_levels_in_either_order",
+            "tests/test_kernel_alpha_slots.py::test_releases_are_paid_in_slots_and_exhaustion_retires_the_target"]
+    museum: redteam/museum/ALPHA-ORDER.patch
+    status: fixed
+  - id: SCOPE-STATEMENT
+    title: a computational claim worded as a physical one ("this circuit will work when built", scope "holds_in
+      physical world") was CERTIFIED-EXACT with that prose (reported by s3-domain, verified on 4e676e9)
+    invariant: "§10 inv. 14 (no claim above its evidence class)"
+    capability: A0
+    tests: ["tests/test_kernel_scope_statement.py::test_lp_claim_worded_as_a_physical_claim_is_not_certified",
+            "tests/test_kernel_scope_statement.py::test_circuit_shaped_claim_worded_as_a_physical_claim_is_not_certified",
+            "tests/test_kernel_scope_statement.py::test_an_adapter_without_a_scope_rendering_fails_k1"]
+    museum: redteam/museum/SCOPE-STATEMENT.patch
+    status: fixed
+  - id: K9-ENCODING
+    title: a held-out canary in an exact certificate's comment, written as UTF-16/32, with a BOM or with \u escapes,
+      was invisible to K9's UTF-8 byte scan while json read the document (s3-domain red team on the circuit adapter,
+      2026-10-14; the lp reader had the same hole). Fix built, NOT test-verified (tests not run this round per owner)
+    invariant: "§10 inv. 2 (no hidden label/canary in an agent-visible artifact); §4.3 K9"
+    capability: A2
+    tests: ["tests/test_kernel_encoding.py::test_a_unicode_escaped_canary_is_found_by_k9",
+            "tests/test_kernel_encoding.py::test_a_canary_in_a_non_utf8_certificate_is_not_certified"]
+    museum: redteam/museum/K9-ENCODING.patch
+    status: fixed

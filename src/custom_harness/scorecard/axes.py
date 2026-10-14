@@ -261,14 +261,21 @@ def coverage(facts: dict[str, Any]) -> dict[str, Any]:
     for r in facts["scorecard_runs"]:
         if r["role"] == "ours":
             ours[r["benchmark"]] = r
-    rows, gaps = [], []
+    rows, gaps, switched = [], [], []
     for cap in caps["capabilities"]:
-        sw = cap.get("ablation")
-        abl = [r for r in facts["scorecard_runs"] if r["role"] == "ablation" and sw and r["disabled"] == [sw]]
-        if not sw or not abl:
+        # a row counts as switched only with a real, tested switch in the closed registry (registry.switch_fact)
+        if not cap.get("has_switch"):
             gaps.append(cap["id"])
-            rows.append({"id": cap["id"], "status": "gap", "why": "no ablation switch" if not sw else
-                         f"switch {sw!r} has no recorded ablation run"})
+            rows.append({"id": cap["id"], "status": "gap", "switch": cap.get("switch"),
+                         "why": cap.get("why") or "no ablation switch"})
+            continue
+        sw = cap["switch"]
+        switched.append(cap["id"])
+        abl = [r for r in facts["scorecard_runs"] if r["role"] == "ablation" and r["disabled"] == [sw]]
+        if not abl:
+            gaps.append(cap["id"])
+            rows.append({"id": cap["id"], "status": "gap", "switch": sw,
+                         "why": f"switch {sw!r}: no ablation run recorded"})
             continue
         res = []
         for a in abl:
@@ -290,6 +297,7 @@ def coverage(facts: dict[str, Any]) -> dict[str, Any]:
         rows.append({"id": cap["id"], "switch": sw, "status": "ablated", "results": res})
     n_ok = len(caps["capabilities"]) - len(gaps)
     return {"capabilities_with_ablation": _metric(n_ok, [caps["ref"]], of=len(caps["capabilities"])),
+            "capabilities_with_switch": _metric(len(switched), [caps["ref"]], of=len(caps["capabilities"])),
             "gaps": gaps, "rows": rows, "status": "pass" if not gaps else "fail"}
 
 

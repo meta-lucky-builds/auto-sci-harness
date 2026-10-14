@@ -143,6 +143,15 @@ class MemoryStore:
             prev = r.get("hash", "") if isinstance(r, dict) else ""
         return problems
 
+    def _refuse_if_ablated(self, what: str) -> None:
+        """Nothing an ABLATED run produces is persisted as memory or skill (custom_harness/ablation.py, fail closed).
+        The run is the one the Kernel is bound to (ModuleContext.kernel()). Reads, and the revocation cascades that
+        derive only from Kernel retractions, are not run output and stay allowed."""
+        run_id = getattr(self.kernel, "run_id", None)
+        off = self.kernel.store.run_ablated(run_id) if isinstance(run_id, str) else ()
+        if off:
+            raise MemoryRefused(f"{what} refused: run {run_id} is ABLATED (switched off: {', '.join(off)})")
+
     def _append(self, typ: str, payload: dict[str, Any]) -> None:
         raw = self._raw()
         seq, prev = len(raw) + 1, (raw[-1]["hash"] if raw else "genesis")
@@ -190,6 +199,7 @@ class MemoryStore:
         same content again returns the existing id and changes nothing."""
         if not writer.strip():
             raise MemoryRefused("a write must name its (trusted) writer")
+        self._refuse_if_ablated("memory write")
         problems = screen_proposal(proposal, Fingerprints.from_vault(self.kernel.vault), secrets)
         if problems:
             self._append("refusal", {"writer": writer, "reasons": problems})  # categories only, never content
@@ -206,6 +216,7 @@ class MemoryStore:
 
     def admit(self, entry_id: str, *, secrets: Sequence[str] = ()) -> GateResult:
         """The quarantine gate. Deterministic, model-free; every failure rejects (terminal for this id)."""
+        self._refuse_if_ablated("memory admission")
         self.sync()
         st = self._state()
         if entry_id not in st.entries:
@@ -486,6 +497,7 @@ class MemoryStore:
         """Count a Kernel outcome for a skill: a certified claim is a success, a verified failure a failure.
         Anything else (no certificate, retracted, re-derivation differs, integrity failure, already counted, the
         skill's own evidence) is refused. The caller (trusted code) asserts the outcome came from using the skill."""
+        self._refuse_if_ablated("skill outcome")
         st = self._state()
         if st.status.get(entry_id) not in READABLE or st.entries[entry_id].kind not in SKILL_KINDS:
             raise ValueError("outcomes are recorded only for readable skill entries")

@@ -368,17 +368,18 @@ def test_reasons_are_coded_and_carry_no_exception_text(world, monkeypatch):
 def test_k4_plan_code_divergence(world, monkeypatch):
     c, ids = _honest(world)
     assert world.kernel.certify(c, ids, record=False).checks["K4"].status == "pass"
-    real = K.paired_example_interval
+    from custom_harness.kernel import ml as ML  # the registered test is the ML adapter's procedure since the split
+    real = ML.paired_example_interval
 
     def percentile_instead(*a, **kw):  # a code change that silently runs another test than the registered one
         iv = real(*a, **kw)
         return Interval(iv.estimate, iv.lo, iv.hi, iv.n, iv.alpha, "percentile", iv.degenerate)
 
-    monkeypatch.setattr(K, "paired_example_interval", percentile_instead)
+    monkeypatch.setattr(ML, "paired_example_interval", percentile_instead)
     cert = world.kernel.certify(c, ids, record=False)
     assert Code.K4_PLAN_CODE_DIVERGENCE in cert.checks["K4"].codes and cert.label == Label.REJECTED
-    monkeypatch.setattr(K, "paired_example_interval", real)
-    monkeypatch.setattr(K, "REGISTERED_TESTS", {})
+    monkeypatch.setattr(ML, "paired_example_interval", real)
+    monkeypatch.setattr(ML, "REGISTERED_TESTS", {})
     assert Code.K4_PLAN_CODE_DIVERGENCE in world.kernel.certify(c, ids, record=False).checks["K4"].codes
     ctx = K.Context(claim=c, claim_hash=c.claim_hash(), store=world.store, vault=world.vault,
                     ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
@@ -463,7 +464,10 @@ def test_record_release_and_k4_k6_use_it(tmp_path):
     w.close()
 
 
-def test_release_with_alpha_account_divides_the_slot_level(tmp_path):
+def test_release_with_alpha_account_is_paid_in_slots_not_in_level(tmp_path):
+    """R2-2 (2026-10-09, docs/alpha_accounts.md): this test used to assert that a release divided the slot level by
+    N/k ("alpha 0.01333" = 0.02 * 2/3), which made the level of an earlier claim depend on later claims and releases.
+    The release is now paid in slots at the later claim's registration; the level stays alpha_T / S_T."""
     w = World(tmp_path / "rel2", seed=10, n_train=120, n_test=120)
     k = w.kernel
     w.register_target("acct", DatasetRole.TEST)
@@ -475,7 +479,9 @@ def test_release_with_alpha_account_divides_the_slot_level(tmp_path):
     k.record_release("acct", "report", "verdict_bit", "report.verdict")
     k.preregister(w.claim(good, comp, delta=0.21, n_boot=1000, **FAST, targets=("acct",)))
     obs = next(o for o in k.certify(c1, ids, record=False).checks["K4"].observations if "Bonferroni" in o)
-    assert "alpha 0.01333" in obs  # 0.02 * k/N = 0.02 * 2/3
+    assert "alpha 0.02" in obs  # alpha_T / S_T, whatever came later
+    assert [e.body["charge"] for e in k.ledger.entries("alpha_reserve")] == [1, 2]  # the release cost a slot
+    assert k.ledger.entries("alpha_retire")  # 1 + 2 = 3 slots: the target retired
     w.close()
 
 

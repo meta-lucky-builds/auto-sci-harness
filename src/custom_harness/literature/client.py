@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..ablation import NO_ABLATION, AblationSet
 from .fulltext import FULL_TEXT_SOURCES, EuropePMCSource, match_snippets, same_paper
 from .http import HttpxTransport, LiteratureError, PacedTransport, Pacer, Transport, fetch
 from .normalize import title_key
@@ -105,7 +106,8 @@ class Deduper:
 
 class LiteratureClient:
     def __init__(self, transport: Transport, *, as_of: date | None = None, sources: dict[str, Source] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 4, full_text: bool = False):
+                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 4, full_text: bool = False,
+                 ablation: AblationSet = NO_ABLATION):
         snap_as_of = getattr(transport, "as_of", None)
         if snap_as_of is not None:
             if as_of is not None and as_of > snap_as_of:
@@ -117,6 +119,9 @@ class LiteratureClient:
         self.sleep, self.max_attempts = sleep, max_attempts
         self.full_text = full_text  # lookups also fetch open-access full text (for quote-span support)
         self.full_text_source = EuropePMCSource()
+        # ablation switch `multi_source_retrieval` (custom_harness/ablation.py): search asks only the first source of
+        # its order (no fallback across sources). Lookups (the citation verifier's resolution path) are unchanged.
+        self.ablation = ablation
 
     def _get(self, url: str, params: dict[str, str]) -> Any:
         return fetch(self.transport, url, params, sleep=self.sleep, max_attempts=self.max_attempts)
@@ -276,6 +281,8 @@ class LiteratureClient:
         start, end = self.window(published_from, published_to)
         subs = split_query(query)
         order = list(sources or SEARCH_ORDER)
+        if self.ablation.off("multi_source_retrieval"):
+            order = order[:1]
         records: list[PaperRecord] = []
         errors: list[dict[str, str]] = []
         retrievals: list[dict[str, Any]] = []

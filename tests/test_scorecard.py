@@ -43,6 +43,20 @@ def _trusted(monkeypatch):
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
 
 
+@pytest.fixture(autouse=True)
+def _fixture_switch(monkeypatch):
+    """The fixture capability `skills` gets a test-only switch `skills` in the closed ablation registry (the registry
+    is closed: an unregistered switch is never counted, tests/test_ablation_scorecard.py)."""
+    from types import MappingProxyType
+
+    import custom_harness.ablation as A
+    import custom_harness.scorecard.registry as G
+    import custom_harness.scorecard.runner as R
+    reg = MappingProxyType({**A.SWITCHES, "skills": A.Switch("skills", "skills", "fixture", "tests/x.py::f")})
+    for mod in (A, R, G):
+        monkeypatch.setattr(mod, "SWITCHES", reg)
+
+
 @dataclass
 class FixtureSystem:
     name: str
@@ -301,10 +315,22 @@ def test_runner_refuses_partial_scores_and_unpaired_comparisons(tmp_path):
     store.close()
 
 
+FULL_SWITCH_ROWS = ["meta-harness"]
+
+
 def test_shipped_registries_are_honest():
     assert load_registry().benchmarks == ()  # no real benchmark without an owner-approved download
     caps = load_capabilities()
-    assert len(caps) == 37 and all(c.ablation is None for c in caps)  # GOAL §9, every row; no switch exists yet
+    assert len(caps) == 37  # GOAL §9, every row
+    # every row carries an ablation record: a switch, or the exact reason it has none (docs/ablation.md)
+    assert all(c.ablation is not None for c in caps)
+    # the rows the scorecard counts as switched (a registered, tested, FULL switch) are pinned here, so a change in
+    # that count is a deliberate, reviewed change; every other row is reported as an invariant-12 gap
+    from custom_harness.scorecard.registry import switch_fact
+    full = sorted(c.id for c in caps
+                  if c.ablation is not None and switch_fact(c.id, c.ablation.model_dump(exclude_defaults=True))[
+                      "has_switch"])
+    assert full == FULL_SWITCH_ROWS
 
 
 def test_cli_build_and_check(tmp_path, monkeypatch):

@@ -211,12 +211,57 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     from .budget import persistent_budget
     limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
-    campaign = persistent_budget(store, a.campaign_id or run_tag, {k: v for k, v in limits.items() if v is not None})
+    campaign_id = a.campaign_id or run_tag
+    campaign = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
+    # the campaign id also names the generation ledger (`chh evolve report`), the durable unit outcomes and the
+    # persisted proposals: re-running with the same --campaign-id resumes it (evolve/durable.py)
+    out = data_dir() / "evolve" / campaign_id
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
-           store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag,
-           campaign_budget=campaign)
-    print(f"outputs: {data_dir() / 'evolve' / run_tag}")
+           store=store, sandbox_factory=factory, cfg=cfg, out_dir=out, campaign_budget=campaign,
+           campaign=campaign_id)
+    print(f"outputs: {out}")
+    print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
+          f"{campaign_id})")
     return 0
+
+
+def cmd_evolve_report(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh evolve report CAMPAIGN`: render every generation's report from the generation ledger and run the
+    recompute audit on it (and on every stopped-generation record). Exit 1 if any cell or record does not reproduce,
+    2 if the campaign is unknown or its ledger is unreadable."""
+    from .evolve import generations as G
+    if not store.records_where(G.CAMPAIGN_KIND, "campaign", a.campaign):
+        print(f"no evolve campaign {a.campaign!r} in this store", file=sys.stderr)
+        return 2
+    try:
+        completed = [r["generation"] for r in store.records_where(G.GENERATION_KIND, "campaign", a.campaign)]
+        wanted = completed if a.generation is None else [a.generation]
+        reports = [G.generation_report(store, a.campaign, g) for g in wanted]
+    except G.LedgerError as e:
+        print(f"FAILED: the generation ledger does not reproduce: {e}", file=sys.stderr)
+        return 1
+    problems = {g: G.audit_report(rep, store) for g, rep in zip(wanted, reports, strict=True)}
+    stopped = G.stopped_records(store, a.campaign)
+    stop_problems = {n: G.verify_stopped(store, n) for n, _ in stopped}
+    bad = {**{f"generation {g}": p for g, p in problems.items() if p},
+           **{f"generation_stopped #{n}": p for n, p in stop_problems.items() if p}}
+    if a.json:
+        print(json.dumps({"campaign": a.campaign, "reports": reports, "stopped": [r for _, r in stopped],
+                          "audit": {"passed": not bad, "problems": bad}}, indent=1, sort_keys=True))
+    else:
+        for rep in reports:
+            print(G.render_markdown(rep))
+        if stopped:
+            print("## Stopped generations (began, did not complete)\n")
+            for n, r in stopped:
+                print(f"- generation_stopped #{n}: generation {r.get('generation')}, reason {r.get('reason')}, "
+                      f"budget {r.get('budget')}, parent {str(r.get('parent'))[:12]}")
+        print(f"\naudit: {'OK' if not bad else 'FAILED'} ({len(reports)} generation report(s), {len(stopped)} stopped "
+              f"record(s) recomputed from the ledger)")
+    for where, ps in bad.items():
+        for p in ps:
+            print(f"AUDIT FAILED {where}: {p}", file=sys.stderr)
+    return 1 if bad else 0
 
 
 def _sandbox_factory(a: argparse.Namespace, root: Path):
@@ -247,15 +292,23 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
         print(json.dumps({"reproduced": False, "refused": "artifacts: " + "; ".join(arts.fatal[:10]),
                           "artifacts": arts.to_json()}, indent=1))
         return 1
+    roots = [Path(r) for r in getattr(a, "artifact_root", None) or []]
+
+    def local(sha: str) -> bytes | None:  # a large artifact the bundle lists but does not carry: this machine's copy
+        for f in [store.blobs._path(sha), *(r / sha for r in roots)]:
+            if f.is_file():
+                return f.read_bytes()
+        return None
     try:
-        report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
+        report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory), artifact_source=local)
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
         print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
         return 1
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems, "artifacts": arts.to_json()}, indent=1))
+                      "problems": report.problems, "missing_artifacts": report.missing_artifacts,
+                      "artifacts": arts.to_json()}, indent=1))
     return 0 if report.reproduced else 1
 
 
@@ -324,6 +377,30 @@ def cmd_approve_role(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_alpha(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh alpha open` is a HUMAN action (GOAL §16.4): it gives a held-out target a fixed budget of slots, each claim
+    tested at alpha / slots and releases paid in slots (kernel/alpha.py). The ledger entry names the approver; no
+    production code path opens an account. `chh alpha status` only reads."""
+    from .kernel import Kernel, KernelError, VaultError
+    from .kernel import alpha as A
+    from .kernel.checks import related_targets, slot_charge
+    kernel = Kernel(store)
+    try:
+        if a.alpha_cmd == "open":
+            e = kernel.open_alpha_account(a.dataset_id, a.alpha, a.slots, approver=a.approver)
+            print(json.dumps({"opened": a.dataset_id, "alpha": a.alpha, "slots": a.slots, "approver": a.approver,
+                              "ledger_seq": e.seq}))
+            return 0
+        accts = A.accounts(kernel.ledger, related_targets(kernel.vault, a.dataset_id))
+    except (KernelError, VaultError) as e:
+        raise SystemExit(f"NOT done: {e}") from e
+    print(json.dumps([{"dataset_id": x.dataset_id, "opened_seq": x.seq, "alpha": x.alpha, "slots": x.slots,
+                       "slot_level": x.level, "charged": A.charged(kernel.ledger, x),
+                       "next_claim_charge": slot_charge(kernel.ledger, kernel.vault, x, kernel.config),
+                       "retired": A.retired(kernel.ledger, x)} for x in accts], indent=1))
+    return 0 if accts else 1
+
+
 def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .kernel import Ledger
     from .kernel.predictions import calibration, score_predictions, vds
@@ -337,12 +414,37 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Write the M2 task suite (synthetic families on the host; real + repair tasks inside the sandbox)."""
     from .research.suite import build_suite, export_real
     real = None
-    if a.docker:
+    if a.frozen or a.verify:  # GOAL §16.2: freeze the manifest, then mint (research/rebuild.py)
+        from .kernel import Ledger
+        from .research import rebuild as RB
+        if not (a.record_dir and a.beacon_file):
+            raise SystemExit("--frozen/--verify need --record-dir and --beacon-file (outside agent-readable roots)")
+        try:
+            RB.require_private_locations(Path(a.record_dir), Path(a.beacon_file))  # before any labelled export lands
+        except RB.RebuildRefused as e:
+            raise SystemExit(f"refused: {e}") from None
+        if a.verify:
+            res = RB.verify(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
+                            ledger_entries=Ledger(store).entries())
+            print(json.dumps(res, indent=1))
+            return 1 if res["problems"] else 0
+        if a.real_export:
+            real = RB.load_real_export(Path(a.real_export))
+    if a.docker and real is None:
         from .sandbox.docker import FULL_IMAGE, DockerSandbox
         # the ONLY full-image sandbox: trusted exporter code reads scikit-learn's bundled datasets (agent code runs
         # in the candidate image, which has none; tests/test_bundled_data.py pins this)
         real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
-                           Path(a.out) / "_export")
+                           Path(a.record_dir) / "_export" if a.frozen else Path(a.out) / "_export")
+    if a.frozen:
+        from .kernel import Kernel
+        try:
+            res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
+                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+        except (RB.RebuildRefused, RB.MintRefused) as e:
+            raise SystemExit(f"refused: {e}") from None
+        print(json.dumps(res, indent=1))
+        return 0
     path = build_suite(Path(a.out), real_data=real)
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
@@ -590,6 +692,8 @@ def main(argv: list[str] | None = None) -> int:
     if args[:1] == ["delegate"]:  # the delegation driver (GOAL §15) has its own parser, root and ledger (no store)
         from .orchestration.cli import main as delegate_main
         return delegate_main(args[1:])
+    if args[:2] == ["evolve", "report"]:  # `chh evolve report CAMPAIGN` (a spec file named "report": ./report)
+        args = ["evolve-report", *args[2:]]
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
@@ -618,11 +722,17 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--race-rounds", type=int, default=2)
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
-    ev.add_argument("--campaign-id", help="persisted campaign budget id (reuse it to continue a campaign)")
+    ev.add_argument("--campaign-id", help="campaign id: persisted budget, generation ledger, durable units and "
+                                         "proposals (reuse it to resume a campaign)")
     ev.add_argument("--max-usd", type=float)
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
+    er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
+                                              "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
+    er.add_argument("campaign")
+    er.add_argument("--generation", type=int, help="only this campaign-global generation")
+    er.add_argument("--json", action="store_true")
     rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure) "
                                          "or a run paused at an approval node")
     rr.add_argument("run_id")
@@ -665,6 +775,15 @@ def main(argv: list[str] | None = None) -> int:
     ar.add_argument("dataset_id")
     ar.add_argument("--approver", required=True, help="the human approving (recorded in the ledger)")
     ar.add_argument("--note", default="", help="why this data is external/future (provenance)")
+    al = sub.add_parser("alpha", help="per-target alpha-accounts: HUMAN `open`, read-only `status` (GOAL 16.4)")
+    alsub = al.add_subparsers(dest="alpha_cmd", required=True)
+    alo = alsub.add_parser("open", help="HUMAN: open an alpha-account on a held-out target before its first claim")
+    alo.add_argument("dataset_id")
+    alo.add_argument("--alpha", type=float, required=True, help="familywise level alpha_T of the target")
+    alo.add_argument("--slots", type=int, required=True, help="slots S_T (each claim tested at alpha_T / S_T)")
+    alo.add_argument("--approver", required=True, help="the human opening it (recorded in the ledger)")
+    als = alsub.add_parser("status", help="accounts covering a target: slots charged, next charge, retired")
+    als.add_argument("dataset_id")
     fz = sub.add_parser("finalize", help="HUMAN: one-shot evaluation of the frozen final harness on the sealed split")
     fz.add_argument("spec")
     fz.add_argument("--suite", required=True)
@@ -695,6 +814,13 @@ def main(argv: list[str] | None = None) -> int:
     bs = sub.add_parser("build-suite", help="write the ML task suite (>= 20 tasks with --docker)")
     bs.add_argument("out")
     bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
+    bs.add_argument("--frozen", action="store_true", help="GOAL 16.2: anchor the suite manifest, then mint the data "
+                    "from draw(manifest hash, sealed beacon); idempotent (docs/suite_rebuild.md)")
+    bs.add_argument("--verify", action="store_true", help="re-derive a --frozen suite and compare every file")
+    bs.add_argument("--record-dir", help="private record directory (outside agent-readable roots)")
+    bs.add_argument("--beacon-file", help="the sealed beacon (outside agent-readable roots)")
+    bs.add_argument("--real-export", help="real-data export written by the trusted exporter (instead of --docker)")
+    bs.add_argument("--name", default="m2", help="suite name recorded in the manifest")
     pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
     pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
     pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
@@ -737,9 +863,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
-                "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role,
+                "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role, "alpha": cmd_alpha,
                 "approve-statement": cmd_approve_statement, "ledger-anchor": cmd_ledger_anchor,
-                "finalize": cmd_finalize, "evolve": cmd_evolve, "runs": cmd_runs,
+                "finalize": cmd_finalize, "evolve": cmd_evolve, "evolve-report": cmd_evolve_report, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,

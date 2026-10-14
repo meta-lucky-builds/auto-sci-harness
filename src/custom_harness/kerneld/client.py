@@ -12,6 +12,7 @@ a score, or leak-problem location strings.
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import signal
@@ -41,6 +42,20 @@ class KernelDError(Exception):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def _wire_safe(v: Any) -> Any:
+    """A trace output as strict JSON for the wire (allow_nan=False): a non-finite float becomes None. Lossless for
+    the leak scan, which reads only strings (and dict keys, kept as str) plus the truthiness of
+    `_redacted_private_values` (a non-finite float there becomes a truthy marker, so the flag is never lost)."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, dict):
+        return {str(k): (True if k == "_redacted_private_values" and isinstance(x, float) and not math.isfinite(x)
+                         else _wire_safe(x)) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_wire_safe(x) for x in v]
+    return v
 
 
 def _package_parent() -> str:
@@ -191,6 +206,7 @@ class RunHandle:
         """`trace` items are dicts {index,node_id,output,error} or objects with those attributes (TraceStep)."""
         steps = [s if isinstance(s, dict) else {"index": s.index, "node_id": s.node_id, "output": s.output,
                                                 "error": s.error} for s in trace]
+        steps = [{**s, "output": _wire_safe(s.get("output"))} for s in steps]
         res = self._call("leak_scan", token=token, trace=steps, workspace=str(workspace) if workspace else None,
                          extra_texts=dict(extra_texts or {}), extra_canaries=list(extra_canaries))
         return [str(p) for p in res["problems"]]
