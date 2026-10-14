@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 LedgerRow = tuple[int, str, str, str, str, float]  # seq, kind, body (canonical JSON), prev, hash, at
 
+# In-process observers of ledger appends, called as observe(seq, kind) in the appending thread and context right
+# after the entry is committed. The engine uses one to see which private reads a step made ITSELF (runtime/engine.py,
+# taint attribution), whatever run id the read names. An observer that raises fails the append's caller (fail closed);
+# an entry appended by ANOTHER process (kerneld) is not observed here.
+_LEDGER_OBSERVERS: list[Callable[[int, str], None]] = []
+
+
+def add_ledger_observer(observe: Callable[[int, str], None]) -> None:
+    if observe not in _LEDGER_OBSERVERS:
+        _LEDGER_OBSERVERS.append(observe)
+
 
 class EvidenceStore:
     def __init__(self, root: Path):
@@ -184,6 +195,8 @@ class EvidenceStore:
             at = time.time()
             h = entry_hash(seq, kind, body, prev, at)
             self._db.execute("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?)", (seq, kind, body, prev, h, at))
+        for observe in tuple(_LEDGER_OBSERVERS):  # in the appender's thread and context, after the commit
+            observe(seq, kind)
         return seq, kind, body, prev, h, at
 
     def ledger_import(self, row: LedgerRow) -> None:

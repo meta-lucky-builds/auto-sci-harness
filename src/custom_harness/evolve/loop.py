@@ -35,7 +35,7 @@ from typing import Any
 
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
-from ..kerneld.releases import Releases, private_reads
+from ..kerneld.releases import Releases, run_targets
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
@@ -436,7 +436,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             # a ledgered verdict-bit release on every target the acceptance runs read (GOAL §16.5.3); pinned in a
             # replayed campaign
             used_runs = {evaluator.outcome(x, u).run_id for x in (spec, parent) for u in gate_units}
-            gate_targets = sorted({t for r in used_runs if r for t in private_reads(store, run_id=r)})
+            gate_targets = sorted({t for r in used_runs if r for t in run_targets(store, r)})
             rel = releases or getattr(evaluator, "releases", None) or Releases.live(store)
             ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
                                note="evolve.gate:decision", key=f"{parent_hash}|{best}"))

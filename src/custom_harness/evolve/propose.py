@@ -13,7 +13,7 @@ from ..gateway import Backend, ChatRequest, Message
 from ..runtime.engine import parse_json_output
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
-from .diagnosis import failed_checks, pair_divergences
+from .diagnosis import failed_checks, labelled_trace, pair_divergences
 from .edits import DEFAULT_PROTECTED_NODES, Edit, EditType
 from .evaluate import RunOutcome
 
@@ -48,7 +48,8 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
             clusters[sig] += 1
             if len(examples.setdefault(sig, [])) < max_examples:
                 excerpt = []
-                for step in store.trace(o.run_id):
+                # labelled steps withheld (runtime/taint.py): an error text may quote a target-derived value
+                for step in labelled_trace(store, o.run_id):
                     if step.error or (isinstance(step.output, dict) and step.output.get("run_error")):
                         excerpt.append({"node": step.node_id, "error": step.error,
                                         "run_error": (step.output or {}).get("run_error")})
@@ -56,7 +57,8 @@ def diagnose(outcomes: list[RunOutcome], store: EvidenceStore, max_examples: int
                                       "excerpt": json.dumps(excerpt, default=str)[:excerpt_chars]})
     named = {f"C{i}": sig for i, (sig, _) in enumerate(clusters.most_common())}
     divergences, no_reference, unlinked = pair_divergences(
-        outcomes, [*outcomes, *(references or [])], store.trace, checks=lambda r: failed_checks(store, r))
+        outcomes, [*outcomes, *(references or [])], lambda r: labelled_trace(store, r),
+        checks=lambda r: failed_checks(store, r))
     return {
         "n_runs": len(outcomes),
         "n_excluded_infra": n_infra,
