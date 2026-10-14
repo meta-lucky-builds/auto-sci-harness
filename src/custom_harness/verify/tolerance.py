@@ -163,18 +163,20 @@ def claim_tolerance(evidence_class: EvidenceClass, floor: NoiseFloor | None, *,
     """The K3 tolerance a pre-registered claim gets. No hand-set value enters here (hand_set = 0.0): with no floor,
     or a floor calibration refuses, the claim keeps 0.0 (identical predictions, the strictest check; for exact
     classes always). A refusal is reported in `reasons`, never clipped or replaced by a looser value."""
+    def strict(*why: str) -> Resolved:
+        # 0.0 is not a hand-set value here: it is the strict default (identical predictions on replay)
+        r = resolve_tolerance(evidence_class, 0.0, None)
+        return Resolved(r.value, "strict_default" if r.source == "hand_set" else r.source, (*r.reasons, *why))
+
     if floor is None:
-        return resolve_tolerance(evidence_class, 0.0, None)
+        return strict()
     if floor.nominal and all(v == floor.reference for v in floor.nominal):
         # identical nominal re-runs: the program is deterministic on identical inputs, which is what a same-environment
         # replay gives it. A tolerance > 0 would switch K3 from comparing PREDICTIONS to comparing scores, so the exact
         # check stays (other sources, e.g. shuffled training rows, never widen a same-input replay check)
-        r = resolve_tolerance(evidence_class, 0.0, None)
-        return Resolved(r.value, r.source, (*r.reasons, "nominal re-runs identical: exact K3 (identical predictions) "
-                                                        "kept"))
+        return strict("nominal re-runs identical: exact K3 (identical predictions) kept")
     try:
         cal = calibrate(floor, miss_rate=miss_rate, purpose=purpose)
     except ToleranceError as e:
-        r = resolve_tolerance(evidence_class, 0.0, None)
-        return Resolved(r.value, r.source, (*r.reasons, f"calibration refused, tolerance stays 0: {e}"))
+        return strict(f"calibration refused, tolerance stays 0: {e}")
     return resolve_tolerance(evidence_class, 0.0, cal)
