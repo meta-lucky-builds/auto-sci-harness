@@ -121,7 +121,7 @@ def test_register_task_reads_truth_from_the_truth_dir(data: Path) -> None:
     class Ctx:
         store = EvidenceStore(data / "store")
 
-        def kernel(self):  # noqa: ANN202
+        def kernel(self):
             from custom_harness.kernel import Kernel
             return Kernel(self.store)
 
