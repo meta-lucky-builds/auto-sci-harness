@@ -34,7 +34,8 @@ class _Stop(Exception):
 
 
 def _labels(raw: bytes) -> list[str]:
-    """Same parsing as research/claims.py `_labels`: csv, first column, header skipped."""
+    """The research loop's label parsing (it read labels in-process before 2026-10-08): csv, first column, header
+    skipped."""
     import csv
     import io
     rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))

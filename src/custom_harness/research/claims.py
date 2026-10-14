@@ -49,10 +49,10 @@ from ..kernel import (
 from ..kernel.bundle import build_bundle
 from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
+from ..kerneld.client import KernelD, KernelDError, KernelDUnavailable, RunHandle
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..verify import metrics as M
-from ..verify.leak import label_windows, leak_audit
 from ..verify.stats import paired_example_interval
 from .modules import _dev_labels, _require_isolation, _sb, _task
 from .task import TaskSpec
@@ -73,11 +73,6 @@ def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
     raw = state.get("hypotheses")
     items = raw.get("hypotheses") if isinstance(raw, dict) else None
     return [h for h in items if isinstance(h, dict)] if isinstance(items, list) else []
-
-
-def _labels(raw: bytes) -> list[str]:
-    rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))
-    return [r[0] for r in rows[1:] if r]
 
 
 def _kernel(ctx: ModuleContext) -> Kernel:
@@ -272,32 +267,67 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
             continue
         if prior.claim_hash == h:
             done[(prior.arm, prior.seed)] = ev.id
-    for seed in claim.analysis_plan.seeds:
-        for arm, ref in (("subject", claim.subject), ("comparator", claim.comparator)):
-            if (arm, seed) in done:
-                evidence.append(done[(arm, seed)])
-                continue
-            # a NEW directory per attempt (uuid suffix): an engine retry after an infrastructure error must never
-            # run next to the failed attempt's files (GOAL L0; orcompute-to-yield-01)
-            box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" /
-                           f"{p}{arm}-{seed}-{uuid.uuid4().hex[:8]}")
-            preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
-                                      argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
-                                                                 "test": (task.test_features_file, test)},
-                                      seed=seed, timeout_s=task.solution_timeout_s)
-            # validate the shape BEFORE touching the labels: an unusable output never causes a label read
-            if preds is None or len(preds) != n_rows:
-                failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
-                continue
-            labels = _labels(vault.read(ids["test"], task.test_labels_file, purpose="evaluate", run_id=ctx.run_id,
-                                        claim_hash=h, arm=arm, seed=seed))
-            rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
-                             label_file=task.test_labels_file, seed=seed, env=env,
-                             limits={"timeout_s": float(task.solution_timeout_s)},
-                             preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
-                             score=M.score(task.metric, labels, preds), run_id=ctx.run_id)
-            evidence.append(kernel.record_evaluation(rec))
+    with _KernelDRun(ctx) as kd:
+        for seed in claim.analysis_plan.seeds:
+            for arm, ref in (("subject", claim.subject), ("comparator", claim.comparator)):
+                if (arm, seed) in done:
+                    evidence.append(done[(arm, seed)])
+                    continue
+                # a NEW directory per attempt (uuid suffix): an engine retry after an infrastructure error must
+                # never run next to the failed attempt's files (GOAL L0; orcompute-to-yield-01)
+                box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" /
+                               f"{p}{arm}-{seed}-{uuid.uuid4().hex[:8]}")
+                preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
+                                          argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
+                                                                     "test": (task.test_features_file, test)},
+                                          seed=seed, timeout_s=task.solution_timeout_s)
+                # validate the shape BEFORE touching the labels: an unusable output never causes a label read
+                if preds is None or len(preds) != n_rows:
+                    failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
+                    continue
+                # the held-out score comes from kerneld (one single-use 'evaluate' token for this claim, arm and
+                # seed); no label enters this process (GOAL §16.5.2)
+                score = kd.run().held_out_score(ids["test"], task.test_labels_file, task.metric, preds,
+                                                claim_hash=h, arm=arm, seed=seed)
+                rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
+                                 label_file=task.test_labels_file, seed=seed, env=env,
+                                 limits={"timeout_s": float(task.solution_timeout_s)},
+                                 preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
+                                 score=score, run_id=ctx.run_id)
+                evidence.append(kernel.record_evaluation(rec))
     return {f"{p}evidence_ids": evidence, f"{p}confirm_failures": failures}
+
+
+class _KernelDRun:
+    """A kerneld process and a run capability for this run, started on first use (GOAL §16.5.2): research code
+    makes its private reads (held-out score, Kernel re-score, leak scan) through narrow per-claim tokens, so no
+    private byte enters this process. kerneld writes each read's `data_access` entry before using the labels."""
+
+    def __init__(self, ctx: ModuleContext):
+        self._root = ctx.kernel().store.root  # the run's store (the module facade has no `root`)
+        self._run_id = ctx.run_id
+        self._kd: KernelD | None = None
+        self._run: RunHandle | None = None
+
+    def run(self) -> RunHandle:
+        if self._run is None:
+            self._kd = KernelD(self._root)
+            self._run = self._kd.open_run(self._run_id)
+        return self._run
+
+    def __enter__(self) -> _KernelDRun:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._kd is not None:
+            try:
+                if self._run is not None:
+                    self._run.close()
+            except (KernelDError, KernelDUnavailable):
+                pass
+            finally:
+                self._kd.close()
+                self._kd = self._run = None
 
 
 # ------------------------------------------------------------------ certify
@@ -787,24 +817,26 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
 
     kernel = ctx.kernel()
     ids = state["datasets"]
-    for p in ("", "replica_"):
-        _audit_certificate(state, p, ctx, kernel, ids, task, fail)
-    try:
-        rerendered = render_report(state, ctx)
-    except (KernelError, KeyError, ValueError) as e:
-        fail("I4", f"report cannot be re-rendered from stored artifacts: {e}")
-    else:
-        if rerendered != state.get("report"):
-            fail("I4", "the report differs from its re-render from stored artifacts (edited or not generated "
-                       "from the certificate)")
-    test = kernel.vault.dataset(ids["test"])
-    raw = kernel.vault.read(ids["test"], task.test_labels_file, purpose="leakscan", run_id=ctx.run_id)
-    fp = {"hashes": {f.blob: f"{ids['test']}/{name}" for name, f in test.files.items() if f.private},
-          "canaries": [], "label_windows": label_windows(_labels(raw)), "contents": [raw]}
-    canaries = [c for c in (kernel.vault.canary(ids["test"]), state.get("_private_canary")) if c]
-    leak = leak_audit(ctx.store.trace(ctx.run_id), _sb(ctx).workspace, fp, canaries,
-                      extra_texts={"report": state.get("report", "")})
-    for problem in leak["problems"]:
+    with _KernelDRun(ctx) as kd:
+        for p in ("", "replica_"):
+            _audit_certificate(state, p, ctx, kernel, ids, task, fail, kd)
+        try:
+            rerendered = render_report(state, ctx)
+        except (KernelError, KeyError, ValueError) as e:
+            fail("I4", f"report cannot be re-rendered from stored artifacts: {e}")
+        else:
+            if rerendered != state.get("report"):
+                fail("I4", "the report differs from its re-render from stored artifacts (edited or not generated "
+                           "from the certificate)")
+        # I5 through kerneld: it builds the fingerprints from the hidden labels (one ledgered 'leakscan' read) and
+        # returns location strings only (GOAL §16.5.2); the vault canary is added there, the run's own canary here
+        report = state.get("report", "")
+        canary = state.get("_private_canary")
+        run = kd.run()
+        problems = run.leak_scan(run.token("leakscan", ids["test"], task.test_labels_file), ctx.store.trace(ctx.run_id),
+                                 _sb(ctx).workspace, extra_texts={"report": str(report) if report else ""},
+                                 extra_canaries=[canary] if isinstance(canary, str) and canary else [])
+    for problem in problems:
         fail("I5", problem)
     figs = _figure_audit(state, ctx)
     res["I6"] = figs["I6"]
@@ -859,7 +891,7 @@ def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:
 
 
 def _audit_certificate(state: dict[str, Any], p: str, ctx: ModuleContext, kernel: Kernel, ids: dict[str, str],
-                       task: TaskSpec, fail: Any) -> None:
+                       task: TaskSpec, fail: Any, kd: _KernelDRun) -> None:
     """I1/I2/I4 for one certificate in the run state (prefix "" = the claim, "replica_" = its replication)."""
     info = state.get(f"{p}certificate")
     if info:
@@ -878,11 +910,12 @@ def _audit_certificate(state: dict[str, Any], p: str, ctx: ModuleContext, kernel
                 fail("I1", "run state disagrees with the ledger certificate or its evidence (label, claim or means)")
             if cert.checks["K5"].status != "pass":
                 fail("I2", "comparator integrity (K5) failed: " + "; ".join(cert.checks["K5"].reasons))
-            labels = _labels(kernel.vault.read(ids["test"], task.test_labels_file, purpose="kernel",
-                                               run_id=ctx.run_id, claim_hash=cert.claim_hash))
+            # re-score through kerneld with a 'kernel' token bound to this certificate's claim (GOAL §16.5.2)
+            run = kd.run()
+            tok = run.token("kernel", ids["test"], task.test_labels_file, claim_hash=cert.claim_hash)
             for eid in cert.evidence_ids:
                 rec = ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(eid).payload_ref))
-                again = M.score(rec.metric, labels, ctx.store.blobs.get_json(rec.preds_ref))
+                again = run.rescore(tok, rec.metric, ctx.store.blobs.get_json(rec.preds_ref))
                 if abs(again - rec.score) > 1e-9:
                     fail("I4", f"{eid}: reported {rec.score!r}, recomputed {again!r}")
     elif state.get(f"{p}claim_hash"):

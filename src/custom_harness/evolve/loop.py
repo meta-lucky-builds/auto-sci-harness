@@ -42,6 +42,7 @@ from ..store import EvidenceStore
 from .branches import BranchConfig, propose_branch
 from .claims import check_claims, digest_refs
 from .critic import FamilySeparatedCritic
+from .durable import ProposalLog
 from .edits import (
     DEFAULT_PROTECTED_NODES,
     Edit,
@@ -272,12 +273,15 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                       proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
                       releases: Releases | None = None,
                       critic: FamilySeparatedCritic | None = None,
-                      branching: BranchConfig | None = None) -> GenerationResult:
+                      branching: BranchConfig | None = None,
+                      proposals: ProposalLog | None = None) -> GenerationResult:
     """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
     shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
     candidate rejected on its evolve re-measurement or the held-out gate is tested per gate cluster and may become
-    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour)."""
+    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour).
+    `proposals`: the campaign's durable proposal log for this generation (durable.py): the proposal is persisted
+    before any candidate runs and, on a resume, replayed instead of calling the proposer again."""
     cfg = cfg or EvolveConfig()
     check_race_config(cfg)  # fail closed before any run
     if critic is not None:
@@ -300,30 +304,39 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     parent_outcomes = [evaluator.outcome(parent, u) for u in evolve_units]
     parent_scores = {u: o.score for u, o in zip(evolve_units, parent_outcomes, strict=True)}
     evolve_ids = {t.task_id for t in tasks if t.split == "evolve"}
-    # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
-    # outcomes never feed the diagnosis, which the proposer reads
-    references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
-    digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
-    # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
-    digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
-                           canaries=getattr(proposer, "canaries", ()))
-    ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
-
-    if isinstance(proposer, ProposerAgent):
-        proposal: Any = proposer.propose_from_export(
-            parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
-            n_edits=cfg.n_edits, protected=cfg.protected_nodes)
-        store.append_record("proposer_session", {"parent": parent_hash, "transcript": proposal.transcript,
-                                                 "problems": proposal.problems})
+    # a resumed campaign generation (evolve/durable.py): the proposal persisted before the crash, with the evidence
+    # ids it may cite and the novelty gate's state; neither the diagnosis nor the proposer runs again
+    saved = proposals.load(parent_hash) if proposals is not None else None
+    proposal: Any
+    if saved is not None:
+        proposal, known, rejected_before = saved
     else:
-        proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+        # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
+        # outcomes never feed the diagnosis, which the proposer reads
+        references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
+        digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
+        # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
+        digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
+                               canaries=getattr(proposer, "canaries", ()))
+        ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
+
+        if isinstance(proposer, ProposerAgent):
+            proposal = proposer.propose_from_export(
+                parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
+                n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+            store.append_record("proposer_session", {"parent": parent_hash, "transcript": proposal.transcript,
+                                                     "problems": proposal.problems})
+        else:
+            proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+        # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis,
+        # or the one-shot proposer's diagnosis
+        shown = getattr(proposal, "evidence_refs", None)
+        known = set(shown) if shown is not None else digest_refs(digest)
+        rejected_before = rejected_signatures(store)
+        if proposals is not None:  # persisted BEFORE any candidate runs: a crash from here on resumes, not re-asks
+            proposals.save(parent_hash, proposal, known, rejected_before)
     edits, problems = proposal.edits, proposal.problems
-    # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis, or the
-    # one-shot proposer's diagnosis
-    shown = getattr(proposal, "evidence_refs", None)
-    known = set(shown) if shown is not None else digest_refs(digest)
     claims_by: dict[str, dict[str, Any]] = {}
-    rejected_before = rejected_signatures(store)
     deny = denied_tokens(tasks)
     task_ids = {t.task_id for t in tasks}
     candidates: dict[str, tuple[Edit, HarnessSpec]] = {}

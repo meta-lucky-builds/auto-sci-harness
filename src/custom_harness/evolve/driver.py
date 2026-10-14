@@ -23,8 +23,9 @@ from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .branches import BranchConfig
+from .durable import ProposalLog, durable_key
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
-from .generations import AnnealSchedule, open_campaign
+from .generations import AnnealSchedule, LedgerError, first_parent, last_parent, open_campaign
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 from .multiplicity import check_campaign, runs_per_task_bound
 
@@ -57,11 +58,18 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
            campaign_budget: Budget | None = None, branching: BranchConfig | None = None,
            campaign: str | None = None, anneal: AnnealSchedule | None = None) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
-    claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py)."""
+    claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py).
+
+    With a `campaign` the run is durable (durable.py): a re-invocation with the same campaign RESUMES it. It
+    continues from the last completed generation's new parent (the seed spec must be the campaign's first parent),
+    runs `generations` more generations starting with the interrupted one, re-runs and re-charges no finished unit
+    (the Evaluator's durable unit outcomes, keyed by the campaign) and never asks the proposer again for a generation
+    whose proposal was persisted. File names in `out_dir` and logged generation numbers are campaign-global."""
     cfg = cfg or EvolveConfig()
     # `campaign`/`anneal`: generation ledger (generations.py): declared or resumed here, before any run (fail closed);
     # each generation gets the annealed edit budget and a `generation_ledger` record (stall, budget, refs)
     gen_ledger = open_campaign(store, campaign, anneal, cfg)
+    parent = _resume_parent(store, campaign, seed_spec) if campaign is not None else seed_spec
     working = [t for t in suite if t.split != "sealed"]
     n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
     bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
@@ -69,22 +77,27 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
         infra_retries=cfg.infra_retries))
     log(json.dumps({"multiplicity_bound": bound}))
     evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run,
-                          infra_retries=cfg.infra_retries, campaign_budget=campaign_budget)
-    parent = seed_spec
+                          infra_retries=cfg.infra_retries, campaign_budget=campaign_budget,
+                          durable_key=durable_key(campaign) if campaign is not None else None)
     for g in range(generations):
+        # the campaign-global generation index (continued across resume); the local loop index without a campaign
+        gi = gen_ledger.generation if gen_ledger is not None else g
         cfg = gen_ledger.begin(cfg) if gen_ledger is not None else cfg  # annealed n_edits (<= the bound's)
         t0 = time.time()
         try:
             res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg,
-                                    branching=branching)
+                                    branching=branching,
+                                    proposals=ProposalLog(store, campaign, gi) if campaign is not None else None)
         except BudgetExceeded as e:
-            log(json.dumps({"generation": g, "stopped": f"campaign budget exhausted: {e}"}))
+            if gen_ledger is not None:  # ledgered with its stop reason (it does not consume the index)
+                gen_ledger.record_stopped(parent.spec_hash(), "budget_exceeded", str(e))
+            log(json.dumps({"generation": gi, "stopped": f"campaign budget exhausted: {e}"}))
             break
         if gen_ledger is not None:
             led = gen_ledger.record(res)
             log(json.dumps({"campaign": campaign, "ledger_generation": led["generation"], "budget": led["budget"],
                             "stalled": led["stall"]["stalled"]}))
-        summary = {"generation": g, "accepted": res.accepted, "decision": res.decision,
+        summary = {"generation": gi, "accepted": res.accepted, "decision": res.decision,
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,
                    "candidates": [{k: c.get(k) for k in ("status", "reason", "survived")} | (
@@ -94,8 +107,28 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
         log(json.dumps(summary, indent=1))
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / f"gen{g:03d}.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
-            (out_dir / f"spec_gen{g:03d}.yaml").write_text(
+            (out_dir / f"gen{gi:03d}.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+            (out_dir / f"spec_gen{gi:03d}.yaml").write_text(
                 yaml.safe_dump(res.new_parent.model_dump(mode="json"), sort_keys=False), encoding="utf-8")
         parent = res.new_parent
     return parent
+
+
+def _resume_parent(store: EvidenceStore, campaign: str, seed_spec: HarnessSpec) -> HarnessSpec:
+    """The parent a (resumed) campaign continues from: the seed spec for a new campaign, else the last completed
+    generation's new parent, loaded from the store's harness versions and checked against its hash (fail closed)."""
+    first, last = first_parent(store, campaign), last_parent(store, campaign)
+    if first is None or last is None:
+        return seed_spec
+    if first != seed_spec.spec_hash():
+        raise LedgerError(f"campaign {campaign!r} was started from spec {first[:12]}, not {seed_spec.spec_hash()[:12]}"
+                          ": a campaign resumes only from its own seed spec")
+    if last == seed_spec.spec_hash():
+        return seed_spec
+    try:
+        spec = HarnessSpec.model_validate(store.harness_spec(last))
+    except (KeyError, OSError, ValueError) as e:
+        raise LedgerError(f"campaign {campaign!r}: its current parent {last[:12]} cannot be loaded ({e})") from None
+    if spec.spec_hash() != last:
+        raise LedgerError(f"campaign {campaign!r}: stored parent {last[:12]} does not hash to itself")
+    return spec

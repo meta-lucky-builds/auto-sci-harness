@@ -206,12 +206,57 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     from .budget import persistent_budget
     limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
-    campaign = persistent_budget(store, a.campaign_id or run_tag, {k: v for k, v in limits.items() if v is not None})
+    campaign_id = a.campaign_id or run_tag
+    campaign = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
+    # the campaign id also names the generation ledger (`chh evolve report`), the durable unit outcomes and the
+    # persisted proposals: re-running with the same --campaign-id resumes it (evolve/durable.py)
+    out = data_dir() / "evolve" / campaign_id
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
-           store=store, sandbox_factory=factory, cfg=cfg, out_dir=data_dir() / "evolve" / run_tag,
-           campaign_budget=campaign)
-    print(f"outputs: {data_dir() / 'evolve' / run_tag}")
+           store=store, sandbox_factory=factory, cfg=cfg, out_dir=out, campaign_budget=campaign,
+           campaign=campaign_id)
+    print(f"outputs: {out}")
+    print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
+          f"{campaign_id})")
     return 0
+
+
+def cmd_evolve_report(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh evolve report CAMPAIGN`: render every generation's report from the generation ledger and run the
+    recompute audit on it (and on every stopped-generation record). Exit 1 if any cell or record does not reproduce,
+    2 if the campaign is unknown or its ledger is unreadable."""
+    from .evolve import generations as G
+    if not store.records_where(G.CAMPAIGN_KIND, "campaign", a.campaign):
+        print(f"no evolve campaign {a.campaign!r} in this store", file=sys.stderr)
+        return 2
+    try:
+        completed = [r["generation"] for r in store.records_where(G.GENERATION_KIND, "campaign", a.campaign)]
+        wanted = completed if a.generation is None else [a.generation]
+        reports = [G.generation_report(store, a.campaign, g) for g in wanted]
+    except G.LedgerError as e:
+        print(f"FAILED: the generation ledger does not reproduce: {e}", file=sys.stderr)
+        return 1
+    problems = {g: G.audit_report(rep, store) for g, rep in zip(wanted, reports, strict=True)}
+    stopped = G.stopped_records(store, a.campaign)
+    stop_problems = {n: G.verify_stopped(store, n) for n, _ in stopped}
+    bad = {**{f"generation {g}": p for g, p in problems.items() if p},
+           **{f"generation_stopped #{n}": p for n, p in stop_problems.items() if p}}
+    if a.json:
+        print(json.dumps({"campaign": a.campaign, "reports": reports, "stopped": [r for _, r in stopped],
+                          "audit": {"passed": not bad, "problems": bad}}, indent=1, sort_keys=True))
+    else:
+        for rep in reports:
+            print(G.render_markdown(rep))
+        if stopped:
+            print("## Stopped generations (began, did not complete)\n")
+            for n, r in stopped:
+                print(f"- generation_stopped #{n}: generation {r.get('generation')}, reason {r.get('reason')}, "
+                      f"budget {r.get('budget')}, parent {str(r.get('parent'))[:12]}")
+        print(f"\naudit: {'OK' if not bad else 'FAILED'} ({len(reports)} generation report(s), {len(stopped)} stopped "
+              f"record(s) recomputed from the ledger)")
+    for where, ps in bad.items():
+        for p in ps:
+            print(f"AUDIT FAILED {where}: {p}", file=sys.stderr)
+    return 1 if bad else 0
 
 
 def _sandbox_factory(a: argparse.Namespace, root: Path):
@@ -585,6 +630,8 @@ def main(argv: list[str] | None = None) -> int:
     if args[:1] == ["delegate"]:  # the delegation driver (GOAL §15) has its own parser, root and ledger (no store)
         from .orchestration.cli import main as delegate_main
         return delegate_main(args[1:])
+    if args[:2] == ["evolve", "report"]:  # `chh evolve report CAMPAIGN` (a spec file named "report": ./report)
+        args = ["evolve-report", *args[2:]]
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
@@ -612,11 +659,17 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--race-rounds", type=int, default=2)
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
-    ev.add_argument("--campaign-id", help="persisted campaign budget id (reuse it to continue a campaign)")
+    ev.add_argument("--campaign-id", help="campaign id: persisted budget, generation ledger, durable units and "
+                                         "proposals (reuse it to resume a campaign)")
     ev.add_argument("--max-usd", type=float)
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
+    er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
+                                              "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
+    er.add_argument("campaign")
+    er.add_argument("--generation", type=int, help="only this campaign-global generation")
+    er.add_argument("--json", action="store_true")
     rr = sub.add_parser("resume", help="resume an interrupted run (process died, engine crash, infra failure) "
                                          "or a run paused at an approval node")
     rr.add_argument("run_id")
@@ -732,7 +785,7 @@ def main(argv: list[str] | None = None) -> int:
                 "rerun": cmd_rerun,
                 "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role,
                 "approve-statement": cmd_approve_statement, "ledger-anchor": cmd_ledger_anchor,
-                "finalize": cmd_finalize, "evolve": cmd_evolve, "runs": cmd_runs,
+                "finalize": cmd_finalize, "evolve": cmd_evolve, "evolve-report": cmd_evolve_report, "runs": cmd_runs,
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
