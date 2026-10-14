@@ -193,8 +193,10 @@ def test_resweep_integrity_failure_and_uncheckable(tmp_path):
     root, _ = _store(tmp_path / "a")
     store = EvidenceStore(root)
     try:
-        store._db.execute("UPDATE ledger SET body = replace(body, '\"dev\"', '\"dex\"') WHERE seq = 1")
-        store._db.execute("UPDATE ledger SET body = body || ' ' WHERE seq = 2")
+        (body,) = store._db.execute("SELECT body FROM ledger WHERE seq = 2").fetchone()
+        doc = json.loads(body)
+        doc["tampered"] = True  # a real content change (whitespace alone re-canonicalizes to the same hash)
+        store._db.execute("UPDATE ledger SET body = ? WHERE seq = 2", (json.dumps(doc, sort_keys=True),))
         store._db.commit()
     finally:
         store.close()

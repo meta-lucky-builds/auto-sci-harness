@@ -343,7 +343,7 @@ def screen(rule: Rule, by: str, reason: str, *, ledger: Path = corpus.DEFAULT_LO
     rule.validate()
     man = man or corpus.manifest()
     prior = sum(1 for line in (ledger.read_text(encoding="utf-8").splitlines() if ledger.exists() else [])
-                if json.loads(line).get("purpose") == "resweep-screen")
+                if json.loads(line).get("purpose") == "resweep-screen" and json.loads(line).get("kind") == "look")
     look = corpus.open_sealed(by, reason, ledger=ledger, man=man, head=head, purpose="resweep-screen")
     items = corpus.sealed_items(look, root, man)
     res = corpus.check_all(items, overrides=rule.overrides, progress=progress)

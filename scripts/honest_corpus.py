@@ -152,7 +152,7 @@ def build_world_item(seed: int, fault: str | None, work: Path) -> tuple[dict[str
     world.kernel.clock = lambda: 1.0
     try:
         good = world.artifact("good")
-        base = world.artifact("baseline")
+        base = world.artifact("baseline", kind="baseline")  # K5: a registered BASELINE comparator
         subject = world.artifact("weak") if fault == "weak_subject" else good
         claim = world.claim(subject, base, delta=0.15).model_copy(update={"resolve_by": FIXED_RESOLVE_BY})
         if fault == "peek_audit":
