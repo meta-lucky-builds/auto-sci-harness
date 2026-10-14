@@ -107,7 +107,10 @@ def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
     if len(data) > MAX_BYTES:
         raise FormalError(f"document is larger than {MAX_BYTES} bytes")
     try:
-        doc = json.loads(data, object_pairs_hook=_unique)
+        text = data.decode("utf-8")  # canonical UTF-8 only: json would also read UTF-16/32 and a BOM,
+        if text.startswith("\ufeff"):  # which K9's byte scan of the same document could not see through
+            raise FormalError("a byte-order mark is refused")
+        doc = json.loads(text, object_pairs_hook=_unique)
     except ValueError as e:
         raise FormalError(f"not JSON: {e}") from None
     if not isinstance(doc, dict) or doc.get("format") != fmt:

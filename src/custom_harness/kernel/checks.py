@@ -6,6 +6,7 @@ exception inside a check is a failure of that check, never a pass (see kernel.Ke
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import importlib
@@ -27,7 +28,16 @@ from ..verify import leak
 from ..verify import noninterference as ni
 from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
-from .claim import SUPPORTED_KINDS, AnalysisPlan, Claim, ClaimKind, EvidenceClass, exact_value, strict_json
+from .claim import (
+    SUPPORTED_KINDS,
+    AnalysisPlan,
+    Claim,
+    ClaimKind,
+    EvidenceClass,
+    canonical_json,
+    exact_value,
+    strict_json,
+)
 from .execution import ExecRecord, ExecutionError
 from .ledger import AsOfLedger, Entry, Ledger, verify_chain
 from .reasons import Code, R, Refusal, coded, codes_of, describe, exception_name
@@ -976,6 +986,15 @@ def k8_computational(ctx: Context) -> CheckResult:
     return _result(coded(Code.K8_ADAPTER_BOUNDS, list(module.bounds(problem, cert, value))))
 
 
+def _reader_texts(data: bytes) -> list[str]:
+    """What a reader of the document can see: its bytes as UTF-8 and, when json can parse it (UTF-8/16/32, a BOM,
+    \\u escapes), every parsed key and string, duplicates included, re-encoded canonically (s3-domain red team)."""
+    texts = [data.decode("utf-8", errors="ignore")]
+    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding: bytes only
+        texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
+    return texts
+
+
 def k9_computational(ctx: Context) -> CheckResult:
     """No canary token and no private file's bytes in the problem instance or the certificate."""
     datasets = ctx.vault.datasets()
@@ -986,8 +1005,9 @@ def k9_computational(ctx: Context) -> CheckResult:
     for role, digest in scanned:
         if digest in private:
             reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} IS a private file ({private[digest]})"))
-        reasons += coded(Code.K9_LEAK,
-            leak.scan_text(ctx.store.blobs.get(digest).decode("utf-8", errors="ignore"), role, canaries, []))
+        found = [f for text in _reader_texts(ctx.store.blobs.get(digest)) for f in leak.scan_text(text, role,
+                                                                                                canaries, [])]
+        reasons += coded(Code.K9_LEAK, list(dict.fromkeys(found)))
     return _result(reasons, [f"scanned the instance and {len(ctx.certificates)} certificate(s) for "
                              f"{len(canaries)} canary token(s) and {len(private)} private file(s)"])
 
