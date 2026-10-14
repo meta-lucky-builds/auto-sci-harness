@@ -478,9 +478,10 @@ class _Tty(io.StringIO):
         return True
 
 
-def _rule(d: Path, col: str) -> list[str]:
+def _rule(d: Path, col: str, *extra: str) -> list[str]:
+    """`--no-anchor` unless other flags are given (s4-human: an anchor is required by default)."""
     return ["rule-feature", str(d), "--feature", col, "--ruling", "legitimate", "--approver", "alice",
-            "--note", "checked the protocol"]
+            "--note", "checked the protocol", *(extra or ("--no-anchor",))]
 
 
 def _cli_rulings() -> list[dict]:
@@ -515,10 +516,22 @@ def test_cli_rule_feature_records_with_tty_and_confirmation(tmp_path, monkeypatc
     assert cli.main(["feature-screen", str(d)]) == 1
     out = json.loads(capsys.readouterr().out)
     assert col in out["report"]["routed"] and out["gate"] == [prov.GATE_MISSING_RULING]
+    # s4-human (orchestrator decision 2026-10-14): an anchor is required by default
     monkeypatch.setattr("sys.stdin", _Tty(col + "\n"))
-    assert cli.main(_rule(d, col)) == 0
+    with pytest.raises(SystemExit, match="--anchor"):
+        cli.main(_rule(d, col, "--note", "no anchor flag"))
+    assert _cli_rulings() == []
+    first = tmp_path / "anchors" / "first.jsonl"
+    assert cli.main(["ledger-anchor", str(first)]) == 0
+    monkeypatch.setattr("sys.stdin", _Tty(col + "\n"))
+    with pytest.raises(SystemExit, match="you reviewed"):  # the ruling binds the report hash the human reviewed
+        cli.main(_rule(d, col, "--anchor", str(first), "--report-hash", "0" * 64))
+    assert _cli_rulings() == []
+    monkeypatch.setattr("sys.stdin", _Tty(col + "\n"))
+    assert cli.main(_rule(d, col, "--anchor", str(first))) == 0
     entry = _cli_rulings()[-1]
     assert (entry["feature"], entry["ruling"], entry["approver"]) == (col, "legitimate", "alice")
+    assert entry["anchors_checked"] == 1 and entry["report_hash"] == prov.screen(d)["report_hash"]
     capsys.readouterr()
     assert cli.main(["feature-screen", str(d)]) == 0
     assert json.loads(capsys.readouterr().out)["gate"] == []
