@@ -208,7 +208,10 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
     factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
 
-    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
+    # --race-allocator: opt-in race allocation (GOAL §5 L1; evolve/loop.py RACE_ALLOCATORS). race_slots stays 1: the
+    # per-completion allocator then evaluates in exactly the batch order (concurrency needs an owner ack, not a flag)
+    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds,
+                       race_allocator=a.race_allocator)
     from .budget import persistent_budget
     limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
     campaign_id = a.campaign_id or run_tag
@@ -720,6 +723,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--seeds", type=int, nargs="+", default=[0])
     ev.add_argument("--n-edits", type=int, default=3)
     ev.add_argument("--race-rounds", type=int, default=2)
+    ev.add_argument("--race-allocator", choices=["batch", "per_completion", "voi"], default="batch",
+                    help="opt-in race allocation: batch (default) | per_completion (completion-driven, one slot) | "
+                         "voi (knowledge-gradient value of information); the acceptance rule is the same")
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
     ev.add_argument("--campaign-id", help="campaign id: persisted budget, generation ledger, durable units and "

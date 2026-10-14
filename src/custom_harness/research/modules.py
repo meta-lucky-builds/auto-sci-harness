@@ -757,7 +757,17 @@ def run_candidate(state, params, ctx):
 @register("research.execution_rank")
 def execution_rank(state, params, ctx):
     """GOAL §16.8: execution is the ranker. No model call: the queue keeps the proposer's order and dev
-    cross-validation decides (research_v1's K-way `research.tournament` stays available as an option)."""
+    cross-validation decides (research_v1's K-way `research.tournament` stays available as an option).
+
+    Opt-in only: `params: {tournament: {...}}` (a dict of `research.tournament` params, e.g. {rounds: 3}) ranks the
+    queue by the judge tournament instead (research/tournament.py, Robin's BTL; its ablation switches
+    `btl_tournament` / `data_profile_kway_rank` apply). Absent (research_v2.yaml as shipped) = execution ranks."""
+    opt = params.get("tournament") if isinstance(params, dict) else None
+    if opt is not None:
+        if not isinstance(opt, dict):
+            raise ValueError("execution_rank params.tournament must be a dict of research.tournament params")
+        from .tournament import tournament_module
+        return tournament_module(state, opt, ctx)
     hyps = [h for h in (state.get("hypotheses") or {}).get("hypotheses", []) if isinstance(h, dict)]
     ids = [h.get("id") for h in hyps]
     if len(set(ids)) != len(ids) or not all(isinstance(i, str) for i in ids):

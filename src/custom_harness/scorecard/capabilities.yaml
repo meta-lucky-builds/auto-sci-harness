@@ -159,7 +159,7 @@ capabilities:
   ablation:
     switch: data_profile_kway_rank
     not_covered:
-      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml only; research_v2.yaml ranks by execution (research.execution_rank), so there only the profiling half of this switch acts
+      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution (research.execution_rank) as shipped, so there only the profiling half of this switch acts unless the opt-in params.tournament is set
       replication profile: the replication brief's trusted profile (research/claims.py _trusted_profile) is still computed
       trajectory data: 'an offline export only (weights/trajectory.py, weights/export.py) that takes trajectories as inputs and is not wired to runs: no run produces or consumes it, so there is nothing in a run to switch off'
 - id: scienceflow
@@ -204,7 +204,7 @@ capabilities:
   ablation:
     switch: multi_source_retrieval
     not_covered:
-      multi-source retrieval in a run: 'not reachable: literature search runs only from the literature CLI (literature/cli.py) and library callers, and live_client / offline_client take no AblationSet; the only in-run client (research/claims.py citation_audit) resolves IDs on an offline snapshot. The switch is tested at library level only'
+      multi-source retrieval in a run: 'no harness run path searches: literature search runs from `chh lit-search` (literature/cli.py; production, every source) and library callers; an ablation arm reaches the switch through a scorecard System that builds live_client / offline_client(ablation=...). The only in-run client (research/claims.py citation_audit) resolves IDs on an offline snapshot'
       citation verifier: 'K0 / audit I3 (literature/cite.py; ID lookups across sources are its resolution path and stay unchanged): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: the-station
   source: The Station
@@ -234,7 +234,7 @@ capabilities:
   ablation:
     switch: btl_tournament
     not_covered:
-      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml only; under research_v2.yaml (execution ranking) this switch changes nothing
+      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution as shipped and reaches the tournament (and this switch) only with the opt-in research.execution_rank params.tournament
       lab-in-loop: 'the physical claim path (research/physical.py) runs through human approval nodes (protocol_review, data_received) and the human-only `chh return-data`: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
       replicated analysis + consensus: 'the headline label (research/claims.py headline, printed by research.report) requires the claim certificate AND one independent replica certificate (replica_* nodes) both CERTIFIED and invariant 5 met: an integrity/reporting requirement, never switched off in production; consensus over more than one replicate analysis: not built'
 - id: ahois
@@ -256,7 +256,7 @@ capabilities:
   ablation:
     switch: reward_variance_selection
     not_covered:
-      reward-variance task selection in a run: 'not reachable: weights/selection.py is called from nowhere in src (L8 is an offline data side, weights/__init__.py: not wired into any loop); the switch is tested at library level only'
+      reward-variance task selection in a run: 'out of scope by owner decision 2026-10-14 (no model training, L8 out of scope; GOAL L8): weights/selection.py is kept only as the L8 export archive''s task selection, called from no run by design; the switch is tested at library level only'
       stateful verifier: not built (no stateful T1 verifier in verify/ or kernel/)
 - id: prime-agent
   source: Prime Agent

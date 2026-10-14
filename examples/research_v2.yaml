@@ -53,6 +53,8 @@ nodes:
       required: [hypotheses]
     retries: 1
 
+  # execution ranks (no tournament call). Opt-in only: params: {tournament: {rounds: 3}} ranks by Robin's BTL judge
+  # tournament instead (research/modules.py execution_rank; ablation switch btl_tournament)
   rank: {kind: module, module: research.execution_rank}
 
   critic:

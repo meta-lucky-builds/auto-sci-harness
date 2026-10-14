@@ -325,13 +325,16 @@ def snapshot_store(root: Path) -> SnapshotStore:
 
 
 def live_client(store: SnapshotStore, *, use_cache: bool = True, as_of: date | None = None,
-                full_text: bool = False) -> LiteratureClient:
-    """Network client; every final answer is recorded into `store` (freeze it later for offline replay)."""
+                full_text: bool = False, ablation: AblationSet = NO_ABLATION) -> LiteratureClient:
+    """Network client; every final answer is recorded into `store` (freeze it later for offline replay).
+    `ablation`: threaded by a scorecard System (only the scorecard runner's entry point makes a non-empty one)."""
     transport = RecordingTransport(PacedTransport(HttpxTransport(), Pacer(PACING)), store, use_cache=use_cache)
-    return LiteratureClient(transport, as_of=as_of, full_text=full_text)
+    return LiteratureClient(transport, as_of=as_of, full_text=full_text, ablation=ablation)
 
 
 def offline_client(store: SnapshotStore, snapshot_id: str, *, as_of: date | None = None,
-                   full_text: bool = False) -> LiteratureClient:
-    """No network: answers only from the frozen snapshot, as of its date T (or an earlier one)."""
-    return LiteratureClient(OfflineTransport(store, snapshot_id), as_of=as_of, full_text=full_text)
+                   full_text: bool = False, ablation: AblationSet = NO_ABLATION) -> LiteratureClient:
+    """No network: answers only from the frozen snapshot, as of its date T (or an earlier one).
+    `ablation`: as for `live_client`."""
+    return LiteratureClient(OfflineTransport(store, snapshot_id), as_of=as_of, full_text=full_text,
+                            ablation=ablation)
