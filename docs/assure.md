@@ -32,6 +32,14 @@ Every honest item is paired with a planted-fault counterpart:
 
 The build fails loudly if an honest item is not certified or a fault is not rejected.
 
+**Build state (2026-10-14).** The full v1 build has NOT completed.
+- A build on 2026-10-09 got through all 120 spec pairs: every honest item was certified, every fault was rejected,
+  and the model agreed with the Kernel on all of them.
+- It then stopped at the first world pair: the honest item was REJECTED on K5. That was a recipe bug: the baseline
+  was registered with kind `method`. It is fixed in 7695539, but the fix has not been run.
+- The research pair has never been built.
+- So `redteam/honest_corpus/manifest.json` is NOT committed yet, and the sealed half does not exist on disk.
+
 **Halves.** A half is assigned per PAIR: `looks.half_of("honest-corpus", pair id)`, the same salted rule as the claim
 suite and the museum. Item and pair ids are opaque hashes, so an id does not tell honest from fault. Dev items'
 expected records are in the committed manifest. Sealed items carry only `commitment` = sha256 of their expected
@@ -102,8 +110,13 @@ gate test (`gen.scripts()`), one Hypothesis seed per chunk, and counts distinct 
 Fast store mode (`CHH_SPEC_FAST=1` in `tests/spec/real_kernel.py`): each world starts from a byte copy of one store
 in which the ML adapter was approved, with sqlite fsync off. This changes durability only.
 
-Measured throughput and the count actually run are in the final report of this workstream; see the logs under
-`custom-harness-data/logs/s3-assure/diff_slice*.log`.
+**Measured (2026-10-09, code 487e061, fast mode, machine shared with ~15 agents):** 15 chunks of 100, so
+**1,500 histories run, 1,194 distinct, 1,664 certifications, 0 disagreements** (state
+`custom-harness-data/assure/diffscale-487e061`, logs `diff_slice1..3.log`). Throughput was 0.237 histories/s, about
+4.2 s each. At that rate the GOAL's 1e5 histories need about 117 hours on one limiter slot. **1e5 was NOT run.**
+Hypothesis repeats some histories across chunk seeds: 306 of the 1,500 were duplicates. Per-history profile: the ML
+adapter hash, which re-reads about 230 source files on every certify, is about 0.7 s of the remaining cost (inferred
+from one cProfile run).
 
 ## 4. Mutation gate re-measured (§16.6)
 
@@ -115,8 +128,13 @@ Measured throughput and the count actually run are in the final report of this w
 - **grown targets**, reported apart from the original set: the K4/K6 helpers (registration, family, releases_on,
   registration_level, fixed_terms, fixed, target_level, plan_code_divergence), and `alpha.py` and `releases.py` whole.
 
-Six of the seven ids in `redteam/equivalent.yaml` no longer name a mutant, because the code moved. They are
-re-justified, or dropped, against the new run.
+**Not measured.** The run on 487e061 (443 mutants: 376 original targets plus 67 grown) never completed. Its coverage
+map run was killed twice by session restarts (`mut_map.log` has no exit line), and the owner then stopped long runs.
+**There is no mutation score for the current Kernel.** The last measured score (93.4% baseline, then 100% with 7
+justified equivalents, on 361 mutants of the 2026-10-07 Kernel) is stale.
+
+Six of the seven ids in `redteam/equivalent.yaml` (every id except vault.py:195) no longer name a mutant, because
+the code moved (verified with `mutate.py --list`). They must be re-justified against the new run, not carried over.
 
 ## 5. Invariant 22 scaffold
 

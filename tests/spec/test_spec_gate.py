@@ -131,8 +131,12 @@ def test_validation_sets_split_into_stable_disjoint_halves():
         assert sorted(halves["dev"] + halves["sealed"]) == sealed.items(name)
         assert halves["dev"] and halves["sealed"]  # both halves exist
     assert len(sealed.items("claim-suite")) == 51
-    # the honest corpus (built 2026-10-09 by scripts/honest_corpus.py): halves per PAIR, from the committed manifest
+    # the honest corpus (scripts/honest_corpus.py): halves per PAIR, from the committed manifest. Until the v1 build
+    # is run and its manifest committed, the set is empty, as before (stated in docs/assure.md)
     halves = sealed.split("honest-corpus")
+    if not (ROOT / sealed.CORPUS_MANIFEST).exists():
+        assert halves == {"dev": [], "sealed": []}
+        return
     assert halves["dev"] and halves["sealed"] and set(halves["dev"]).isdisjoint(halves["sealed"])
     assert sorted(halves["dev"] + halves["sealed"]) == sealed.items("honest-corpus")
     man = json.loads((ROOT / sealed.CORPUS_MANIFEST).read_text(encoding="utf-8"))
