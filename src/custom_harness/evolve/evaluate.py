@@ -32,7 +32,7 @@ from typing import Any, Literal
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
-from ..kerneld.releases import VERDICT_LABELS, Releases, attributed_reads
+from ..kerneld.releases import VERDICT_LABELS, Releases, attributed_reads, run_targets
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
 from ..runtime.engine import RetryPolicy, run_family
@@ -221,6 +221,29 @@ def dev_term(state: dict) -> float:
     return 0.0
 
 
+DEV_KEYS = ("best", "baseline_dev", "task")  # the state keys dev_term reads
+
+
+def dev_withheld(store: EvidenceStore, run_id: str) -> bool:
+    """Is the dev term of this run computed from a TARGET-LABELLED value (runtime/taint.py: a key `dev_term` reads
+    carries targets in the run's last labelled checkpoint, or the run has no labelled checkpoint at all and read a
+    private file: fail closed)? Then it is withheld (0.0): the proposer sees scores, and a continuous function of a
+    held-out value is not a verdict bit."""
+    from ..runtime.taint import TAINT_DOC_VERSION
+    steps = store.trace(run_id)
+    for st in reversed(steps):
+        if st.checkpoint_ref is None:
+            continue
+        try:
+            doc = store.blobs.get_json(st.checkpoint_ref).get("taint")
+        except (OSError, ValueError, KeyError, AttributeError):
+            doc = None
+        if isinstance(doc, dict) and doc.get("v") == TAINT_DOC_VERSION and isinstance(doc.get("labels"), dict):
+            return any(doc["labels"].get(k) for k in DEV_KEYS)
+        break
+    return bool(run_targets(store, run_id))
+
+
 def combine(status: RunStatus, bits: dict[str, Any], dev: float) -> tuple[float | None, bool]:
     """The run score from the (possibly pinned) verdict bits and the dev term."""
     if status == RunStatus.INFRA_FAILED:
@@ -312,7 +335,10 @@ def finish_run(ex: ExecutedRun, *, store: EvidenceStore, releases: Releases | No
         rel = releases if releases is not None else Releases.live(store)
         bits = rel.emit(bits, targets=ex.targets, channel="evolution_score", alphabet="verdict_bit",
                         note="evolve.score:verdict", key=f"{ex.spec_hash}|{task.task_id}|{seed}")
-    score, verified = combine(res.status, bits, dev_term(res.state) if isinstance(res.state, dict) else 0.0)
+    dev = dev_term(res.state) if isinstance(res.state, dict) else 0.0
+    if task.split == "evolve" and dev_withheld(store, res.run_id):
+        dev = 0.0  # a continuous term computed from target-labelled keys never reaches the proposer (inv. 18)
+    score, verified = combine(res.status, bits, dev)
     cert = res.state.get("certificate")
     label = cert.get("label") if isinstance(cert, dict) else None
     return RunOutcome(task.task_id, res.run_id, seed, score, verified, res.status.value, res.cost,

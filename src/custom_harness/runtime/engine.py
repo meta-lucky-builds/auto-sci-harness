@@ -66,6 +66,7 @@ from .spec import (
     engine_reserved,
 )
 from .taint import (
+    MUTABLE,
     SANDBOX_SURFACE,
     SECRETS_SURFACE,
     TaintState,
@@ -110,6 +111,9 @@ def _note_nested(child: str) -> None:
 # read names (kerneld/releases.attributed_reads `own_seqs`). Reads served by another process (kerneld) are not seen
 # here; they are attributed by the run id they name (docs/taint.md).
 _CAPTURE: contextvars.ContextVar[tuple[list[int], ...]] = contextvars.ContextVar("chh_read_capture", default=())
+# The label of what the module step executing in this context has read so far (a callable, evaluated when asked): a
+# run started inside that step (a nested Engine.run) starts with its `input` carrying it.
+_PARENT_LABEL: contextvars.ContextVar[Any] = contextvars.ContextVar("chh_parent_label", default=None)
 
 
 def _observe_ledger(seq: int, kind: str) -> None:
@@ -369,6 +373,11 @@ class Engine:
         # labels already held by this engine object are kept (as before: an engine reused for another run, or a test
         # seeding `engine.taint`, can only over-taint, never under-taint)
         self._ts.seq = self._data_access_seq()
+        parent = _PARENT_LABEL.get()
+        if parent is not None:  # nested inside a module step: its inputs may carry what that step read
+            lab = frozenset(parent())
+            if lab:
+                self._ts.set_label("input", self._ts.labels.get("input", frozenset()) | lab)
         self._started(run.id)
         return self._loop(run.id, state, self.spec.entry, start_index=0)
 
@@ -817,6 +826,10 @@ class Engine:
         instance = res["instance"] if res else f"{run_id}:{index}"
         charged: set[str] = set(res["charged"]) if res else set()
         self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
+        # the items' label first: every early MapError below quotes something about them (count, type)
+        items_root = node.items_key.split(".")[0]
+        items_taint = set(self._ts.labels.get(items_root, frozenset()))
+        self._step_label[id(node)] = set(items_taint)
         try:
             items = lookup(state, node.items_key)
         except KeyError:
@@ -835,8 +848,6 @@ class Engine:
         done = {r["branch_id"]: r for r in records if r.get("node_id") == node_id and r.get("error") is None}
         known_nonces = {r["nonce"] for r in records}
 
-        items_root = node.items_key.split(".")[0]
-        items_taint = set(self._ts.labels.get(items_root, frozenset()))
         prompt_taint = set(items_taint)  # the label of the reduced value: the items' and every branch's
         surfaces: set[str] = set()
         acc = Cost()
@@ -1050,7 +1061,8 @@ class Engine:
         target = self._next(node_id, state, consulted)
         edges = self.spec.outgoing(node_id)
         # whether the step errored decides which edges are even looked at (`_next`), whatever their order
-        if any(e.when is not None and e.when.key.split(".")[0] == "_last_error" for e in edges):
+        # (the same rule as `_next`: an edge whose key CONTAINS `_last_error` is followed after an error)
+        if any(e.when is not None and "_last_error" in e.when.key for e in edges):
             consulted.add("_last_error")
         successors = {e.target for e in edges}
         lab = self._ts.label_of(consulted)
@@ -1106,6 +1118,16 @@ class Engine:
             self._frame = _ModuleFrame(node_id, tracked, touched, self._data_access_seq(), run_id,
                                        own=self._step_capture)
             ttoken = STEP_TOUCHED.set(touched)
+
+            def _label_so_far() -> set[str]:
+                from ..kerneld.releases import attributed_reads
+                lab = set(self._ts.control)
+                for t in self._module_reads(tracked, touched).values():
+                    lab |= t
+                reads, _ = attributed_reads(self.store, after_seq=self._frame.seq if self._frame else 0,
+                                            run_ids=run_family(run_id), own_seqs=self._step_capture)
+                return lab | set(reads)
+            ptoken = _PARENT_LABEL.set(_label_so_far)
             try:
                 updates = fn(tracked, node.params, mctx)
                 # copied WHILE the engine still records: returning the TrackedState (or a structure holding it) is a
@@ -1115,6 +1137,7 @@ class Engine:
             except Exception as e:
                 raise ModuleError(f"{type(e).__name__}: {e}", mctx.spent, mctx.llm_calls) from e
             finally:
+                _PARENT_LABEL.reset(ptoken)
                 STEP_TOUCHED.reset(ttoken)
                 self._frame = outer
                 mctx._touched = None
@@ -1128,12 +1151,20 @@ class Engine:
         """What a module read so far, as (source -> targets): each labelled state key it read (every key after a bulk
         read), plus the run label for the store/Kernel, the workspace label for the sandbox and the `_private*` keys'
         labels for the secrets."""
-        keys = set(dict.keys(tracked)) if tracked.bulk else set(tracked.reads)
+        # every key READ: a bulk read recorded every key present at that moment (a key popped before it stays in);
+        # after a bulk read also every key still present (coarser, never finer)
+        keys = set(tracked.reads) | (set(dict.keys(tracked)) if tracked.bulk else set())
         out = {k: self._ts.labels[k] for k in sorted(keys) if self._ts.labels.get(k)}
         if touched & _STORE_TOUCH and self._ts.run:
             out["_store"] = self._ts.run
         if SANDBOX_SURFACE in touched and self._ts.workspace:
             out["_workspace"] = self._ts.workspace
+        if "archive_taint" in touched:
+            arch: set[str] = set()
+            for t in self.archive_taint.values():
+                arch |= t
+            if arch:
+                out["_archive"] = frozenset(arch)
         if SECRETS_SURFACE in touched:
             sec = self._ts.label_of(k for k in dict.keys(tracked) if str(k).startswith("_private"))
             if sec:
@@ -1172,9 +1203,11 @@ class Engine:
         rel = self.releases or Releases.live(self.store)
         self._release_control(f.node_id)
         for src, targets in self._module_reads(f.tracked, f.touched).items():
-            value = dict.get(f.tracked, src) if src in dict.keys(f.tracked) else None
-            alphabet = self._ts.alphabets.get(src) or (alphabet_of(value) if src in dict.keys(f.tracked)
-                                                       else "continuous")
+            # the value as the module READ it (it may have overwritten the key since): a mutable value, a surface or
+            # a key never read as such is `continuous`
+            first = f.tracked.first.get(src, MUTABLE)
+            value = None if first is MUTABLE else first
+            alphabet = self._ts.alphabets.get(src) or (alphabet_of(first) if first is not MUTABLE else "continuous")
             rel.emit(value, targets=targets, channel="prompt", alphabet=alphabet,
                      note=note_code("module_llm", f.node_id, src), key=getattr(self, "_run_id", ""))
         reads, _ = attributed_reads(self.store, after_seq=f.seq, run_ids=run_family(f.run_id), own_seqs=f.own)

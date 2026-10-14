@@ -176,9 +176,12 @@ def embargo_labelled(doc: dict[str, Any], *, control: bool) -> dict[str, Any]:
                              else EMBARGOED) for k, v in output.items()}
     if out.get("error") is not None:
         out["error"] = EMBARGOED
-    if control:
+    if control:  # which node ran, and anything naming it, tells which way the decision went
         out["node_id"] = EMBARGOED
         out["input"] = EMBARGOED
+        out["output"] = EMBARGOED  # its output KEYS name the branch too
+        if out.get("provenance") is not None:
+            out["provenance"] = EMBARGOED
     return out
 
 

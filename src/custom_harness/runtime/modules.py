@@ -119,8 +119,9 @@ class ModuleContext:
 
 
 # ModuleContext surfaces whose use the engine records for the step's taint label (runtime/taint.py). `_store` and
-# `kernel` both reach the whole store; `sandbox` the workspace; `secrets` the run's private values.
-_RECORDED = frozenset({"store", "_store", "kernel", "sandbox", "secrets"})
+# `kernel` both reach the whole store; `sandbox` the workspace; `secrets` the run's private values; `archive_taint`
+# the digests of values archived from (possibly target-derived) prompts.
+_RECORDED = frozenset({"store", "_store", "kernel", "sandbox", "secrets", "archive_taint"})
 
 
 def _cost():

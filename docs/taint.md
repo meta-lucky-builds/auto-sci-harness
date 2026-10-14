@@ -7,7 +7,8 @@ target-derived, and what it does not see.
 
 Code: `src/custom_harness/runtime/taint.py` (labels, `TrackedState`, `step_labels`), `runtime/engine.py` (recording,
 persistence, release sites), `kerneld/releases.py` (`attributed_reads`, `run_targets`), `evolve/export.py` and
-`evolve/evaluate.py` (the evolver's views). Tests: `tests/test_taint_flow.py`.
+`evolve/evaluate.py` (the evolver's views), `store/evidence.py` (ledger append observers). Tests: `tests/test_taint_flow.py`,
+`tests/test_redteam_taint.py`, `tests/test_redteam_taint2.py`, `tests/test_recall.py`.
 
 ## What was wrong (reproduced on c9823b8; each reproduction failed there)
 
@@ -33,6 +34,21 @@ persistence, release sites), `kerneld/releases.py` (`attributed_reads`, `run_tar
 | F9 | in-place REORDERING of a dict's keys (prompts render insertion order; the fingerprint sorted keys) | fingerprints are order-sensitive |
 | F10 | a large int (e.g. 750000) released as `count` | `alphabet_of`: an int is `count` only in `[0, KernelConfig.count_alphabet)`, else `continuous` |
 | F11 | a module writing into the workspace by PATH (not through `ctx.sandbox`) | a module/map step whose workspace snapshot differs from the previous one adds its label to the workspace label |
+
+### Red-team round 2 (against a8dd56f; `tests/test_redteam_taint3.py`, and the builder's `test_redteam_taint2.py`)
+
+| | laundering path that got through | fix |
+|---|---|---|
+| H1 | `state.pop(k)` then a bulk read (`len(state)`, `.items()`): the label used the keys LEFT after the module ran | the keys READ (a bulk read records every key present at that moment) |
+| H2 | an in-place change inside a TUPLE value (`state["pair"][0].append(x)`): tuples were not fingerprinted | tuples are fingerprinted |
+| H3 | an error edge whose key merely CONTAINS `_last_error` (`retry_last_error`): `_next` follows it after an error, `_route` did not count the error as consulted | `_route` uses `_next`'s substring rule |
+| H4 | an early `MapError` ("3 items exceed max_items=2") returned before the items' label was recorded | the items' label is recorded first |
+| H5 | a module reads a continuous value, overwrites the key with a bit, then calls its model: released as `verdict_bit` | the alphabet of the value as first READ (`TrackedState.first`); mutable values `continuous` |
+| H6 | the evolution score's dev term read `best.dev_score` / `baseline_dev` by name, labels ignored: a continuous function of a held-out value reached the proposer | evolve split: the dev term is withheld (0.0) when a key it reads is labelled (`evaluate.dev_withheld`; fail closed for runs without labels that read a private file). Owner decision noted below |
+| H7 | the export kept a control-tainted step's output KEY names (`path_hi` vs `path_lo`) and provenance | the whole output and the provenance are withheld for such a step (kind, cost and timing stay: stated side channels) |
+| H8 | `ctx.archive_taint` (digests of target-derived values truncated in prompts) was not a recorded surface | it is (`_archive` source: the union of the archived prompts' targets) |
+| H9 | a nested `Engine.run` inside a module step (own backend) rendered the outer value as an unlabelled `input` | a run started inside a module step labels its `input` with that step's label so far (`_PARENT_LABEL`) |
+| (gen.) | generalised from the failure-signature fix: the evolver's DIAGNOSIS (`propose.diagnose` trace excerpts and the first-divergence signatures, `diagnosis.py`) quoted raw step errors, routes and node ids, labels ignored | both read `diagnosis.labelled_trace`: labelled steps keep output key names only, errors/routes withheld, control-tainted steps lose node id and output (`tests/test_taint_views.py`) |
 
 ### An existing test that encoded a leak (recall)
 
@@ -106,6 +122,8 @@ this change, or malformed) restores **fail closed**: every key carries every tar
 | pending tainted routing decisions | at the next of the above (`control:<decider>:<renderer>`) |
 | evidence export (evolver) | labelled trace steps are WITHHELD (outputs, error; node id and node spec too if the step ran under a tainted decision); the run's end detail is withheld once any step is labelled. Certificate labels stay (released as before, `export.run:verdict`). Steps of runs without stored labels: fail closed by time (labelled if an attributed read happened at or before the step ended) |
 | failure signatures (evolver) | a labelled step contributes `<node>: <embargoed>` only |
+| diagnosis (evolver: trace excerpts, first-divergence signatures) | `labelled_trace`: as the export |
+| evolution score dev term (evolve split) | withheld (0.0) when a key it reads is labelled |
 | run-level verdict releases (export, evolution score, gate decision, branch bits) | on `run_targets(run)` / per-run `attributed_reads`, unioned with the run's persisted labels (`persisted_run_label`): reads naming no run, and reads a step made itself naming another run, now count |
 
 `alphabet_of(value)`: `verdict_bit` for booleans, None and certificate labels; `count` only for an int in
@@ -140,8 +158,10 @@ would let recall serve more, which is an owner decision, not part of this change
   `ctx.sandbox`) does not get the workspace label (writing by path is covered). `TrackedState` records what honest
   code reads; hostile code can bypass it (`dict.__getitem__(state, k)`). Modules are trusted, human-written registry
   code (engine docstring).
-- **Reads served by kerneld** (another process) are not seen by the engine's ledger observer: they are attributed by
-  the run id they name (a kerneld read naming another known run made inside this run's step is not attributed).
+- **Reads the engine's ledger observer cannot see**: served by kerneld (another process), or made on a worker thread
+  that does not copy the step's context (e.g. a `ThreadPoolExecutor` inside a module). They are attributed by the run
+  id they name: naming this run, no run or an unknown run counts; naming another known run does not
+  (`test_redteam_taint2.py::test_G1_worker_thread_read_naming_another_known_run`, a strict xfail).
 - **Cross-run flows through the store**: a module reading another run's trace/evidence, memory entries written by
   earlier runs. The store-access rule adds THIS run's label only. Memory writes are not a release site here.
 - **Nested runs on another thread**: a run started inside a module step on a thread that does not copy the context is
@@ -156,4 +176,37 @@ would let recall serve more, which is an owner decision, not part of this change
 
 ## Yield cost (measured)
 
-See "Measured yield cost" below (filled from `scripts/taint_yield.py` runs).
+`scripts/taint_yield.py` runs the three scripted research runs (mock LLMs, no network: `research_v1.yaml` one
+family, `research_v1.yaml` two-family replication, `research_v2.yaml` packed) on a fresh store each and counts every
+release. One run per scenario per commit (deterministic scripted runs; no confidence interval applies).
+
+| scenario | c9823b8 (before) | a8dd56f (after round 1) | difference |
+|---|---|---|---|
+| v1_scripted | 3 releases, all `prompt/verdict_bit` (`replicate:replication_brief.{claim,idea,profile}`) | 4 `prompt/verdict_bit`: the same 3 + `control:certify:replicate` | +1 verdict_bit |
+| v1_two_family_replication | 3 (same) | 4 (same) | +1 verdict_bit |
+| v2_packed | 3 (same) | 4 (same) | +1 verdict_bit |
+
+The extra release is the routing decision after `certify` (whether the replication runs), which depends on the
+held-out certificate: an implicit flow the old engine did not count. No `continuous` release appears, so no target
+becomes adaptively exposed; K4's transcript bound per claim grows by a factor of 2 (one more verdict bit) for the
+single target family (`data@.../test`, family size 1: 3 -> 4 releases in the family). Certificate labels are
+unchanged (CERTIFIED-INTERNAL for both certificates in all three scenarios).
+Logs: before `7f9fcb5e.../scratchpad/logs/02_yield_before.log` + `yield_before_c9823b8.json`; after
+`f4d503e4.../scratchpad/w2t/yield_after_a8dd56f.log` + `.json`.
+
+After the round-2 fixes (the commit after a8dd56f): NOT MEASURED (owner instruction: no runs in that round). The
+round-2 rules can only add releases or withhold more (H5 can turn a `verdict_bit`/`count` module-call release into
+`continuous`; H6 can withhold a dev term), so the numbers above are a lower bound on the cost (inferred, not run).
+`scripts/taint_yield.py` now also reports which keys end labelled and whether the dev term would be withheld.
+
+## Open (owner decisions, verification still owed)
+
+- **H6 dev term**: withholding it (0.0) when `best`/`baseline_dev`/`task` is labelled is the fail-closed choice made
+  here; releasing it instead would put a `continuous` value in front of the evolver, which invariant 18 forbids. If
+  research runs end with `best` labelled, evolve-split scores lose their dev term: whether they do is NOT MEASURED.
+- **H7**: a control-tainted exported step still shows its `kind`, cost and timing (stated side channels).
+- **Performance**: whole-state fingerprints and per-value deep copies run around every module/map step. Not
+  profiled. `tests/test_infra.py::test_docker_outage_mid_campaign_changes_no_decision` ran > 30 min at a8dd56f under
+  machine contention (it already exceeded 4 min at bd1acbb); whether that is a regression against c9823b8 is NOT
+  MEASURED.
+- **Round-2 fixes are not test-verified yet** (see the w2-taint RESUME for the exact runs owed).

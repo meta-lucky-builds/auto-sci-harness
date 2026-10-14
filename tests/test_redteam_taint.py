@@ -161,8 +161,10 @@ def _nested_engine(state, params, ctx):
 def test_nested_engine_using_ctx_backends_is_released_by_the_outer_frame(store):
     _res, llm = _run(store, {"held": HELD, "copy": COPY, "nest": _mod("rt.nested_engine")}, ["held", "copy", "nest"])
     assert "X=0.75" in _prompts(llm)[0]
-    # the copied key it read, plus the store it touched (ctx._store, to start the nested engine)
-    assert sorted(n for _a, n in _prompt_releases(store)) == ["module_llm:nest:_store", "module_llm:nest:copied"]
+    # the copied key it read, plus the store it touched (ctx._store, to start the nested engine); and (since the H9
+    # fix) the nested run's own prompt, whose input carries the outer step's label
+    assert sorted(n for _a, n in _prompt_releases(store)) == ["module_llm:nest:_store", "module_llm:nest:copied",
+                                                              "prompt:a:input.x"]
 
 
 # ----------------------------------------------------------------------------------------- tool node / sandbox

@@ -62,6 +62,31 @@ _VOLATILE_KEYS = frozenset({"hash", "claim_hash", "replica_claim_hash", "prereg_
 _ID_LIKE = re.compile(r"^(?:[a-z]+_[0-9a-f]{16}|[0-9a-f]{16,128})\Z")
 
 
+def labelled_trace(store: EvidenceStore, run_id: str) -> list[TraceStep]:
+    """The run's trace as the evolver may see it (runtime/taint.py step labels, as the export applies them): a step
+    whose output carries target labels keeps only its output KEY names (values withheld, `route` and `run_error`
+    withheld) and its error is withheld; a step that ran because of a target-dependent routing decision also has its
+    node id and its whole output withheld. Fail closed by time for runs without stored labels (`step_labels`)."""
+    from ..runtime.taint import step_labels
+    from .export import EMBARGOED
+    labels = step_labels(store, run_id)
+    out: list[TraceStep] = []
+    for st in store.trace(run_id):
+        lab = labels.get(st.index)
+        if lab is None or not lab.tainted:
+            out.append(st)
+            continue
+        upd: dict[str, Any] = {"error": EMBARGOED if st.error is not None else None}
+        if lab.control:
+            upd.update(node_id=EMBARGOED, output={})
+        elif isinstance(st.output, dict):
+            upd["output"] = {k: EMBARGOED for k in st.output}
+        else:
+            upd["output"] = {}
+        out.append(st.model_copy(update=upd))
+    return out
+
+
 def _error_sig(step: TraceStep) -> str | None:
     if step.error:
         return _signature(step.error.splitlines()[0] if step.error.strip() else "")

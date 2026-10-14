@@ -81,9 +81,21 @@ def _run(name: str, spec_file: str, make, tmp: Path) -> dict:
     for t in targets:
         fam = related_targets(kernel.vault, t)
         bound[t] = {"releases_in_family": len(kernel.releases(t)), "family_size": len(fam)}
+    labelled: list[str] = []
+    dev_withheld = None
+    try:  # the final labels (w2-taint and later; absent on older commits)
+        from custom_harness.evolve.evaluate import dev_withheld as _dw
+        dev_withheld = _dw(store, res.run_id)
+    except ImportError:
+        pass
+    last = [st for st in store.trace(res.run_id) if st.checkpoint_ref][-1:]
+    if last:
+        doc = store.blobs.get_json(last[0].checkpoint_ref).get("taint") or {}
+        labelled = sorted((doc.get("labels") or {}).keys())
     store.close()
     return {"status": res.status.value, "releases_total": len(rel), "by_channel_alphabet": dict(sorted(by.items())),
-            "by_note": dict(sorted(notes.items())), "claims": claims, "targets": bound}
+            "by_note": dict(sorted(notes.items())), "claims": claims, "targets": bound,
+            "final_labelled_keys": labelled, "dev_term_withheld": dev_withheld}
 
 
 def main(out: str) -> None:

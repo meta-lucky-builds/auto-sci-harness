@@ -35,8 +35,8 @@ def fingerprint(value: Any) -> str | None:
     """Content fingerprint of a MUTABLE value (None for immutable scalars, which cannot change in place). ORDER
     SENSITIVE (no sort_keys): prompts render dicts in insertion order (template.render), so an in-place reordering is
     a change of what an agent can see."""
-    if value is None or isinstance(value, (str, int, float, bool, bytes, tuple, frozenset)):
-        return None
+    if value is None or isinstance(value, (str, int, float, bool, bytes, frozenset)):
+        return None  # a tuple IS fingerprinted: it can hold mutable values (a list inside changes in place)
     try:
         text = json.dumps(value, default=repr, ensure_ascii=False)
     except (TypeError, ValueError):  # e.g. a cycle: the content cannot be compared, so it counts as changed
@@ -65,6 +65,9 @@ def changed_in_place(state: dict[str, Any], before: Mapping[str, str]) -> set[st
     return out
 
 
+MUTABLE = object()  # TrackedState.first: the key held a mutable value (its alphabet is `continuous`)
+
+
 class TrackedState(dict):
     """A module's view of run state: a shallow copy of it whose reads and writes the engine records (in-place
     mutations are found by `changed_in_place` over the whole state around the step). Overriding `__iter__` also
@@ -79,10 +82,17 @@ class TrackedState(dict):
         self.bulk = False
         self.written: set[str] = set()
         self.deleted: set[str] = set()
+        # the value each key had when the module FIRST read it (immutable scalars only; MUTABLE otherwise): what a
+        # release of that read describes, even if the module overwrites the key before its model call
+        self.first: dict[str, Any] = {}
 
     # ------------------------------------------------------------ recording
     def _read(self, key: Any) -> None:
-        self.reads.add(str(key))
+        k = str(key)
+        self.reads.add(k)
+        if k not in self.first and dict.__contains__(self, k):
+            v = dict.__getitem__(self, k)
+            self.first[k] = v if v is None or isinstance(v, (str, int, float, bool)) else MUTABLE
 
     def _read_all(self) -> None:
         self.bulk = True
