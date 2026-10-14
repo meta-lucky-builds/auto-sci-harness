@@ -51,6 +51,7 @@ from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
 from ..runtime import register
 from ..runtime.modules import ModuleContext
+from ..truth_layout import truth_file
 from ..verify import metrics as M
 from ..verify.leak import label_windows, leak_audit
 from ..verify.stats import paired_example_interval
@@ -97,7 +98,7 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
     vault = ctx.kernel().vault
     train = (task_dir / "public" / task.train_file).read_bytes()
     test_x = (task_dir / "public" / task.test_features_file).read_bytes()
-    test_y = (task_dir / "private" / task.test_labels_file).read_bytes()
+    test_y = truth_file(task_dir, task.test_labels_file).read_bytes()  # outside agent-readable roots (truth_layout)
     baseline = (task_dir / task.baseline_file).read_bytes()
 
     def digest(*parts: bytes) -> str:  # fixed-length per-file digests: no separator ambiguity
@@ -105,7 +106,7 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
 
     ids = task.dataset_ids(digest(train, test_x, test_y), digest(train, test_x, test_y, baseline))
     vault.register_dataset(ids["train"], DatasetRole.DEV, public={task.train_file: train}, private={})
-    canary_path = task_dir / "private" / task.canary_file
+    canary_path = truth_file(task_dir, task.canary_file)
     canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.exists() else None
     vault.register_dataset(ids["test"], DatasetRole.TEST, public={task.test_features_file: test_x},
                            private={task.test_labels_file: test_y}, canary=canary)

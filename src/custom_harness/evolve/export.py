@@ -55,6 +55,7 @@ from typing import Any
 from ..kerneld.releases import Releases, run_targets
 from ..runtime.taint import step_labels
 from ..store import EvidenceStore
+from ..truth_layout import legacy_truth_dir, truth_dir, truth_files
 from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
 from .evaluate import RunOutcome, SuiteTask
 
@@ -344,16 +345,17 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
     paths: list[str] = []
     found: list[str] = [c for c in canaries if c]
     for t in tasks:
-        pdir = Path(t.task_dir) / "private"
-        if not pdir.is_dir():
+        # truth_layout: the truth dir (outside agent-readable roots) and the legacy in-task location; truth_files
+        # refuses an unmigrated suite task instead of silently fingerprinting nothing
+        files = truth_files(t.task_dir)
+        if not files:
             continue
-        for variant in {str(pdir), pdir.as_posix(), str(pdir.resolve()), pdir.resolve().as_posix()}:
-            paths.append(variant.replace("\\", "/").lower())
-        for p in sorted(pdir.rglob("*")):
-            if not p.is_file():
-                continue
+        for pdir in {truth_dir(t.task_dir), legacy_truth_dir(t.task_dir)}:
+            for variant in {str(pdir), pdir.as_posix(), str(pdir.resolve()), pdir.resolve().as_posix()}:
+                paths.append(variant.replace("\\", "/").lower())
+        for rel, p in files.items():
             data = p.read_bytes()
-            hashes[hashlib.sha256(data).hexdigest()] = f"{t.task_id}/private/{p.relative_to(pdir).as_posix()}"
+            hashes[hashlib.sha256(data).hexdigest()] = f"{t.task_id}/private/{rel}"
             if len(data) > _MAX_PRIVATE_SCAN:
                 continue
             text = data.decode("utf-8", errors="ignore")
