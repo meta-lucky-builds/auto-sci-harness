@@ -90,3 +90,19 @@ with the original numbers.
   "$0.0000" for subscription runs (`kernel/checklist.py fill`). Both are the same "unknown cost shown as 0" class;
   neither is edited here (shared file owned by another workstream; Kernel).
 * Audit arm runs are created without a per-run bundle (invariant 9); axis F reports such runs as offenders.
+
+## Review fixes (2026-10-14, after a read-only review of this branch)
+
+* Axis B: every (accepted edit, held-out target) OOD value is listed (two edits on one family no longer
+  overwrite each other); a negative one is a loss. Accepted edits are still matched to generations by parent
+  hash: two campaigns from one parent in one store are not told apart (stated in the metric note).
+* Axis F: the run-bundle records, the bundle zips (`runbundle:<manifest sha256>:<path>`), the certificates and
+  their ledgered bundle entries are now sources, so a deleted zip or ledger entry fails `check_local`.
+* Axis H: a museum log that names no commit, or another commit than this checkout, makes the catch rate fail as
+  stale. (The integrator logs used above name no commit, so on the real store the catch rate is now "fail: stale".)
+* Axis G: a call's USD counts as known only when it is the single real API call of a step reporting USD > 0.
+  Definition, stated: cost per certified live claim = the spend of ALL runs in the store / the live certified claims.
+* `chh reproduce` compares the re-derived headline numbers with the bundled certificate's and fails on any
+  difference (`original_headline` in the output).
+* Audit checklist: a missing human step leaves `human_in_the_loop` unanswered (blocks); `not a loop:` needs a reason.
+* Loop labels: the replica checklist's label is cross-checked too.
