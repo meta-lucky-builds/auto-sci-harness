@@ -55,7 +55,7 @@ def test_execution_rank_is_the_default_and_the_tournament_is_opt_in():
     out2 = execution_rank(_rank_state(), {"tournament": {"rounds": 3}}, ctx_off)
     assert out2["ranking"]["mode"] == "ablated" and "btl_tournament" in out2["ranking"]["method"]
     assert [h["id"] for h in out2["queue"]] == ["h0", "h1", "h2"]
-    with pytest.raises(ValueError, match="params.tournament"):
+    with pytest.raises(ValueError, match=r"params.tournament"):
         execution_rank(_rank_state(), {"tournament": 3}, ctx)
 
 
