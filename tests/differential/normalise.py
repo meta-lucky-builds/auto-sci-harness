@@ -132,14 +132,14 @@ def r_derived_hashes(scope: list[Rec]) -> list[Rec]:
     """Claim hashes cover resolve_by, certificate hashes cover issued_at (both wall clock), so both differ per run.
     Every hex string (>= 8 chars) that is a prefix of a claim or certificate hash recorded in this scope is renamed
     `<h#k:len>` by first appearance; all other hashes (data, artifact, adapter content) are left alone."""
-    known: list[str] = []
+    known: dict[str, list[str]] = {}  # 8-char prefix -> full hashes (recorded order)
     for r in scope:
         res: Rec = r["result"] if isinstance(r.get("result"), dict) else {}
         body: Rec = res["body"] if isinstance(res.get("body"), dict) else {}
         kwargs: Rec = r["kwargs"] if isinstance(r.get("kwargs"), dict) else {}
         for v in (res.get("claim_hash"), body.get("claim_hash"), kwargs.get("cert_hash")):
-            if isinstance(v, str) and len(v) == 64 and v not in known:
-                known.append(v)
+            if isinstance(v, str) and len(v) == 64 and v not in known.get(v[:8], []):
+                known.setdefault(v[:8], []).append(v)
     if not known:
         return scope
     names: dict[str, str] = {}
@@ -147,7 +147,7 @@ def r_derived_hashes(scope: list[Rec]) -> list[Rec]:
     def sub(s: str) -> str:
         def one(m: re.Match[str]) -> str:
             t = m.group(0)
-            for full in known:
+            for full in known.get(t[:8], []):
                 if full.startswith(t):
                     if full not in names:
                         names[full] = f"h#{len(names) + 1}"
@@ -184,8 +184,19 @@ RULES: list[tuple[str, Callable[[list[Rec]], list[Rec]]]] = [
 ]
 
 
-def normalise(recs: list[Rec], rules: list[str],
-              flaky: set[tuple[str, int, str]] | None = None) -> dict[str, list[Rec]]:
+Flaky = tuple[set[tuple[str, int, str]], set[str]]  # (cells, whole scopes)
+
+
+def rules_for(*headers: Rec, mask_adapter_hash: bool = True) -> list[str]:
+    """All rules, except `evidence_ids` when every side recorded with deterministic ids (kernel_recorder): then the ids
+    are a deterministic function of (scope, n), and renaming them would hide a change in how many are made."""
+    names = [n for n, _ in RULES]
+    if headers and all(h.get("deterministic_ids") is True for h in headers):
+        names.remove("evidence_ids")
+    return names + (["adapter_hash"] if mask_adapter_hash else [])
+
+
+def normalise(recs: list[Rec], rules: list[str], flaky: Flaky | None = None) -> dict[str, list[Rec]]:
     table = dict([*RULES, ("adapter_hash", r_adapter_hash)])
     out: dict[str, list[Rec]] = {}
     for scope, rs in by_scope(json.loads(json.dumps(recs))).items():
@@ -193,9 +204,13 @@ def normalise(recs: list[Rec], rules: list[str],
             rs = table[name](rs)
         out[scope] = rs
     if flaky:
-        for scope, i, path in flaky:
+        cells, scopes = flaky
+        for scope, i, path in cells:
             if scope in out and i < len(out[scope]):
                 _mask_path(out[scope][i], path)
+        for scope in scopes:  # structurally nondeterministic: only the test outcome is compared
+            if scope in out:
+                out[scope] = [r for r in out[scope] if r.get("t") != "call"]
     return out
 
 
@@ -263,25 +278,32 @@ def _label(rs: dict[str, list[Rec]], s: str, i: int) -> str:
     return f"{r.get('t')}:{r.get('api', r.get('when', ''))}"
 
 
-def load_flaky(paths: list[Path]) -> set[tuple[str, int, str]]:
-    out: set[tuple[str, int, str]] = set()
+def load_flaky(paths: list[Path]) -> Flaky:
+    cells: set[tuple[str, int, str]] = set()
+    scopes: set[str] = set()
     for p in paths:
-        for c in json.loads(p.read_text(encoding="utf-8"))["cells"]:
-            out.add((c["scope"], c["i"], c["path"]))
-    return out
+        doc = json.loads(p.read_text(encoding="utf-8"))
+        for c in doc["cells"]:
+            cells.add((c["scope"], c["i"], c["path"]))
+        scopes.update(doc.get("scopes", []))
+    return cells, scopes
 
 
 def diff_files(old_p: Path, new_p: Path, *, raw: bool = False, intersect: bool = False, limit: int = 0,
                mask_adapter_hash: bool = True, flaky_files: list[Path] | None = None) -> int:
     ho, ro = load(old_p)
     hn, rn = load(new_p)
-    rules = [] if raw else [n for n, _ in RULES] + (["adapter_hash"] if mask_adapter_hash else [])
+    rules = [] if raw else rules_for(ho, hn, mask_adapter_hash=mask_adapter_hash)
     flaky = None if raw else load_flaky(flaky_files or [])
     print(f"OLD {old_p}: {len(ro)} records, header {_short({k: v for k, v in ho.items() if k != 't'}, 400)}")
     print(f"NEW {new_p}: {len(rn)} records, header {_short({k: v for k, v in hn.items() if k != 't'}, 400)}")
-    print(f"rules applied to both sides: {rules or 'NONE (raw)'}; flaky cells masked: {len(flaky or ())}")
-    for s, i, path in sorted(flaky or ()):
-        print(f"  flaky (masked): {s} #{i} {path}")
+    cells, fscopes = flaky or (set(), set())
+    print(f"rules applied to both sides: {rules or 'NONE (raw)'}; flaky cells masked: {len(cells)}; flaky scopes "
+          f"(Kernel calls not compared, test outcome still compared): {len(fscopes)}")
+    for s, i, path in sorted(cells):
+        print(f"  flaky cell (masked): {s} #{i} {path}")
+    for s in sorted(fscopes):
+        print(f"  flaky scope (calls not compared): {s}")
     a, b = normalise(ro, rules, flaky), normalise(rn, rules, flaky)
     n = 0
     scopes: set[str] = set()
@@ -297,12 +319,14 @@ def diff_files(old_p: Path, new_p: Path, *, raw: bool = False, intersect: bool =
     return 1 if n else 0
 
 
-def explain(run1: Path, run2: Path, flaky_out: Path | None = None) -> int:
+def explain(run1: Path, run2: Path, flaky_out: Path | None = None, intersect: bool = False) -> int:
     """Prove each rule: apply rules cumulatively to two raw runs of the same commit; report what each removes."""
-    _, r1 = load(run1)
-    _, r2 = load(run2)
+    h1, r1 = load(run1)
+    h2, r2 = load(run2)
+    names = rules_for(h1, h2, mask_adapter_hash=False)
+    print(f"deterministic ids: run1 {h1.get('deterministic_ids')}, run2 {h2.get('deterministic_ids')}; rules: {names}")
     applied: list[str] = []
-    prev = list(diff_scopes(normalise(r1, []), normalise(r2, [])))
+    prev = list(diff_scopes(normalise(r1, []), normalise(r2, []), intersect))
     print(f"raw differences between the two runs: {len(prev)} (in {len({d[0] for d in prev})} scopes)")
     by_path: dict[str, int] = {}
     for d in prev:
@@ -311,9 +335,9 @@ def explain(run1: Path, run2: Path, flaky_out: Path | None = None) -> int:
     for k, v in sorted(by_path.items(), key=lambda kv: -kv[1])[:40]:
         print(f"   raw diff path {k}: {v}")
     unproven = []
-    for name, _ in RULES:
+    for name in names:
         applied.append(name)
-        cur = list(diff_scopes(normalise(r1, applied), normalise(r2, applied)))
+        cur = list(diff_scopes(normalise(r1, applied), normalise(r2, applied), intersect))
         removed = len(prev) - len(cur)
         cur_keys = {(d[0], d[1], d[2]) for d in cur}
         example = next((d for d in prev if (d[0], d[1], d[2]) not in cur_keys), None)
@@ -329,7 +353,12 @@ def explain(run1: Path, run2: Path, flaky_out: Path | None = None) -> int:
     for s, i, path, x, y in prev:
         print(f"RESIDUAL {s} #{i} {path}\n   run1: {_short(x)}\n   run2: {_short(y)}")
     if flaky_out is not None:
-        cells = [{"scope": s, "i": i, "path": p} for s, i, p, _, _ in prev if i >= 0 and not p.startswith("<")]
-        flaky_out.write_text(json.dumps({"from": [str(run1), str(run2)], "cells": cells}, indent=1), encoding="utf-8")
-        print(f"wrote {len(cells)} flaky cell(s) to {flaky_out}")
+        # a scope whose call SEQUENCE differs (a call missing, or another API at the same index) cannot be masked
+        # cell by cell: the whole scope's calls are excluded (its test outcome is still compared)
+        structural = sorted({s for s, i, p, x, y in prev if i < 0 or p.startswith("<") or p == "/api"
+                             or "<absent>" in (x, y)})
+        cells = [{"scope": s, "i": i, "path": p} for s, i, p, _, _ in prev if s not in structural]
+        flaky_out.write_text(json.dumps({"from": [str(run1), str(run2)], "cells": cells, "scopes": structural},
+                                        indent=1), encoding="utf-8")
+        print(f"wrote {len(cells)} flaky cell(s) and {len(structural)} flaky scope(s) to {flaky_out}")
     return 0

@@ -96,3 +96,27 @@ def test_flaky_cells_mask_exactly_one_cell(tmp_path: Path) -> None:
     rec["result"]["checks"]["K5"]["reasons"] = ["changed"]
     c = _write(tmp_path, "c.jsonl", [rec])
     assert N.diff_files(a, c, flaky_files=[flaky]) == 1  # a change outside the flaky cell is still found
+
+
+def test_a_structurally_flaky_scope_keeps_only_its_test_outcome(tmp_path: Path) -> None:
+    outcome = {"t": "test", "scope": "tests/x.py::t", "when": "call", "outcome": "passed"}
+    a = _write(tmp_path, "a.jsonl", [_call(0), outcome])
+    b = _write(tmp_path, "b.jsonl", [_call(0), _call(1), outcome])  # one more Kernel call in run 2
+    flaky = tmp_path / "flaky.json"
+    N.explain(a, b, flaky)
+    assert json.loads(flaky.read_text(encoding="utf-8"))["scopes"] == ["tests/x.py::t"]
+    assert N.diff_files(a, b, flaky_files=[flaky]) == 0
+    failed = _write(tmp_path, "c.jsonl", [_call(0), {**outcome, "outcome": "failed"}])
+    assert N.diff_files(a, failed, flaky_files=[flaky]) == 1  # the outcome is still compared
+
+
+def test_evidence_ids_are_not_renamed_when_both_sides_used_deterministic_ids(tmp_path: Path) -> None:
+    def write(name: str, ev: tuple[str, ...]) -> Path:
+        p = tmp_path / name
+        p.write_text("\n".join(json.dumps(r) for r in [{"t": "header", "deterministic_ids": True}, _call(0, ev=ev)]),
+                     encoding="utf-8")
+        return p
+    a = write("a.jsonl", ("ev_1111111111111111", "ev_2222222222222222"))
+    b = write("b.jsonl", ("ev_3333333333333333", "ev_4444444444444444"))
+    assert N.rules_for({"deterministic_ids": True}, {"deterministic_ids": True})[0] != "evidence_ids"
+    assert N.diff_files(a, b) == 1  # deterministic ids that differ are a real difference

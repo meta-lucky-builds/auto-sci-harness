@@ -31,11 +31,13 @@ from pathlib import Path
 from typing import Any, TextIO
 
 ENV = "CHH_KERNEL_RECORD"
+RANDOM_IDS_ENV = "CHH_KERNEL_RECORD_RANDOM_IDS"  # "1": keep uuid4 record ids (default: deterministic, see below)
 
 _sink: TextIO | None = None
 _scope = "<none>"
 _counter: dict[str, int] = {}
 _installed = False
+_id_counter: dict[str, int] = {}
 
 
 def set_scope(scope: str) -> None:
@@ -133,6 +135,28 @@ def write_header(info: dict[str, Any]) -> None:
     _emit({"t": "header", **info})
 
 
+def deterministic_ids() -> bool:
+    """Replace `custom_harness.records.new_id` (`<prefix>_<uuid4 hex[:16]>`, used for run/evidence/claim record ids)
+    by `<prefix>_<sha256(scope|n)[:16]>`, n counting the ids made in the current scope (test or history). Measured on
+    a7fb608 (docs/kernel_differential.md): with uuid ids, which seed K3 replays (sampled from a hash of the evidence)
+    differs run to run, and with it K3 observations and, in tests that loop until a seed is sampled, the whole call
+    sequence. Fixed ids remove that nondeterminism at the source, identically for OLD and NEW. Ids stay unique:
+    scopes are unique and the counter only grows. Returns False (nothing patched) when RANDOM_IDS_ENV=1."""
+    if os.environ.get(RANDOM_IDS_ENV) == "1":
+        return False
+    import hashlib
+
+    from custom_harness import records
+
+    def new_id(prefix: str) -> str:
+        n = _id_counter.get(_scope, 0)
+        _id_counter[_scope] = n + 1
+        return f"{prefix}_{hashlib.sha256(f'{_scope}|{n}'.encode()).hexdigest()[:16]}"
+
+    records.new_id = new_id  # the Field default_factory lambdas look the name up in the module at call time
+    return True
+
+
 # ---------------------------------------------------------------------- pytest plugin hooks (active only with ENV set)
 def pytest_configure(config: Any) -> None:
     path = os.environ.get(ENV)
@@ -144,7 +168,7 @@ def pytest_configure(config: Any) -> None:
     config._kernel_record_file = f
     install(f)
     write_header({"mode": "suite", "custom_harness": str(Path(custom_harness.__file__).resolve()),
-                  "args": [str(a) for a in config.invocation_params.args]})
+                  "args": [str(a) for a in config.invocation_params.args], "deterministic_ids": deterministic_ids()})
 
 
 def pytest_unconfigure(config: Any) -> None:

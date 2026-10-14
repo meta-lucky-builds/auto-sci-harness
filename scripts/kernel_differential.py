@@ -80,7 +80,7 @@ def cmd_explain(a: argparse.Namespace) -> int:
     sys.path.insert(0, str(DIFFERENTIAL))
     import normalise
 
-    return normalise.explain(Path(a.run1), Path(a.run2), Path(a.flaky_out) if a.flaky_out else None)
+    return normalise.explain(Path(a.run1), Path(a.run2), Path(a.flaky_out) if a.flaky_out else None, a.intersect)
 
 
 def main() -> int:
@@ -107,6 +107,7 @@ def main() -> int:
     e = sub.add_parser("explain")
     e.add_argument("run1")
     e.add_argument("run2")
+    e.add_argument("--intersect", action="store_true", help="only scopes present in both runs")
     e.add_argument("--flaky-out", help="write the cells still differing after all rules (to pass to diff --flaky)")
     a = p.parse_args()
     return {"suite": cmd_suite, "histories": cmd_histories, "diff": cmd_diff, "explain": cmd_explain}[a.cmd](a)

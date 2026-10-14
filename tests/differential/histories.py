@@ -404,7 +404,8 @@ def main(out: Path, n: int, seed: int, head: str, only: list[str] | None = None)
     os.environ["CHH_ALLOW_UNISOLATED"] = "1"  # LocalSandbox runs the world's trusted stdlib programs (test mode)
     with open(out, "w", encoding="utf-8") as f:
         kernel_recorder.install(f)
-        kernel_recorder.write_header({"mode": "histories", "n": n, "seed": seed, "head": head, "kinds": kinds})
+        kernel_recorder.write_header({"mode": "histories", "n": n, "seed": seed, "head": head, "kinds": kinds,
+                                      "deterministic_ids": kernel_recorder.deterministic_ids()})
         for i in range(n):
             r = random.Random(f"{seed}:{i}")
             kind = kinds[i % len(kinds)]  # round-robin: every kind appears, parameters are random
