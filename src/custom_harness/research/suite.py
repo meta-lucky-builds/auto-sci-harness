@@ -4,8 +4,9 @@
 
 Synthetic families are generated on the host with the standard library. Real-dataset and repair tasks are
 generated INSIDE the sandbox image from scikit-learn's bundled copies (no network, nothing downloaded),
-so the host needs no ML libraries. Every task follows research/task.py: public/ train + test features,
-private/ test labels + a random canary, and a baseline obeying the solution CLI contract.
+so the host needs no ML libraries. Every task follows research/task.py: public/ train + test features, test labels
++ a canary in the task's truth dir (truth_layout.truth_dir: OUTSIDE every agent-readable root for a suite under
+<data>/suites), and a baseline obeying the solution CLI contract.
 
 Repair tasks (ScienceIDE-style "codebase repair" adapted to ML pipelines): the baseline is a deliberately
 defective pipeline; the defect is recorded in the task's `defect` note (NOT shown to the agent: it stays in
@@ -40,6 +41,13 @@ MINT_TRAIN_ROWS = 600  # UNCALIBRATED (owner decision, GOAL §13.8)
 # test set does not make trivial effects certifiable. NOT enforced here: the Kernel (K1) owns claim policy and has
 # been asked to read it (mailbox mint-to-kstats). Conservative: well above the ~0.005 minimum detectable effect.
 DELTA_FLOOR = 0.02  # UNCALIBRATED (owner decision, GOAL §13.8)
+# Held-out rows per synthetic task of a suite built with `heldout_rows=` (build_suite, `chh build-suite
+# --heldout-rows`; recorded in the rebuild manifest). The default suite (None) keeps the 70/30 split of SYNTHETIC.
+# PROPOSED value from w2-suite's PARTIAL real preflight (research.preflight, n_sims 200, n_dev 1050, baseline accuracy
+# 0.8, comparator-only-right rate 0.05, delta = DELTA_FLOOR = 0.02): a true effect of 0.04 (= 2 delta) certifies with
+# P = 0.75 at 4,000 and 0.88 at 5,000 held-out rows (4,500 NOT measured), so P >= 0.8 needs 4,000-5,000. Accuracy
+# tasks only (rings, xor, spirals); f1_macro/rmse/mae tasks were not modelled. UNCALIBRATED (owner decision, §13.8).
+PROPOSED_HELDOUT_ROWS = 4_500
 
 # ---------------------------------------------------------------- baselines (stdlib, solution CLI contract)
 _ARGS = '''import argparse, csv, math
@@ -162,10 +170,15 @@ def _csv(rows: list[list[str]]) -> bytes:
 
 def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Path:
     """Write one task. Test rows whose features also occur in the training file are dropped (de-duplication:
-    their label would be public). `canary`: share one between tasks that share data (default: a fresh one)."""
+    their label would be public). `canary`: share one between tasks that share data (default: a fresh one).
+    The labels and canary go to truth_layout.truth_dir(task dir), which refuses (TruthLayoutError) a location inside
+    an agent-readable root BEFORE anything is written."""
+    from ..truth_layout import truth_dir
+
     d = Path(root) / spec.task_id
+    truth = truth_dir(d)
     (d / "public").mkdir(parents=True, exist_ok=True)
-    (d / "private").mkdir(parents=True, exist_ok=True)
+    truth.mkdir(parents=True, exist_ok=True)
     ti = spec.header.index(spec.target)
     feat = [c for j, c in enumerate(spec.header) if j != ti]
 
@@ -176,9 +189,8 @@ def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Pa
     test = [r for r in spec.test if x(r) not in seen]
     (d / "public" / "train.csv").write_bytes(_csv([spec.header, *spec.train]))
     (d / "public" / "test_X.csv").write_bytes(_csv([feat, *[list(x(r)) for r in test]]))
-    (d / "private" / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in test]]))
-    (d / "private" / "canary.txt").write_text((canary or "CHH-CANARY-" + secrets.token_hex(16)) + "\n",
-                                              encoding="utf-8")
+    (truth / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in test]]))
+    (truth / "canary.txt").write_text((canary or "CHH-CANARY-" + secrets.token_hex(16)) + "\n", encoding="utf-8")
     (d / "baseline.py").write_text(spec.baseline, encoding="utf-8")
     (d / "task.yaml").write_text(yaml.safe_dump({
         "id": spec.task_id, "title": spec.title, "description": spec.description, "metric": spec.metric,
@@ -281,6 +293,16 @@ def _interactions_rows(f: random.Random, lab: random.Random, n: int) -> list[lis
     return rows
 
 
+def _noise_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
+    """A GENUINELY NULL family (GOAL §16.9): the label is a fair coin independent of the features, so every
+    predictor has expected accuracy exactly 1/2 and no claim of an effect over any baseline is true."""
+    rows = []
+    for _ in range(n):
+        y = lab.randrange(2)
+        rows.append([*[_f(f.gauss(0, 1)) for _ in range(5)], str(y)])
+    return rows
+
+
 @dataclass(frozen=True)
 class Family:
     rows: Rows
@@ -290,6 +312,9 @@ class Family:
     target: str
     header: list[str]
     baseline: str
+    # True: labels are independent of the features (no predictor beats another in expectation). Only such a family,
+    # when it is ALSO in the real task pool, may host null salts (salts/generate.null_salt; decision 2026-10-14).
+    null: bool = False
 
 
 FAMILIES: dict[str, Family] = {
@@ -314,41 +339,63 @@ FAMILIES: dict[str, Family] = {
                            "Predict `y` from six Gaussian features; one pairwise interaction and one non-linearity "
                            "matter. Lower MAE is better.", "mae", "y", [*[f"x{i}" for i in range(1, 7)], "y"],
                            _fill(MEAN, "y")),
+    # genuinely null (see _noise_rows). NOT in SYNTHETIC: a suite gets it only with build_suite(null_families=...)
+    # (owner decision: adding null tasks to the real pool, GOAL §13.8)
+    "noise": Family(_noise_rows, "Binary labels from five features",
+                    "Predict `label` (0/1) from five numeric features.", "accuracy", "label",
+                    ["f1", "f2", "f3", "f4", "f5", "label"], _fill(CENTROID, "label"), null=True),
 }
+NULL_FAMILIES = frozenset(f for f, fam in FAMILIES.items() if fam.null)
 
 
-def synthetic_task(family: str, variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+def synthetic_task(family: str, variant: int, n: int, key: bytes | None = None, *,
+                   heldout_rows: int | None = None) -> TaskSpecFiles:
     """Task `<family>-s<variant>` with n rows (70/30 split). `variant` only names the task: the data come from
-    `key` (None: fresh OS entropy, so the rows can never be regenerated from the code)."""
+    `key` (None: fresh OS entropy, so the rows can never be regenerated from the code).
+
+    `heldout_rows` (§16.2 "small train / large test", PROPOSED_HELDOUT_ROWS): the training file stays exactly what
+    the 70/30 split gives, and the test set is topped up to `heldout_rows` rows (before write_task's de-duplication)
+    with rows from two more independent keyed streams ("heldout/features", "heldout/labels") of the same generator.
+    None (default) leaves the task byte-identical to a suite built without the parameter."""
     fam, k = FAMILIES[family], _key(key)
     rows = fam.rows(stream(k, "features"), stream(k, "labels"), n)
     tr, te = _split(rows, stream(k, "split"))
+    if heldout_rows is not None:
+        if heldout_rows < 1:
+            raise ValueError("heldout_rows must be positive")
+        extra = heldout_rows - len(te)
+        if extra > 0:
+            te = te + fam.rows(stream(k, "heldout/features"), stream(k, "heldout/labels"), extra)
     return TaskSpecFiles(f"{family}-s{variant}", fam.title, fam.description, fam.metric, fam.target, fam.header,
                          tr, te, fam.baseline, family)
 
 
-def rings(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("rings", variant, n, key)
+def rings(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("rings", variant, n, key, **kw)
 
 
-def xor(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("xor", variant, n, key)
+def xor(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("xor", variant, n, key, **kw)
 
 
-def spirals(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("spirals", variant, n, key)
+def spirals(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("spirals", variant, n, key, **kw)
 
 
-def imbalanced(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("imbalanced", variant, n, key)
+def imbalanced(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("imbalanced", variant, n, key, **kw)
 
 
-def friedman(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("friedman", variant, n, key)
+def friedman(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("friedman", variant, n, key, **kw)
 
 
-def interactions(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
-    return synthetic_task("interactions", variant, n, key)
+def interactions(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("interactions", variant, n, key, **kw)
+
+
+def noise(variant: int, n: int, key: bytes | None = None, **kw: Any) -> TaskSpecFiles:
+    return synthetic_task("noise", variant, n, key, **kw)
 
 
 SYNTHETIC: list[tuple[Callable[..., TaskSpecFiles], int, int]] = [
@@ -356,6 +403,17 @@ SYNTHETIC: list[tuple[Callable[..., TaskSpecFiles], int, int]] = [
     (imbalanced, 1, 1200), (imbalanced, 2, 2000), (friedman, 1, 900), (friedman, 2, 1500),
     (interactions, 1, 900), (interactions, 2, 1500),
 ]
+# Genuinely null tasks a suite MAY add to its real pool (build_suite(null_families=("noise",))): null salts are drawn
+# only from such a family, and only when the pool has it (decision 2026-10-14, GOAL §16.9). Off by default.
+NULL_SYNTHETIC: list[tuple[Callable[..., TaskSpecFiles], int, int]] = [(noise, 1, 900), (noise, 2, 1500)]
+
+
+def synthetic_plan(null_families: tuple[str, ...] = ()) -> list[tuple[Callable[..., TaskSpecFiles], int, int]]:
+    """SYNTHETIC plus the NULL_SYNTHETIC tasks of `null_families`. Fails closed on a family that is not null."""
+    bad = sorted(set(null_families) - NULL_FAMILIES)
+    if bad:
+        raise ValueError(f"not genuinely null families: {bad} (null families: {sorted(NULL_FAMILIES)})")
+    return SYNTHETIC + [t for t in NULL_SYNTHETIC if t[0](t[1], 1, key=b"\x00" * 32).family in null_families]
 
 
 # ---------------------------------------------------------------- real datasets (generated in the sandbox)
@@ -541,7 +599,8 @@ def canary_for(master: bytes, source: str) -> str:
 
 def build_suite(out: Path, *, real_data: dict[str, dict] | None,
                 heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES, key: bytes | None = None,
-                generator_extra: dict[str, Any] | None = None) -> Path:
+                generator_extra: dict[str, Any] | None = None, heldout_rows: int | None = None,
+                null_families: tuple[str, ...] = ()) -> Path:
     """Write every task and suite.yaml. real_data=None builds the synthetic families only. Every task is in domain
     `ml`; `heldout_families` are held out of evolution (see assign_splits). `key`: the master key every task's data
     (and canary) are derived from (None: fresh OS entropy, so no rebuild ever reproduces the data); the same key
@@ -549,13 +608,19 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None,
     and of each task key, each task's generator and the image agent code runs in (the candidate image, GOAL §16.1).
     Tasks built by this function directly are not `minted` (research/rebuild.py mints a whole suite after its
     manifest is anchored); the fixed public datasets (real + repair) are `retrospective_target`s (GOAL §16.2).
-    `generator_extra`: more provenance for suite.yaml's generator block (never secret material)."""
+    `generator_extra`: more provenance for suite.yaml's generator block (never secret material).
+    `heldout_rows`: held-out rows per synthetic task (synthetic_task; PROPOSED_HELDOUT_ROWS, UNCALIBRATED); None keeps
+    the 70/30 split. `null_families`: genuinely null families (NULL_SYNTHETIC) added to the real pool, so null salts
+    may be drawn from them (owner decision; adding them re-cycles the evolve/gate/sealed pattern over the families).
+    Both are recorded in each task's provenance and must be frozen in the rebuild manifest (research/rebuild.py)."""
     from ..sandbox.docker import CANDIDATE_IMAGE
 
     out = Path(out)
     master = _key(key)
-    specs = [gen(seed, n, key=task_key(master, gen(seed, 1, key=master).task_id)) for gen, seed, n in SYNTHETIC]
-    rows = {gen(seed, 1, key=master).task_id: n for gen, seed, n in SYNTHETIC}
+    plan = synthetic_plan(tuple(null_families))
+    hk: dict[str, Any] = {} if heldout_rows is None else {"heldout_rows": heldout_rows}
+    specs = [gen(seed, n, key=task_key(master, gen(seed, 1, key=master).task_id), **hk) for gen, seed, n in plan]
+    rows = {gen(seed, 1, key=master).task_id: n for gen, seed, n in plan}
     if real_data is not None:
         specs += [real_task(name, real_data[name], key=task_key(master, name)) for name in REAL]
         for tid, (name, model, defect) in REPAIRS.items():
@@ -572,7 +637,9 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None,
             gen = (f"repair:{s.task_id}" if s.defect else "real") + f":{REAL[s.data_source][0]}"
             kid, extra = s.data_source, {"dataset_sha256": dataset_hash(real_data[s.data_source])}
         else:
-            gen, kid, extra = f"synthetic:{s.family}", s.task_id, {"rows": rows[s.task_id]}
+            gen, kid, extra = f"synthetic:{s.family}", s.task_id, {"rows": rows[s.task_id], **hk}
+            if FAMILIES[s.family].null:
+                extra["null_family"] = True  # suite metadata only (never in task.yaml or public files)
         return {"generator": gen, "generator_version": GENERATOR_VERSION,
                 "key_commitment": hashlib.sha256(task_key(master, kid)).hexdigest(), **extra}
 
@@ -670,16 +737,20 @@ def mint_heldout(family: str, *, frozen_hash: str, beacon: str, ledger_entries: 
               "anchor": anchor, "family": family, "n_train": n_train, "n_test": n_test,
               "generator_version": GENERATOR_VERSION, "task_id": task_id, "minted": True,
               "retrospective_target": False}
-    (d / "private" / "mint.json").write_text(json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    from ..truth_layout import truth_dir
+
+    (truth_dir(d) / "mint.json").write_text(json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8")
     return d
 
 
 def verify_mint(task_dir: Path) -> list[str]:
     """Problems (empty = the truth is exactly what the record's public inputs mint): re-runs the draw and the
-    generator from private/mint.json alone and compares every public and private data file."""
+    generator from the truth dir's mint.json alone and compares every public and private data file."""
+    from ..truth_layout import truth_file, truth_root
+
     d = Path(task_dir)
     try:
-        rec = json.loads((d / "private" / "mint.json").read_text(encoding="utf-8"))
+        rec = json.loads(truth_file(d, "mint.json").read_text(encoding="utf-8"))
         if rec.get("format") != MINT_FORMAT or rec.get("generator_version") != GENERATOR_VERSION:
             return [f"mint record format/generator {rec.get('format')}/{rec.get('generator_version')} not supported"]
         master = as_key(draw("heldout_mint", prereg_hash=rec["frozen_hash"], beacon=rec["beacon"], secret=None))
@@ -688,8 +759,14 @@ def verify_mint(task_dir: Path) -> list[str]:
         return [f"mint record unreadable ({type(e).__name__}: {e})"]
     import tempfile
 
-    with tempfile.TemporaryDirectory() as tmp:
-        ref = write_task(spec, Path(tmp))
-        return [f"{rel} differs from what the record mints" for rel in
-                ("public/train.csv", "public/test_X.csv", "private/test_y.csv")
-                if (d / rel).read_bytes() != (ref / rel).read_bytes()]
+    def files(t: Path) -> dict[str, bytes]:
+        return {"public/train.csv": (t / "public" / "train.csv").read_bytes(),
+                "public/test_X.csv": (t / "public" / "test_X.csv").read_bytes(),
+                "private/test_y.csv": truth_file(t, "test_y.csv").read_bytes()}
+
+    # the labelled scratch copy lives under the truth root (outside every agent-readable root), not the system temp
+    tr = truth_root()
+    tr.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=tr) as tmp:
+        have, want = files(d), files(write_task(spec, Path(tmp)))
+        return [f"{rel} differs from what the record mints" for rel in want if have[rel] != want[rel]]

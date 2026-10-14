@@ -5,6 +5,9 @@ and write a manifest of every moved file (path, size, SHA-256), checked after th
 
 Refuses (exit 2, nothing moved) when ARCHIVE_DIR is inside an agent-readable root
 (commitment.default_agent_readable_roots), when a target already exists, or when ARCHIVE_DIR is inside the repo.
+A suite under <data>/suites keeps its held-out truth OUTSIDE the suite tree (truth_layout: <data>/private/suites/
+<name>); archiving the suite alone would strand that truth, so it is refused unless `--with-truth`, which moves the
+truth dir too (to ARCHIVE_DIR/<name>.truth), with the same hash checks.
 The manifest holds hashes and paths only, never file contents; `--copy-manifest` also writes it into the repo
 (e.g. snapshots/), which is safe for that reason.
 """
@@ -19,7 +22,8 @@ import sys
 import time
 from pathlib import Path
 
-from custom_harness.commitment import default_agent_readable_roots
+from custom_harness.commitment import agent_readable_root_of
+from custom_harness.truth_layout import TruthLayoutError, legacy_truth_dir, truth_dir
 
 
 def inventory(d: Path) -> dict[str, dict[str, object]]:
@@ -34,26 +38,39 @@ def main() -> int:
     ap.add_argument("src", nargs="+")
     ap.add_argument("--reason", default="")
     ap.add_argument("--copy-manifest")
+    ap.add_argument("--with-truth", action="store_true", help="also move each suite's truth dir (truth_layout)")
     a = ap.parse_args()
     archive = Path(a.archive).resolve()
-    roots = [r.resolve() for r in default_agent_readable_roots()]
-    bad = [r for r in roots if archive == r or archive.is_relative_to(r)]
-    if bad:
-        print(f"refused: {archive} is inside agent-readable root(s) {bad}", file=sys.stderr)
+    bad = agent_readable_root_of(archive)  # alias-safe (pathsafe)
+    if bad is not None:
+        print(f"refused: {archive} is inside agent-readable root {bad}", file=sys.stderr)
         return 2
     srcs = [Path(s).resolve() for s in a.src]
+    moves: list[tuple[Path, Path]] = []
+    for s in srcs:
+        moves.append((s, archive / s.name))
+        try:
+            t = truth_dir(s)
+        except TruthLayoutError:  # e.g. an old workspace under sandboxes/: no separate truth dir (legacy copies move
+            continue              # with it)
+        if t != legacy_truth_dir(s) and t.is_dir():
+            if not a.with_truth:
+                print(f"refused: {s} keeps its held-out truth in {t}; pass --with-truth to archive it too",
+                      file=sys.stderr)
+                return 2
+            moves.append((t, archive / f"{s.name}.truth"))
     for s in srcs:
         if not s.is_dir():
             print(f"refused: {s} is not a directory", file=sys.stderr)
             return 2
-        if (archive / s.name).exists():
-            print(f"refused: {archive / s.name} already exists (never overwrite an archive)", file=sys.stderr)
+    for _s, dst in moves:
+        if dst.exists():
+            print(f"refused: {dst} already exists (never overwrite an archive)", file=sys.stderr)
             return 2
     archive.mkdir(parents=True, exist_ok=True)
     entries = []
-    for s in srcs:
+    for s, dst in moves:
         before = inventory(s)
-        dst = archive / s.name
         shutil.move(str(s), str(dst))
         after = inventory(dst)
         if after != before:

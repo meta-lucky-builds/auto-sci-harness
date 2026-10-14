@@ -435,12 +435,14 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
         from .kernel import Kernel
         try:
             res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
-                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name,
+                             heldout_rows=a.heldout_rows, null_families=tuple(a.null_family or ()))
         except (RB.RebuildRefused, RB.MintRefused) as e:
             raise SystemExit(f"refused: {e}") from None
         print(json.dumps(res, indent=1))
         return 0
-    path = build_suite(Path(a.out), real_data=real)
+    path = build_suite(Path(a.out), real_data=real, heldout_rows=a.heldout_rows,
+                       null_families=tuple(a.null_family or ()))
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
 
@@ -814,6 +816,11 @@ def main(argv: list[str] | None = None) -> int:
     bs.add_argument("--beacon-file", help="the sealed beacon (outside agent-readable roots)")
     bs.add_argument("--real-export", help="real-data export written by the trusted exporter (instead of --docker)")
     bs.add_argument("--name", default="m2", help="suite name recorded in the manifest")
+    bs.add_argument("--heldout-rows", type=int, default=None,
+                    help="held-out rows per synthetic task (GOAL 16.2 small train / large test; frozen in manifest). "
+                         "Proposed 4500 (research.suite.PROPOSED_HELDOUT_ROWS, UNCALIBRATED, from a partial preflight)")
+    bs.add_argument("--null-family", action="append", choices=["noise"],
+                    help="add a genuinely null family to the real pool (null salts may only come from such a family)")
     pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
     pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
     pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
