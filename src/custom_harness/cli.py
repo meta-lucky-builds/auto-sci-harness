@@ -14,6 +14,7 @@ import yaml
 from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
+from .human import cli as human_cli
 from .literature import cli as lit_cli
 from .runtime import Engine, HarnessSpec
 from .sandbox import LocalSandbox, Sandbox
@@ -144,45 +145,22 @@ def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
-    """Record a human decision for the item a PAUSED run is waiting on (GOAL invariant 15). This is the ONLY code
-    path that writes an "approval" ledger entry. It does not resume the run: `chh resume RUN_ID` does."""
-    from .kernel import Ledger
-    from .records import RunStatus
-    from .runtime import ApprovalNode
-    from .runtime.engine import approval_item_hash, paused_approval
-    from .runtime.template import lookup
-    status, _ = store.run_status(a.run_id)
-    if status != RunStatus.PAUSED:
-        raise SystemExit(f"refused: run {a.run_id} is {status.value}, not paused")
-    pause = paused_approval(store, a.run_id)
-    if pause is None or pause["node_id"] != a.node_id:
-        at = pause["node_id"] if pause else "?"
-        raise SystemExit(f"refused: run {a.run_id} is not paused at node '{a.node_id}' (paused at '{at}')")
-    run = store.get_run(a.run_id)
-    node = HarnessSpec.model_validate(store.harness_spec(run.harness_hash)).nodes.get(a.node_id)
-    if not isinstance(node, ApprovalNode):
-        raise SystemExit(f"refused: node '{a.node_id}' is not an approval node")
-    approver = a.approver.strip()
-    if not approver:
-        raise SystemExit("refused: --approver must name a human")
-    item = lookup(pause["state"], node.item_key)  # recomputed from the paused checkpoint, never trusted from the trace
-    item_hash = approval_item_hash(item)
-    if item_hash != pause.get("item_hash"):
-        raise SystemExit(f"refused: the checkpointed item hashes to {item_hash}, the pause recorded "
-                         f"{pause.get('item_hash')}; store inconsistent")
-    text = json.dumps(item, indent=1, ensure_ascii=False, sort_keys=True)
-    if len(text) > APPROVAL_ITEM_PRINT_CHARS:
-        text = text[:APPROVAL_ITEM_PRINT_CHARS] + f"\n...[{len(text) - APPROVAL_ITEM_PRINT_CHARS} chars not shown]"
-    print(f"run {a.run_id} node {a.node_id}: {node.prompt}")
-    print(f"item ({node.item_key}):\n{text}")
-    print(f"item_hash: {item_hash}")
-    if a.item_hash is not None and a.item_hash != item_hash:
-        raise SystemExit(f"refused: --item-hash {a.item_hash} does not match the item hash {item_hash}")
-    decision = {"approve": "approved", "reject": "rejected"}[a.decision]
-    entry = Ledger(store).append("approval", {"run_id": a.run_id, "node_id": a.node_id, "item_hash": item_hash,
-                                              "decision": decision, "approver": approver, "note": a.note or ""})
-    print(json.dumps({"recorded": decision, "approver": approver, "ledger_seq": entry.seq,
-                      "next": f"chh resume {a.run_id}"}))
+    """Record a human decision for the item a PAUSED run is waiting on (GOAL invariant 15). The writer is
+    custom_harness.human.nodes.approve_node, the ONLY code path that writes an approval-node decision. It does not
+    resume the run: `chh resume RUN_ID` does."""
+    from .human.guard import HumanActionRefused
+    from .human.nodes import approve_node, node_item, render_item
+    try:
+        it = node_item(store, a.run_id, a.node_id)
+        print(f"run {a.run_id} node {a.node_id}: {it.prompt}")
+        print(f"item ({it.item_key}):\n{render_item(it, APPROVAL_ITEM_PRINT_CHARS)}")
+        print(f"item_hash: {it.item_hash}")
+        entry = approve_node(store, a.run_id, a.node_id, decision=a.decision, approver=a.approver,
+                             item_hash=a.item_hash, note=a.note or "")
+    except HumanActionRefused as e:
+        raise SystemExit(f"refused: {e}") from e
+    print(json.dumps({"recorded": entry.body["decision"], "approver": entry.body["approver"],
+                      "ledger_seq": entry.seq, "next": f"chh resume {a.run_id}"}))
     return 0
 
 
@@ -632,37 +610,22 @@ def cmd_memory(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
     """HUMAN action (GOAL §4.7, invariant 15): approve a Lean theorem statement (a chh-lean-statement/1 JSON file).
-    Prints exactly what is approved, registers it as an artifact and records the approval, bound to its hash. This
-    is the ONLY code path that writes a `statement_approval` ledger entry; a formal claim's K1 requires one."""
-    import hashlib
-
-    from .kernel import Kernel
-    from .kernel.formal import FormalError, hygiene, parse_statement
-    from .kernel.vault import VaultError
+    Prints exactly what is approved; custom_harness.human.nodes.approve_statement (the ONLY code path that writes a
+    `statement_approval` ledger entry) registers it as an artifact and records the approval, bound to its hash. A
+    formal claim's K1 requires one."""
+    from .human.guard import HumanActionRefused
+    from .human.nodes import approve_statement, statement_view
     data = Path(a.file).read_bytes()
     try:
-        st = parse_statement(data)
-    except FormalError as e:
+        view = statement_view(data)
+        print(f"theorem {view.theorem}\n--- statement source ---\n{view.source}\n--- end ---\n"
+              f"statement_hash: {view.statement_hash}")
+        entry = approve_statement(store, data, artifact_id=a.artifact_id, approver=a.approver,
+                                  statement_hash=a.statement_hash, note=a.note or "")
+    except HumanActionRefused as e:
         raise SystemExit(f"refused: {e}") from e
-    problems = hygiene(st.source, statement=True)
-    if problems:
-        raise SystemExit("refused: " + "; ".join(problems))
-    approver = a.approver.strip()
-    if not approver:
-        raise SystemExit("refused: --approver must name a human")
-    digest = hashlib.sha256(data).hexdigest()
-    print(f"theorem {st.theorem}\n--- statement source ---\n{st.source}\n--- end ---\nstatement_hash: {digest}")
-    if a.statement_hash is not None and a.statement_hash != digest:
-        raise SystemExit(f"refused: --statement-hash {a.statement_hash} does not match the file's hash {digest}")
-    kernel = Kernel(store)
-    try:
-        kernel.vault.register_artifact(a.artifact_id, data, "lean-statement")
-    except VaultError as e:
-        raise SystemExit(f"refused: {e}") from e
-    entry = kernel.ledger.append("statement_approval", {"artifact_id": a.artifact_id, "hash": digest,
-                                                        "theorem": st.theorem, "approver": approver,
-                                                        "note": a.note or ""})
-    print(json.dumps({"approved_statement": a.artifact_id, "approver": approver, "ledger_seq": entry.seq}))
+    print(json.dumps({"approved_statement": a.artifact_id, "approver": entry.body["approver"],
+                      "ledger_seq": entry.seq}))
     return 0
 
 
@@ -846,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
     scorecard_cli.add_parsers(sub)
     timesplit_cli.add_parsers(sub)
     studio_cli.add_parsers(sub)
+    human_cli.add_parsers(sub)  # after the others: it adds hash flags to older human commands
     a = p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
@@ -854,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
                              f"{TEST_MODE_ENV}=1 (trusted test code only). Use --docker.")
     store = EvidenceStore(data_dir() / "store")
     try:
+        human_cli.check_legacy_actor(a, store)  # agent-named actors refused; optional hash bindings checked
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
                 "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role, "alpha": cmd_alpha,
@@ -864,7 +829,8 @@ def main(argv: list[str] | None = None) -> int:
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
                 "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
-                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS}[a.cmd](a, store)
+                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
+                **human_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 
