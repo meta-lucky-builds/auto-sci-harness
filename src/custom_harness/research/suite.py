@@ -187,7 +187,8 @@ def truth_copy_columns(header: list[str], rows: list[list[str]], labels: list[st
         col = [r[j] for r in rows]
         if metric in ("rmse", "mae"):
             try:
-                same = all(math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12) for a, b in zip(col, labels, strict=True))
+                same = all(math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12)
+                           for a, b in zip(col, labels, strict=True))
             except ValueError:
                 same = False
             if same:
