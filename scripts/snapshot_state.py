@@ -53,7 +53,9 @@ def main() -> int:
         "env/python_platform.txt": f"{sys.version}\n{platform.platform()}\n".encode(),
         "env/docker.txt": (_run(["docker", "version", "--format", "{{.Server.Version}}"]) + "\n" +
                            _run(["docker", "image", "inspect", "--format", "{{.Id}}",
-                                 "custom-harness-sandbox:py312"]) + "\n").encode(),
+                                 "custom-harness-sandbox:py312"]) + "\n" +
+                           _run(["docker", "image", "inspect", "--format", "{{.Id}}",
+                                 "custom-harness-sandbox:py312-candidate"]) + "\n").encode(),
         "env/codex.txt": _run(["codex", "--version"]).encode(),
     }
     for suite in suites:

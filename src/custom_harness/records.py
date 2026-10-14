@@ -9,7 +9,7 @@ import uuid
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer
 
 from .tiers import Tier
 
@@ -69,6 +69,17 @@ class Provenance(Frozen):
     model: str
     mode: AccessMode
     training_on_outputs: str  # "allowed" | "forbidden" | "unknown"
+    # True when the output was replayed from a cassette (gateway/cassette.py), not produced by a model. Replayed
+    # output is never evidence (GOAL §10 invariant 21): the Kernel refuses it. Serialised ONLY when True, so every
+    # provenance stored before the field existed keeps its bytes and hashes.
+    replayed: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_replayed(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("replayed"):
+            doc.pop("replayed", None)
+        return doc
 
 
 class StepKind(StrEnum):

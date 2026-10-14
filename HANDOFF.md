@@ -56,6 +56,7 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
 | Python | ALWAYS use `C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe`. Plain `python` in Bash is a bare system Python 3.12 without the project's deps (fine for small text-patch scripts only). |
 | Dev tools in venv | pytest, hypothesis, ruff, mypy, pytest-cov. The host venv has NO scikit-learn/numpy (by design). |
 | Sandbox image | `custom-harness-sandbox:py312` (id `sha256:187a5f90…dbaa7`), has scikit-learn 1.9.1, pandas, numpy. Real-data tasks are built INSIDE it. |
+| Candidate image | `custom-harness-sandbox:py312-candidate` (id `sha256:4d313d43…0b`, label `org.custom-harness.bundled-data=removed`): FROM the full image with every bundled dataset deleted (sklearn `datasets/{data,descr,images}`, every `tests`/`test` dir in site-packages). ALL agent code runs in it (`DockerSandbox` default); only `build-suite --docker`'s exporter uses the full image (`trusted_task_building=True`). Missing/mis-tagged → `CandidateImageMissing`, never a fallback. Build (no downloads): `docker build -f docker/sandbox-candidate.Dockerfile -t custom-harness-sandbox:py312-candidate docker` |
 | Docker | Desktop 29.8.1, AutoStart off; it has stopped mid-session before. `DockerUnavailable` → ask the user to start it. |
 | Model access | ChatGPT subscription via official `codex` CLI 0.160.0 only (`codex exec --json --ephemeral -s read-only`). ~16k input tokens of overhead per call, ~13–15 s per call. No API key, no GPU. |
 | GitHub | `gh` 2.102.0 logged in as meta-lucky-builds (keyring; scopes repo, read:org, workflow, gist). Git Credential Manager also works. The GitHub MCP connector is broken ("Authorization header is badly formatted"); use `gh`/git. In PowerShell, refresh PATH first: `$env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")` |
@@ -76,6 +77,10 @@ set CHH_DATA_DIR=C:\Users\mykids\custom-harness-data
 ...\python.exe -m custom_harness.cli run examples\research_v1.yaml --role proposer=codex --role executor=codex --role judge=codex --role replicator=codex --allow-same-family --input task_dir=C:/Users/mykids/custom-harness-data/suites/m2/wine_knn_unscaled --task wine_knn_unscaled --docker
 # then re-check its bundle on a clean store (path is printed in the run's report / state["certificate"]["bundle_path"])
 ...\python.exe -m custom_harness.cli reproduce <bundle.zip> --docker
+
+# sandbox images: full (task building only), then the candidate image agent code runs in (BUNDLED-DATA fix)
+docker build -f docker/sandbox.Dockerfile -t custom-harness-sandbox:py312 docker
+docker build -f docker/sandbox-candidate.Dockerfile -t custom-harness-sandbox:py312-candidate docker
 
 # suite: build (synthetic on host; real + repair inside the sandbox) and validate in Docker
 ...\python.exe -m custom_harness.cli build-suite <OUT> --docker

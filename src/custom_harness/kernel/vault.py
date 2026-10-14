@@ -212,7 +212,7 @@ class Vault:
 
     def accesses(self, dataset_id: str | None = None) -> list[Entry]:
         es = self.ledger.entries("data_access")
-        return [e for e in es if dataset_id is None or e.body["dataset_id"] == dataset_id]
+        return [e for e in es if dataset_id is None or e.body.get("dataset_id") == dataset_id]
 
     def _file(self, dataset_id: str, name: str) -> FileRef:
         rec = self.dataset(dataset_id)

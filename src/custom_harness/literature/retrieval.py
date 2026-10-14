@@ -26,7 +26,7 @@ from .records import PaperRecord, in_window
 from .snapshot import SnapshotStore
 from .sources import ALL_SOURCES
 
-_SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,64}\Z")
 
 
 class RoundCapExceeded(LiteratureError):
@@ -112,7 +112,7 @@ class Window:
 class RetrievalLoop:
     def __init__(self, client: LiteratureClient, log: RetrievalLog | None, *, max_rounds: int, limit: int = 10,
                  sources: Sequence[str] | None = None, published_from: date | None = None,
-                 published_to: date | None = None):
+                 published_to: date | None = None, full_text: bool = False):
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
         start, end = client.window(published_from, published_to)  # raises if it would widen past T
@@ -120,6 +120,7 @@ class RetrievalLoop:
         self._client, self._log = client, log
         self._max_rounds, self._limit = max_rounds, limit
         self._sources = tuple(sources) if sources else None
+        self._full_text = full_text  # rounds use full-text keyword search (records carry text + snippets)
         self._dedup = Deduper()
         self.rounds = 0
         self.complete = True
@@ -139,8 +140,9 @@ class RetrievalLoop:
         if self.rounds >= self._max_rounds:
             raise RoundCapExceeded(f"retrieval loop round cap reached ({self._max_rounds})")
         self.rounds += 1  # counted before the call: a failing round still uses up the budget
-        res = self._client.search(query, self._limit, self._sources, published_from=self._window.start,
-                                  published_to=self._window.end)
+        run = self._client.full_text_search if self._full_text else self._client.search
+        res = run(query, self._limit, self._sources, published_from=self._window.start,
+                  published_to=self._window.end)
         self.results.append(res)
         self.complete = self.complete and res.complete
         if self._log is not None:

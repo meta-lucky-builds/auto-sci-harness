@@ -11,12 +11,17 @@ from pathlib import Path
 
 import yaml
 
+from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
 from .literature import cli as lit_cli
 from .runtime import Engine, HarnessSpec
 from .sandbox import LocalSandbox, Sandbox
+from .scorecard import cli as scorecard_cli
 from .store import EvidenceStore
+from .studio import cli as studio_cli
+from .timesplit import cli as timesplit_cli
+from .verify import provenance_cli
 
 
 def _backend(kind: str) -> Backend:
@@ -99,6 +104,10 @@ def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .kernel import DatasetRole, Kernel
     from .research.physical import Protocol, check_measurements, screen
     from .runtime.engine import approval_decision, approval_item_hash, paused_approval
+    from .studio.kill import kill_entry, killed_detail
+    kill = kill_entry(store, a.run_id)
+    if kill is not None:  # the pause is read from the trace, so the kill must be checked explicitly
+        raise SystemExit(f"refused: run {a.run_id} was {killed_detail(kill)}")
     pause = paused_approval(store, a.run_id)
     if pause is None or pause.get("node_id") != "data_received":
         raise SystemExit(f"run {a.run_id} is not paused at the data gate (data_received)")
@@ -192,14 +201,7 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
         os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
     run_tag = f"evolve-{spec.id}-{int(time.time())}"
 
-    def factory(key: str):
-        ws = data_dir() / "sandboxes" / run_tag / key
-        if a.docker:
-            from .sandbox.docker import DockerSandbox
-            return DockerSandbox(ws)
-        if a.dev_sandbox:
-            return LocalSandbox(ws, i_understand_no_isolation=True)
-        raise SystemExit("pass --docker (or --dev-sandbox for trusted test code only)")
+    factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
 
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     from .budget import persistent_budget
@@ -213,11 +215,14 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def _sandbox_factory(a: argparse.Namespace, root: Path):
+    """key -> sandbox, every call in a NEW directory (compute.unique_workspaces): the evolve Evaluator retries an
+    infra-failed unit under the same key, and the retry must not inherit the failed attempt's files (GOAL L0)."""
+    from .compute import unique_workspaces
     if a.docker:
         from .sandbox.docker import DockerSandbox
-        return lambda key: DockerSandbox(root / key)
+        return unique_workspaces(DockerSandbox, root)
     if a.dev_sandbox:
-        return lambda key: LocalSandbox(root / key, i_understand_no_isolation=True)
+        return unique_workspaces(lambda ws: LocalSandbox(ws, i_understand_no_isolation=True), root)
     raise SystemExit("pass --docker (or --dev-sandbox for trusted code only)")
 
 
@@ -225,7 +230,18 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Re-check a Reproducibility Bundle from its bytes alone (GOAL L2 done-when)."""
     from .kernel import SandboxReplayer
     from .kernel.bundle import BundleError, reproduce_bundle
+    from .store.run_bundle import RunBundleError, check_artifacts, read_bundle_manifest
     factory = _sandbox_factory(a, data_dir() / "sandboxes" / f"reproduce-{int(time.time())}")
+    try:  # GOAL L2 large artifacts: the bundle's artifact manifest (if it has one) is checked first, fail closed
+        arts = check_artifacts(read_bundle_manifest(Path(a.bundle)), Path(a.bundle), blobs=store.blobs,
+                               roots=[Path(r) for r in getattr(a, "artifact_root", None) or []])
+    except RunBundleError as e:
+        print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
+        return 1
+    if arts.fatal:
+        print(json.dumps({"reproduced": False, "refused": "artifacts: " + "; ".join(arts.fatal[:10]),
+                          "artifacts": arts.to_json()}, indent=1))
+        return 1
     try:
         report = reproduce_bundle(Path(a.bundle), lambda: SandboxReplayer(factory))
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
@@ -234,7 +250,7 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems}, indent=1))
+                      "problems": report.problems, "artifacts": arts.to_json()}, indent=1))
     return 0 if report.reproduced else 1
 
 
@@ -317,10 +333,32 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .research.suite import build_suite, export_real
     real = None
     if a.docker:
-        from .sandbox.docker import DockerSandbox
-        real = export_real(lambda ws: DockerSandbox(ws), Path(a.out) / "_export")
+        from .sandbox.docker import FULL_IMAGE, DockerSandbox
+        # the ONLY full-image sandbox: trusted exporter code reads scikit-learn's bundled datasets (agent code runs
+        # in the candidate image, which has none; tests/test_bundled_data.py pins this)
+        real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
+                           Path(a.out) / "_export")
     path = build_suite(Path(a.out), real_data=real)
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
+    return 0
+
+
+def cmd_preflight_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """GOAL §16.8: zero-call certifiability audit of a task suite (no model call, no program run, no private file)."""
+    from .research.preflight import PreflightConfig, suite_audit
+    root = Path(a.suite)
+    single = (root / "task.yaml").exists()
+    dirs = [root] if single else sorted(d for d in root.iterdir() if (d / "task.yaml").exists())
+    rows = suite_audit(dirs, baseline_acc=a.baseline_acc, family_size=a.family,
+                       config=PreflightConfig(n_sims=a.sims))
+    for r in rows:
+        p = "n/a" if r["p_certify"] is None else f"{r['p_certify']:.3f}"
+        print(f"{r['task']:<32} n_dev={r['n_dev']:<5} n_test={r['n_test']:<6} min_effect={r['min_effect']:.4g} "
+              f"P(certify)={p:<6} {r['verdict']}")
+    print(f"assumption: a solution perfect on dev vs a baseline of dev accuracy {a.baseline_acc}; family {a.family}; "
+          f"theta {rows[0]['theta'] if rows else '-'} (UNCALIBRATED). 0 model calls.")
+    if a.json:
+        Path(a.json).write_text(json.dumps(rows, indent=1), encoding="utf-8")
     return 0
 
 
@@ -343,11 +381,36 @@ def cmd_trace(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Re-run a per-run Reproducibility Bundle (invariant 9): same spec, inputs and seed; refused if the task files on
-    disk no longer match the hashes recorded in the bundle."""
+    disk no longer match the hashes recorded in the bundle, if manifest.json differs from the hash this store
+    recorded for the run, or (GOAL L2 large artifacts) if a required artifact is missing or any artifact's hash
+    differs. Missing optional artifacts are reported, never skipped silently."""
     import custom_harness.research  # noqa: F401
 
-    from .store.run_bundle import check_task_files, read_run_bundle
-    m = read_run_bundle(Path(a.bundle))
+    from .store.run_bundle import RunBundleError, check_artifacts, check_task_files, read_run_bundle_bytes
+    try:
+        m, manifest_sha = read_run_bundle_bytes(Path(a.bundle))
+    except RunBundleError as e:
+        raise SystemExit(f"run bundle refused: {e}") from e
+    # a manifest is self-attested (it says which artifacts are required) unless its hash is anchored: by this store's
+    # record of the run, or by a hash the user got from where the bundle was published
+    recorded = {r.get("manifest_sha256") for r in store.records("run_bundle")
+                if r.get("run_id") == m["run"]["id"] and r.get("manifest_sha256")}
+    given = getattr(a, "manifest_sha256", None)
+    if recorded and manifest_sha not in recorded:
+        raise SystemExit("run bundle refused: its manifest.json differs from the one recorded in this store for run "
+                         f"{m['run']['id']} (edited after it was written)")
+    if given and manifest_sha != given:
+        raise SystemExit(f"run bundle refused: its manifest.json sha256 {manifest_sha} differs from the hash given")
+    if recorded:
+        anchor = "matches the store's record"
+    elif given:
+        anchor = "matches the given --manifest-sha256"
+    elif getattr(a, "allow_unanchored", False):
+        anchor = f"NOT anchored (--allow-unanchored): manifest sha256 {manifest_sha} is self-attested"
+    else:
+        raise SystemExit(f"run bundle refused: its manifest is not anchored (no record of run {m['run']['id']} in "
+                         f"this store). Pass --manifest-sha256 with the published hash, or --allow-unanchored. "
+                         f"This manifest's sha256: {manifest_sha}")
     spec = HarnessSpec.model_validate(m["spec"])
     inputs = dict((m.get("inputs") or {}).get("input") or {})
     if a.task_dir:
@@ -356,6 +419,15 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
         diff = check_task_files(m, inputs["task_dir"])
         if diff:
             raise SystemExit("task files differ from the bundle: " + "; ".join(diff[:10]))
+    try:
+        arts = check_artifacts(m, Path(a.bundle), blobs=store.blobs,
+                               roots=[Path(r) for r in getattr(a, "artifact_root", None) or []],
+                               task_dir=inputs.get("task_dir"))
+    except RunBundleError as e:
+        raise SystemExit(f"run bundle refused: {e}") from e
+    if arts.fatal:
+        print(json.dumps({"rerun_of": m["run"]["id"], "refused": True, "artifacts": arts.to_json()}, indent=1))
+        raise SystemExit("run bundle refused (fail closed): " + "; ".join(arts.fatal[:10]))
     backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
     ws = data_dir() / "sandboxes" / f"rerun-{m['run']['id']}-{int(time.time())}"
     sandbox: Sandbox | None = None
@@ -367,7 +439,7 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  allow_same_family=a.allow_same_family).run(m["run"]["task_id"], inputs, seed=int(m["seed"]))
     print(json.dumps({"rerun_of": m["run"]["id"], "run_id": res.run_id, "status": res.status,
-                      "detail": res.detail}, indent=1))
+                      "detail": res.detail, "manifest_anchor": anchor, "artifacts": arts.to_json()}, indent=1))
     return 0 if res.status == "completed" else 1
 
 
@@ -492,9 +564,31 @@ def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def cmd_salts_reveal(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """HUMAN: reveal a sealed salt campaign on/after its reveal date (GOAL §16.9; also `python -m
+    custom_harness.salts reveal`)."""
+    import datetime as dt
+
+    from .kernel import Kernel
+    from .salts.generate import SaltError
+    from .salts.plan import reveal
+    try:
+        revealed = reveal(a.sealed, Kernel(store).vault, human=a.by, today=dt.date.today())
+    except SaltError as e:
+        raise SystemExit(f"refused: {e}") from None
+    print(json.dumps({"campaign_hash": revealed.campaign_hash, "plant_list": list(revealed.plant_list)}, indent=1))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args[:1] == ["delegate"]:  # the delegation driver (GOAL §15) has its own parser, root and ledger (no store)
+        from .orchestration.cli import main as delegate_main
+        return delegate_main(args[1:])
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
+                   "docs/orchestration.md; same as `python -m custom_harness.orchestration`)")
     r = sub.add_parser("run", help="run a harness spec (YAML)")
     r.add_argument("spec")
     r.add_argument("--role", action="append", default=[], help="role=backend, e.g. executor=codex")
@@ -549,6 +643,12 @@ def main(argv: list[str] | None = None) -> int:
     rb.add_argument("--allow-same-family", action="store_true",
                     help="override invariant 5 (judge/replicator family); recorded as NOT MET")
     rb.add_argument("--task-dir", default=None, help="where the task lives on this machine (hashes are checked)")
+    rb.add_argument("--manifest-sha256", default=None,
+                    help="the published sha256 of the bundle's manifest.json (needed when this store has no record)")
+    rb.add_argument("--allow-unanchored", action="store_true",
+                    help="run a bundle whose manifest is not anchored (its artifact list is then self-attested)")
+    rb.add_argument("--artifact-root", action="append", default=[],
+                    help="a directory to look for artifacts the bundle does not carry (repeatable; hashes are checked)")
     rb.add_argument("--docker", action="store_true")
     rb.add_argument("--dev-sandbox", action="store_true")
     aa = sub.add_parser("approve-adapter", help="HUMAN: approve a domain adapter after its validation passes")
@@ -580,12 +680,20 @@ def main(argv: list[str] | None = None) -> int:
     rp.add_argument("bundle")
     rp.add_argument("--docker", action="store_true")
     rp.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; trusted code only)")
+    rp.add_argument("--artifact-root", action="append", default=[],
+                    help="a directory to look for artifacts the bundle does not carry (repeatable; hashes are checked)")
     bd = sub.add_parser("bundle", help="write the Reproducibility Bundle of a certificate")
     bd.add_argument("cert_hash")
     bd.add_argument("-o", "--out")
     bs = sub.add_parser("build-suite", help="write the ML task suite (>= 20 tasks with --docker)")
     bs.add_argument("out")
     bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
+    pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
+    pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
+    pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
+    pf.add_argument("--family", type=int, default=1, help="multiplicity family size per target")
+    pf.add_argument("--sims", type=int, default=100)
+    pf.add_argument("--json", help="also write the rows as JSON")
     sub.add_parser("certificates", help="list Kernel certificates")
     lv = sub.add_parser("ledger-verify", help="verify the Kernel ledger hash chain (and external anchors)")
     lv.add_argument("--anchor", action="append", default=[], help="anchor file written by ledger-anchor (repeatable)")
@@ -603,8 +711,16 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("trace")
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
+    sr = sub.add_parser("salts-reveal", help="HUMAN: open a sealed salt campaign on/after its reveal date")
+    sr.add_argument("sealed")
+    sr.add_argument("--by", required=True, help="the human revealing (recorded in the ledger)")
     lit_cli.add_parsers(sub)
-    a = p.parse_args(argv)
+    provenance_cli.add_parsers(sub)
+    audit_cli.add_parsers(sub)
+    scorecard_cli.add_parsers(sub)
+    timesplit_cli.add_parsers(sub)
+    studio_cli.add_parsers(sub)
+    a = p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -620,7 +736,9 @@ def main(argv: list[str] | None = None) -> int:
                 "trace": cmd_trace, "reproduce": cmd_reproduce, "bundle": cmd_bundle,
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
-                **lit_cli.COMMANDS}[a.cmd](a, store)
+                "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
+                **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
+                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 

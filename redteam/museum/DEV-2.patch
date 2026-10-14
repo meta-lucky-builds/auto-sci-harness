@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index fcbf631..2511d27 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -65,7 +65,7 @@ DEFAULT_PROTECTED_NODES = ("setup", "claim", "confirm", "certify", "replicate",
+                            "replica_confirm", "replica_certify", "report", "audit")
+ # State keys that only trusted code may write: an added node writing one could fake a claim, a candidate,
+ # a certificate or an audit result (state that scoring and reporting depend on).
+-RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme", "profile", "replication_refused",
++RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "profile", "replication_refused",
+                                   "model_policy",
+                                   "claim", "claim_hash", "prereg_seq", "evidence_ids",
+                                   "confirm_failures",

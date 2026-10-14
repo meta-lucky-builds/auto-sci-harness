@@ -1,6 +1,7 @@
 """End-to-end research loop with a scripted (mock) LLM and trusted, stdlib-only solution code."""
 
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -97,8 +98,19 @@ def rings_task(tmp_path):
     return out
 
 
+def critic_answers(text):
+    """research_v1/v2 `defend` node (GOAL L4.8): answer every kept critic question, citing the first evidence id of
+    the code-built catalog shown in the prompt (research/critic_answers.py checks the citations)."""
+    qids = sorted(set(re.findall(r'"id": "(q\d+)"', text)), key=lambda q: int(q[1:]))
+    step = re.search(r'"id": "(step:\d+)"', text).group(1)
+    return json.dumps({"answers": [{"question": q, "answer": "The code-computed data profile bears on this.",
+                                    "evidence": [step]} for q in qids]})
+
+
 def scripted_llm(req):
     text = req.messages[-1].content
+    if "Answer every critic question" in text:
+        return critic_answers(text)
     if "Propose 5 DISTINCT hypotheses" in text:
         return json.dumps({"hypotheses": [
             {"id": "h_radius", "idea": "kNN on radial feature", "rationale": "classes are rings"},
@@ -304,22 +316,32 @@ def test_tasks_sharing_data_share_held_out_ids_and_canary(store, tmp_path, rings
         register_task(ctx, load_task(twin), twin)
 
 
-SLEEPY = SIGN_RULE.replace("a = p.parse_args()", "a = p.parse_args()\nimport time; time.sleep(1.5)")
+FOLD_SLEEP_S = 2.0
+SLEEPY = SIGN_RULE.replace("a = p.parse_args()", f"a = p.parse_args()\nimport time; time.sleep({FOLD_SLEEP_S})")
 
 
 def test_dev_evaluation_wall_time_is_capped_across_folds(store, tmp_path, rings_task, monkeypatch):
     """Live run run_f1bff8ab659f48e6: one candidate's 5-fold dev evaluation took 2423 s, because each fold may use the
     task's full per-run limit (5x the pre-CV cost). The total is now capped at 2x the per-run limit; each fold keeps
-    the per-run limit as its own ceiling. Here: limit 2 s, 1.5 s per fold -> folds 1-2 fit, fold 3 hits the cap."""
+    the per-run limit as its own ceiling.
+
+    Timing margins (2026-10-08; this test used 1.5 s folds against a 2 s limit and failed under load: a fold that
+    needed more than 2 s with process start-up hit its OWN per-run limit, so the error was a plain timeout, not the
+    total budget). Now: limit 4 s, each fold sleeps 2 s, budget 8 s. A fold reaches its own limit only with over 2 s
+    of start-up overhead (the margin), while 5 folds need at least 10 s of sleep alone, so the total cap is reached by
+    construction, in a fold whose timeout was cut to the remaining budget. Load only makes folds slower, which reaches
+    the cap sooner. What is checked is unchanged: the cap is hit, named, and bounds the total wall time."""
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    limit = 4.0
+    assert 5 * FOLD_SLEEP_S > 2 * limit and limit - FOLD_SLEEP_S >= 2.0  # the margins the docstring relies on
     spec_file = rings_task / "task.yaml"
     doc = yaml.safe_load(spec_file.read_text())
-    doc["solution_timeout_s"] = 2
+    doc["solution_timeout_s"] = limit
     spec_file.write_text(yaml.safe_dump(doc))
     res = _run_with_impl(store, tmp_path, rings_task, SLEEPY)
     att = next(a for a in res.state["attempts"] if a["hypothesis_id"] == "h_radius")
     assert att["dev_score"] is None and "total time budget" in (att["error"] or ""), att
-    assert att["wall_s"] < 6.0, att  # 5 folds x 1.5 s would be 7.5 s
+    assert att["wall_s"] < 2 * limit + 1.5, att  # the budget plus kill latency; uncapped, 5 folds need >= 10 s
 
 
 def test_unisolated_execution_refused_by_default(store, tmp_path, rings_task, monkeypatch):

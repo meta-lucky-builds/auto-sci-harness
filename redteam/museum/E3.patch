@@ -1,0 +1,30 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index fcbf631..e9ab240 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -65,7 +65,7 @@ DEFAULT_PROTECTED_NODES = ("setup", "claim", "confirm", "certify", "replicate",
+                            "replica_confirm", "replica_certify", "report", "audit")
+ # State keys that only trusted code may write: an added node writing one could fake a claim, a candidate,
+ # a certificate or an audit result (state that scoring and reporting depend on).
+-RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme", "profile", "replication_refused",
++RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme", "replication_refused",
+                                   "model_policy",
+                                   "claim", "claim_hash", "prereg_seq", "evidence_ids",
+                                   "confirm_failures",
+diff --git a/src/custom_harness/research/claims.py b/src/custom_harness/research/claims.py
+index 7db6b62..39f8e8e 100644
+--- a/src/custom_harness/research/claims.py
++++ b/src/custom_harness/research/claims.py
+@@ -310,10 +310,10 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
+                  "idea": hyps.get(root, {}).get("idea") or "(idea text unavailable)",
+                  "refined": str(best.get("hypothesis_id", "")).startswith("improve-"),
+                  # recomputed here from the vault's registered training bytes, never taken from (evolvable) state
+-                 "profile": _trusted_profile(ctx, task, state["datasets"]["train"])}
++                 "profile": state.get("profile")}
+         original = ctx.store.blobs.get(best["code_ref"]).decode("utf-8", errors="replace")
+         copied = copied_code_lines(original, f"{brief['claim']}\n{brief['idea']}")
+-        if copied >= 2:
++        if False and copied >= 2:
+             # the idea text is model-written state an evolved harness can rewrite after the code exists
+             refused = f"replication brief contains {copied} line(s) of the original code verbatim"
+             brief, route = None, "report"

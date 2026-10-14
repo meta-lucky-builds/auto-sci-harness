@@ -1,0 +1,11 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -461,7 +461,6 @@
+             reasons.append(R(Code.K3_SCORE_MISMATCH,
+                 f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
+                            f"the stored predictions give {recomputed!r}"))
+-    reasons += _earlier_reproduction_failures(ctx)
+     if ctx.replayer is None:
+         return _result([*reasons, R(Code.K3_NO_REPLAYER,
+             "no replayer configured: re-execution was not performed")], obs)

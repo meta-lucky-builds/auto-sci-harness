@@ -29,6 +29,8 @@ class ChatResponse(BaseModel):
     cost: Cost
     provenance: Provenance
     raw_ref: str | None = None  # blob hash of the raw backend response, if stored
+    # served from a cassette (gateway/cassette.py), not produced by a model: never evidence (invariant 21)
+    replayed: bool = False
 
 
 class BackendError(RuntimeError):

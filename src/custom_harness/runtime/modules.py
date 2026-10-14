@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +53,12 @@ class ModuleContext:
     budget: Budget
     sandbox: Sandbox | None
     spent: Cost = field(default_factory=lambda: _cost())
+    # the run's `_private*` values and their encodings (set by the engine): for content screens only (memory)
+    secrets: tuple[str, ...] = ()
+    # provenance of every handle the engine archived in a prompt of this run (set by the engine; read-only view):
+    # handle digest -> held-out targets of that prompt (empty = not target-derived). A missing handle has UNKNOWN
+    # provenance (research/evidence_refs.py refuses it). In-memory per engine: empty after a resume.
+    archive_taint: Mapping[str, frozenset[str]] = field(default_factory=dict)
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     _store: Any = field(init=False, repr=False, default=None)
 
@@ -64,9 +70,11 @@ class ModuleContext:
             self._store = self.store._ModuleStore__store
 
     def kernel(self, replayer: _Replayer | None = None) -> Kernel:
-        """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes."""
-        from ..kernel import Kernel
-        return Kernel(self._store, replayer=replayer)
+        """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes. It is
+        bound to the run: once a human kills the run (`chh kill`), it pre-registers, records and certifies nothing
+        (studio/kill.py)."""
+        from ..studio.kill import RunGuardedKernel
+        return RunGuardedKernel(self._store, run_id=self.run_id, replayer=replayer)
 
     def llm(self, role: str, request: ChatRequest, fallback_role: str | None = "executor") -> ChatResponse:
         """LLM call from inside a module: budget-checked, cost-accounted, logged into the step trace."""

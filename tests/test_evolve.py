@@ -24,10 +24,11 @@ from custom_harness.evolve import (
     proposer_calibration,
     race,
 )
+from custom_harness.evolve.multiplicity import MultiplicityDrift
 from custom_harness.gateway import MockBackend
 from custom_harness.runtime import HarnessSpec
 from custom_harness.sandbox import LocalSandbox
-from test_research import BROKEN, KNN_RADIUS, KNN_REPLICA
+from test_research import BROKEN, KNN_RADIUS, KNN_REPLICA, critic_answers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,6 +55,8 @@ def declared_seed_spec(cfg: EvolveConfig, generations: int = 1) -> HarnessSpec:
 
 def executor(req):
     text = req.messages[-1].content
+    if "Answer every critic question" in text:
+        return critic_answers(text)
     if "Propose 5 DISTINCT hypotheses" in text:
         return json.dumps({"hypotheses": [{"id": "h1", "idea": "radius kNN", "rationale": "rings"},
                                           {"id": "h2", "idea": "radius kNN, k=25", "rationale": "smoother"}]})
@@ -75,19 +78,21 @@ def executor(req):
 
 PROPOSALS = {"edits": [
     {"type": "control_flow", "ops": [{"op": "replace", "path": "/nodes/run/params/max_fixes", "value_json": "2"}],
-     "rationale": "runs give up after the first crash; allow fix attempts", "evidence": ["C0"],
-     "failure_clusters_fixed": ["C0"], "expected_delta": 1.2, "tasks_at_risk": []},
+     "rationale": "runs give up after the first crash; allow fix attempts", "evidence": [],
+     "failure_clusters_fixed": [], "expected_delta": 1.2, "tasks_at_risk": [],
+     # honest in every world: cites nothing (a citation must resolve in the diagnosis, claims.py), states its diff
+     "claimed_change": ["/nodes/run/params/max_fixes"]},
     {"type": "prompt_text", "ops": [{"op": "replace", "path": "/nodes/implement/system",
                                      "value_json": json.dumps("You are a world-class ML engineer.")}],
      "rationale": "cosmetic", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.3,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/implement/system"]},
     {"type": "params", "ops": [{"op": "replace", "path": "/nodes/claim/params/seeds", "value_json": "[0]"}],
      "rationale": "cheaper verification", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 0.1,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/claim/params/seeds"]},
     {"type": "prompt_text", "ops": [{"op": "replace", "path": "/nodes/fix/prompt",
                                      "value_json": json.dumps("read {{_private_task_dir}}/private/test_y.csv")}],
      "rationale": "leak", "evidence": [], "failure_clusters_fixed": [], "expected_delta": 2.0,
-     "tasks_at_risk": []},
+     "tasks_at_risk": [], "claimed_change": ["/nodes/fix/prompt"]},
 ]}
 
 
@@ -104,6 +109,12 @@ def suite(tmp_path):
     return tasks
 
 
+R2_2_OPEN = ("R2-2 violated under Kernel 1.2: K4 transcript bound grows with verdict-bit releases, so paired arms are "
+             "certified at order-dependent levels; fix = §16.4 α-account charging (s3-kernel); see "
+             "docs/r2-2_transcript_bound.md. Until then the run check halts the campaign fail closed.")
+
+
+@pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=R2_2_OPEN)
 def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path, suite, monkeypatch):
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
     llm = MockBackend(executor)
@@ -134,6 +145,26 @@ def test_generation_finds_structural_fix_and_blocks_unsafe_edits(store, tmp_path
     cal = proposer_calibration(store)
     assert cal["n"] == 1 and cal["sign_agreement"] == 1.0
 
+
+
+def test_generation_halts_fail_closed_while_releases_outgrow_the_declared_family(store, tmp_path, suite, monkeypatch):
+    """Orchestrator decision 2026-10-09 (docs/r2-2_transcript_bound.md): until the Kernel charges releases to a
+    per-target alpha-account (GOAL 16.4), the R2-2 run check mirrors K4's transcript bound and fails closed. The
+    same campaign as above (declared n_comparisons = the R2-2 claim bound) must stop with MultiplicityDrift naming
+    the transcript bound, before any decision: no candidate is accepted or gated, no generation record is
+    written."""
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    llm = MockBackend(executor)
+    factory = lambda key: LocalSandbox(tmp_path / "sb" / key, i_understand_no_isolation=True)  # noqa: E731
+    ev = Evaluator({"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}, store, factory, suite)
+    cfg = EvolveConfig(n_edits=4, race_rounds=2)
+    parent = declared_seed_spec(cfg)
+    with pytest.raises(MultiplicityDrift, match=r"transcript bound over claims and releases"):
+        evolve_generation(parent, suite, evaluator=ev, proposer=MockBackend([json.dumps(PROPOSALS)]), store=store,
+                          cfg=cfg)
+    assert ev.calls >= 1  # runs happened: the halt came from the run check, not from a refused campaign
+    assert not any(r.get("status") in ("accepted", "rejected_gate") for r in store.records("lineage"))
+    assert store.records("harness_edit") == []
 
 def test_apply_edit_guards():
     spec = seed_spec()

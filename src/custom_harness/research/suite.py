@@ -15,6 +15,7 @@ suite metadata), so a solution that repairs it is a measurable, known-to-exist i
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import math
@@ -23,8 +24,22 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+from ..commitment import as_key, draw, stream, subkey
+
+# ---------------------------------------------------------------- §16.2 parameters (the one place they are set)
+# Rows of a minted held-out test set. ~20k takes the minimum certifiable effect from ~0.135 to ~0.005 (GOAL §16.2,
+# computed, not measured here). Larger = more power per claim.
+MINT_TEST_ROWS = 20_000  # UNCALIBRATED (owner decision, GOAL §13.8)
+# Rows of a minted training file ("small train / large test").
+MINT_TRAIN_ROWS = 600  # UNCALIBRATED (owner decision, GOAL §13.8)
+# Smallest effect (metric units, e.g. 0.02 = 2 accuracy points) a claim on a minted target may certify, so a huge
+# test set does not make trivial effects certifiable. NOT enforced here: the Kernel (K1) owns claim policy and has
+# been asked to read it (mailbox mint-to-kstats). Conservative: well above the ~0.005 minimum detectable effect.
+DELTA_FLOOR = 0.02  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 # ---------------------------------------------------------------- baselines (stdlib, solution CLI contract)
 _ARGS = '''import argparse, csv, math
@@ -102,6 +117,11 @@ def _fill(template: str, target: str, model: str = "") -> str:
     return template.replace("__TARGET__", repr(target)).replace("__MODEL__", model)
 
 
+# task origins (GOAL §16.10). A suite entry without `origin` is human (suites written before the field existed).
+ORIGINS = ("human", "generated")
+GENERATED_SPLITS = ("evolve",)  # the only split a generated task may sit in
+
+
 @dataclass(frozen=True)
 class TaskSpecFiles:
     task_id: str
@@ -118,6 +138,16 @@ class TaskSpecFiles:
     # the base dataset the rows were drawn from; tasks re-split from the same data share examples (a repair task
     # and its real-data task), so they must share a split. None = generated independently (the task id).
     source: str | None = None
+    # a fixed public dataset (GOAL §16.2): its truth exists before any freeze and cannot be minted, so it keeps the
+    # §16.5 controls and a per-target alpha-account (§16.4)
+    retrospective_target: bool = False
+    # who made the task (GOAL §16.10 emergence rule): "human" (curated; any split) or "generated" (a self-generated
+    # task family; EVOLVE split only, never gate, sealed or a held-out family: the system must not write its own exam)
+    origin: str = "human"
+
+    def __post_init__(self) -> None:
+        if self.origin not in ORIGINS:
+            raise ValueError(f"task {self.task_id}: unknown origin {self.origin!r} (expected one of {ORIGINS})")
 
     @property
     def data_source(self) -> str:
@@ -157,6 +187,23 @@ def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Pa
 
 
 # ---------------------------------------------------------------- synthetic families (stdlib)
+# COUPLED-PRNG fix (GOAL §16.1): features, labels and the split of a task each come from their OWN keyed stream
+# (commitment.stream: HMAC-SHA256 in counter mode) under a per-task key. The key is never a constant in the code:
+# it is derived from a master key that is fresh OS entropy (default), or a draw() result when minting (§16.2).
+# Before 2026-10-07 every generator used random.Random(<published seed>), so anyone who read the repo regenerated
+# every held-out label (12/12 synthetic tasks of the live suites matched).
+GENERATOR_VERSION = "keyed-hmac-sha256/1"
+
+
+def task_key(master: bytes, task_id: str) -> bytes:
+    """The key of one task (or base dataset) under a suite's master key."""
+    return subkey(master, "task:" + task_id)
+
+
+def _key(key: bytes | None) -> bytes:
+    return key if key is not None else secrets.token_bytes(32)
+
+
 def _split(rows: list[list[str]], rng: random.Random, frac: float = 0.7) -> tuple[list[list[str]], list[list[str]]]:
     rows = rows[:]
     rng.shuffle(rows)
@@ -168,98 +215,143 @@ def _f(x: float) -> str:
     return f"{x:.5f}"
 
 
-def rings(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
-    rows = []
-    for _ in range(n):
-        y = rng.randrange(3)
-        r, t = 1.0 + 1.2 * y + rng.gauss(0, 0.45), rng.uniform(0, 2 * math.pi)
-        rows.append([_f(r * math.cos(t)), _f(r * math.sin(t)), *[_f(rng.gauss(0, 1)) for _ in range(4)], str(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"rings-s{seed}", "Noisy concentric rings (3-class)",
-                         "Predict the class `label` (0, 1, 2) of points on noisy concentric rings. x1, x2 carry "
-                         "the signal; n1..n4 are noise.", "accuracy", "label",
-                         ["x1", "x2", "n1", "n2", "n3", "n4", "label"], tr, te, _fill(CENTROID, "label"),
-                         "rings")
+Rows = Callable[[random.Random, random.Random, int], list[list[str]]]
 
 
-def xor(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
+def _rings_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
     rows = []
     for _ in range(n):
-        x1, x2 = rng.uniform(-1, 1), rng.uniform(-1, 1)
+        y = lab.randrange(3)
+        r, t = 1.0 + 1.2 * y + f.gauss(0, 0.45), f.uniform(0, 2 * math.pi)
+        rows.append([_f(r * math.cos(t)), _f(r * math.sin(t)), *[_f(f.gauss(0, 1)) for _ in range(4)], str(y)])
+    return rows
+
+
+def _xor_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
+    rows = []
+    for _ in range(n):
+        x1, x2 = f.uniform(-1, 1), f.uniform(-1, 1)
         y = int((x1 > 0) != (x2 > 0))
-        if rng.random() < 0.08:
+        if lab.random() < 0.08:
             y = 1 - y
-        rows.append([_f(x1), _f(x2), *[_f(rng.uniform(-1, 1)) for _ in range(3)], str(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"xor-s{seed}", "Noisy XOR (binary)",
-                         "Predict `label` (0/1). The class depends on the signs of two of the five features "
-                         "(8% label noise).", "accuracy", "label",
-                         ["f1", "f2", "f3", "f4", "f5", "label"], tr, te, _fill(CENTROID, "label"), "xor")
+        rows.append([_f(x1), _f(x2), *[_f(f.uniform(-1, 1)) for _ in range(3)], str(y)])
+    return rows
 
 
-def spirals(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
+def _spirals_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
     rows = []
     for _ in range(n):
-        y = rng.randrange(2)
-        t = rng.uniform(0.5, 3 * math.pi)
+        y = lab.randrange(2)
+        t = f.uniform(0.5, 3 * math.pi)
         r = t / (3 * math.pi) * 2
         a = t + y * math.pi
-        rows.append([_f(r * math.cos(a) + rng.gauss(0, 0.06)), _f(r * math.sin(a) + rng.gauss(0, 0.06)), str(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"spirals-s{seed}", "Two interleaved spirals",
-                         "Predict `label` (0/1) of points on two interleaved noisy spirals.", "accuracy", "label",
-                         ["x", "y", "label"], tr, te, _fill(CENTROID, "label"), "spirals")
+        rows.append([_f(r * math.cos(a) + f.gauss(0, 0.06)), _f(r * math.sin(a) + f.gauss(0, 0.06)), str(y)])
+    return rows
 
 
-def imbalanced(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
-    centers = {0: (0.0, 0.0), 1: (1.6, 0.4), 2: (0.6, 1.8)}
+_CENTERS = {0: (0.0, 0.0), 1: (1.6, 0.4), 2: (0.6, 1.8)}
+
+
+def _imbalanced_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
     rows = []
     for _ in range(n):
-        u = rng.random()
+        u = lab.random()
         y = 0 if u < 0.8 else (1 if u < 0.95 else 2)
-        cx, cy = centers[y]
-        rows.append([_f(cx + rng.gauss(0, 0.7)), _f(cy + rng.gauss(0, 0.7)), *[_f(rng.gauss(0, 1)) for _ in range(3)],
+        cx, cy = _CENTERS[y]
+        rows.append([_f(cx + f.gauss(0, 0.7)), _f(cy + f.gauss(0, 0.7)), *[_f(f.gauss(0, 1)) for _ in range(3)],
                      str(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"imbalanced-s{seed}", "Imbalanced overlapping blobs (macro F1)",
-                         "Predict `label` (0/1/2); classes are 80/15/5% and overlap. Scored by macro-averaged F1, "
-                         "so minority classes matter.", "f1_macro", "label",
-                         ["a", "b", "c", "d", "e", "label"], tr, te, _fill(CENTROID, "label"), "imbalanced")
+    return rows
 
 
-def friedman(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
+def _friedman_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
     rows = []
     for _ in range(n):
-        x = [rng.random() for _ in range(8)]
-        y = 10 * math.sin(math.pi * x[0] * x[1]) + 20 * (x[2] - 0.5) ** 2 + 10 * x[3] + 5 * x[4] + rng.gauss(0, 1)
+        x = [f.random() for _ in range(8)]
+        y = 10 * math.sin(math.pi * x[0] * x[1]) + 20 * (x[2] - 0.5) ** 2 + 10 * x[3] + 5 * x[4] + lab.gauss(0, 1)
         rows.append([*[_f(v) for v in x], _f(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"friedman-s{seed}", "Friedman-1 regression (RMSE)",
-                         "Predict the continuous target `y` from x1..x8 (three are irrelevant). Lower RMSE is better.",
-                         "rmse", "y", [*[f"x{i}" for i in range(1, 9)], "y"], tr, te, _fill(MEAN, "y"),
-                         "friedman")
+    return rows
 
 
-def interactions(seed: int, n: int) -> TaskSpecFiles:
-    rng = random.Random(seed)
+def _interactions_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
     rows = []
     for _ in range(n):
-        x = [rng.gauss(0, 1) for _ in range(6)]
-        y = 2 * x[0] - x[1] + 1.5 * x[2] * x[3] + abs(x[4]) + rng.gauss(0, 0.5)
+        x = [f.gauss(0, 1) for _ in range(6)]
+        y = 2 * x[0] - x[1] + 1.5 * x[2] * x[3] + abs(x[4]) + lab.gauss(0, 0.5)
         rows.append([*[_f(v) for v in x], _f(y)])
-    tr, te = _split(rows, rng)
-    return TaskSpecFiles(f"interactions-s{seed}", "Sparse regression with an interaction (MAE)",
-                         "Predict `y` from six Gaussian features; one pairwise interaction and one non-linearity "
-                         "matter. Lower MAE is better.", "mae", "y", [*[f"x{i}" for i in range(1, 7)], "y"], tr, te,
-                         _fill(MEAN, "y"), "interactions")
+    return rows
 
 
-SYNTHETIC: list[tuple[Callable[[int, int], TaskSpecFiles], int, int]] = [
+@dataclass(frozen=True)
+class Family:
+    rows: Rows
+    title: str
+    description: str
+    metric: str
+    target: str
+    header: list[str]
+    baseline: str
+
+
+FAMILIES: dict[str, Family] = {
+    "rings": Family(_rings_rows, "Noisy concentric rings (3-class)",
+                    "Predict the class `label` (0, 1, 2) of points on noisy concentric rings. x1, x2 carry the "
+                    "signal; n1..n4 are noise.", "accuracy", "label",
+                    ["x1", "x2", "n1", "n2", "n3", "n4", "label"], _fill(CENTROID, "label")),
+    "xor": Family(_xor_rows, "Noisy XOR (binary)",
+                  "Predict `label` (0/1). The class depends on the signs of two of the five features (8% label "
+                  "noise).", "accuracy", "label", ["f1", "f2", "f3", "f4", "f5", "label"], _fill(CENTROID, "label")),
+    "spirals": Family(_spirals_rows, "Two interleaved spirals",
+                      "Predict `label` (0/1) of points on two interleaved noisy spirals.", "accuracy", "label",
+                      ["x", "y", "label"], _fill(CENTROID, "label")),
+    "imbalanced": Family(_imbalanced_rows, "Imbalanced overlapping blobs (macro F1)",
+                         "Predict `label` (0/1/2); classes are 80/15/5% and overlap. Scored by macro-averaged F1, so "
+                         "minority classes matter.", "f1_macro", "label", ["a", "b", "c", "d", "e", "label"],
+                         _fill(CENTROID, "label")),
+    "friedman": Family(_friedman_rows, "Friedman-1 regression (RMSE)",
+                       "Predict the continuous target `y` from x1..x8 (three are irrelevant). Lower RMSE is better.",
+                       "rmse", "y", [*[f"x{i}" for i in range(1, 9)], "y"], _fill(MEAN, "y")),
+    "interactions": Family(_interactions_rows, "Sparse regression with an interaction (MAE)",
+                           "Predict `y` from six Gaussian features; one pairwise interaction and one non-linearity "
+                           "matter. Lower MAE is better.", "mae", "y", [*[f"x{i}" for i in range(1, 7)], "y"],
+                           _fill(MEAN, "y")),
+}
+
+
+def synthetic_task(family: str, variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    """Task `<family>-s<variant>` with n rows (70/30 split). `variant` only names the task: the data come from
+    `key` (None: fresh OS entropy, so the rows can never be regenerated from the code)."""
+    fam, k = FAMILIES[family], _key(key)
+    rows = fam.rows(stream(k, "features"), stream(k, "labels"), n)
+    tr, te = _split(rows, stream(k, "split"))
+    return TaskSpecFiles(f"{family}-s{variant}", fam.title, fam.description, fam.metric, fam.target, fam.header,
+                         tr, te, fam.baseline, family)
+
+
+def rings(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("rings", variant, n, key)
+
+
+def xor(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("xor", variant, n, key)
+
+
+def spirals(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("spirals", variant, n, key)
+
+
+def imbalanced(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("imbalanced", variant, n, key)
+
+
+def friedman(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("friedman", variant, n, key)
+
+
+def interactions(variant: int, n: int, key: bytes | None = None) -> TaskSpecFiles:
+    return synthetic_task("interactions", variant, n, key)
+
+
+SYNTHETIC: list[tuple[Callable[..., TaskSpecFiles], int, int]] = [
     (rings, 1, 900), (rings, 2, 1500), (xor, 1, 900), (xor, 2, 1500), (spirals, 1, 900), (spirals, 2, 1400),
     (imbalanced, 1, 1200), (imbalanced, 2, 2000), (friedman, 1, 900), (friedman, 2, 1500),
     (interactions, 1, 900), (interactions, 2, 1500),
@@ -290,34 +382,40 @@ json.dump(out, open("export.json", "w"))
 
 
 def export_real(sandbox_factory: Callable[[Path], object], work: Path) -> dict[str, dict]:
-    """Run the exporter inside the sandbox image (scikit-learn's bundled datasets; no network)."""
+    """Run the exporter inside the FULL sandbox image (scikit-learn's bundled datasets; no network). Trusted code only:
+    agent code runs in the candidate image, which has no bundled datasets (sandbox.docker.CANDIDATE_IMAGE)."""
     sb = sandbox_factory(work)
     (work / "export.py").write_text(_EXPORT, encoding="utf-8")
     res = sb.exec([sb.python, "export.py", json.dumps({k: v[0] for k, v in REAL.items()})],  # type: ignore[attr-defined]
                   timeout_s=600)
-    if res.returncode != 0:
-        raise RuntimeError(f"dataset export failed in the sandbox: {res.stderr[-1500:]}")
-    return json.loads((work / "export.json").read_text(encoding="utf-8"))
+    try:
+        if res.returncode != 0:
+            raise RuntimeError(f"dataset export failed in the sandbox: {res.stderr[-1500:]}")
+        return json.loads((work / "export.json").read_text(encoding="utf-8"))
+    finally:  # export.json is every labelled row of every real dataset: never leave that copy next to the suite
+        for f in ("export.json", "export.py"):
+            (work / f).unlink(missing_ok=True)
+        if work.is_dir() and not any(work.iterdir()):
+            work.rmdir()
 
 
-def real_task(name: str, data: dict, seed: int, *, baseline: str | None = None, task_id: str | None = None,
-              defect: str | None = None) -> TaskSpecFiles:
+def real_task(name: str, data: dict, key: bytes | None = None, *, baseline: str | None = None,
+              task_id: str | None = None, defect: str | None = None) -> TaskSpecFiles:
     _loader, metric, desc = REAL[name]
-    rng = random.Random(seed)
     target = "target"
     header = [*data["columns"], target]
     is_cls = metric != "rmse"
     rows = [[*[str(v) for v in x], str(int(y)) if is_cls else f"{y:.4f}"] for x, y in zip(data["X"], data["y"],
                                                                                         strict=True)]
-    tr, te = _split(rows, rng)
+    tr, te = _split(rows, stream(_key(key), "split"))  # key: shared by tasks re-split from one dataset
     return TaskSpecFiles(task_id or f"{name}-real", f"{name.replace('_', ' ').title()} (real data)", desc, metric,
                          target, header, tr, te,
                          baseline or _fill(CENTROID if is_cls else MEAN, target),
-                         "repair" if defect else "real", defect, source=name)
+                         "repair" if defect else "real", defect, source=name,
+                         retrospective_target=True)
 
 
 # ---------------------------------------------------------------- the suite
-REAL_SPLIT_SEED = 7
 _PATTERN = ("evolve", "gate", "evolve", "sealed", "evolve")
 
 
@@ -344,14 +442,31 @@ def assign_splits(specs: list[TaskSpecFiles], heldout_families: tuple[str, ...] 
     family so every split mixes families. Then every task takes the split of the first task drawn from the same base
     dataset (held-out tasks first, so their datasets stay in gate), so examples shared by re-splits of one dataset can
     never sit in two splits (a gate/sealed label would be public elsewhere). Fails closed (ValueError) on no or an
-    unknown held-out family, or an empty split."""
-    families = {s.family for s in specs}
+    unknown held-out family, or an empty split.
+
+    Generated tasks (origin "generated", GOAL §16.10) all go to evolve and take no part in the human assignment
+    above, so adding or removing them never moves a human task. Fails closed on an unknown origin, on a held-out
+    family that has a generated task (a held-out family must be human-curated), and on a generated task that shares
+    a base dataset with a human task (one of them would have to leave its split, or the human task's held-out
+    examples would be public in evolve)."""
+    bad_origin = sorted(s.task_id for s in specs if s.origin not in ORIGINS)
+    if bad_origin:
+        raise ValueError(f"task(s) with an unknown origin: {bad_origin}")
+    generated = [s for s in specs if s.origin == "generated"]
+    human = [s for s in specs if s.origin != "generated"]
+    gen_held = sorted({s.family for s in generated} & set(heldout_families))
+    if gen_held:
+        raise ValueError(f"held-out families with a generated task: {gen_held} (held-out families are human-curated)")
+    shared = sorted({s.data_source for s in generated} & {s.data_source for s in human})
+    if shared:
+        raise ValueError(f"base dataset(s) {shared} shared by a generated and a human task")
+    families = {s.family for s in human}
     if not heldout_families:
         raise ValueError("no held-out family requested (the leave-one-family-out gate needs one)")
     unknown = sorted(set(heldout_families) - families)
     if unknown:
         raise ValueError(f"held-out families with no task: {unknown}")
-    ordered = sorted(specs, key=lambda t: (t.family, t.task_id))
+    ordered = sorted(human, key=lambda t: (t.family, t.task_id))
     held = [s for s in ordered if s.family in heldout_families]
     rest = [s for s in ordered if s.family not in heldout_families]
     proposed = {s.task_id: "gate" for s in held} | {s.task_id: _PATTERN[i % len(_PATTERN)] for i, s in enumerate(rest)}
@@ -359,6 +474,7 @@ def assign_splits(specs: list[TaskSpecFiles], heldout_families: tuple[str, ...] 
     for s in held + rest:
         first.setdefault(s.data_source, proposed[s.task_id])
     splits = {s.task_id: first[s.data_source] for s in ordered}
+    splits |= {s.task_id: "evolve" for s in generated}
     empty = sorted({"evolve", "gate", "sealed"} - set(splits.values()))
     if empty:
         raise ValueError(f"split(s) {empty} would be empty")
@@ -385,8 +501,16 @@ def _example_rows(task_dir: Path) -> set[str]:
 def check_split_isolation(entries: list[dict]) -> list[str]:
     """Problems that would let one split see another split's examples: a missing source, a source spread over
     several splits, or (by content, whatever the declared sources say) an example row present in tasks of two
-    different splits. Compares public files only; exact text match, so re-formatted copies are not detected."""
+    different splits. Compares public files only; exact text match, so re-formatted copies are not detected.
+    Also (GOAL §16.10): an unknown `origin`, or a generated task outside the evolve split. No `origin` = human."""
     problems = [f"task {e.get('id')} has no `source` (base dataset)" for e in entries if not e.get("source")]
+    for e in entries:
+        origin = e.get("origin", "human")
+        if origin not in ORIGINS:
+            problems.append(f"task {e.get('id')} has an unknown origin {origin!r} (expected one of {ORIGINS})")
+        elif origin == "generated" and e.get("split") not in GENERATED_SPLITS:
+            problems.append(f"generated task {e.get('id')} is in split {e.get('split')!r}: generated tasks may "
+                            f"only be in {GENERATED_SPLITS} (GOAL §16.10)")
     by_source: dict[str, set[str]] = {}
     for e in entries:
         if e.get("source"):
@@ -404,17 +528,21 @@ def check_split_isolation(entries: list[dict]) -> list[str]:
 
 
 def build_suite(out: Path, *, real_data: dict[str, dict] | None,
-                heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES) -> Path:
+                heldout_families: tuple[str, ...] = DEFAULT_HELDOUT_FAMILIES, key: bytes | None = None) -> Path:
     """Write every task and suite.yaml. real_data=None builds the synthetic families only. Every task is in domain
-    `ml`; `heldout_families` are held out of evolution (see assign_splits)."""
+    `ml`; `heldout_families` are held out of evolution (see assign_splits). `key`: the master key every task's data
+    are derived from (None: fresh OS entropy, so no rebuild ever reproduces the data). It is never written; suite.yaml
+    records only its SHA-256 commitment. Tasks are built before any freeze, so none is `minted`; the fixed public
+    datasets (real + repair) are `retrospective_target`s (GOAL §16.2)."""
     out = Path(out)
-    specs = [gen(seed, n) for gen, seed, n in SYNTHETIC]
+    master = _key(key)
+    specs = [gen(seed, n, key=task_key(master, gen(seed, 1, key=master).task_id)) for gen, seed, n in SYNTHETIC]
     if real_data is not None:
-        specs += [real_task(name, real_data[name], seed=REAL_SPLIT_SEED) for name in REAL]
+        specs += [real_task(name, real_data[name], key=task_key(master, name)) for name in REAL]
         for tid, (name, model, defect) in REPAIRS.items():
-            # the SAME split as the real-data task: no held-out label of one is public in the other (they name one
-            # held-out target in the vault; see TaskSpec.dataset_ids)
-            specs.append(real_task(name, real_data[name], seed=REAL_SPLIT_SEED, task_id=tid, defect=defect,
+            # the SAME split (same key) as the real-data task: no held-out label of one is public in the other (they
+            # name one held-out target in the vault; see TaskSpec.dataset_ids)
+            specs.append(real_task(name, real_data[name], key=task_key(master, name), task_id=tid, defect=defect,
                                    baseline=_fill(_SK, "target", model)))
     splits = assign_splits(specs, heldout_families)
     canaries = {src: "CHH-CANARY-" + secrets.token_hex(16) for src in {s.data_source for s in specs}}
@@ -422,10 +550,115 @@ def build_suite(out: Path, *, real_data: dict[str, dict] | None,
     for s in sorted(specs, key=lambda t: (t.family, t.task_id)):
         d = write_task(s, out, canary=canaries[s.data_source])
         entries.append({"id": s.task_id, "dir": str(d.resolve()), "split": splits[s.task_id],
-                        "family": s.family, "domain": "ml", "source": s.data_source,
+                        "family": s.family, "domain": "ml", "source": s.data_source, "origin": s.origin,
+                        "retrospective_target": s.retrospective_target, "minted": False,
                         **({"defect": s.defect} if s.defect else {})})
     problems = check_split_isolation(entries)
     if problems:  # fail closed: never write a suite whose splits leak into each other
         raise ValueError("suite splits are not isolated: " + "; ".join(problems))
-    (out / "suite.yaml").write_text(yaml.safe_dump({"tasks": entries}, sort_keys=False), encoding="utf-8")
+    generator = {"version": GENERATOR_VERSION, "key_commitment": hashlib.sha256(master).hexdigest(),
+                 "key_source": "caller" if key is not None else "os_entropy"}
+    (out / "suite.yaml").write_text(yaml.safe_dump({"generator": generator, "tasks": entries}, sort_keys=False),
+                                    encoding="utf-8")
     return out / "suite.yaml"
+
+
+# ---------------------------------------------------------------- freeze, then mint (GOAL §16.2)
+MINT_FORMAT = "chh-mint/1"
+
+
+class MintRefused(ValueError):
+    pass
+
+
+def _mentions(value: Any, h: str) -> bool:
+    if isinstance(value, str):
+        return value == h
+    if isinstance(value, dict):
+        return any(_mentions(v, h) for v in value.values())
+    if isinstance(value, list):
+        return any(_mentions(v, h) for v in value)
+    return False
+
+
+def require_anchored(frozen_hash: str, ledger_entries: list[Any], anchor_file: Path) -> dict[str, Any]:
+    """The anchor proving `frozen_hash` was frozen before minting: the full chain must verify, every anchor in
+    `anchor_file` (kept outside the store) must still match it, and a ledger entry naming `frozen_hash` must sit at
+    or before the latest anchored position. Returns {"entry_seq", "length", "head"}. Fails closed (MintRefused)."""
+    from ..kernel.ledger import check_anchors, verify_chain
+
+    problems = verify_chain(ledger_entries, full=True)
+    if problems:
+        raise MintRefused(f"the ledger does not verify: {problems[:3]}")
+    if not Path(anchor_file).is_file():
+        raise MintRefused(f"no anchor file at {anchor_file}")
+    problems = check_anchors(ledger_entries, Path(anchor_file))
+    if problems:
+        raise MintRefused(f"the ledger does not match its anchors: {problems[:3]}")
+    lines = [json.loads(ln) for ln in Path(anchor_file).read_text(encoding="utf-8").splitlines() if ln.strip()]
+    length, head = max((int(a["length"]), str(a["head"])) for a in lines)
+    named = [e for e in ledger_entries if _mentions(e.body, frozen_hash)]
+    if not named:
+        raise MintRefused(f"no ledger entry names the frozen hash {frozen_hash[:16]}: freeze (record) it first")
+    first = min(e.seq for e in named)
+    if first > length:
+        raise MintRefused(f"the frozen hash {frozen_hash[:16]} is recorded at ledger seq {first} but is not anchored "
+                          f"(latest anchor covers {length} entries): anchor the ledger, then mint")
+    return {"entry_seq": first, "length": length, "head": head}
+
+
+def _minted_spec(family: str, master: bytes, n_train: int, n_test: int, task_id: str) -> TaskSpecFiles:
+    fam = FAMILIES[family]
+    train = fam.rows(stream(master, "mint-train/features"), stream(master, "mint-train/labels"), n_train)
+    test = fam.rows(stream(master, "mint-test/features"), stream(master, "mint-test/labels"), n_test)
+    return TaskSpecFiles(task_id, fam.title, fam.description, fam.metric, fam.target, fam.header, train, test,
+                         fam.baseline, family)
+
+
+def mint_heldout(family: str, *, frozen_hash: str, beacon: str, ledger_entries: list[Any], anchor_file: Path,
+                 out: Path, n_train: int = MINT_TRAIN_ROWS, n_test: int = MINT_TEST_ROWS) -> Path:
+    """Mint a fresh held-out target of synthetic `family` for the frozen object `frozen_hash` (a claim, edit, program
+    or Kernel version), ONLY after that hash is recorded and anchored (require_anchored). The key is
+    draw("heldout_mint", prereg_hash=frozen_hash, beacon=beacon): beacon-only, so anyone can re-run it once the beacon
+    is public (verify_mint). The caller must have fixed which beacon value it would use before the freeze.
+
+    Writes task dir `<out>/<family>-mint-<id>` (write_task layout; test rows de-duplicated against train) and
+    private/mint.json. The record is truth-equivalent (with the public generator code, hash + beacon regenerate the
+    labels), so it stays private, and the beacon must not reach the program while it runs."""
+    if family not in FAMILIES:
+        raise MintRefused(f"unknown synthetic family {family!r}: fixed public datasets cannot be minted (they are "
+                          f"retrospective targets)")
+    if n_train < 1 or n_test < 1:
+        raise MintRefused("n_train and n_test must be positive")
+    anchor = require_anchored(frozen_hash, ledger_entries, anchor_file)
+    value = draw("heldout_mint", prereg_hash=frozen_hash, beacon=beacon, secret=None)
+    master = as_key(value)
+    task_id = f"{family}-mint-{hashlib.sha256(master).hexdigest()[:12]}"
+    d = write_task(_minted_spec(family, master, n_train, n_test, task_id), Path(out))
+    record = {"format": MINT_FORMAT, "purpose": "heldout_mint", "frozen_hash": frozen_hash, "beacon": beacon,
+              "anchor": anchor, "family": family, "n_train": n_train, "n_test": n_test,
+              "generator_version": GENERATOR_VERSION, "task_id": task_id, "minted": True,
+              "retrospective_target": False}
+    (d / "private" / "mint.json").write_text(json.dumps(record, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    return d
+
+
+def verify_mint(task_dir: Path) -> list[str]:
+    """Problems (empty = the truth is exactly what the record's public inputs mint): re-runs the draw and the
+    generator from private/mint.json alone and compares every public and private data file."""
+    d = Path(task_dir)
+    try:
+        rec = json.loads((d / "private" / "mint.json").read_text(encoding="utf-8"))
+        if rec.get("format") != MINT_FORMAT or rec.get("generator_version") != GENERATOR_VERSION:
+            return [f"mint record format/generator {rec.get('format')}/{rec.get('generator_version')} not supported"]
+        master = as_key(draw("heldout_mint", prereg_hash=rec["frozen_hash"], beacon=rec["beacon"], secret=None))
+        spec = _minted_spec(rec["family"], master, int(rec["n_train"]), int(rec["n_test"]), rec["task_id"])
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        return [f"mint record unreadable ({type(e).__name__}: {e})"]
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ref = write_task(spec, Path(tmp))
+        return [f"{rel} differs from what the record mints" for rel in
+                ("public/train.csv", "public/test_X.csv", "private/test_y.csv")
+                if (d / rel).read_bytes() != (ref / rel).read_bytes()]

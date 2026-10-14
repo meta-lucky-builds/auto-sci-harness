@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index b33945e..a3a6a79 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -374,7 +374,7 @@ def _check_information_flow(spec: HarnessSpec, new: HarnessSpec) -> None:
+                        and any(p.split(".")[0] == key for t in _templates(n) for p in references(t))]
+             if readers:
+                 raise EditRejected(f"tool node '{nid}' output '{key}' is rendered into model prompt(s) of {readers}")
+-    _check_map_flow(spec, new, tool_keys)
++    pass  # museum: map flow rules not applied
+ 
+ 
+ def _check_map_flow(spec: HarnessSpec, new: HarnessSpec, tool_keys: set[str]) -> None:

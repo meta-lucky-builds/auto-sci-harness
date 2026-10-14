@@ -280,7 +280,11 @@ def test_the_edit_surface_cannot_reach_adapter_files(monkeypatch):
         "kind", "role", "system", "prompt", "output_key", "output_schema", "retries", "temperature", "max_tokens",
         "command", "timeout_s", "snapshot_after", "module", "params", "item_key",
         "source", "target", "when", "key", "op", "value", "max_value_chars", "head_fraction",
-        "usd", "gpu_hours", "quota_units", "tokens", "wall_s"}
+        "usd", "gpu_hours", "quota_units", "tokens", "wall_s",
+        # MapNode (g-runtime, reviewed 2026-10-08 at the int16-fix merge): items_key is a state path, body a node id,
+        # reducer a lookup in the trusted declared-reducer registry (never an import), max_items an integer cap. None
+        # resolves code; the evolve flow rules for maps are in edits._check_map_flow (finding R2-MAP).
+        "items_key", "body", "reducer", "max_items"}
     assert not [m for m in registered() if "adapter" in m or m.startswith(("custom_harness", "kernel"))]
     for path in ("custom_harness.kernel.adapters", "kernel.adapters", "custom_harness.verify.metrics"):
         with pytest.raises(KeyError):
@@ -323,7 +327,9 @@ def test_tool_node_cannot_put_training_rows_into_a_prompt(store, tmp_path, monke
     spec = seed_spec()
     tool = {"kind": "tool", "command": [sys.executable, "-c", "print(open('data/train.csv').read()[:600])"],
             "output_key": "tool_rows"}
-    ops = _insert_between(spec, "baseline", "hypothesize", "peek", tool)
+    # the node right before hypothesize (was `baseline`; the L5 memory wiring, 93c0c4a, put `recall` in between)
+    (before,) = [e["source"] for e in _edges(spec) if e["target"] == "hypothesize" and e.get("when") is None]
+    ops = _insert_between(spec, before, "hypothesize", "peek", tool)
     ops.append(EditOp(op="replace", path="/nodes/hypothesize/prompt",
                       value=spec.nodes["hypothesize"].prompt + "\nRows: {{tool_rows.stdout}}"))
     with pytest.raises(EditRejected, match="tool output"):
@@ -364,7 +370,7 @@ def test_tool_node_rules_and_positive_control():
     with pytest.raises(EditRejected, match="must write a 'tool_\\*' key"):
         apply_edit(spec, tool_edit(check | {"output_key": "queue"}))  # a key a trusted module reads
     with pytest.raises(EditRejected, match=r"tool output|rendered into model prompt"):  # a new LLM node rendering it
-        apply_edit(spec, tool_edit(check, _insert_between(spec, "socratic", "next", "n1", {
+        apply_edit(spec, tool_edit(check, _insert_between(spec, "check_answers", "next", "n1", {
             "kind": "llm", "prompt": "{{tool_check.stdout}}", "output_key": "n1"})))
     with pytest.raises(EditRejected, match="rendered into model prompt"):  # an existing prompt already rendering it
         human = spec.model_dump(mode="json")
@@ -373,10 +379,16 @@ def test_tool_node_rules_and_positive_control():
 
 
 def test_no_trusted_module_reads_tool_prefixed_state():
-    """The tool taint rule relies on no module consuming `tool_*` keys: pin it on the module sources."""
+    """The tool taint rule relies on no module consuming `tool_*` keys: pin it on the module sources. One reviewed
+    exception: runtime/spec.py's check_map REFUSES an LLM map body over a `tool_*` key (a guard, not a reader); it
+    may mention the prefix only inside that `startswith` test."""
     src = ROOT / "src/custom_harness"
+    guard = 'root.startswith("tool_")'
     for p in [*(src / "research").glob("*.py"), *(src / "runtime").glob("*.py")]:
         text = p.read_text(encoding="utf-8")
+        if p.name == "spec.py" and p.parent.name == "runtime":
+            assert text.count(guard) == 1, p  # the guard is still there (not vacuous)
+            text = text.replace(guard, "")
         assert '"tool_' not in text and "'tool_" not in text, p
 
 
@@ -461,6 +473,41 @@ def test_campaign_refused_unless_claim_nodes_declare_the_multiplicity_bound(stor
     with pytest.raises(MultiplicityDrift):
         check_campaign(_declared(seed_spec(), 64), store, [d1, d2], runs_per_task=32)
     assert check_campaign(_declared(seed_spec(), 65), store, [d1, d2], runs_per_task=32) == 65
+
+
+def test_run_check_uses_the_kernels_transcript_bound_not_the_claim_count(store, tmp_path):
+    """K4 certifies at alpha / max(n_comparisons, N) with N the transcript bound over the target family: every
+    release logged before a claim (e.g. each evolve run's verdict bits, channel evolution_score) doubles that claim's
+    term. Counting claims (2 here) misses the drift K4 actually applies (1 + 2^3 = 9 here): with n_comparisons=2 the
+    second claim was certified at alpha/9, so the arm evaluated later in a paired comparison is judged stricter.
+    Secure: check_run refuses (MultiplicityDrift) whenever K4's family size exceeds the declared n_comparisons.
+    Orchestrator decision 2026-10-09: fail closed until the Kernel's alpha-account charging lands (GOAL 16.4;
+    docs/r2-2_transcript_bound.md)."""
+    from custom_harness.budget import Budget
+    from custom_harness.evolve.multiplicity import MultiplicityDrift, check_run, held_out_target_id, last_prereg_seq
+    from custom_harness.kernel import Kernel
+    from custom_harness.kernel.ledger import Ledger
+    from custom_harness.research.claims import register_task
+    from custom_harness.research.task import load_task
+    from custom_harness.runtime.modules import ModuleContext
+    d1 = _rings(tmp_path, "a", 1)
+    ctx = ModuleContext(run_id="t", store=store, backends={}, budget=Budget(), sandbox=None)
+    register_task(ctx, load_task(d1), d1)
+    target = held_out_target_id(d1)
+
+    def prereg(c: str, declared: int) -> None:
+        Ledger(store).append("prereg", {"claim_hash": c * 64, "claim": {
+            "generalization_targets": [target], "analysis_plan": {"n_comparisons": declared}}})
+    prereg("a", 2)  # an earlier run's claim (no release before it: transcript term 1)
+    for _ in range(3):  # its verdict bits reached the proposer: three verdict_bit releases
+        Kernel(store).record_release(target, "evolution_score", "verdict_bit", "evolve.score:verdict")
+    since = last_prereg_seq(store)
+    prereg("b", 2)  # 2 claims <= 2 declared, but K4's N = 1 + 2**3 = 9
+    with pytest.raises(MultiplicityDrift, match="n_comparisons=2"):
+        check_run(store, since)
+    since = last_prereg_seq(store)
+    prereg("c", 1 + 8 + 8)  # declared >= N (1 + 8 + 8 = 17): K4 used exactly the declared size
+    assert [c["family"] for c in check_run(store, since)] == [17]
 
 
 def _declared(spec: HarnessSpec, n: int) -> HarnessSpec:
@@ -550,3 +597,16 @@ def test_finalize_cli_requires_a_named_human(tmp_path):
     suite.write_text(yaml.safe_dump({"tasks": []}), encoding="utf-8")
     with pytest.raises(SystemExit, match="approver"):
         main(["finalize", str(spec), "--suite", str(suite), "--approver", " ", "--dev-sandbox"])
+
+
+def test_reserved_module_ids_and_keys_name_real_modules():
+    """b-evolve reserved b-research's module ids and output keys by name before that branch was merged; now both are
+    on one branch, every reserved module id must be a REGISTERED module (a typo would reserve nothing), and the
+    critic/recall keys must be keys those modules really write."""
+    from custom_harness.evolve.edits import RESERVED_OUTPUT_KEYS, RESERVED_WRITING_MODULES
+    from custom_harness.runtime.modules import registered
+    assert sorted(RESERVED_WRITING_MODULES - set(registered())) == []
+    src = ROOT / "src/custom_harness/research"
+    written = (src / "critic_answers.py").read_text(encoding="utf-8") + (src / "recall.py").read_text(encoding="utf-8")
+    for key in ("critic_answers", "critic_evidence", "recalled", "recall_log"):
+        assert key in RESERVED_OUTPUT_KEYS and f'"{key}":' in written, key

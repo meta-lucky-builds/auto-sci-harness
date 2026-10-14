@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import csv
 import io
+import secrets
 from collections.abc import Callable
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, SerializerFunctionWrapHandler, model_serializer
 
 from ..sandbox.base import Sandbox, WorkspaceEscape, safe_path
 from .vault import Vault
@@ -52,6 +53,16 @@ class ExecRecord(_Model):
     metric: str
     score: float
     run_id: str
+    # invariant 21: the program came from REPLAYED model output (a cassette). Such a record is never evidence (K0
+    # refuses it). Omitted from dumps when false, so records written before the field existed keep their bytes.
+    replayed: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_not_replayed(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("replayed"):
+            doc.pop("replayed", None)
+        return doc
 
 
 class ExecutionError(RuntimeError):
@@ -110,6 +121,9 @@ class SandboxReplayer:
     def __init__(self, sandbox_factory: SandboxFactory):
         self.sandbox_factory = sandbox_factory
         self.calls = 0
+        # a per-replayer nonce in every key: callers build a NEW replayer per certify/reproduce, and a factory that maps
+        # key -> root / key would otherwise hand a second replayer the directory (and files) of the first one
+        self.nonce = secrets.token_hex(4)
 
     def replay(self, record: ExecRecord, vault: Vault) -> list[str] | None:
         self.calls += 1
@@ -119,7 +133,8 @@ class SandboxReplayer:
             if vault.store.blobs.put(data) != ref.blob:
                 raise ExecutionError(f"input {role} ({ref.dataset_id}/{ref.file}) no longer matches the record")
             inputs[role] = (ref.file, data)
-        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.calls}")
+        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.nonce}-"
+                                       f"{self.calls}")
         preds, _ = run_program(sandbox, code=vault.store.blobs.get(record.artifact_hash), entrypoint=record.entrypoint,
                                argv=record.argv, inputs=inputs, seed=record.seed,
                                timeout_s=float(record.limits.get("timeout_s", 900)))

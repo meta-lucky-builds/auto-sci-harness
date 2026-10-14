@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors import InfraError
+from ..errors import infra_cause
 from ..kernel import Certificate, Claim, Kernel, KernelError, Label
 from ..kernel.checks import applicability
 from ..kernel.claim import EvidenceClass, canonical_json
@@ -48,9 +48,9 @@ from .model import (
 from .screen import WRAPPER, Fingerprints, screen_proposal, screen_strings
 
 CERTIFIED = frozenset({Label.CERTIFIED_VALIDATED, Label.CERTIFIED_INTERNAL, Label.CERTIFIED_EXACT})
-_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}\Z")
+_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def cascade_closure(children: Mapping[str, Iterable[str]], roots: Iterable[str]) -> set[str]:
@@ -216,7 +216,11 @@ class MemoryStore:
         entry = st.entries[entry_id]
         try:
             reasons, tier = self._gate(entry, st, secrets)
-        except InfraError as e:  # the environment broke during re-derivation: judge again later, do not reject
+        except Exception as e:
+            # the environment broke (Kernel re-derivation, the exploit evaluator): judge again later, do not reject
+            # (GOAL L1, infra != policy). Anything else propagates as before.
+            if infra_cause(e) is None:
+                raise
             return GateResult(entry_id, False, Status.QUARANTINED, None, (f"infrastructure failure: {e}",))
         if reasons:
             self._set(entry_id, Status.REJECTED, "gate", reasons, tier)
@@ -304,7 +308,9 @@ class MemoryStore:
                     verdict = self.exploit_check.check(entry)
                     if not verdict.passed:
                         reasons += list(verdict.reasons) or ["exploit check failed"]
-                except Exception as e:  # noqa: BLE001  fail closed
+                except Exception as e:  # fail closed
+                    if infra_cause(e) is not None:  # an outage is no verdict: admit() keeps the entry quarantined
+                        raise
                     reasons.append(f"exploit check raised {type(e).__name__}")
         return reasons, tier
 
@@ -566,8 +572,10 @@ def negative_proposal(kernel: Kernel, cert_hash: str) -> Proposal | None:
                                                  "min_effect": claim.effect.min_effect, "targets": targets})
 
 
-def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> list[GateResult]:
-    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store."""
+def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest",
+                      secrets: Sequence[str] = ()) -> list[GateResult]:
+    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store.
+    `secrets`: the calling run's private values (the research loop passes them), screened like any write's."""
     st = store._state()
     done = {h for e in st.entries.values() if e.kind == Kind.NEGATIVE for h in e.evidence}
     out = []
@@ -579,7 +587,7 @@ def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> 
         if prop is None:
             continue
         try:
-            out.append(store.submit(prop, writer=writer))
+            out.append(store.submit(prop, writer=writer, secrets=secrets))
         except MemoryRefused:
             continue  # e.g. the claim statement carries an injection pattern: refused and logged by propose
         done.add(h)

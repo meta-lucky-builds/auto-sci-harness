@@ -1,0 +1,37 @@
+{
+  "version": "6.9",
+  "hitCount": 3,
+  "nextCursorMark": "AoIIP4AAACgyMjg4OTE1Mg==",
+  "request": {"queryString": "(splice ratio hypoxia) AND OPEN_ACCESS:y AND HAS_FT:y", "resultType": "core", "pageSize": 10},
+  "resultList": {
+    "result": [
+      {
+        "id": "31000077", "source": "MED", "pmid": "31000077", "pmcid": "PMC9000077", "doi": "10.5555/lit.2022.077",
+        "title": "Hypoxia-Induced Splicing Shifts in Cultured Hepatocytes.",
+        "authorString": "Okafor N, Lindqvist M, Tanaka H.",
+        "authorList": {"author": [{"fullName": "Okafor N", "firstName": "Nkem", "lastName": "Okafor"},
+                                  {"fullName": "Lindqvist M", "firstName": "Maja", "lastName": "Lindqvist"},
+                                  {"fullName": "Tanaka H", "firstName": "Hiro", "lastName": "Tanaka"}]},
+        "pubYear": "2022", "firstPublicationDate": "2022-03-15",
+        "abstractText": "We measured alternative splicing in cultured hepatocytes under low oxygen and report a reproducible shift in exon usage.",
+        "isOpenAccess": "Y", "inEPMC": "Y", "hasPDF": "Y", "license": "cc by"
+      },
+      {
+        "id": "31000110", "source": "MED", "pmid": "31000110", "pmcid": "PMC9000110", "doi": "10.5555/lit.2025.010",
+        "title": "Splice Ratio Dynamics After Reoxygenation",
+        "authorString": "Mbeki T, Novak P.",
+        "pubYear": "2025", "firstPublicationDate": "2025-06-01",
+        "abstractText": "A follow-up study of splice ratio recovery after hypoxia.",
+        "isOpenAccess": "Y", "inEPMC": "Y", "license": "cc by"
+      },
+      {
+        "id": "PPR000123", "source": "PPR", "doi": "10.5555/lit.2021.300",
+        "title": "Exon Usage Under Oxygen Stress: A Preprint",
+        "authorString": "Rossi A.",
+        "pubYear": "2021", "firstPublicationDate": "2021-11-02",
+        "abstractText": "Preprint on exon usage under oxygen stress.",
+        "isOpenAccess": "N", "inEPMC": "N"
+      }
+    ]
+  }
+}

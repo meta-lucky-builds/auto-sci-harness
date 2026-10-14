@@ -82,3 +82,26 @@ chh lit-search "q" --live --session run_1 --published-from 2020-01-01   # logs r
 chh cite-check cites.json --snapshot <id> --session run_1   # exit 0 iff I3 passes (or n/a)
 ```
 Without `--live` there is no network access.
+
+## Full-text keyword retrieval (2026-10-07; `fulltext.py`)
+`chh lit-search "q" --source europepmc --full-text ...` searches Europe PMC (open-access articles with full text),
+then fetches each in-window hit's JATS full text (`/{PMCID}/fullTextXML`) and cuts match snippets from it locally
+(Europe PMC returns none, so every snippet re-derives from a stored envelope). `chh cite-check --full-text` also
+fetches the full text of each resolved citation, so quote spans are checked against the body, not only the abstract.
+Rules, all enforced in code:
+- the full text is fetched only for records inside the loop's fixed window, through the same paced, recorded
+  transport (Europe PMC: 1 s per request), and replays identically from a frozen snapshot;
+- the text is title + abstract + body; the reference list and back matter never support a quote;
+- the text's date is the LATEST date the article gives (e.g. its PMC release). As of T, a text dated after T, or with
+  no date, is never used. A search result then carries no text and no snippets. In a citation check, a quote that is
+  not in the abstract becomes `unchecked` (unverified), not `unsupported`, because a full text exists that cannot
+  be used;
+- a full text is attached only if it states one of the record's ids and contradicts none (`same_paper`);
+- each record keeps the article's licence (`full_text_license`): only permissively licensed texts may go into a
+  shared bundle (not enforced: no bundle code reads it yet).
+Terms (read 2026-10-07): **alphaXiv** (OR's full-text source) forbids automated access and copying in its terms, so
+it is not wired. **Europe PMC**: EMBL-EBI allows automated use at a reasonable load and expects attribution; each
+article's own licence governs reuse. The Europe PMC pages returned HTTP 403 to our reader, so endpoint shapes are
+inferred from EBI material. Never exercised live in this build. **arXiv** (no full-text search API; PDFs for
+research use, not redistribution) and **NCBI BioC** (retrieval by id) are possible fetch-by-id fallbacks, not built.
+**CORE** needs a licence and API key (needs owner).

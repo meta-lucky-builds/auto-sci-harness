@@ -44,6 +44,23 @@ def test_claims_require_existing_evidence_and_take_weakest_tier(store):
     assert store.claim_tier(c.id) == Tier.T5_LLM_JUDGE
 
 
+def test_a_claim_with_no_evidence_is_refused(store):
+    """GOAL L2: claims come only from evidence. An EMPTY evidence list passed the per-id check vacuously and stored
+    a claim backed by nothing (scorecard, 2026-10-08)."""
+    c = Claim(text="x improves y", evidence_ids=())
+    with pytest.raises(ValueError, match="no evidence"):
+        store.add_claim(c)
+    with pytest.raises(KeyError):
+        store.get_claim(c.id)  # nothing was written
+
+
+def test_a_status_for_an_unknown_claim_is_refused(store):
+    """Same class: a status row for a claim that does not exist (no evidence behind it) was accepted."""
+    from custom_harness.records import ClaimStatus
+    with pytest.raises(KeyError):
+        store.set_claim_status("claim_missing", ClaimStatus.DRAFT)
+
+
 def test_evidence_requires_blob(store):
     with pytest.raises(ValueError):
         store.add_evidence(Evidence(kind=EvidenceKind.LOG, tier=Tier.T1_EXECUTABLE, verifier_id="v",

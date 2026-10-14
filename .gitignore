@@ -14,3 +14,4 @@ github repo/
 .coverage
 .mypy_cache/
 .ruff_cache/
+.mutation/

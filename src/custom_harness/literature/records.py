@@ -9,11 +9,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-_DOI = re.compile(r"^10\.[0-9]{4,9}/[!-~]+$")  # printable ASCII only: no homoglyphs, no spaces
-_ARXIV_NEW = re.compile(r"^([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?$")
-_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?$")
+_DOI = re.compile(r"^10\.[0-9]{4,9}/[!-~]+\Z")  # printable ASCII only: no homoglyphs, no spaces
+_ARXIV_NEW = re.compile(r"^([0-9]{4}\.[0-9]{4,5})(v[0-9]+)?\Z")
+_ARXIV_OLD = re.compile(r"^([a-z][a-z\-]*(?:\.[A-Z]{2})?/[0-9]{7})(v[0-9]+)?\Z")
 _DOI_PREFIX = re.compile(r"^(?:doi:|https?://(?:dx\.)?doi\.org/)", re.IGNORECASE)
-_PMID = re.compile(r"^(?:pmid:?\s*|https?://pubmed\.ncbi\.nlm\.nih\.gov/)([1-9][0-9]{0,8})/?$", re.IGNORECASE)
+_PMID = re.compile(r"^(?:pmid:?\s*|https?://pubmed\.ncbi\.nlm\.nih\.gov/)([1-9][0-9]{0,8})/?\Z", re.IGNORECASE)
 _ARXIV_PREFIX = re.compile(r"^(?:arxiv:|https?://(?:export\.)?arxiv\.org/abs/)", re.IGNORECASE)
 
 
@@ -67,6 +67,12 @@ class PaperRecord(BaseModel):
     full_text: str | None = None
     url: str | None = None
     envelope: str | None = None  # digest of the stored response this record was parsed from (provenance)
+    # full text (fulltext.py): where it came from, its stored response, licence, the latest date the article gives
+    full_text_source: str | None = None
+    full_text_envelope: str | None = None
+    full_text_license: str | None = None
+    full_text_date: str | None = None
+    snippets: tuple[str, ...] = ()  # match snippets of the search that returned this record (cut from full_text)
 
     def ids(self) -> set[str]:
         out = set()
@@ -89,7 +95,7 @@ class LookupResult(BaseModel):
     attempts: list[dict[str, Any]] = []
 
 
-_DATE = re.compile(r"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:[T ].*)?$")
+_DATE = re.compile(r"^([0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?(?:[T ].*)?\Z")
 
 
 def latest_date(s: str | None) -> date | None:
@@ -131,6 +137,14 @@ def text_as_of(rec: PaperRecord, as_of: date) -> bool:
         return True
     u = latest_date(rec.updated)
     return u is not None and u <= as_of
+
+
+def full_text_as_of(rec: PaperRecord, as_of: date | None) -> bool:
+    """The stored FULL text can be used as of `as_of`: its latest stated date is provably on or before it."""
+    if as_of is None:
+        return True
+    d = latest_date(rec.full_text_date)
+    return d is not None and d <= as_of
 
 
 def in_window(rec: PaperRecord, start: date | None, end: date | None) -> bool:

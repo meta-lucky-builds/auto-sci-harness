@@ -45,9 +45,36 @@ reject it.
 ## Exploit quarantine
 
 `PerturbedEvaluatorCheck(evaluator, min_retained=0.5)`: passes iff the skill's nominal gain is positive and at
-least `min_retained` of it survives a perturbed evaluator. Exceptions, non-numbers and NaN fail. **No real
-perturbed evaluator exists yet**; the tests use a declared test double (`GainTable`). Until one exists the
-production default (`exploit_check=None`) admits no skill.
+least `min_retained` of it survives a perturbed evaluator. Exceptions, non-numbers and NaN fail. The
+production default (`exploit_check=None`) admits no skill. `tests/test_memory.py` uses a declared test double
+(`GainTable`).
+
+The real evaluator for ML skills is `research/perturbed.py` `PerturbedTaskEvaluator(kernel, spawn, targets, k=3,
+timeout_s=120, n_perturbed_seeds=3)` (tests: `tests/test_exploit_eval.py`). For a skill it takes the first
+CERTIFIED-VALIDATED/INTERNAL certificate in its evidence, and re-runs the claim's subject and comparator programs
+(code from the evidence store) under k-fold CV on the claim's first development dataset: only the PUBLIC
+`train.csv`, read with `read_public`; a held-out role or an undeclared target column raises. `targets` (dataset
+-> target column) comes from trusted code. Gain = mean over seeds of the sign-adjusted metric difference of the
+out-of-fold predictions.
+
+- Nominal: the claim's seeds, fold split seed 0, inputs named `train.csv` / `test_X.csv`, the standard argv,
+  original row and column order (the contract the skill was certified under).
+- Perturbed: seeds derived from the certificate hash and disjoint from the claim's seeds, another split seed,
+  random input file names, test rows shuffled (predictions un-shuffled before scoring), columns permuted
+  (programs must read columns by header name).
+
+A failing run or a wrong prediction count raises (fail closed). `k`, the number of perturbed seeds, the timeout
+and the perturbed seed range are UNCALIBRATED (owner decision, GOAL §13.8). The test certifies two planted
+exploit-skills with the real Kernel (good only for seeds 0-2; good only when the test file is `test_X.csv`),
+checks they gain under the nominal grader, and that the store rejects both and admits an honest KNN playbook;
+with the perturbation replaced by the nominal grader both exploits are admitted. The research certificates are
+T2, below the default T1 skill floor, so that test declares `floors={PLAYBOOK: T2}`.
+
+Wiring: `research/perturbed.py` may not import `custom_harness.memory` (allowlist test), so the composition
+`PerturbedEvaluatorCheck(PerturbedTaskEvaluator(...))` must be made by allowlisted trusted code (e.g. `cli.py`);
+that wiring is not done. Limits: it only catches exploits of what it perturbs (seeds, names, order, split); a
+skill that hard-codes the development data's labels or detects the CV row count is not caught; each check costs
+2 x k x (claim seeds + perturbed seeds) program runs.
 
 ## Revocation cascade
 
@@ -87,11 +114,12 @@ namespace unreadable. `unused()` lists readable entries never read; `retire()` r
 `chh memory list|unused|verify-log|sync|harvest-negatives|revoke ENTRY --reason R --by HUMAN [--namespace NS]`.
 No command writes free text into memory.
 
-## Not done (integration hooks needed elsewhere)
+## Integration (done in phase 2, see docs/research_loop_wiring.md)
 
-- Research loop: call `harvest_negatives()` after certify, query + `render()` into the hypothesize/plan prompt
-  (`research/modules.py`), `record_outcome()` when a playbook was used.
-- A real perturbed evaluator (L3) behind `ExploitCheck`.
-- Engine: pass the run's `_private*` values as `secrets=` (today `_private_values` is private to the engine).
-- Only `memory/*` and `cli.py` may import the package (`test_memory_package_has_no_model_path...`); a new writer
-  must be added to that allowlist deliberately.
+- Research loop: `research/memory_wiring.py` renders memory into the hypothesize prompt (`recall` node), runs
+  `harvest_negatives()` after certify and `record_outcome()` for skills rendered into the run's prompt.
+- Engine: passes the run's `_private*` values (and encodings) to modules as `ModuleContext.secrets`.
+- L3 exploit check: `research/perturbed.py` (`PerturbedTaskEvaluator`), built into a check by
+  `memory_wiring.exploit_check(kernel, spawn, targets)`. No loop node writes skills yet.
+- Only `memory/*`, `cli.py`, `research/memory_wiring.py` and `research/claims.py` may import the package
+  (`test_memory_package_has_no_model_path...`); a new writer must be added to that allowlist deliberately.

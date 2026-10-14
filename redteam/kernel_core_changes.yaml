@@ -1,0 +1,56 @@
+# Two-speed Kernel records (GOAL §16.7; checked by scripts/governance.py, part of check.py --fast).
+# kind: baseline (the first record only: the core as adopted) / window (scheduled, >= 7 days after 'proposed') /
+# tighten (merges at once; the claim that it only tightens is NOT machine-checked).
+# deviation (appended correction of an EARLIER record; never satisfies the current core): corrects, changes,
+# cooling_off_observed, basis, approver.
+changes:
+- fingerprint: 05c4b9fd1e4e25b73f144b145afcbf89bb242b50b4513053a3711260c94daf14
+  kind: baseline
+  approver: owner (delegated to orchestrator in chat, 2026-10-08)
+  note: >-
+    Kernel core as merged on main before the §16 workstreams (base commit f0f703f). Replaces the assure agent's
+    bootstrap record of 2026-10-07, which said it needed owner confirmation; the owner delegated that confirmation
+    to the orchestrator in chat on 2026-10-08. The record itself was typed by the fixer agent; no human typed it.
+  recorded: '2026-10-07'
+- fingerprint: 352143e29e8717a35c8413b6c9a8ee8313b593f644db9c904aaf61f610ceb43b
+  kind: tighten
+  approver: owner (delegated to orchestrator in chat, 2026-10-08)
+  note: >-
+    The §16 Kernel core change as integrated on int16-fix (kstats' §16.4/§16.5.8/§16.6/§16.7 work plus the fixer's
+    KD3/KD4, duplicate-bundle-member, replay-directory and malformed-ledger-entry fixes). Classified tighten-only by
+    the fixer agent, on the orchestrator's instruction (window or tighten as appropriate), because a window record proposed 2026-10-07 could only be recorded
+    on or after 2026-10-14. Honest caveats: (1) the classification is not machine-checked; (2) some parts are not
+    plainly tighten-only: verify_status separates STALE from forged (a stale certificate is no longer reported as a
+    forgery, although verify() stays strict), score_predictions now scores a malformed certificate entry as a miss
+    instead of crashing, and the K3 reliability demonstration changes how many replays a claim needs; (3) the
+    museum (45/45 KILLED) and the Kernel tests are the evidence, not proof. The owner should review these three
+    points and, if any is not a tightening, replace this record with a window record.
+  recorded: '2026-10-08'
+- fingerprint: 71b85b551ca602006c28b39bf77ecc22e975c047fd026514872c0be63f6bd961
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; tighten-only changes may merge at once, GOAL 16.7)
+  note: >-
+    F4 transductive check registered in the ML adapter: the adapter's identity now covers
+    custom_harness.verify.transductive and its fault-injection validation runs the 13 F4 cases, so a weakened F4
+    makes the ML adapter unapprovable. Only adds validation; no pass condition is relaxed. Recorded by the
+    integrator agent, not typed by a human. The ML adapter hash changes: `chh approve-adapter ml` must be re-run
+    by the human.
+  recorded: '2026-10-08'
+- fingerprint: 352143e29e8717a35c8413b6c9a8ee8313b593f644db9c904aaf61f610ceb43b
+  kind: deviation
+  corrects: 352143e29e8717a35c8413b6c9a8ee8313b593f644db9c904aaf61f610ceb43b
+  changes:
+  - verify_status separates STALE from forged (a stale certificate is no longer reported as a forgery; verify() stays
+    strict)
+  - score_predictions scores a certificate entry without a readable resolution as a miss (invalid_resolution) instead
+    of crashing every prediction reader
+  - the K3 zero-failure reliability demonstration changes how many clean replays a claim needs
+  cooling_off_observed: false
+  basis: GOAL §16.4 (statistics fixed at registration, K3 reliability) and §16.6 (stale vs forged, as-of stability)
+  approver: owner (delegated to orchestrator in chat, 2026-10-08 evening)
+  note: >-
+    Corrects the 'tighten' record above for the same fingerprint, which classed these three changes as tightening.
+    They are Kernel core changes adopted from GOAL §16.4/§16.6 under the owner's delegation on 2026-10-08. The §16.7
+    7-day cooling-off for core changes was NOT observed: this is a recorded deviation, not a tightening. The earlier
+    record is left unchanged (history is not rewritten). Typed by the integrator agent, not by a human.
+  recorded: '2026-10-08'

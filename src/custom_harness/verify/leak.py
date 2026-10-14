@@ -74,6 +74,10 @@ MIN_FRAGMENT = 16  # characters of a canary's random part that identify it
 _B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
 _HEX_RUN = re.compile(r"[0-9a-fA-F]{32,}")
 _TOKEN_SPLIT = re.compile(r"[\s,;|]+")
+# a label run written as a quoted list / tuple / set literal (`["c", "a", ...]`, `('c', 'a')`): quote and bracket
+# characters are also separators in a second tokenisation (auditor-to-kstats-01); the first one is kept, so a label
+# vocabulary that itself contains such characters is matched as before
+_LITERAL_SPLIT = re.compile(r"""[\s,;|"'`\[\](){}]+""")
 MIN_VERBATIM_LEN = 8
 MIN_ENCODED_LEN = 16
 FRAGMENT_LEN = 16
@@ -220,8 +224,11 @@ def _canary_in(view: str, canaries: list[str]) -> bool:
 
 
 def _runs_in(view: str, runs: list[LabelRuns]) -> bool:
-    tokens = [t for t in _TOKEN_SPLIT.split(view) if t]
-    return any(r.found(tokens) or r.found(tokens[::-1]) for r in runs)
+    for split in (_TOKEN_SPLIT, _LITERAL_SPLIT):
+        tokens = [t for t in split.split(view) if t]
+        if any(r.found(tokens) or r.found(tokens[::-1]) for r in runs):
+            return True
+    return False
 
 
 def scan_text(text: str, where: str, canaries: list[str], windows: list[str],

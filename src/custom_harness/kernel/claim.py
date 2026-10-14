@@ -83,6 +83,19 @@ class AnalysisPlan(_Model):
     # AFTER it is fixed (a program that is deterministic only for a predictable seed is caught); "all": every seed
     reproduce: Literal["sampled_seed", "all"] = "sampled_seed"
     reproduce_tolerance: float = 0.0  # max |metric difference| on re-execution; 0 = identical predictions
+    # K3 reliability demonstration (§16.4): the claim's program fails (does not reproduce) at most eps_max of the time,
+    # demonstrated at confidence 1 - beta by ceil(ln beta / ln(1 - eps_max)) consecutive clean replays. None = the
+    # Kernel's preset, frozen into the pre-registration. Omitted from dumps when unset (older claims keep their hash).
+    eps_max: float | None = None
+    beta: float | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_reliability(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        for key in ("eps_max", "beta"):
+            if doc.get(key) is None:
+                doc.pop(key, None)
+        return doc
 
 
 class Risk(_Model):

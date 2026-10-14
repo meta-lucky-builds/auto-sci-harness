@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 664c83d..917575e 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -274,7 +274,7 @@ def k2_preregistered(ctx: Context) -> CheckResult:
+             other = first_prereg.get(ch)
+             excused = (purpose in ("evaluate", "kernel") and ch != ctx.claim_hash and other is not None
+                        and other.seq < a.seq
+-                       and bool(related & set(other.body.get("claim", {}).get("generalization_targets", []))))
++                       and True)
+             if not excused:
+                 early.append(a)
+         if early:

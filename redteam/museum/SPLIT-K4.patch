@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -169,7 +169,7 @@
+         return {target}
+     private = {f.blob for f in datasets[target].files.values() if f.private}
+     return {target} | {d for d, rec in datasets.items() if d != target and (
+-        shared_examples(vault, target, d) or any(f.private and f.blob in private for f in rec.files.values()))}
++        False or any(f.private and f.blob in private for f in rec.files.values()))}
+ 
+ 
+ # ------------------------------------------------------------------ fixed at registration (§16.4, invariant 17)

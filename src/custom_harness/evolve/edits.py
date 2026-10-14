@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from ..runtime.spec import HarnessSpec, LLMNode, ToolNode
+from ..runtime.spec import HarnessSpec, LLMNode, MapNode, ToolNode
 from ..runtime.template import references
 
 
@@ -52,8 +54,11 @@ class Edit(BaseModel):
     type: EditType
     ops: list[EditOp]
     rationale: str
-    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids
+    evidence: list[str] = Field(default_factory=list)  # trace refs / failure-cluster ids (claims.py citation forms)
     predicted: PredictedEffect = Field(default_factory=PredictedEffect)
+    # the JSON-pointer paths the proposer says its ops change (claims.check_claimed_diff); None = not stated, which
+    # the loop refuses (fail closed). Not part of the novelty signature (loop.edit_signature: type + ops only).
+    claimed_change: list[str] | None = None
 
 
 class EditRejected(ValueError):
@@ -77,7 +82,12 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "replica_evidence_ids", "replica_confirm_failures", "replica_certificate",
                                   "replica_checklist", "replica_publishable", "replica_publish_blockers",
                                   # audit I3 inputs (research/claims.py: citation_audit)
-                                  "citations", "literature_snapshot"})
+                                  "citations", "literature_snapshot",
+                                  # audit I6 input (research/claims.py: _figure_audit)
+                                  "figures",
+                                  # critic-answer check and recall (research/critic_answers.py, research/recall.py;
+                                  # tests/test_evolve_hardening.py checks these keys are really written)
+                                  "critic_answers", "critic_evidence", "recalled", "recall_log"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
@@ -87,7 +97,12 @@ RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
 RESERVED_WRITING_MODULES = frozenset({
     "research.setup", "research.profile_data", "research.baseline_dev", "research.socratic_filter",
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
-    "research.replica_dev", "research.report", "research.audit"})
+    "research.replica_dev", "research.report", "research.audit",
+    # the critic-answer check and recall write reserved keys (ids checked against the registry by a test)
+    "research.critic_evidence", "research.check_critic_answers", "research.recall"})
+# Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
+# critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
+PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
@@ -286,6 +301,9 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
             raise EditRejected(f"edges out of approval node '{nid}' are human-only")
         if _edge_set(new_edges, nid) != _edge_set(old_edges, nid):
             raise EditRejected(f"edges into approval node '{nid}' are human-only")
+    for nid in PINNED_NODES:
+        if nid in spec.nodes and (nid not in new.nodes or new.nodes[nid] != spec.nodes[nid]):
+            raise EditRejected(f"critic-chain node '{nid}' is human-only (its definition cannot be edited or removed)")
     protected_modules = {getattr(spec.nodes[n], "module", None) for n in protected_nodes if n in spec.nodes} - {None}
     for nid, node in new.nodes.items():
         if nid in spec.nodes and node == spec.nodes[nid]:
@@ -370,6 +388,223 @@ def _check_information_flow(spec: HarnessSpec, new: HarnessSpec) -> None:
                        and any(p.split(".")[0] == key for t in _templates(n) for p in references(t))]
             if readers:
                 raise EditRejected(f"tool node '{nid}' output '{key}' is rendered into model prompt(s) of {readers}")
+    _check_map_flow(spec, new, tool_keys)
+
+
+def _check_map_flow(spec: HarnessSpec, new: HarnessSpec, tool_keys: set[str]) -> None:
+    """The same rules through a MapNode (R2 evolve gap for maps). A map renders each element of `items_key` into its
+    body's templates under `item_key`, so a body reference to the item is a reference to `items_key`; a map whose
+    body is a tool node carries tool output into the map's `output_key`, which is then tool output itself. Checked
+    for every map that an edit adds or changes, or whose body it changes (a human-written map is judged again when
+    an edit changes its body)."""
+    changed = set(_changed(spec, new))
+    maps = {nid: n for nid, n in new.nodes.items() if isinstance(n, MapNode)}
+    tool_bodied = {m.output_key for m in maps.values() if isinstance(new.nodes.get(m.body), ToolNode)}
+    for mid, m in maps.items():
+        if mid not in changed and m.body not in changed:
+            continue
+        body = new.nodes.get(m.body)
+        items_root = m.items_key.split(".")[0]
+        for path in (p for t in _templates(body) for p in references(t)):
+            if path.split(".")[0] != m.item_key:
+                continue
+            if items_root in UNRENDERABLE_KEYS or items_root.startswith("_"):
+                raise EditRejected(f"map '{mid}' would render '{m.items_key}' into body '{m.body}' as '{path}' "
+                                   "(unfiltered, private, host or engine state is never rendered by an evolved "
+                                   "template)")
+            if isinstance(body, LLMNode) and (items_root in tool_keys | tool_bodied
+                                              or items_root.startswith(TOOL_OUTPUT_PREFIX)):
+                raise EditRejected(f"map '{mid}' would render tool output '{m.items_key}' into the model prompt of "
+                                   f"body '{m.body}' (tool output only routes control flow)")
+        if isinstance(body, ToolNode):
+            if not m.output_key.startswith(TOOL_OUTPUT_PREFIX):
+                raise EditRejected(f"map '{mid}' has tool body '{m.body}', so it must write a '{TOOL_OUTPUT_PREFIX}*' "
+                                   f"key, not '{m.output_key}' (its output is tool output)")
+    judged = {m.output_key for mid, m in maps.items() if m.output_key in tool_bodied
+              and (mid in changed or m.body in changed)}
+    for nid, n in new.nodes.items():  # a tool-bodied map's output reaches no model prompt
+        if not isinstance(n, LLMNode):
+            continue
+        keys = tool_bodied if nid in changed else judged  # unchanged prompts are judged against changed maps only
+        hit = [p for t in _templates(n) for p in references(t) if p.split(".")[0] in keys]
+        if hit:
+            raise EditRejected(f"node '{nid}' would render tool output {hit} (the output of a map with a tool body) "
+                               "into a model prompt")
+
+
+def mechanisms(edit: Edit, spec: HarnessSpec) -> list[list[str]] | None:
+    """The mechanisms an edit changes (GOAL §5 L6.6 "one mechanism per candidate"), defined on the EFFECT of its ops,
+    not on how they are written:
+
+      - an anchor is a node whose definition changed (added, removed or modified), a node whose ordered list of
+        OUTGOING edges changed (a routing decision belongs to its source node), or a top-level spec field other than
+        `nodes`/`edges` that changed (`spec:<field>`, e.g. `spec:max_steps`);
+      - a node the edit ADDS is merged with every node that gains an edge into it, and a node it REMOVES with every
+        node that loses an edge into it (inserting or deleting a step is one mechanism with its wiring).
+
+    Each connected group of anchors is one mechanism. Returns the groups (sorted), or None when the ops cannot be
+    applied (apply_edit reports that)."""
+    old = copy.deepcopy(spec.model_dump(mode="json"))
+    doc = copy.deepcopy(old)
+    try:
+        for op in edit.ops:
+            _apply_op(doc, op)
+    except (EditRejected, ValueError, IndexError, TypeError, KeyError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("nodes"), dict) or not isinstance(doc.get("edges"), list):
+        return None
+    anchors: set[str] = set()
+    for key in set(old) | set(doc):
+        if key not in ("nodes", "edges") and old.get(key) != doc.get(key):
+            anchors.add(f"spec:{key}")
+    on, nn = old["nodes"], doc["nodes"]
+    added, removed = set(nn) - set(on), set(on) - set(nn)
+    anchors |= {n for n in set(on) | set(nn) if on.get(n) != nn.get(n)}
+
+    def out_edges(edges: list[Any]) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for e in edges:
+            src = str(e.get("source")) if isinstance(e, dict) else "?"
+            out.setdefault(src, []).append(json.dumps(e, sort_keys=True, default=str))
+        return out
+
+    oe, ne = out_edges(old["edges"]), out_edges(doc["edges"])
+    anchors |= {s for s in set(oe) | set(ne) if oe.get(s) != ne.get(s)}
+    parent = {a: a for a in anchors}
+
+    def find(a: str) -> str:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def union(a: str, b: str) -> None:
+        if a in parent and b in parent:
+            parent[find(a)] = find(b)
+
+    for edges, nodes in ((doc["edges"], added), (old["edges"], removed)):
+        for e in edges:
+            if isinstance(e, dict) and e.get("target") in nodes:
+                union(str(e.get("source")), str(e["target"]))
+    groups: dict[str, list[str]] = {}
+    for a in sorted(anchors):
+        groups.setdefault(find(a), []).append(a)
+    return sorted(groups.values())
+
+
+def check_one_mechanism(edit: Edit, spec: HarnessSpec) -> None:
+    """Refuse a bundle that changes more than one mechanism (see `mechanisms`). An edit that cannot be applied is
+    left to apply_edit, which rejects it with the precise reason."""
+    groups = mechanisms(edit, spec)
+    if groups is not None and len(groups) > 1:
+        raise EditRejected(f"one mechanism per candidate: this edit changes {len(groups)} separate mechanisms "
+                           f"{[g if len(g) > 1 else g[0] for g in groups][:6]}; propose them as separate edits")
+
+
+_CLUSTER_ID = re.compile(r"^[CD]\d{1,4}\Z")  # \Z, not $: `$` also matches before a trailing newline
+_CANARY = re.compile(r"CHH-CANARY-", re.I)
+
+
+def denied_tokens(tasks: Iterable[Any], canaries: Iterable[str] = ()) -> list[str]:
+    """What no proposer output may contain: ids of every gate/sealed task, names (>= 3 chars) of held-out families
+    and domains (they appear in no evolve task), and the caller's canaries. The proposer never sees any of these,
+    so their presence in its output means a leak or a covert channel."""
+    tasks = list(tasks)
+    evolve_fam = {getattr(t, "family", None) for t in tasks if t.split == "evolve"}
+    evolve_dom = {getattr(t, "domain", None) for t in tasks if t.split == "evolve"}
+    out = {t.task_id for t in tasks if t.split != "evolve"}
+    for t in tasks:
+        if t.split == "evolve":
+            continue
+        for name, seen in ((getattr(t, "family", None), evolve_fam), (getattr(t, "domain", None), evolve_dom)):
+            if isinstance(name, str) and len(name) >= 3 and name not in seen:
+                out.add(name)
+    out |= {c for c in canaries if c}
+    return sorted(out)
+
+
+def _token_hit(text: str, tokens: Iterable[str]) -> bool:
+    low = text.lower()
+    for tok in tokens:
+        t = tok.lower()
+        i = low.find(t)
+        while i >= 0:
+            before = low[i - 1] if i > 0 else " "
+            after = low[i + len(t)] if i + len(t) < len(low) else " "
+            if not (before.isalnum() or before in "_-") and not (after.isalnum() or after in "_-"):
+                return True
+            i = low.find(t, i + 1)
+    return False
+
+
+class ScreenRejected(EditRejected):
+    """Refused by `screen_prediction`. `about_ops`: the CHANGE itself (its ops) carries the denied content, so the
+    novelty gate should refuse it again; otherwise only its free text did, and the same change re-worded is fine."""
+
+    def __init__(self, msg: str, *, about_ops: bool):
+        super().__init__(msg)
+        self.about_ops = about_ops
+
+
+def screen_prediction(edit: Edit, *, task_ids: Iterable[str], deny: Iterable[str], max_text_chars: int,
+                      max_delta: float, delta_decimals: int) -> tuple[Edit, list[str]]:
+    """The covert-channel screen on a proposed edit (GOAL §5 L6.2: "typed edits with a predicted effect", done
+    safely). Rejects (EditRejected, with a reason that never quotes the text) an edit any of whose text (ops,
+    rationale, evidence, predicted clusters) carries a denied token (`denied_tokens`), a canary or a private-data
+    pattern. Otherwise returns a sanitised copy plus notes on what was changed:
+      - failure_clusters_fixed keeps only diagnosis-style ids (C<n> / D<n>);
+      - tasks_at_risk keeps only exact ids of this campaign's tasks (anything else is free text);
+      - evidence keeps at most 20 items of at most 64 chars; rationale is cut to `max_text_chars`;
+      - expected_delta must be finite (else 0), is clipped to +-max_delta and rounded to `delta_decimals`: a float's
+        low-order digits are otherwise a 50-bit channel into the ledger.
+    tasks_at_risk is screened by the exact-id rule, not the deny list: naming a task is what that field is for."""
+    deny = list(deny)
+    texts = [(True, json.dumps([o.model_dump() for o in edit.ops], default=str)),
+             *((False, t) for t in (edit.rationale, *edit.evidence, *edit.predicted.failure_clusters_fixed,
+                                    *(edit.claimed_change or ())))]
+    for in_ops, text in texts:
+        where = "edit ops" if in_ops else "edit text"
+        if _token_hit(text, deny):
+            raise ScreenRejected(f"{where} name a held-out task, family, domain or canary (covert channel or leak; "
+                                 "content withheld)", about_ops=in_ops)
+        if _CANARY.search(text) or any(p.search(text) for p in _LEAK_PATTERNS):
+            raise ScreenRejected(f"{where} carry a canary or a private-data pattern (content withheld)",
+                                 about_ops=in_ops)
+    notes: list[str] = []
+    known = set(task_ids)
+    clusters = [c for c in edit.predicted.failure_clusters_fixed if _CLUSTER_ID.match(c)]
+    risk = [t for t in edit.predicted.tasks_at_risk if t in known]
+    evidence = [e for e in edit.evidence if len(e) <= 64][:20]
+    # claimed paths: bounded like evidence. A dropped path is noted; the loop rejects an edit whose citations or
+    # claimed paths were dropped (loop.UNVERIFIABLE_IF_DROPPED), since a dropped FALSE claim could not be checked
+    claimed = None if edit.claimed_change is None else [p for p in edit.claimed_change if len(p) <= 200][:32]
+    rationale = edit.rationale[:max_text_chars]
+    delta = edit.predicted.expected_delta
+    if not math.isfinite(delta):
+        delta = 0.0
+        notes.append("expected_delta not finite: set to 0")
+    clipped = round(max(-max_delta, min(max_delta, delta)), delta_decimals)
+    if clipped != delta:
+        notes.append(f"expected_delta clipped/rounded to {clipped}")
+    for name, before, after in (("failure_clusters_fixed", edit.predicted.failure_clusters_fixed, clusters),
+                                ("tasks_at_risk", edit.predicted.tasks_at_risk, risk),
+                                ("evidence", edit.evidence, evidence),
+                                ("claimed_change", edit.claimed_change or [], claimed or [])):
+        if len(after) != len(before):
+            notes.append(f"{name}: {len(before) - len(after)} item(s) dropped")
+    if rationale != edit.rationale:
+        notes.append(f"rationale cut to {max_text_chars} chars")
+    clean = edit.model_copy(update={"rationale": rationale, "evidence": evidence, "claimed_change": claimed,
+                                    "predicted": PredictedEffect(failure_clusters_fixed=clusters,
+                                                                 expected_delta=clipped, tasks_at_risk=risk)})
+    return clean, notes
+
+
+def withheld(edit: Edit) -> dict[str, Any]:
+    """What the lineage may keep of an edit refused by `screen_prediction`: type and op paths only (the refused text
+    must not be written to the store, from which later exports are built)."""
+    return {"type": edit.type.value, "ops": [{"op": o.op, "path": "<withheld>"} for o in edit.ops],
+            "rationale": "<withheld>", "evidence": [], "predicted": PredictedEffect().model_dump(), "withheld": True}
 
 
 def terminal_nodes(spec: HarnessSpec) -> set[str]:

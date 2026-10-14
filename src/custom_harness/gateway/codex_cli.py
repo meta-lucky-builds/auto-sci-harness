@@ -1,6 +1,8 @@
 """BYOS backend via the official OpenAI Codex CLI (registry entry `openai-codex-cli`).
 
-We run `codex exec` as a subprocess in an empty, read-only working directory. The user signs in
+We run `codex exec` as a subprocess in a fresh, EMPTY, read-only working directory: the process cwd and `-C` are
+one new temp directory with nothing in it (no repo, no .git, no AGENTS.md), and the output-schema / last-message
+files live in a separate sibling temp directory (GOAL §16.8). The user signs in
 to Codex themselves; we never read or reuse Codex credentials.
 
 Honest limits:
@@ -75,22 +77,26 @@ class CodexCLIBackend(Backend):
 
     def _complete(self, req: ChatRequest, schema: dict | None) -> ChatResponse:
         model = req.model or self.model
-        with tempfile.TemporaryDirectory(prefix="chh-codex-") as tmp:
-            tmpdir = Path(tmp)
-            out_file = tmpdir / "last_message.txt"
+        # Two temp directories: `work` is Codex's cwd and -C and stays empty; `io` holds the files WE exchange with
+        # Codex. The process cwd is set explicitly so Codex never inherits the harness's cwd (the repo, whose
+        # AGENTS.md / config Codex would otherwise load).
+        with (tempfile.TemporaryDirectory(prefix="chh-codex-io-") as io_tmp,
+              tempfile.TemporaryDirectory(prefix="chh-codex-work-") as work_tmp):
+            iodir, workdir = Path(io_tmp), Path(work_tmp)
+            out_file = iodir / "last_message.txt"
             cmd = [self.exe, "exec", "--json", "--ephemeral", "-s", "read-only",
-                   "--skip-git-repo-check", "-C", str(tmpdir), "-o", str(out_file)]
+                   "--skip-git-repo-check", "-C", str(workdir), "-o", str(out_file)]
             if model:
                 cmd += ["-m", model]
             if schema is not None:
-                schema_file = tmpdir / "schema.json"
+                schema_file = iodir / "schema.json"
                 schema_file.write_text(json.dumps(schema), encoding="utf-8")
                 cmd += ["--output-schema", str(schema_file)]
             cmd.append("-")
             t0 = time.time()
             try:
                 proc = subprocess.run(cmd, input=_flatten(req), capture_output=True, text=True, check=False,
-                                      encoding="utf-8", timeout=self.timeout_s)
+                                      encoding="utf-8", timeout=self.timeout_s, cwd=str(workdir))
             except subprocess.TimeoutExpired as e:
                 raise BackendError(f"codex exec timed out after {self.timeout_s}s", transient=True) from e
             wall = time.time() - t0
