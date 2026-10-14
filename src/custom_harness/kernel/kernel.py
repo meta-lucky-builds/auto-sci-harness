@@ -7,10 +7,12 @@ runtime engine, the research loop or the evolver.
 
 from __future__ import annotations
 
+import csv
+import io
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from ..errors import InfraError
 from ..records import Evidence, EvidenceKind
@@ -19,6 +21,8 @@ from ..tiers import Tier
 from . import adapters, alpha
 from .certificate import CHECK_IDS, VG_LADDER, Assumption, Certificate, CheckResult, Label
 from .checks import (
+    NOISE_FLOOR,
+    NOISE_SOURCES,
     Context,
     KernelConfig,
     Replayer,
@@ -29,7 +33,7 @@ from .checks import (
     related_targets,
     slot_charge,
 )
-from .claim import Claim, EvidenceClass, strict_json
+from .claim import Claim, EvidenceClass, canonical_json, strict_json
 from .execution import ExecRecord
 from .ledger import AsOfLedger, Entry, Ledger
 from .reasons import Code, UncodedReason, exception_name
@@ -192,15 +196,27 @@ class Kernel:
     def declare_truth_copy(self, target: str, dataset_id: str, file: str, column: str, declarer: str) -> Entry:
         """Trusted host code (task registration) declares that public file `dataset_id/file`, column `column`, carries
         a copy of `target`'s held-out truth (possibly encoded) that a program could receive. K3 then requires the
-        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks."""
+        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks.
+        The public hook for task registration (s4-integrity): IDEMPOTENT (an identical earlier declaration is returned,
+        so re-registering a suite adds nothing); declare before the task's first claim (a later declaration makes
+        earlier certificates STALE on verify, never valid by omission). docs/kernel_s4.md."""
         rec = self.vault.dataset(dataset_id)
         if target not in self.vault.datasets() or file not in rec.files or rec.files[file].private:
             raise KernelError("a truth copy is a PUBLIC file of a registered dataset, for a registered target")
-        header = self.store.blobs.get(rec.files[file].blob).decode("utf-8", errors="replace").splitlines()[:1]
-        if not declarer.strip() or not header or column not in header[0].split(","):
+        header = next(csv.reader(io.StringIO(self.store.blobs.get(rec.files[file].blob).decode("utf-8", "replace"))),
+                      [])
+        if not declarer.strip() or column not in header:
             raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
-        return self.ledger.append("truth_copy", {"target": target, "dataset_id": dataset_id, "file": file,
-                                                 "column": column, "declarer": declarer})
+        body = {"target": target, "dataset_id": dataset_id, "file": file, "column": column}
+        old = [e for e in self.ledger.entries("truth_copy") if {k: e.body.get(k) for k in body} == body]
+        return old[0] if old else self.ledger.append("truth_copy", {**body, "declarer": declarer})
+
+    def record_noise_floor(self, floor: Any) -> str:
+        """Store a measured noise floor (verify.tolerance.NoiseFloor) as a chh-noise-floor/1 record; returns the hash a
+        claim cites as AnalysisPlan.tolerance_evidence. Nothing here is trusted: K1 re-reads and re-calibrates it."""
+        runs = {k: [float(v) for v in getattr(floor, k)] for k in NOISE_SOURCES}
+        doc = {"format": NOISE_FLOOR, "reference": float(floor.reference), **runs}
+        return self.store.blobs.put(canonical_json(doc))
 
     def releases(self, target_dataset_id: str) -> list[Entry]:
         """Releases on the target and on every target sharing its held-out examples (the K4 family)."""

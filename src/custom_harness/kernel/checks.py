@@ -6,13 +6,16 @@ exception inside a check is a failure of that check, never a pass (see kernel.Ke
 
 from __future__ import annotations
 
+import ast
 import contextlib
 import csv
 import hashlib
 import importlib
+import importlib.util
 import io
 import json
 import math
+import re
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -49,6 +52,7 @@ from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRe
 # peek as "leakscan" is not caught. "reproduce" is NOT excused: nothing on a live store reads with it (bundles are
 # re-checked on a fresh store with purpose "kernel"), so excusing it would only widen the trusted surface.
 INTEGRITY_PURPOSES = frozenset({"leakscan"})
+_PLAIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+=@-]{0,199}")  # K1: ids rendered into a data statement
 
 
 class Replayer(Protocol):
@@ -388,6 +392,15 @@ def k1_well_formed(ctx: Context) -> CheckResult:
     unknown = sorted((targets | dev | set(c.scope.datasets)) - set(known))
     if unknown:
         reasons.append(R(Code.K1_DATASETS, f"unregistered datasets: {unknown}"))
+    if c.evidence_class == EvidenceClass.DATA:  # s4: the ML adapter's scope vocabulary, as for the exact classes
+        roles, phrase = {d: r.role.value for d, r in known.items()}, getattr(procedures(ctx), "scope_phrase", None)
+        reasons += statement_reasons(ctx, None if phrase is None else lambda: str(phrase(c, roles)))
+        reasons += [R(Code.K1_STATEMENT, f"identifier {x[:40]!r} is not a plain id ({_PLAIN_ID.pattern}): ids are "
+                                         f"rendered into the statement") for x in (c.subject.artifact_id,
+                    c.comparator.artifact_id, *c.generalization_targets) if not _PLAIN_ID.fullmatch(x)]
+        if set(c.scope.datasets) - targets - dev:
+            reasons.append(R(Code.K1_SCOPE, f"scope datasets {sorted(set(c.scope.datasets) - targets - dev)} were "
+                                            f"neither tested (targets) nor used in development: no claim about them"))
     if len(set(plan.seeds)) != len(plan.seeds) or len(plan.seeds) < cfg.min_seeds:
         reasons.append(R(Code.K1_PLAN, f"analysis plan needs >= {cfg.min_seeds} distinct seeds"))
     if not 0 < plan.alpha <= cfg.max_alpha:
@@ -412,10 +425,37 @@ def k1_well_formed(ctx: Context) -> CheckResult:
         reasons.append(R(Code.K1_RELIABILITY, f"K3 reliability requirement must have eps_max in (0, {cfg.max_eps_max}] "
                                               f"and beta in (0, {cfg.max_beta}]"))
     power = plan.power
-    if power is not None and not (c.kind == ClaimKind.NEGATIVE_RESULT and cfg.min_power <= power <= cfg.max_power):
-        reasons.append(R(Code.K1_POWER, f"a declared power is for negative_result claims only, in [{cfg.min_power}, "
-                                        f"{cfg.max_power}]"))
-    return _result(reasons + p0_reasons(ctx))
+    bounded = c.kind in (ClaimKind.NEGATIVE_RESULT, ClaimKind.EQUIVALENCE)  # §16.10 bounded nulls and TOST
+    if power is not None and not (bounded and cfg.min_power <= power <= cfg.max_power):
+        reasons.append(R(Code.K1_POWER, f"a declared power is for negative_result and equivalence claims only, in "
+                                        f"[{cfg.min_power}, {cfg.max_power}]"))
+    return _result(reasons + p0_reasons(ctx) + tolerance_reasons(ctx))
+
+
+NOISE_FLOOR = "chh-noise-floor/1"
+NOISE_SOURCES = ("nominal", "perturbed", "rebuild", "seed")
+
+
+def tolerance_reasons(ctx: Context) -> list[str]:
+    """K1 (s3-verifiers): a reproduce tolerance > 0 is accepted only up to the tolerance that the cited noise-floor
+    record gives when K1 re-reads it and re-calibrates it with verify.tolerance.claim_tolerance (the owner's fixed
+    miss rate and sources, l3_config), so no hand-set or inflated tolerance can loosen K3."""
+    plan = ctx.claim.analysis_plan
+    if plan.reproduce_tolerance == 0:
+        return []
+    from ..verify import tolerance  # it imports kernel.checks (l3_config): resolved at call time
+    try:
+        doc = strict_json(ctx.store.blobs.get(str(plan.tolerance_evidence)))
+        runs = [tuple(doc[k]) for k in NOISE_SOURCES]
+        if doc["format"] != NOISE_FLOOR or not all(type(v) is float for v in (doc["reference"], *sum(runs, ()))):
+            raise ValueError("not a chh-noise-floor/1 record of floats")
+        got = tolerance.claim_tolerance(ctx.claim.evidence_class, tolerance.NoiseFloor(doc["reference"], *runs)).value
+    except (KeyError, TypeError, ValueError, OSError) as e:
+        return [R(Code.K1_TOLERANCE, f"reproduce_tolerance {plan.reproduce_tolerance} > 0 needs a readable noise-floor "
+                                     f"record (tolerance_evidence): {exception_name(e)}")]
+    return [] if got is not None and plan.reproduce_tolerance <= got else [R(
+        Code.K1_TOLERANCE, f"reproduce_tolerance {plan.reproduce_tolerance} exceeds the tolerance {got} that its "
+                           f"noise-floor record gives on re-calibration")]
 
 
 def p0_reasons(ctx: Context) -> list[str]:
@@ -798,16 +838,16 @@ def k9_leaks(ctx: Context) -> CheckResult:
         if ref.hash in private_blobs:
             reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} code IS a private file ({private_blobs[ref.hash]})"))
         try:
-            text = ctx.store.blobs.get(ref.hash).decode("utf-8", errors="ignore")
+            texts = reader_texts(ctx.store.blobs.get(ref.hash), source=True)  # decoded literals too (s4-kernel)
         except OSError:
             continue  # K0 reports unresolvable artifacts
-        reasons += coded(Code.K9_LEAK, leak.scan_text(text, f"{role} code", canaries, windows, runs))
+        reasons += coded(Code.K9_LEAK, _scan(texts, f"{role} code", canaries, windows, runs))
     # program inputs: hidden labels must not reach a program even as a renamed or re-headed copy (records here
     # passed K0, so every input blob resolves; a read error would fail this check via certify, never pass it)
     for blob in sorted({ref.blob for _, r in ctx.records for ref in r.inputs.values()}):
         data = ctx.store.blobs.get(blob)
-        text = data.decode("utf-8", errors="ignore")
-        reasons += coded(Code.K9_LEAK, leak.scan_text(text, f"program input {blob[:12]}", canaries, windows, runs))
+        reasons += coded(Code.K9_LEAK, _scan(reader_texts(data), f"program input {blob[:12]}", canaries, windows,
+                                             runs))
         # KD3: the labels as a COLUMN (interleaved with features, so no consecutive run exists in the text)
         reasons += [R(Code.K9_LEAK, f"hidden test labels found as column {col!r} of program input {blob[:12]}")
                     for labels in label_lists for col in label_columns(data, labels)]
@@ -872,13 +912,14 @@ def _exact_spec(ctx: Context) -> adapters.AdapterSpec | None:
 
 
 def statement_reasons(ctx: Context, phrase: Callable[[], str] | None) -> list[str]:
-    """Computational and formal claims (invariant 14): no scope conditions (a certificate or a proof holds for the
-    registered instance or the approved statement only) and the statement is exactly the adapter's rendering, so no
-    prose (e.g. "this circuit works when built") rides on an exact result. An adapter without a rendering fails."""
+    """Computational, formal and data claims (invariant 14): no scope conditions (none is in the adapters'
+    vocabularies: a certificate or a proof holds for the registered instance or the approved statement only; a data
+    claim for its targets' populations) and the statement is exactly the adapter's rendering, so no prose (e.g. "this
+    circuit works when built", "cures X") rides on a result. An adapter without a rendering fails."""
     c, reasons = ctx.claim, []
     if c.scope.conditions:
-        reasons.append(R(Code.K1_SCOPE, f"a {c.evidence_class.value} claim has no scope conditions (it holds for the "
-                                        f"registered subject only), got {sorted(c.scope.conditions)}"))
+        reasons.append(R(Code.K1_SCOPE, f"a {c.evidence_class.value} claim has no scope conditions (none is in its "
+                                        f"adapter's vocabulary), got {sorted(c.scope.conditions)}"))
     if phrase is None:
         return [*reasons, R(Code.K1_STATEMENT, "the adapter renders no scope phrase: the statement cannot be checked")]
     try:
@@ -986,13 +1027,26 @@ def k8_computational(ctx: Context) -> CheckResult:
     return _result(coded(Code.K8_ADAPTER_BOUNDS, list(module.bounds(problem, cert, value))))
 
 
-def _reader_texts(data: bytes) -> list[str]:
-    """What a reader of the document can see: its bytes as UTF-8 and, when json can parse it (UTF-8/16/32, a BOM,
-    \\u escapes), every parsed key and string, duplicates included, re-encoded canonically (s3-domain red team)."""
-    texts = [data.decode("utf-8", errors="ignore")]
-    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding: bytes only
+def reader_texts(data: bytes, *, source: bool = False) -> list[str]:
+    """What a reader of the bytes can see (s3-domain red team; s4: program sources): the bytes as UTF-8, also with NUL
+    bytes dropped (UTF-16/32 spellings of ASCII); when json parses it (UTF-8/16/32, a BOM, \\u escapes) every parsed
+    key and string re-encoded canonically; for program `source` that Python parses (a coding cookie, \\u \\x \\N{}
+    octal escapes, adjacent literals) the decoded source and its string and bytes literals in source order, joined
+    by newlines and joined directly (a canary split over literals). Runtime-built strings are not seen (stated)."""
+    texts = [data.decode("utf-8", errors="ignore"), data.replace(b"\0", b"").decode("utf-8", errors="ignore")]
+    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding
         texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
-    return texts
+    with contextlib.suppress(ValueError, SyntaxError, RecursionError, LookupError, MemoryError):  # not Python
+        nodes = ast.walk(ast.parse(data)) if source else iter(())
+        consts = sorted((n.lineno, n.col_offset, n.value if isinstance(n.value, str) else n.value.decode(
+            "utf-8", "ignore")) for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str | bytes))
+        lits = [v.replace("\0", "") for *_, v in consts]
+        texts += [importlib.util.decode_source(data), "\n".join(lits), "".join(lits)] if source else []
+    return list(dict.fromkeys(texts))
+
+
+def _scan(texts: list[str], where: str, canaries: list[str], windows: list[str], runs: Any = None) -> list[str]:
+    return list(dict.fromkeys(f for t in texts for f in leak.scan_text(t, where, canaries, windows, runs)))
 
 
 def k9_computational(ctx: Context) -> CheckResult:
@@ -1005,9 +1059,7 @@ def k9_computational(ctx: Context) -> CheckResult:
     for role, digest in scanned:
         if digest in private:
             reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} IS a private file ({private[digest]})"))
-        found = [f for text in _reader_texts(ctx.store.blobs.get(digest)) for f in leak.scan_text(text, role,
-                                                                                                canaries, [])]
-        reasons += coded(Code.K9_LEAK, list(dict.fromkeys(found)))
+        reasons += coded(Code.K9_LEAK, _scan(reader_texts(ctx.store.blobs.get(digest)), role, canaries, []))
     return _result(reasons, [f"scanned the instance and {len(ctx.certificates)} certificate(s) for "
                              f"{len(canaries)} canary token(s) and {len(private)} private file(s)"])
 

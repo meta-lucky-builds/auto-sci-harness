@@ -17,14 +17,16 @@ enforcement. No model output and no harness edit can reach it.
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import hashlib
 import importlib
 import importlib.util
 import json
 import site
+import sys
 import sysconfig
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -36,7 +38,7 @@ from ..verify.stats import mean_t_interval, paired_example_interval
 from . import lp, sim
 from .claim import EvidenceClass, canonical_json
 from .execution import ExecutionError, parse_predictions
-from .ledger import Entry, Ledger
+from .ledger import Entry, Ledger, inside
 
 
 @dataclass(frozen=True)
@@ -73,7 +75,8 @@ def _source_file(name: str) -> Path | None:
     if spec is None or not spec.has_location or spec.origin is None:
         return None  # built-in / frozen / namespace package: no source of ours
     path = Path(spec.origin).resolve()
-    return None if any(path.is_relative_to(r) for r in _external_roots()) else path
+    # by identity, not spelling (\?\, 8.3, case): an OSError counts as project code, which is hashed (fail closed)
+    return None if any(inside(path, r, on_error=False) for r in _external_roots()) else path
 
 
 _IMPORTS: dict[str, frozenset[str]] = {}  # sha256 of a module's source -> absolute names it imports (parse cache)
@@ -118,14 +121,39 @@ def covered_modules(spec: AdapterSpec) -> dict[str, Path]:
     return dict(sorted(out.items()))
 
 
+Stamps = tuple[tuple[Path, int, int, int], ...]
+_HASHES: dict[tuple[AdapterSpec, tuple[str, ...]], tuple[Stamps, str]] = {}
+
+
+def _stamps(paths: Iterable[Path]) -> Stamps:
+    return tuple((p, (s := p.stat()).st_mtime_ns, s.st_size, s.st_ino) for p in paths)
+
+
 def adapter_hash(spec: AdapterSpec) -> str:
+    """Cached per process (s3-assure: ~0.7 s of a ~2 s certify), keyed by the spec and sys.path, and recomputed in
+    full when any covered file's (mtime_ns, size, inode) changed. Cached only when the import closure and the stamps
+    are unchanged across the computation (no edit raced it). Residual: an edit that restores all three stamps is not
+    seen until the process restarts (the process runs the code it imported then anyway)."""
+    key = (spec, tuple(sys.path))
+    hit = _HASHES.get(key)
+    with contextlib.suppress(OSError):  # a covered file gone: recompute (fails closed there)
+        if hit is not None and _stamps(p for p, *_ in hit[0]) == hit[0]:
+            return hit[1]
+    covered = covered_modules(spec)
+    stamps, h = _stamps(covered.values()), _adapter_hash(spec, covered)
+    if covered_modules(spec) == covered and _stamps(covered.values()) == stamps:
+        _HASHES[key] = (stamps, h)
+    return h
+
+
+def _adapter_hash(spec: AdapterSpec, covered: dict[str, Path]) -> str:
     parts: dict[str, Any] = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
                              "metrics": sorted(spec.metrics), "modules": {}}
     if spec.exact_module is not None:  # only when set: adapters without one keep their approved hashes
         parts["exact_module"] = spec.exact_module
     if spec.procedures is not None:
         parts["procedures"] = spec.procedures
-    for mod, path in covered_modules(spec).items():
+    for mod, path in covered.items():
         parts["modules"][mod] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 

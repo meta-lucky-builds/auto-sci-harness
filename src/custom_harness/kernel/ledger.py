@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +124,24 @@ def verify_chain(entries: list[Entry], *, full: bool) -> list[str]:
     return problems
 
 
+# ------------------------------------------------------------------ path containment (Windows aliases)
+_DEVICE = re.compile(r"^\\\\[?.]\\(?:(UNC)\\|(?=[A-Za-z]:))", re.I)  # \\?\C:..., \\.\C:..., \\?\UNC\server\...
+
+
+def inside(a: Path | str, b: Path | str, *, on_error: bool) -> bool:
+    """`a` is `b` or lies under it, whatever the spelling (s3-evolve red team, the evolve/reveal.py approach): by path
+    after stripping the Windows device prefixes \\\\?\\ and \\\\.\\ (Path.resolve keeps them), then by file identity of
+    every existing ancestor of `a` (8.3 short names, case, admin shares, \\\\?\\GLOBALROOT, junctions). An OSError
+    in the identity test returns `on_error`: each caller passes its fail-closed direction."""
+    a, b = (Path(_DEVICE.sub(lambda m: "\\\\" if m.group(1) else "", os.fspath(p))).resolve() for p in (a, b))
+    if a == b or b in a.parents:
+        return True
+    try:
+        return b.exists() and any(x.exists() and os.path.samefile(x, b) for x in (a, *a.parents))
+    except OSError:
+        return on_error
+
+
 # ------------------------------------------------------------------ external anchoring
 ANCHOR_FORMAT = "chh-anchor/1"
 
@@ -133,7 +153,7 @@ class AnchorError(ValueError):
 def write_anchor(ledger: Ledger, path: Path, store_root: Path) -> dict[str, Any]:
     """Append the current (length, head) of an INTACT chain to an anchor file outside the store; returns the anchor."""
     path, root = Path(path).resolve(), Path(store_root).resolve()
-    if path == root or path.is_relative_to(root):
+    if inside(path, root, on_error=True):  # any alias of the store (\?\, 8.3, case) is the store
         raise AnchorError(f"the anchor file must live outside the store ({root}): whoever can rewrite the store "
                           f"could rewrite an anchor kept inside it")
     entries = ledger.entries()

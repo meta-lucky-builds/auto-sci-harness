@@ -36,6 +36,8 @@ from .execution import ExecRecord
 from .reasons import Code, R, exception_name
 
 _NORMAL = _statistics.NormalDist()
+BOUNDED_KINDS = frozenset({ClaimKind.NEGATIVE_RESULT, ClaimKind.EQUIVALENCE})  # bounded-null certificates (§16.10)
+SIDED_TOST = "two one-sided tests (TOST): lower and upper limit, each one-sided at level"  # equivalence
 SCORE_TOLERANCE = 1e-9  # reported vs recomputed score: anything larger is a different number
 
 
@@ -54,6 +56,23 @@ def metric_reasons(c: Claim) -> list[str]:
     if M.HIGHER_IS_BETTER[c.metric.id] != c.metric.higher_is_better:
         return [R(Code.K1_METRIC, f"metric {c.metric.id!r} direction does not match the registry")]
     return []
+
+
+_RELATION = {ClaimKind.IMPROVEMENT: "beats {c} by at least {d}", ClaimKind.ABLATION_EFFECT: "beats its ablation {c} "
+             "by at least {d}", ClaimKind.NEGATIVE_RESULT: "does not beat {c} by {d} or more",
+             ClaimKind.EQUIVALENCE: "differs from {c} by less than {d}"}
+
+
+def scope_phrase(c: Claim, roles: Mapping[str, str]) -> str:
+    """The data class's scope vocabulary (K1, invariant 14; s3-kernel: data claims had none): the ONLY statement a data
+    claim may make. Datasets: the generalization targets, in claim order; splits: each target's registered role and
+    its held-out examples; population: what the targets are an i.i.d. sample of; metric phrase: kind, comparator,
+    metric, direction and min_effect (repr, never rounded). Nothing else: no prose, no scope conditions."""
+    relation = _RELATION.get(c.kind, "?").format(c=c.comparator.artifact_id, d=repr(c.effect.min_effect))
+    held = ", ".join(f"{t} (split {roles.get(t, '?')})" for t in c.generalization_targets)
+    return (f"{c.subject.artifact_id} {relation} in {c.metric.id} ({'higher' if c.metric.higher_is_better else 'lower'}"
+            f" is better) on the held-out examples of {held}; population: the examples each target is an i.i.d. "
+            f"sample of")
 
 
 def recompute(ctx: Any) -> list[str]:
@@ -178,10 +197,10 @@ def risk(ctx: Any) -> tuple[list[str], list[str]]:
 
     Negative-result and equivalence claims FAIL (fail closed): at their claimed bound, success is at most alpha
     for any bound, so no noise model can tell a vacuous bound ("does not improve by 0.9 accuracy") from a tight one.
-    Exception (§16.10): a negative result that declares its power gets a bounded-null certificate when a plasmode
-    proves that power (bounded_null). Without a declaration (and every equivalence claim) it is never certified."""
+    Exception (§16.10): a negative result or an equivalence (TOST) that declares its power gets a bounded-null
+    certificate when a plasmode proves that power (bounded_null). Without a declaration it is never certified."""
     c = ctx.claim
-    bounded = c.kind == ClaimKind.NEGATIVE_RESULT and c.analysis_plan.power is not None
+    bounded = c.kind in BOUNDED_KINDS and c.analysis_plan.power is not None
     if c.kind not in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT) and not bounded:
         return [R(Code.K7_NO_RISK_MODEL,
             f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
@@ -220,9 +239,9 @@ class Exclusion:
     one-sided level `level`, by a procedure whose power to detect an effect of excluded_effect was demonstrated."""
 
     excluded_effect: float  # delta = min_effect (sign-corrected metric units; positive = subject better)
-    sided: str  # "one-sided (upper limit)"
-    level: float  # the largest per-target K4 level alpha_eff: each limit is a (1 - level) upper confidence limit
-    observed_limit: float  # the largest upper limit over targets and over the intervals the criterion uses
+    sided: str  # "one-sided (upper limit)"; equivalence: SIDED_TOST (both limits, each one-sided at `level`)
+    level: float  # the largest per-target K4 level alpha_eff: each limit is a one-sided (1 - level) confidence limit
+    observed_limit: float  # the largest upper limit (equivalence: largest |limit|) over targets and used intervals
     reported_limit: float  # max(observed_limit, excluded_effect): never tighter than the proven sensitivity (CLs-like)
     declared_power: float
     proven_power: float  # gamma ** (1 / plantings): one-sided (1 - gamma) lower bound when every planting was detected
@@ -257,53 +276,69 @@ def plant(metric: str, labels: list[str], preds: list[str], gain: float, sign: f
 
 
 def plasmode(metric: str, higher: bool, labels: list[str], subj: list[list[str]], comp: list[list[str]],
-             delta: float, st: TargetStats, n_boot: int, plantings: int, seed: bytes) -> tuple[Code, str] | None:
+             delta: float, st: TargetStats, n_boot: int, plantings: int, seed: bytes,
+             side: int = 1) -> tuple[Code, str] | None:
     """Positive control: `plantings` times, plant an effect of delta into the subject's stored predictions (each seed),
     draw a bootstrap resample of the test examples, and run the registered test (BCa over examples, t over seeds, at
     the target's level). Detected iff each interval the criterion uses has its lower limit above the observed
-    estimate. None iff every planting was detected; else the first failure (code, text)."""
+    estimate. side = -1 (equivalence, the -delta side): the same, planted into the COMPARATOR (an effect of -delta on
+    subject - comparator; nothing is degraded), detected iff each upper limit is below the observed estimate. None iff
+    every planting was detected; else the first failure (code, text)."""
     sign = 1.0 if higher else -1.0
     for j in range(plantings):
         rng = random.Random(hashlib.sha256(seed + j.to_bytes(4, "big")).digest())
-        planted = [plant(metric, labels, p, delta, sign, rng) for p in subj]
+        planted = [plant(metric, labels, p, delta, sign, rng) for p in (subj if side > 0 else comp)]
         a0 = [p for p in planted if p is not None]
         if len(a0) < len(planted):
-            return Code.K7_NOT_PLANTABLE, f"no effect of {delta} can be planted (vacuous bound)"
+            return Code.K7_NOT_PLANTABLE, f"no effect of {side * delta} can be planted (vacuous bound)"
         idx = [rng.randrange(len(labels)) for _ in labels]
-        y, a, b = [labels[i] for i in idx], [[p[i] for i in idx] for p in a0], [[p[i] for i in idx] for p in comp]
+        a, b = ([[p[i] for i in idx] for p in arm] for arm in ((a0, comp) if side > 0 else (subj, a0)))
+        y = [labels[i] for i in idx]
         ex = paired_example_interval(M.METRICS[metric], y, a, b, higher_is_better=higher, alpha=2 * st.alpha_eff,
                                      n_boot=n_boot, seed=0)
         seed_ci = mean_t_interval([sign * (M.score(metric, y, pa) - M.score(metric, y, pb))
                                    for pa, pb in zip(a, b, strict=True)], alpha=2 * st.alpha_eff)
-        if ex.degenerate or not ex.lo > st.example.estimate or not (st.seed.degenerate
-                                                                     or seed_ci.lo > st.seed.estimate):
-            return Code.K7_INSENSITIVE, (f"planted effect {delta} not detected in planting {j + 1} of {plantings}: "
-                                         f"the declared power is not proven")
+        if ex.degenerate or not _beyond(ex, st.example, side) or not (st.seed.degenerate
+                                                                       or _beyond(seed_ci, st.seed, side)):
+            return Code.K7_INSENSITIVE, (f"planted effect {side * delta} not detected in planting {j + 1} of "
+                                         f"{plantings}: the declared power is not proven")
     return None
 
 
+def _beyond(planted: Interval, observed: Interval, side: int) -> bool:
+    """The planted resample's interval excludes the observed estimate on the planted side."""
+    return planted.lo > observed.estimate if side > 0 else planted.hi < observed.estimate
+
+
 def bounded_null(ctx: Any) -> tuple[list[str], list[str]]:
-    """K7 for a negative result with a declared power: the zero-failure plasmode on every target (seeded from the
-    claim hash and the evidence, like K3's replay choice, so verify() re-derives it), then the exclusion statement."""
+    """K7 for a negative result or an equivalence with a declared power: the zero-failure plasmode on every target
+    (seeded from the claim hash and the evidence, like K3's replay choice, so verify() re-derives it; an equivalence
+    runs it on both sides, N plantings each), then the exclusion statement."""
     c, plan, gamma = ctx.claim, ctx.claim.analysis_plan, ctx.config.plasmode_gamma
     n = max(1, math.ceil(math.log(gamma) / math.log(plan.power) - 1e-12))
+    tost = c.kind == ClaimKind.EQUIVALENCE
     reasons, limits = [], []
     for target, st in sorted(ctx.stats.items()):
         by, seeds = ctx.by_target(target), sorted(plan.seeds)
         subj, comp = ([ctx.preds[by[(arm, s)][0]] for s in seeds] for arm in ("subject", "comparator"))
-        seed = hashlib.sha256(f"{ctx.claim_hash}|plasmode|{target}|{ctx.material()}".encode()).digest()
-        why = plasmode(c.metric.id, c.metric.higher_is_better, ctx.label_values(target), subj, comp,
-                       c.effect.min_effect, st, plan.n_boot, n, seed)
-        reasons += [R(why[0], f"{target}: {why[1]}")] if why else []
-        limits.append(st.example.hi if st.seed.degenerate else max(st.example.hi, st.seed.hi))
+        for side, tag in ((1, ""), (-1, "|-"))[:2 if tost else 1]:  # the +delta seed is the negative result's
+            seed = hashlib.sha256(f"{ctx.claim_hash}|plasmode|{target}|{ctx.material()}{tag}".encode()).digest()
+            why = plasmode(c.metric.id, c.metric.higher_is_better, ctx.label_values(target), subj, comp,
+                           c.effect.min_effect, st, plan.n_boot, n, seed, side)
+            reasons += [R(why[0], f"{target}: {why[1]}")] if why else []
+        used = (st.example,) if st.seed.degenerate else (st.example, st.seed)
+        limits.append(max(max(iv.hi, -iv.lo) if tost else iv.hi for iv in used))
     if reasons:
         return reasons, []
-    ex = Exclusion(c.effect.min_effect, "one-sided (upper limit)", max(s.alpha_eff for s in ctx.stats.values()),
-                   max(limits), max(*limits, c.effect.min_effect), plan.power, gamma ** (1 / n), 1 - gamma, n)
+    ex = Exclusion(c.effect.min_effect, SIDED_TOST if tost else "one-sided (upper limit)",
+                   max(s.alpha_eff for s in ctx.stats.values()), max(limits), max(*limits, c.effect.min_effect),
+                   plan.power, gamma ** (1 / n), 1 - gamma, n)
     ctx.exclusion = asdict(ex)
-    return [], [f"bounded null: effects >= {ex.reported_limit:.4g} excluded (one-sided, level {ex.level:.4g}; observed "
-                f"limit {ex.observed_limit:.4g}); power >= {ex.proven_power:.3g} at {1 - gamma:.3g} confidence, "
-                f"{n}/{n} planted effects of {ex.excluded_effect} detected"]
+    what = (f"|effects| >= {ex.reported_limit:.4g} excluded (TOST: each side one-sided" if tost else
+            f"effects >= {ex.reported_limit:.4g} excluded (one-sided")
+    return [], [f"bounded null: {what}, level {ex.level:.4g}; observed limit {ex.observed_limit:.4g}); power >= "
+                f"{ex.proven_power:.3g} at {1 - gamma:.3g} confidence, {n}/{n} planted effects of "
+                f"{'+-' if tost else ''}{ex.excluded_effect} detected{' on each side' if tost else ''}"]
 
 
 def record_bounds(ctx: Any, eid: str, rec: ExecRecord) -> list[str]:
