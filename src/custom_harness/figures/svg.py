@@ -151,6 +151,40 @@ def bar_chart(inputs: dict[str, Any], bars: list[tuple[str, str]], title: str = 
     return "\n".join([*out, "</g>", "</svg>"]) + "\n"
 
 
+def interval_chart(inputs: dict[str, Any], items: list[tuple[str, str, str | None, str | None]], title: str = "",
+                   y_label: str = "") -> str:
+    """One estimate per (category label, estimate ref, lower-bound ref or None, upper-bound ref or None): a point at
+    the estimate and, for each bound, a segment from the estimate to that bound. Every mark (point or segment) is bound
+    to exactly one ref; the axis covers every plotted value and 0."""
+    if not items:
+        raise ValueError("an interval chart needs at least one item")
+    est = [value_of(inputs, e) for _, e, _, _ in items]
+    bounds = [(value_of(inputs, lo) if lo is not None else None, value_of(inputs, hi) if hi is not None else None)
+              for _, _, lo, hi in items]
+    lo_ax, hi_ax, ticks = axis([*est, *(b for pair in bounds for b in pair if b is not None)])
+    out = _head("interval", title) + _axes(lo_ax, hi_ax, ticks, y_label) + ['<g class="marks">']
+    slot = (W - LEFT - RIGHT) / len(items)
+    for i, ((cat, e_ref, l_ref, h_ref), v, (lv, hv)) in enumerate(zip(items, est, bounds, strict=True)):
+        g = point_geometry(len(items), i, lo_ax, hi_ax, v)
+        for ref, b in ((l_ref, lv), (h_ref, hv)):
+            if ref is not None and b is not None:
+                s = segment_geometry(len(items), i, lo_ax, hi_ax, v, b)
+                out.append(f'<line class="ci" data-ref="{escape(ref)}" data-v="{data_v(b)}" x1="{s["x1"]}" '
+                           f'y1="{s["y1"]}" x2="{s["x2"]}" y2="{s["y2"]}" stroke="{COLORS[0]}"/>')
+        out.append(f'<circle class="mark" data-ref="{escape(e_ref)}" data-v="{data_v(v)}" cx="{g["cx"]}" '
+                   f'cy="{g["cy"]}" r="{g["r"]}" fill="{COLORS[0]}"/>')
+        out.append(f'<text class="value" data-ref="{escape(e_ref)}" x="{px(LEFT + slot * (i + 0.5) + 8)}" '
+                   f'y="{g["cy"]}" text-anchor="start">{label(v)}</text>')
+        out.append(f'<text class="category" x="{px(LEFT + slot * (i + 0.5))}" y="{px(H - BOTTOM + 18)}" '
+                   f'text-anchor="middle">{escape(cat)}</text>')
+    return "\n".join([*out, "</g>", "</svg>"]) + "\n"
+
+
+def segment_geometry(n: int, i: int, lo: float, hi: float, est: float, bound: float) -> dict[str, str]:
+    x = px(LEFT + (W - LEFT - RIGHT) / n * (i + 0.5))
+    return {"x1": x, "y1": px(y_px(lo, hi, est)), "x2": x, "y2": px(y_px(lo, hi, bound))}
+
+
 def line_chart(inputs: dict[str, Any], series: list[tuple[str, list[str]]], x_labels: list[str] | None = None,
                title: str = "", y_label: str = "") -> str:
     """Points (and a connecting polyline) per (series name, [ref id per x position])."""
