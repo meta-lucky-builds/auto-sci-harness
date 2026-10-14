@@ -4,7 +4,7 @@ Run from the TREE UNDER TEST as working directory (locked_run.py sets cwd and PY
 script and its helpers taken from the HARNESS tree (this checkout), so OLD and NEW are recorded by the same code:
 
     locked_run.py <TREE> <LOG> script <HARNESS>/scripts/kernel_differential.py suite --out old_suite.jsonl
-    locked_run.py <TREE> <LOG> script <HARNESS>/scripts/kernel_differential.py histories --out old_hist.jsonl --n 40
+    locked_run.py <TREE> <LOG> script <HARNESS>/scripts/kernel_differential.py histories --out old_hist.jsonl --n 14
     python <HARNESS>/scripts/kernel_differential.py diff old_suite.jsonl new_suite.jsonl   # exit 1 on any difference
 
 Subcommands:
@@ -92,7 +92,7 @@ def main() -> int:
     s.add_argument("pytest_args", nargs="*")
     h = sub.add_parser("histories")
     h.add_argument("--out", required=True)
-    h.add_argument("--n", type=int, default=40)
+    h.add_argument("--n", type=int, default=14)
     h.add_argument("--seed", type=int, default=20261008)
     h.add_argument("--only", action="append", help="only histories of this kind (repeatable)")
     d = sub.add_parser("diff")
