@@ -126,6 +126,7 @@ def main() -> int:
         ("red-team registry", [PY, "scripts/museum.py", "--check-only"]),
         ("governance (two-speed Kernel)", [PY, "scripts/governance.py"]),
         ("sealed-half look ledger", [PY, "scripts/sealed.py", "--check"]),
+        ("human-held check (NOT MET until a human registers one)", [PY, "scripts/human_check.py", "--gate"]),
         ("kernel tests + 100% branch coverage", kernel_step()),
     ]
     if not fast:
