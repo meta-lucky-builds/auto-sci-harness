@@ -528,6 +528,8 @@ def render_table(card: dict[str, Any]) -> str:
                     extra = f" ({v['numerator']}/{v['denominator']}; Wilson 95% two-sided [{lo:.3f}, {hi:.3f}]"
                     if v.get("museum_patches_not_in_log"):
                         extra += f"; {len(v['museum_patches_not_in_log'])} registry patch(es) NOT in the log"
+                    if v.get("stale"):
+                        extra += "; STALE: " + str(v["stale"])
                     extra += ")"
                 elif "numerator" in v:
                     extra = f" ({v['numerator']}/{v['denominator']})"
