@@ -193,7 +193,6 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
         assert cand.spec_hash() != parent.spec_hash()
         return parent, cand
 
-    target = _open_alpha_account(store, rings_task)
     # 1. Undeclared campaign (the original attack setting): the FIRST run already registers 2 claims (claim +
     # replica_claim) on the target, more than the declared 1, so its certification strictness depended on what ran
     # before it. Secure: the evaluation is refused, its outcome never used.
@@ -206,13 +205,22 @@ def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp
     # 2. Declared campaign: both arms are certified at the SAME constant level, whatever ran first. Since Kernel 1.2
     # the runs release verdict bits (evolution score, replication brief), so the claim count no longer fixes K4's
     # level on a target WITHOUT an account (docs/r2-2_transcript_bound.md); the fix (docs/alpha_accounts.md) is the
-    # per-target alpha-account opened by a human (here a test stand-in, before the first claim on the target): every
-    # claim is tested at alpha_T / S_T and the releases are paid in slots at registration.
-    declared = 2 + 2 * 2  # the 2 claims of the refused run above + 2 runs x 2 claim nodes
+    # per-target alpha-account opened by a human (here a test stand-in) BEFORE the first claim on the target: every
+    # claim is tested at alpha_T / S_T and the releases are paid in slots at registration. The account needs a target
+    # with no claim yet, so this step runs on a second rings task (other data, other target id). Stated cost: the
+    # releases make the slot charges grow exponentially (docs/alpha_accounts.md), so S_T is large and the level
+    # strict; the guarantee asserted here is the R2-2 one (identical levels and paired difference 0).
+    rings_b = tmp_path / "rings_b"
+    subprocess.run([sys.executable, str(ROOT / "examples/tasks/make_rings_task.py"), str(rings_b), "--n-train", "400",
+                    "--n-test", "300", "--seed", "777"], check=True, capture_output=True)
+    floor = _bonferroni_borderline_task(rings_b)
+    target = _open_alpha_account(store, rings_b)
+    task_b = SuiteTask("rings_b", rings_b, "evolve", family="rings")
+    declared = 2 * 2  # 2 runs x 2 claim nodes on the account target
     parent, cand = arms(declared)
-    ev = Evaluator({r: llm for r in ALL_ROLES}, store, _sandbox_factory(tmp_path), [task])
-    sample = paired_sample([("rings", 0)], lambda u: ev.score(cand, u), lambda u: ev.score(parent, u))
-    oc, op = ev.outcome(cand, ("rings", 0)), ev.outcome(parent, ("rings", 0))
+    ev = Evaluator({r: llm for r in ALL_ROLES}, store, _sandbox_factory(tmp_path), [task_b])
+    sample = paired_sample([("rings_b", 0)], lambda u: ev.score(cand, u), lambda u: ev.score(parent, u))
+    oc, op = ev.outcome(cand, ("rings_b", 0)), ev.outcome(parent, ("rings_b", 0))
     assert oc.status == op.status == "completed", (oc.failure_signatures, op.failure_signatures)
 
     def cert(o):
