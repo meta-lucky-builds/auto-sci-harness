@@ -2,11 +2,13 @@
 
 A HUMAN opens an account on a held-out target (`alpha_open`: total alpha_T, S_T slots). Every claim pre-registered on
 the target (or on a related one: shared examples or private labels, the K4 family) reserves one slot
-(`alpha_reserve`) and is tested at the FIXED level alpha_T / S_T, whatever the order in which claims are certified
-(R2-2 fixed by construction). When the slots run out the target RETIRES (`alpha_retire`): no further claim can be
-registered on it; new evidence needs fresh data. FWER on the target <= S_T * alpha_T / S_T = alpha_T (Bonferroni over a
-fixed-size family; with releases, each claim's level is further divided by the transcripts reachable at its
-registration, see releases.py). Targets without an account keep the declared-n_comparisons rule.
+(`alpha_reserve`) and is tested at the FIXED level alpha_T / S_T, whatever the order in which claims are registered,
+released or certified (R2-2 fixed by construction). Releases are paid in SLOTS, not in level: a claim registered after
+releases that allow |T| transcripts is charged |T| slots at registration (the union bound over every claim the
+transcript could have selected), and is refused when the account cannot pay. When the slots run out the target
+RETIRES (`alpha_retire`). FWER on the target <= (sum of charges) * alpha_T / S_T <= alpha_T: docs/alpha_accounts.md
+states the argument, its assumptions and why an additive charge would be invalid. Targets without an account keep
+the declared-n_comparisons rule and the transcript bound in K4.
 """
 
 from __future__ import annotations
@@ -39,9 +41,14 @@ def reservations(ledger: Ledger, account: Account) -> list[Entry]:
     return [e for e in ledger.entries("alpha_reserve") if e.body.get("account") == account.seq]
 
 
+def charged(ledger: Ledger, account: Account) -> int:
+    """Slots the account has paid (a reservation recorded before charges existed counts 1)."""
+    return sum(int(e.body.get("charge", 1)) for e in reservations(ledger, account))
+
+
 def retired(ledger: Ledger, account: Account) -> bool:
     return (any(e.body.get("account") == account.seq for e in ledger.entries("alpha_retire"))
-            or len(reservations(ledger, account)) >= account.slots)
+            or charged(ledger, account) >= account.slots)
 
 
 def holds_slot(ledger: Ledger, account: Account, claim_hash: str) -> bool:

@@ -159,11 +159,11 @@ class FlakyDockerLike(LocalSandbox):
         # so they share its outages
         return FlakyDockerLike(workspace, i_understand_no_isolation=True)
 
-    def exec(self, command, timeout_s=600, env=None):
+    def exec(self, command, timeout_s=600, env=None, *, cpu_s=None):
         FlakyDockerLike.count += 1
         if FlakyDockerLike.count % FlakyDockerLike.PERIOD in (5, 6):
             raise InfraError("Cannot connect to the Docker daemon", transient=True)
-        return super().exec(command, timeout_s, env)
+        return super().exec(command, timeout_s, env, cpu_s=cpu_s)
 
 
 @pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=R2_2_OPEN)

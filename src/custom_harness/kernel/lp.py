@@ -14,6 +14,7 @@ fractions.Fraction; this module never creates a float. It is deliberately small:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from fractions import Fraction
@@ -46,11 +47,22 @@ def _numbers(v: object, what: str, n: int | None) -> list[Fraction]:
     return [parse_rational(e) for e in v]
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """A duplicated key would show a reader one value and the checker another (json keeps the last): refused."""
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise LPError(f"duplicate key {sorted({k for k in keys if keys.count(k) > 1})[0]!r}")
+    return dict(pairs)
+
+
 def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
     if len(data) > MAX_BYTES:
         raise LPError(f"document is larger than {MAX_BYTES} bytes")
     try:
-        doc = json.loads(data)
+        text = data.decode("utf-8")  # canonical UTF-8 only: json would also read UTF-16/32 and a BOM,
+        if text.startswith("\ufeff"):  # which K9's byte scan of the same document could not see through
+            raise LPError("a byte-order mark is refused")
+        doc = json.loads(text, object_pairs_hook=_unique)
     except ValueError as e:
         raise LPError(f"not JSON: {e}") from None
     if not isinstance(doc, dict) or doc.get("format") != fmt:
@@ -80,6 +92,14 @@ def parse(problem: bytes, certificate: bytes) -> tuple[Problem, list[Fraction], 
     c, a, b = parse_problem(problem)
     doc = _load(certificate, "chh-lp-certificate/1", {"x", "y"})
     return (c, a, b), _numbers(doc["x"], "'x'", len(c)), _numbers(doc["y"], "'y'", len(b))
+
+
+def scope_phrase(problem: bytes, value: Fraction) -> str:
+    """K1: the only statement an LP claim may carry (no free prose can widen it beyond the registered instance)."""
+    c, a, _ = parse_problem(problem)
+    return (f"the optimum of LP instance {hashlib.sha256(problem).hexdigest()[:12]} (maximise c^T x subject to A x <= "
+            f"b, x >= 0; {len(a)} constraint(s), {len(c)} variable(s)) is exactly {value}; nothing beyond this "
+            f"instance is claimed")
 
 
 def _dot(u: list[Fraction], v: list[Fraction]) -> Fraction:

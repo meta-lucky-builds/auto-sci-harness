@@ -280,7 +280,8 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                 preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
                                           argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
                                                                      "test": (task.test_features_file, test)},
-                                          seed=seed, timeout_s=task.solution_timeout_s)
+                                          seed=seed, timeout_s=task.solution_timeout_s,
+                                          cpu_s=float(task.solution_timeout_s))  # §16.8: load is infra, not policy
                 # validate the shape BEFORE touching the labels: an unusable output never causes a label read
                 if preds is None or len(preds) != n_rows:
                     failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
@@ -291,7 +292,8 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                                 claim_hash=h, arm=arm, seed=seed)
                 rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
                                  label_file=task.test_labels_file, seed=seed, env=env,
-                                 limits={"timeout_s": float(task.solution_timeout_s)},
+                                 limits={"timeout_s": float(task.solution_timeout_s),
+                                         "cpu_s": float(task.solution_timeout_s)},
                                  preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
                                  score=score, run_id=ctx.run_id)
                 evidence.append(kernel.record_evaluation(rec))

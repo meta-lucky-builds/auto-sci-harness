@@ -73,8 +73,16 @@ def approve_statement(w: World, data: bytes | None = None, artifact_id: str = "t
 
 
 def formal_claim(w: World, ref: ArtifactRef | None = None, **changes) -> Claim:
+    """`statement=` tags (which made each test's claim unique) go to `assumptions`: since 2026-10-09 K1 requires the
+    statement to be exactly the adapter's rendering (invariant 14; test_formal_statement_must_be_the_rendering)."""
     ref = ref or approve_statement(w)
-    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement="Chh.add_comm' holds", subject=ref, comparator=ref,
+    if "statement" in changes:
+        changes["assumptions"] = [changes.pop("statement")]
+    try:
+        phrase = formal.scope_phrase(w.store.blobs.get(ref.hash))
+    except ValueError:
+        phrase = "unreadable statement"
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=phrase, subject=ref, comparator=ref,
                 metric=MetricRef(id="lean_theorem", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),
@@ -488,3 +496,17 @@ def test_formal_parsers_refuse_malformed_input(pinned):
     assert formal.lean_version("Lean (version 4.19.0, x86_64-unknown-linux-gnu, commit abc, Release)") == "4.19.0"
     assert formal.lean_version("Lean (version 4.20.0-rc2, commit abc, Release)") == "4.20.0-rc2"
     assert formal.lean_version("garbage") is None
+
+
+def test_formal_statement_must_be_the_rendering(fw):
+    """Invariant 14 (2026-10-09): a formal claim's prose cannot widen the approved statement, and it has no scope."""
+    ref = approve_statement(fw)
+    honest = formal_claim(fw, ref)
+    assert honest.statement == formal.scope_phrase(V.statement_bytes()) and "nothing beyond" in honest.statement
+    widened = formal_claim(fw, ref).model_copy(update={"statement": "Chh.add_comm' holds, so the bridge is safe"})
+    cert = formal_certify(fw, widened)
+    assert cert.label == Label.REJECTED and cert.failed() == ["K1"]
+    assert "K1_STATEMENT" in cert.checks["K1"].codes
+    scoped = formal_claim(fw, ref, scope__conditions={"holds_in": "the physical world"})
+    cert = formal_certify(fw, scoped)
+    assert cert.failed() == ["K1"] and "K1_SCOPE" in cert.checks["K1"].codes

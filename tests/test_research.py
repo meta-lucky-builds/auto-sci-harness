@@ -384,13 +384,13 @@ class _HiccupSandbox(LocalSandbox):
     def spawn(self, workspace):
         return _HiccupSandbox(workspace, i_understand_no_isolation=True)
 
-    def exec(self, command, timeout_s=600, env=None):
+    def exec(self, command, timeout_s=600, env=None, *, cpu_s=None):
         if "-confirm" in str(self.workspace):
             _HiccupSandbox.confirm_execs += 1
             if _HiccupSandbox.confirm_execs == 4:
                 from custom_harness.errors import InfraError
                 raise InfraError("Cannot connect to the Docker daemon", transient=True)
-        return super().exec(command, timeout_s, env)
+        return super().exec(command, timeout_s, env, cpu_s=cpu_s)
 
 
 def test_infra_retry_during_confirmation_does_not_reject_the_claim(store, tmp_path, rings_task, monkeypatch):
