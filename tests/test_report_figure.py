@@ -63,6 +63,16 @@ def test_report_figure_plots_only_certificate_refs_and_passes_the_audit(tmp_path
     assert res.ok, res.problems
 
 
+def test_a_content_addressed_target_id_does_not_break_the_figure(tmp_path, sb):
+    """Regression: real targets are dataset ids like "data@3e5a.../test"; put in a label, "3e5" reads as a number to
+    the audit's free-text check and the report node failed. Labels now letter the targets instead."""
+    cert = {"resolution": {"targets": {"data@3e5a1b2c4d6f7a8b/test": CERT["resolution"]["targets"]["accuracy"]}},
+            "claim": CERT["claim"]}
+    fig = make_report_figure({"certificate": {"hash": H}}, _Kernel({H: cert}), None, sb, tmp_path / "fig")
+    assert fig is not None and "3e5" not in (tmp_path / "fig/figure.svg").read_text()
+    assert _audit(tmp_path / "fig", sb, {H: cert}, fig["meta_sha256"]).ok
+
+
 def test_an_injected_fake_value_is_blocked(tmp_path, sb):
     fig = make_report_figure({"certificate": {"hash": H}}, _Kernel({H: CERT}), None, sb, tmp_path / "fig")
     assert fig is not None

@@ -37,6 +37,15 @@ def _ptr(*parts: str) -> str:
     return "".join("/" + p.replace("~", "~0").replace("/", "~1") for p in parts)
 
 
+def _letter(i: int) -> str:
+    out = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        out = chr(65 + r) + out
+    return out
+
+
 def _finite(x: Any) -> bool:
     return isinstance(x, int | float) and not isinstance(x, bool) and math.isfinite(x)
 
@@ -46,7 +55,8 @@ def figure_spec(certs: list[tuple[str, str, dict[str, Any]]]) -> tuple[list[list
     items: list[list[str | None]] = []
     refs: dict[str, Any] = {}
     for ci, (prefix, h, cert) in enumerate(certs):
-        for ti, (target, t) in enumerate(sorted((cert.get("resolution") or {}).get("targets", {}).items())):
+        targets = sorted((cert.get("resolution") or {}).get("targets", {}).items())
+        for ti, (target, t) in enumerate(targets):
             if not _finite(t.get("estimate")):
                 continue
             base = f"c{ci}_t{ti}"
@@ -58,7 +68,10 @@ def figure_spec(certs: list[tuple[str, str, dict[str, Any]]]) -> tuple[list[list
             if _finite(t.get("hi")):
                 hi = f"{base}_hi"
                 refs[hi] = {"certificate": h, "pointer": _ptr("resolution", "targets", target, "hi")}
-            items.append([f"{prefix}: held-out effect on {target}", f"{base}_est", lo, hi])
+            # the label never carries the target id: a content-addressed id ("data@3e5a...") reads as a number to the
+            # audit's free-text check (F3); targets are lettered in sorted order, and figure.json names each ref
+            which = "" if len(targets) == 1 else f", target {_letter(ti)}"
+            items.append([f"{prefix}: held-out effect{which}", f"{base}_est", lo, hi])
         if _finite(((cert.get("claim") or {}).get("effect") or {}).get("min_effect")):
             refs[f"c{ci}_min"] = {"certificate": h, "pointer": _ptr("claim", "effect", "min_effect")}
             items.append([f"{prefix}: required minimum effect", f"c{ci}_min", None, None])
