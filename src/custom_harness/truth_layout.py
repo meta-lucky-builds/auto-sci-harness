@@ -66,7 +66,7 @@ def protected_truth_dirs() -> list[Path]:
     return [truth_root() / s for s in MAPPED_SUBDIRS]
 
 
-def _mapped(task_dir: Path) -> Path | None:
+def mapped_truth_dir(task_dir: Path) -> Path | None:
     from .config import data_dir
 
     d = data_dir()
@@ -100,7 +100,7 @@ def legacy_truth_dir(task_dir: Path | str) -> Path:
 def truth_dir(task_dir: Path | str) -> Path:
     """The directory holding `task_dir`'s held-out truth (see the module doc). Fails closed (TruthLayoutError)
     when that directory would be inside an agent-readable root."""
-    mapped = _mapped(Path(task_dir))
+    mapped = mapped_truth_dir(Path(task_dir))
     out = mapped if mapped is not None else legacy_truth_dir(task_dir)
     require_outside_agent_readable(out)
     return out
