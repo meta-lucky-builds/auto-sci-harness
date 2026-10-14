@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index dce765d..9165ea6 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -992,7 +992,7 @@ def _reader_texts(data: bytes) -> list[str]:
+     texts = [data.decode("utf-8", errors="ignore")]
+     with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding: bytes only
+         texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
+-    return texts
++    return texts[:1]
+ 
+ 
+ def k9_computational(ctx: Context) -> CheckResult:

@@ -490,3 +490,13 @@ findings:
             "tests/test_kernel_scope_statement.py::test_an_adapter_without_a_scope_rendering_fails_k1"]
     museum: redteam/museum/SCOPE-STATEMENT.patch
     status: fixed
+  - id: K9-ENCODING
+    title: a held-out canary in an exact certificate's comment, written as UTF-16/32, with a BOM or with \u escapes,
+      was invisible to K9's UTF-8 byte scan while json read the document (s3-domain red team on the circuit adapter,
+      2026-10-14; the lp reader had the same hole). Fix built, NOT test-verified (tests not run this round per owner)
+    invariant: "§10 inv. 2 (no hidden label/canary in an agent-visible artifact); §4.3 K9"
+    capability: A2
+    tests: ["tests/test_kernel_encoding.py::test_a_unicode_escaped_canary_is_found_by_k9",
+            "tests/test_kernel_encoding.py::test_a_canary_in_a_non_utf8_certificate_is_not_certified"]
+    museum: redteam/museum/K9-ENCODING.patch
+    status: fixed
