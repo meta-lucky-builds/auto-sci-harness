@@ -56,8 +56,15 @@ def _read(path: Path) -> bytes:
 
 # ------------------------------------------------------------------------------------------- research task
 def task_private_dir(task_dir: Path) -> Path:
-    """Where a task's held-out truth lives (labels, canary). Today: `<task>/private/` (research/task.py layout)."""
-    return task_dir / "private"
+    """Where a task's held-out truth lives (labels, canary). With s4-integrity's `truth_layout` (held-out truth outside
+    every agent-readable root) it is `truth_layout.truth_dir`, which refuses an unmigrated or agent-readable location
+    (TruthLayoutError, an OSError: the ingest then fails `not_found`). Before that module is merged, the legacy
+    `<task>/private/` (research/task.py layout). Only this process calls this function."""
+    try:
+        from .. import truth_layout  # type: ignore[attr-defined, unused-ignore]
+    except ImportError:  # s4-integrity not merged yet: the layout every task has today
+        return task_dir / "private"
+    return Path(truth_layout.truth_dir(task_dir))
 
 
 def research_task(vault: Vault, run_id: str, task_id: str, task_dir: str) -> dict[str, Any]:
