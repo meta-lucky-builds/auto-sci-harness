@@ -29,9 +29,33 @@ an unrouted cluster the routed harness is the trunk (difference 0). eps = min(`B
 the loop's `EvolveConfig.non_regression_eps`), so it is never looser than the global gate. A campaign without a held-out
 family cannot branch (fail closed).
 
-The result is ONE more verdict bit, released like the cluster bits (note `branch_lofo:<branch id>`, on every target the
-held-out groups' runs read) and stored as `lofo {passed, targets, note}`. The router refuses a record without a
-released, passing `lofo` bit (`router.verified_bits`), so an old-format or forged record is not routable.
+The result is ONE more verdict bit, released like the cluster bits (on every target the held-out groups' runs read)
+and stored as `lofo {passed, targets, note, routes}`. The router refuses a record without a released, passing `lofo`
+bit (`router.verified_bits`), so an old-format or forged record is not routable.
+
+### Red-team round (s3-evolve__redteam, 2026-10-09; fixed 2026-10-14)
+
+- **Notes bind the value and the record.** A release note used to name only a branch id and a cluster, so a record
+  claiming `passed: True` next to a released 0, or a record copied onto another trunk / an untested spec, was routed.
+  Now `cluster_note(trunk, spec, cluster, bit)` and `lofo_note(trunk, spec, routes, bit)` are
+  `note_code(prefix, sha256(full hashes, exact cluster / route table)[:32], bit)`; `check_record` recomputes every
+  note from the record's own fields and requires `branch_id == branch_id(trunk, spec)`. A pinned replay value that
+  differs from the computed one raises (the note names the computed bit).
+- **Composed routes.** Each branch's LOFO bit is computed for the WHOLE table the router would then serve: the table
+  it serves now (`router.current_routes`) plus the candidate on its won clusters (`lofo.routes`). The router serves a
+  table only if some record on the trunk LOFO-checked exactly that table. (Before: two branches each passing alone
+  could compose into a held-out-family regression beyond eps; red-team test
+  `test_attack_two_routes_each_lofo_checked_alone_compose_into_an_unchecked_regression`.) Cost: the earlier branches
+  are re-scored on the held-out groups' gate units (cached in one Evaluator; a new run otherwise).
+- **No choice for a route policy.** `build_router(policy=...)` must reproduce `default_policy`'s table (which refuses two
+  winners on one cluster); any other table, including dropping a won cluster, is refused. Before, a policy could read
+  the store through the caller's frame and express a host-only per-task gate value as WHICH winner it routed.
+- **The rejecting stage is released.** `rejected_on` (`cost` says the pooled gate and every LOFO group passed) reached the
+  proposer and the L7 orchestrator unreleased. It is now a `count` release, note `evolve.gate:stage`, on the gate
+  targets of the decision (loop.py `GATE_STAGES`), emitted for rejections only and pinned in a replay.
+- **OPEN, needs owner decision:** `driver.evolve` writes the free-text gate decision (e.g. `mean=-0.5`) into
+  `out_dir/genNNN.json` and its log. Whether that output is agent-visible is the owner's call; the red-team test is
+  `xfail(strict=True)` until then (fixing it edits the summary lines that w2-wiring also changes).
 
 ### New: wiring
 
@@ -76,6 +100,16 @@ New:
   last record was read, so a record appended to the store around `advance` (backdated or future) revealed future
   labels (`tests/test_reveal_wiring.py::test_attack_forged_watermark_records_reveal_nothing_early` fails at a7fb608).
 - `check_mounts(paths)`, `check_destination(dest)`, `n_revealed()`.
+- Red-team fixes (2026-10-14): path aliases (`\\?\` / `\\?\UNC\` / `\\.\` prefixes, which Path.resolve keeps; 8.3 short
+  names; admin shares) are caught by stripping the device prefixes and comparing by file identity
+  (`os.path.samefile`) over every existing ancestor; the declared mounts are re-resolved at every check and the seal is
+  checked again right after its root is created. `seal.json` binds a seal to its stream id and target dataset: a second
+  stream opened on the same seal (whose reveals K4 would have counted on the wrong target) is refused.
+- Date-only labels now end at the END of their calendar day in UTC-12 (12:00Z the next day), the latest that day ends
+  anywhere; before, the UTC day was used, so a label could be revealed while its day was still running west of UTC.
+  This changes a convention: `tests/test_reveal.py`'s first test now advances to `2026-09-16T12:00Z` to see the
+  `2026-09-15` label (and asserts it is NOT visible at `2026-09-16T00:00Z`). NEEDS OWNER CONFIRMATION (fail-closed
+  choice made meanwhile).
 - Driver wiring: `evolve(..., reveals=[(TemporalReveal, dest)])`. Before anything runs, each seal is checked against
   every task directory of the suite and the output directory (in addition to its declared mounts) and each destination
   must be inside a declared mount (fail closed). Before each generation the visible labels are written to the

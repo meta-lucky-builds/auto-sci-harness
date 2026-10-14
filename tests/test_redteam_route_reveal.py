@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
 from custom_harness.evolve import SuiteTask
 from custom_harness.evolve.branches import BRANCH_KIND, BranchConfig, propose_branch
 from custom_harness.evolve.reveal import LabelItem, RevealRefused, TemporalReveal, label_time, watermark_time
@@ -240,13 +241,20 @@ def test_attack_the_proposer_visible_rejecting_stage_carries_a_gate_bit_no_relea
     res_a, views_a, rel_a = _gate_stage_world(tmp_path, gate_regresses=False)
     res_b, views_b, rel_b = _gate_stage_world(tmp_path, gate_regresses=True)
     assert not res_a.accepted and not res_b.accepted
-    assert rel_a == rel_b == [("evolve.gate:decision", False)]  # identical released values in both worlds
-    assert views_a[0] == ["cost"] and views_b[0] == ["held_out_gate"]  # the attack is observed
-    assert views_a == views_b, (
+    assert views_a[0] == ["cost"] and views_b[0] == ["held_out_gate"]  # the proposer-visible stages differ
+    # KILLED (s3-evolve fix, loop.py GATE_STAGES): the stage is itself a ledgered `count` release, so the two worlds'
+    # releases differ exactly where the views do; with equal released values the views would be equal
+    from custom_harness.evolve.loop import GATE_STAGES
+    assert [v for k, v in rel_a if k == "evolve.gate:decision"] == [v for k, v in rel_b if k == "evolve.gate:decision"]
+    assert dict(rel_a)["evolve.gate:stage"] == GATE_STAGES.index("cost")
+    assert dict(rel_b)["evolve.gate:stage"] == GATE_STAGES.index("held_out_gate")
+    assert rel_a != rel_b, (
         f"the proposer-visible rejecting stage differs between worlds with identical releases: {views_a} vs {views_b} "
         "('cost' tells the proposer the held-out gate and every LOFO group passed)")
 
 
+@pytest.mark.xfail(strict=True, reason="OPEN, needs owner decision: is the driver's out_dir / stdout agent-visible? "
+                   "(pre-existing driver behaviour; fixing it edits the summary lines w2-wiring also changes)")
 def test_attack_driver_writes_the_continuous_gate_mean_into_the_output_directory_and_log(store, tmp_path,
                                                                                         monkeypatch):
     """ATTACK (invariant 18; NEEDS OWNER DECISION on who may read the driver's output): `driver.evolve` writes each

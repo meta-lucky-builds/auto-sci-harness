@@ -46,6 +46,7 @@ from .edits import (
     DEFAULT_PROTECTED_NODES,
     Edit,
     EditRejected,
+    EditType,
     ScreenRejected,
     _token_hit,
     apply_edit,
@@ -327,7 +328,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     admitted: list[Edit] = list(edits)
     quota_refused: list[Edit] = []
     if edit_admission is not None:
-        adm_ok, adm_refused = edit_admission(list(edits))
+        # the quota sees each edit's EFFECTIVE type: an edit whose ops only rewrite prompt text is prompt-only,
+        # whatever type it declares (red-team finding: mislabelled prompt edits passed the quota)
+        adm_ok, adm_refused = edit_admission([_quota_view(e) for e in edits])
         both = [*adm_ok, *adm_refused]
         if any(type(i) is not int for i in both) or sorted(both) != list(range(len(edits))):
             raise ValueError("edit_admission must partition the proposal's edit indices (fail closed)")
@@ -477,6 +480,16 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 decision, rejected_on = "rejected: " + cost["reason"], "cost"
             else:
                 decision, rejected_on = d.reason, None
+            # the rejecting stage reaches the proposer (proposer_view, lineage_view) and the L7 orchestrator, and it
+            # is gate-derived ('cost' says the pooled gate and every LOFO group passed): a ledgered `count` release
+            # on the same targets, pinned in a replayed campaign (GOAL §16.5.3, invariant 18)
+            # (emitted only for a rejection: an accepted candidate has no stage beyond the accept bit)
+            if rejected_on is not None:
+                code = rel.emit(GATE_STAGES.index(rejected_on), targets=gate_targets, channel="evolution_score",
+                                alphabet="count", note="evolve.gate:stage", key=f"{parent_hash}|{best}")
+                if type(code) is not int or not 1 <= code < len(GATE_STAGES):
+                    raise ValueError("released gate stage is not a rejecting stage (fail closed)")
+                rejected_on = GATE_STAGES[code]
             per_task = _per_task(fresh_units + gate_units, tasks, lambda u: evaluator.score(spec, u),
                                  lambda u: evaluator.score(parent, u))
             flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
@@ -523,6 +536,18 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
 
 
 RACE_ALLOCATORS = ("batch", "per_completion", "voi")
+# spec fields that hold prompt text (runtime/spec.py: LLM node `system` / `prompt`, approval node `prompt`, the spec
+# `description`): an edit whose every op ends in one of them only changes wording
+PROMPT_TEXT_FIELDS = frozenset({"system", "prompt", "description"})
+
+
+def _quota_view(edit: Edit) -> Edit:
+    """`edit` as the L7 edit-type quota sees it: typed prompt_text when every op targets a prompt-text field."""
+    if edit.ops and all(op.path.rstrip("/").rsplit("/", 1)[-1] in PROMPT_TEXT_FIELDS for op in edit.ops):
+        return edit.model_copy(update={"type": EditType.PROMPT_TEXT})
+    return edit
+# the released gate-stage code (index): None = accepted, else the rejecting stage
+GATE_STAGES: tuple[str | None, ...] = (None, "evolve", "held_out_gate", "cost", "exclusion_asymmetry")
 
 
 def check_race_config(cfg: EvolveConfig) -> None:

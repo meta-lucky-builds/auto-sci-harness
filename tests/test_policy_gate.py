@@ -113,20 +113,36 @@ def test_too_few_non_zero_pairs_are_refused_even_at_a_small_p():
     assert dec["accepted"] is False and "too few non-zero pairs" in dec["reason"]  # ... but 4 < min_nonzero
 
 
-def test_the_order_coins_are_reproduced_from_the_declared_seed(store):
+def test_the_order_coins_are_drawn_per_pair_and_reproduced_from_the_ledgered_nonces(store):
+    """Under the Orchestrator the coins are NOT known at declaration: the coin of pair k is drawn when the pair
+    starts (fresh entropy the declarer does not supply) and ledgered with its nonce before the pair runs; the coins
+    are reproduced from (seed, trial id, k, nonce). `declare()` alone keeps the seeded coins for simulations."""
+    import inspect
     pg = PG()
-    orch = _orch(store)
+    isl = ISL()
+    nonces = iter(f"nonce-{i:011d}" for i in range(100))
+    islands = [isl.Island("a", {"codex": 1.0}, {"contract": 1.0}), isl.Island("b", {"local": 1.0}, {"hop": 1.0}),
+               isl.Island("c", {"codex": 1.0}, {"tool": 1.0})]
+    orch = isl.Orchestrator(islands, isl.OrchestratorPolicy(version="v1", **POLICY_KW), total_budget=30,
+                            store=store, entropy=lambda: next(nonces))
+    assert not {"entropy", "nonce", "coins"} & set(inspect.signature(orch.declare_trial).parameters)
     decl = orch.declare_trial(_challenger(), order_seed="declared-seed", trial_id="T1", n_pairs=6)
-    coins = [int(hashlib.sha256(f"declared-seed|T1|{k}".encode()).hexdigest(), 16) & 1 for k in range(6)]
-    assert decl.coins() == coins and store.records("policy_trial")[0]["coins"] == coins
-    assert 0 < sum(coins) < 6  # both orders occur (a crossover, not a fixed AB order)
-    assert decl.schedule() == [a for c in coins for a in (("incumbent", "challenger") if c == 0
-                                                          else ("challenger", "incumbent"))]
+    assert "coins" not in store.records("policy_trial")[0] and store.records("policy_trial")[0]["drawn"] is True
+    with pytest.raises(pg.PolicyGateError):
+        decl.coins()  # nothing to read before the pairs start
+    assert store.records("policy_trial_coin") == []
     _run_trial(orch, 1, 0)
+    drawn = store.records("policy_trial_coin")
+    assert [d["pair"] for d in drawn] == list(range(6)) and [d["round"] for d in drawn] == [1, 3, 5, 7, 9, 11]
+    coins = [pg.drawn_coin("declared-seed", "T1", d["pair"], d["nonce"]) for d in drawn]
+    assert coins == [d["coin"] for d in drawn]
+    assert 0 < sum(coins) < 6  # both orders occur with these nonces (a crossover, not a fixed AB order)
     used = [r["arm"] for r in store.records("policy_trial_round")]
-    assert used == decl.schedule()
-    assert pg.declare(trial_id="T1", incumbent_version="v1", incumbent_hash="h1", challenger_version="v2",
-                      challenger_hash="h2", round_now=0, order_seed="declared-seed", n_pairs=6).coins() == coins
+    assert used == decl.schedule(coins)
+    seeded = pg.declare(trial_id="T1", incumbent_version="v1", incumbent_hash="h1", challenger_version="v2",
+                        challenger_hash="h2", round_now=0, order_seed="declared-seed", n_pairs=6)
+    assert seeded.coins() == [int(hashlib.sha256(f"declared-seed|T1|{k}".encode()).hexdigest(), 16) & 1
+                              for k in range(6)]
 
 
 def test_a_change_without_a_trial_or_too_early_is_refused():

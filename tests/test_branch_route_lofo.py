@@ -67,7 +67,8 @@ def test_the_same_domain_win_without_the_regression_is_routed_and_carries_its_lo
     rec = _domain_branch(store, tasks, h_delta=0.1)  # positive control: H improves too
     assert rec is not None and rec["won"] == ["ml"]
     lofo = rec["lofo"]
-    assert lofo["passed"] is True and lofo["note"] == lofo_note(TRUNK.spec_hash(), CA.spec_hash(), {"ml": CA.spec_hash()}, True)
+    assert lofo["passed"] is True
+    assert lofo["note"] == lofo_note(TRUNK.spec_hash(), CA.spec_hash(), {"ml": CA.spec_hash()}, True)
     # the bit is ledgered on every held-out group's target (H, and domain bio = family B)
     assert {b["dataset_id"] for b in released(store) if b["note"] == lofo["note"]} == set(lofo["targets"])
     assert len(lofo["targets"]) == 5  # gH0, gH1, gB0, gB1, gB2
@@ -97,7 +98,7 @@ def test_router_refuses_records_without_a_released_passing_lofo_bit(store, tmp_p
     from custom_harness.kernel import Kernel
     from custom_harness.store import EvidenceStore
     tasks = _gate_tasks(tmp_path)
-    (ra, _), _ = _branches(store, tasks)
+    _branches(store, tasks)
     assert build_router(store, TRUNK).routes  # positive control
     cases = (
         (lambda r: r.pop("lofo"), "whitelist"),                                     # old format: no LOFO at all

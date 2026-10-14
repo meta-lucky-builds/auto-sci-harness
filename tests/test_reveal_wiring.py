@@ -26,14 +26,18 @@ def test_watermark_rule_at_day_and_timezone_boundaries(store, tmp_path):
     r = _stream(store, tmp_path)
     r.seal([LabelItem("west", 8, "2026-09-20T23:30:00-05:00"),  # = 2026-09-21T04:30Z
             LabelItem("east", 9, "2026-09-21T03:00:00+05:00"),  # = 2026-09-20T22:00Z
-            LabelItem("same-day", 10, "2026-09-21")])  # date-only: the END of 2026-09-21
+            LabelItem("same-day", 10, "2026-09-21")])  # date-only: the END of 2026-09-21 in UTC-12
     r.advance("2026-09-21")  # start of 2026-09-21 UTC
     vis = _ids(r.visible())
     assert "east" in vis and "west" not in vis and "same-day" not in vis
     r.advance("2026-09-21T23:59:59+00:00")
     assert "same-day" not in _ids(r.visible())  # still before the end of its day
     r.advance("2026-09-22")
-    assert {"west", "same-day"} <= set(_ids(r.visible()))
+    assert "west" in _ids(r.visible()) and "same-day" not in _ids(r.visible())  # 2026-09-21 not over in UTC-12
+    r.advance("2026-09-22T11:59:59+00:00")
+    assert "same-day" not in _ids(r.visible())
+    r.advance("2026-09-22T12:00:00+00:00")  # the day has ended everywhere on earth
+    assert "same-day" in _ids(r.visible())
 
 
 def test_undated_items_stay_sealed_at_the_latest_possible_watermark(store, tmp_path):
@@ -127,9 +131,9 @@ def test_driver_reveals_labels_before_each_generation_and_ledgers_them(store, tm
     def tick(n):
         seen.append(sorted(json.loads(x)["item_id"] for x in dest.read_text(encoding="utf-8").splitlines()))
         if n == 1:
-            r.advance("2026-10-01")  # time passes between generations
+            r.advance("2026-10-01T12:00:00+00:00")  # time passes between generations
 
-    r.advance("2026-09-02")
+    r.advance("2026-09-02T12:00:00+00:00")
     _drive(monkeypatch, store, tmp_path, suite, _Stub(tick), reveals=[(r, dest)])
     assert seen == [["old"], ["edge-day", "late", "old", "tz"]]
     assert sorted(x["item_id"] for x in store.records(REVEAL_KIND)) == ["edge-day", "late", "old", "tz"]

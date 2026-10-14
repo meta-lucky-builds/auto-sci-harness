@@ -60,17 +60,27 @@ human decision). Without a hook the lever is never chosen.
    - the trial id;
    - the incumbent and the challenger, each as version and parameter hash;
    - `n_pairs` W, `alpha`, `min_nonzero`;
-   - the order seed and its coins;
+   - the order seed (the coins are NOT part of the declaration: they are drawn per pair, see 2);
    - the declaring round and the test name.
 
    The declaration is refused when:
    - a trial is open;
-   - the challenger version was adopted or trialled before (no retrying until a lucky pass);
+   - the challenger version, OR its parameters under any version name (`OrchestratorPolicy.param_hash`), was adopted
+     or trialled before (no retrying until a lucky pass; red-team finding: renaming the version re-trialled it);
    - fewer than `cadence` rounds have passed since the last change;
    - the window cannot reach alpha, i.e. 2^-W > alpha, or `min_nonzero` > W.
 2. **Window.** W round pairs, starting the round after the declaration.
-   - Pair k runs incumbent then challenger, or the reverse, by the coin
-     `int(sha256(f"{order_seed}|{trial_id}|{k}"), 16) & 1` (an AB/BA crossover).
+   - Pair k runs incumbent then challenger, or the reverse, by its coin (an AB/BA crossover). The coin is DRAWN when
+     pair k starts: `seeded_coin(order_seed, trial_id, k) XOR (int(sha256(f"{nonce_k}|{trial_id}|{k}"), 16) & 1)`
+     with `nonce_k = secrets.token_hex(16)` (injectable for tests only, never a `declare_trial` argument), and the
+     nonce and coin are ledgered (`policy_trial_coin`) before the pair runs. Red-team finding (2026-10-09): with
+     coins fixed by a declared seed, a seed found by search plus a pure period effect got a no-effect challenger
+     accepted at p = 11/1024; with drawn coins that attack is accepted at the test's level (test_redteam_l7.py,
+     300 repetitions).
+   - Every island must report in every trial round (a signal, or an explicit `Orchestrator.skip` for an island that
+     ran no generation: 0 edits or the weights lever). A round with a silent island VOIDS the trial (not accepted).
+     Red-team finding: missing signals counted as non-accepts, so lost incumbent-round signals passed a null
+     challenger.
    - Every island in a round runs under that round's arm, so the total budget of a round is the same in both arms.
 3. **Outcome.** y = the number of islands whose generation in that round accepted an edit. Only accept bits are
    used: no gate mean, CI, per-task value or score. Pair difference: d_k = y_challenger - y_incumbent.
@@ -97,8 +107,10 @@ human decision). Without a hook the lever is never chosen.
 - Under the alternative, carry-over (the orchestrator state the previous round left) can bias the size of the
   effect. The test estimates no effect size.
 - **alpha holds per trial, not across trials.** Report the number of trials, `len(store.records("policy_trial"))`.
-- The coins come from a declared seed, not a public beacon. A declarer could search seeds; the only guard is that
-  the declaration is ledgered before the first round.
+- The coins are drawn per pair from local entropy (`secrets`), not a public beacon: an auditor must trust the host
+  that drew them (the nonces are ledgered). A declarer who abandons a trial after seeing early coins can only declare a
+  DIFFERENT challenger next (same parameters are refused); each such trial counts against the per-trial alpha
+  (reported trial count), which is not controlled across trials.
 - A seeded simulation test (4000 null trials, identical arms) checks that the false-acceptance rate is
   <= alpha + 3 binomial standard errors, using the same test function.
 
@@ -127,3 +139,14 @@ not a change, so the first trial may be declared at round 0. `set_policy` itself
 - One challenger per run of `evolve_islands`; there is no automatic search over policies.
 - A trial that is accepted but finishes before the cadence allows the change is recorded, and the change is
   applied at the first later round where the cadence allows it. If the run ends first, it is not applied.
+
+## Red-team round (s3-evolve__redteam, 2026-10-09; fixed 2026-10-14)
+
+- Order coins chosen by the declarer: fixed (coins drawn per pair, above).
+- Re-trial under a new version string: fixed (`param_hash` excludes the version).
+- Missing island signals counted as non-accepts: fixed (a silent island voids the trial; `skip` for deliberate skips).
+- Mislabelled prompt edits passed the edit-type quota: fixed in the loop's admission seam: the quota sees each edit's
+  EFFECTIVE type (`loop._quota_view`: an edit whose every op targets a prompt-text field, `system` / `prompt` /
+  `description`, counts as `prompt_text` whatever it declares). The edit itself is unchanged.
+- Decision records carried the unreleased gate stage (`cost` vs `held_out_gate`): fixed at the root, the stage is now a
+  ledgered `count` release of the generation (loop.py `GATE_STAGES`; docs/branch_route_reveal.md).

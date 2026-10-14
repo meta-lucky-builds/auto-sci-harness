@@ -110,9 +110,13 @@ def test_edit_type_quota_prevents_collapse_into_prompt_only_edits():
 
 
 def _accept_if_challenger(orch):
-    """Trial evidence for the policy test below: an accepting island in the challenger's round, none otherwise."""
-    if orch.trial is not None and orch.trial.arm(orch.round) == "challenger":
-        orch.observe(_sig("good", orch.round, True, 1, [], ["contract"]))
+    """Trial evidence for the policy test below: an accepting island in the challenger's round, none otherwise.
+    Every island reports in every trial round (a round with a missing island voids the trial)."""
+    if orch.trial is not None:
+        good = orch.trial.arm(orch.round) == "challenger"
+        for iid in sorted(orch.islands):
+            acc = good and iid == "good"
+            orch.observe(_sig(iid, orch.round, acc, 1, [] if acc else ["held_out_gate"], ["contract"]))
 
 
 def test_the_policy_is_versioned_and_changes_only_on_a_slower_cadence(store):

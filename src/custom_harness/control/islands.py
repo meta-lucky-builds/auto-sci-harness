@@ -86,6 +86,11 @@ class OrchestratorPolicy:
                 or self.min_edit_types < 1 or self.cadence < 1 or self.max_seeds < 1 or self.weights_after < 1):
             raise IslandError("orchestrator policy parameter out of range")
 
+    def param_hash(self) -> str:
+        """Hash of the parameters WITHOUT the version: the same policy under a new name has the same param_hash."""
+        return hashlib.sha256(json.dumps({k: v for k, v in asdict(self).items() if k != "version"},
+                                         sort_keys=True).encode()).hexdigest()
+
     def policy_hash(self) -> str:
         return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()
 
@@ -247,7 +252,8 @@ def admit(edit_types: Iterable[str], policy: OrchestratorPolicy) -> tuple[list[i
 
 class Orchestrator:
     def __init__(self, islands: list[Island], policy: OrchestratorPolicy, *, total_budget: int,
-                 store: Any | None = None, initial_seeds: int = 1, weights_lever: bool = False):
+                 store: Any | None = None, initial_seeds: int = 1, weights_lever: bool = False,
+                 entropy: Callable[[], str] | None = None):
         if len(islands) < 2:
             raise IslandError("islands need at least two members")
         ids = [i.island_id for i in islands]
@@ -269,6 +275,11 @@ class Orchestrator:
         self.trial: pg.PolicyTrial | None = None
         self._trial_challenger = policy  # the open trial's challenger (set by declare_trial)
         self.trialled: list[str] = []  # challenger versions declared in a trial (a version is trialled once)
+        # parameter hashes (version excluded) declared in a trial or adopted: the same parameters under a new version
+        # name are not trialled again (red-team finding: re-trial after peeking or a refusal)
+        self.trialled_params: set[str] = {policy.param_hash()}
+        self._entropy = entropy  # coin entropy of policy trials (None = secrets.token_hex)
+        self._round_seen: dict[int, set[str]] = {}  # islands that reported (or were explicitly skipped) per round
         self.trial_decisions: dict[str, dict[str, Any]] = {}
         self._trial_decls: dict[str, pg.TrialDeclaration] = {}
         self._round_accepts: dict[int, int] = {}
@@ -291,8 +302,21 @@ class Orchestrator:
             raise IslandError(f"unknown island {s.island!r}")
         if self.round and self._closed >= self.round:
             raise IslandError(f"round {self.round} is closed: a signal for it can no longer be counted")
+        seen = self._round_seen.setdefault(self.round, set())
+        if self.trial is not None and self.trial.index(self.round) is not None and s.island in seen:
+            raise IslandError(f"island {s.island!r} already reported in trial round {self.round}")
+        seen.add(s.island)
         self.state[s.island].signals.append(s)
         self._round_accepts[self.round] = self._round_accepts.get(self.round, 0) + int(s.accepted)
+
+    def skip(self, island: str) -> None:
+        """Record that `island` deliberately ran no generation this round (0 edits, or the weights lever): it counts
+        as reported. An island neither observed nor skipped in a trial round voids the trial (close_round)."""
+        if island not in self.islands:
+            raise IslandError(f"unknown island {island!r}")
+        if self.round and self._closed >= self.round:
+            raise IslandError(f"round {self.round} is closed")
+        self._round_seen.setdefault(self.round, set()).add(island)
 
     # ------------------------------------------------------------------ policy trial and change (policy_gate.py)
     def trial_refusal(self, challenger: OrchestratorPolicy) -> str | None:
@@ -301,6 +325,8 @@ class Orchestrator:
             return f"trial {self.trial.decl.trial_id!r} is still open"
         if challenger.version in self.versions or challenger.version in self.trialled:
             return f"policy version {challenger.version!r} was used before (adopted or trialled)"
+        if challenger.param_hash() in self.trialled_params:
+            return "these policy parameters were adopted or trialled before (under another version name)"
         # the cadence counts from the last CHANGE; the initial policy is not a change (see docs/search_over_search.md)
         if self.changes and self.round - self.policy_changed_at < self.policy.cadence:
             return (f"a trial may start {self.policy.cadence} rounds after the last change (round "
@@ -321,14 +347,15 @@ class Orchestrator:
             decl = pg.declare(trial_id=tid, incumbent_version=self.policy.version,
                               incumbent_hash=self.policy.policy_hash(), challenger_version=challenger.version,
                               challenger_hash=challenger.policy_hash(), round_now=self.round, order_seed=order_seed,
-                              n_pairs=n_pairs, alpha=alpha, min_nonzero=min_nonzero)
+                              n_pairs=n_pairs, alpha=alpha, min_nonzero=min_nonzero, drawn=True)
         except pg.PolicyGateError as e:
             raise IslandError(f"policy trial refused: {e}") from e
         self._closed = max(self._closed, self.round)  # signals after the declaration belong to trial rounds only
-        self.trial = pg.PolicyTrial(decl)
+        self.trial = pg.PolicyTrial(decl, self._entropy)
         self._trial_challenger = challenger
         self._trial_decls[tid] = decl
         self.trialled.append(challenger.version)
+        self.trialled_params.add(challenger.param_hash())
         self._log(pg.TRIAL_KIND, decl.as_record() | {"challenger_params": asdict(challenger),
                                                      "incumbent_params": asdict(self.policy)})
         return decl
@@ -340,7 +367,13 @@ class Orchestrator:
             return
         self._closed = self.round
         t = self.trial
-        if t is None or t.arm(self.round) is None:
+        if t is None or t.index(self.round) is None:
+            return
+        missing = sorted(set(self.islands) - self._round_seen.get(self.round, set()))
+        if missing:  # a round whose islands did not all report is not a measurement: the trial is void
+            self._log(pg.ROUND_KIND, {"trial_id": t.decl.trial_id, "round": self.round, "void": True,
+                                      "missing": missing})
+            self._finish_trial()
             return
         rec = t.record(self.round, self._round_accepts.get(self.round, 0))
         self._log(pg.ROUND_KIND, rec | {"policy_version": self.round_policy.version,
@@ -412,6 +445,10 @@ class Orchestrator:
         island (the downgrade-only gate's); an island's budget becomes min(its budget, floor(cap)), never more."""
         self.close_round()
         self.round += 1
+        if self.trial is not None:  # the coin of a starting pair is drawn now and ledgered before the pair runs
+            coin = self.trial.start(self.round)
+            if coin is not None:
+                self._log(pg.COIN_KIND, coin)
         arm = self.trial.arm(self.round) if self.trial is not None else None
         p = self._trial_challenger if arm == "challenger" else self.policy
         self.round_policy = p

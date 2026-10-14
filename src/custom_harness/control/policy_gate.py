@@ -7,9 +7,13 @@ Design (chosen to be valid under the verdict embargo, invariant 18, and without 
   - a trial is DECLARED before its first round: trial id, incumbent and challenger (version + parameter hash), the
     window W (number of round PAIRS), alpha, min_nonzero, the order seed, the declaring round and the test name;
   - the window is W round-pairs. In pair k the two rounds run under the incumbent and the challenger in an order
-    fixed by the coin c_k = int(sha256(f"{order_seed}|{trial_id}|{k}"), 16) & 1 (0: incumbent first, 1: challenger
-    first; an AB/BA crossover). Within a round EVERY island runs under the same policy, so the per-round total
-    budget is identical across arms;
+    fixed by the coin c_k (0: incumbent first, 1: challenger first; an AB/BA crossover). Under the Orchestrator the
+    coin of pair k is DRAWN when pair k starts, from fresh entropy (`secrets`) the declarer neither chooses nor
+    sees in advance: c_k = (seeded coin of k) XOR int(sha256(f"{nonce_k}|{trial_id}|{k}"), 16) & 1, ledgered (record
+    `policy_trial_coin`) before the pair runs (red-team finding: coins fixed by a declared seed could be searched
+    for, and with any period effect a no-effect challenger then passed). `declare(...)` alone (no draws) keeps the
+    seeded coins c_k = int(sha256(f"{order_seed}|{trial_id}|{k}"), 16) & 1 for simulations. Within a round EVERY
+    island runs under the same policy, so the per-round total budget is identical across arms;
   - round outcome y = number of islands whose generation in that round ACCEPTED an edit (accept bits only: the bit
     is already a ledgered release to the proposer; no gate mean, CI, per-task value or score is read);
   - pair difference d_k = y_challenger - y_incumbent;
@@ -33,7 +37,8 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Sequence
+import secrets
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from fractions import Fraction
 from typing import Any
@@ -43,11 +48,13 @@ from .. import config
 TRIAL_KIND = "policy_trial"
 ROUND_KIND = "policy_trial_round"
 DECISION_KIND = "policy_trial_decision"
+COIN_KIND = "policy_trial_coin"
 ARMS = ("incumbent", "challenger")
 TEST_NAME = ("exact one-sided sign test: p = P(Bin(n_plus + n_minus, 1/2) >= n_plus) over the non-zero round-pair "
              "differences y_challenger - y_incumbent; accept iff n_plus + n_minus >= min_nonzero and p <= alpha")
 _DECISION_FIELDS = ("trial_id", "incumbent_version", "incumbent_hash", "challenger_version", "challenger_hash",
-                    "n_pairs", "alpha", "min_nonzero", "complete", "outcomes", "diffs", "n_plus", "n_minus", "n_zero",
+                    "n_pairs", "alpha", "min_nonzero", "complete", "outcomes", "coins", "diffs", "n_plus", "n_minus",
+                    "n_zero",
                     "p", "accepted", "reason")
 
 
@@ -127,6 +134,7 @@ class TrialDeclaration:
     order_seed: str
     declared_at_round: int
     test: str = TEST_NAME
+    drawn: bool = False  # True: coins are drawn per pair at run time (Orchestrator), never derived from the seed
 
     def __post_init__(self) -> None:
         if not self.trial_id or not isinstance(self.trial_id, str) or not isinstance(self.order_seed, str):
@@ -150,12 +158,15 @@ class TrialDeclaration:
             raise PolicyGateError("unknown test")
 
     def coins(self) -> list[int]:
+        """The seeded coins (declare() alone). A drawn trial has no coins before its pairs start (fail closed)."""
+        if self.drawn:
+            raise PolicyGateError("the coins of a drawn trial exist only once each pair starts")
         return [order_coin(self.order_seed, self.trial_id, k) for k in range(self.n_pairs)]
 
-    def schedule(self) -> list[str]:
+    def schedule(self, coins: Sequence[int] | None = None) -> list[str]:
         """The arm of each trial round (2 x n_pairs rounds, starting at declared_at_round + 1)."""
         out: list[str] = []
-        for c in self.coins():
+        for c in (self.coins() if coins is None else coins):
             out += ["incumbent", "challenger"] if c == 0 else ["challenger", "incumbent"]
         return out
 
@@ -166,26 +177,39 @@ class TrialDeclaration:
         return self.declared_at_round + 2 * self.n_pairs
 
     def as_record(self) -> dict[str, Any]:
-        return asdict(self) | {"coins": self.coins()}
+        return asdict(self) | ({} if self.drawn else {"coins": self.coins()})
+
+
+def drawn_coin(order_seed: str, trial_id: str, k: int, nonce: str) -> int:
+    """The coin of pair k of a drawn trial, from the nonce drawn when the pair started."""
+    return order_coin(f"{order_seed}", trial_id, k) ^ order_coin(nonce, trial_id, k)
 
 
 def declare(*, trial_id: str, incumbent_version: str, incumbent_hash: str, challenger_version: str,
             challenger_hash: str, round_now: int, order_seed: str, n_pairs: int = config.POLICY_TRIAL_PAIRS,
-            alpha: Any = config.POLICY_TRIAL_ALPHA, min_nonzero: int = config.POLICY_TRIAL_MIN_NONZERO
-            ) -> TrialDeclaration:
+            alpha: Any = config.POLICY_TRIAL_ALPHA, min_nonzero: int = config.POLICY_TRIAL_MIN_NONZERO,
+            drawn: bool = False) -> TrialDeclaration:
     return TrialDeclaration(trial_id, incumbent_version, incumbent_hash, challenger_version, challenger_hash, n_pairs,
-                            _frac_str(exact_alpha(alpha)), min_nonzero, str(order_seed), round_now)
+                            _frac_str(exact_alpha(alpha)), min_nonzero, str(order_seed), round_now, drawn=drawn)
 
 
-def decision(decl: TrialDeclaration, outcomes: Sequence[int | None]) -> dict[str, Any]:
-    """The trial decision from the per-round outcomes y (in trial-round order; None = round not run). A trial whose
-    window is not complete is never accepted."""
-    sched = decl.schedule()
+def decision(decl: TrialDeclaration, outcomes: Sequence[int | None],
+             coins: Sequence[int | None] | None = None) -> dict[str, Any]:
+    """The trial decision from the per-round outcomes y (in trial-round order; None = round not run) and, for a drawn
+    trial, the coins drawn so far (None = pair not started). A trial whose window is not complete is never
+    accepted."""
+    if decl.drawn:
+        if coins is None or len(coins) != decl.n_pairs or any(c not in (0, 1, None) for c in coins):
+            raise PolicyGateError("a drawn trial's decision needs its drawn coins")
+        cs: list[int | None] = list(coins)
+    else:
+        cs = list(decl.coins())
+    sched = decl.schedule([c if c is not None else 0 for c in cs])
     if len(outcomes) != len(sched):
         raise PolicyGateError("one outcome per trial round is needed")
     if any(y is not None and (type(y) is not int or y < 0) for y in outcomes):
         raise PolicyGateError("round outcomes are counts")
-    complete = all(y is not None for y in outcomes)
+    complete = all(y is not None for y in outcomes) and all(c is not None for c in cs)
     diffs: list[int] = []
     if complete:
         for k in range(decl.n_pairs):
@@ -198,7 +222,8 @@ def decision(decl: TrialDeclaration, outcomes: Sequence[int | None]) -> dict[str
     return {"trial_id": decl.trial_id, "incumbent_version": decl.incumbent_version,
             "incumbent_hash": decl.incumbent_hash, "challenger_version": decl.challenger_version,
             "challenger_hash": decl.challenger_hash, "n_pairs": decl.n_pairs, "alpha": decl.alpha,
-            "min_nonzero": decl.min_nonzero, "complete": complete, "outcomes": list(outcomes), "diffs": diffs, **test}
+            "min_nonzero": decl.min_nonzero, "complete": complete, "outcomes": list(outcomes), "coins": cs,
+            "diffs": diffs, **test}
 
 
 def verify_decision(doc: Any, decl: TrialDeclaration) -> list[str]:
@@ -206,7 +231,7 @@ def verify_decision(doc: Any, decl: TrialDeclaration) -> list[str]:
     if not isinstance(doc, dict) or set(doc) != set(_DECISION_FIELDS):
         return ["decision is malformed"]
     try:
-        want = decision(decl, doc["outcomes"])
+        want = decision(decl, doc["outcomes"], doc["coins"] if decl.drawn else None)
     except (PolicyGateError, TypeError) as e:
         return [f"decision cannot be recomputed: {e}"]
     return [] if want == doc else ["decision differs from its recomputation"]
@@ -215,17 +240,39 @@ def verify_decision(doc: Any, decl: TrialDeclaration) -> list[str]:
 class PolicyTrial:
     """One declared trial: its outcomes per trial round, filled in round order."""
 
-    def __init__(self, decl: TrialDeclaration):
+    def __init__(self, decl: TrialDeclaration, entropy: Callable[[], str] | None = None):
         self.decl = decl
         self.outcomes: list[int | None] = [None] * (2 * decl.n_pairs)
+        self.coins: list[int | None] = [None] * decl.n_pairs if decl.drawn else list(decl.coins())
+        self._entropy = entropy or (lambda: secrets.token_hex(16))
 
     def index(self, round_no: int) -> int | None:
         i = round_no - self.decl.first_round()
         return i if 0 <= i < len(self.outcomes) else None
 
+    def start(self, round_no: int) -> dict[str, Any] | None:
+        """Called when `round_no` starts: draws the coin of its pair if it is the pair's first round (a drawn trial).
+        Returns the `policy_trial_coin` record to ledger, or None."""
+        i = self.index(round_no)
+        if i is None or not self.decl.drawn or self.coins[i // 2] is not None:
+            return None
+        if i % 2:
+            raise PolicyGateError("a pair's coin is drawn at its first round")
+        k = i // 2
+        nonce = self._entropy()
+        if not isinstance(nonce, str) or len(nonce) < 16:
+            raise PolicyGateError("the coin entropy must be a string of at least 16 characters")
+        self.coins[k] = drawn_coin(self.decl.order_seed, self.decl.trial_id, k, nonce)
+        return {"trial_id": self.decl.trial_id, "pair": k, "round": round_no, "nonce": nonce, "coin": self.coins[k]}
+
     def arm(self, round_no: int) -> str | None:
         i = self.index(round_no)
-        return None if i is None else self.decl.schedule()[i]
+        if i is None:
+            return None
+        c = self.coins[i // 2]
+        if c is None:
+            raise PolicyGateError(f"the coin of pair {i // 2} has not been drawn (round {round_no} not started)")
+        return ("incumbent", "challenger")[(i % 2) ^ c]
 
     def record(self, round_no: int, y: int) -> dict[str, Any]:
         i = self.index(round_no)
@@ -236,12 +283,11 @@ class PolicyTrial:
         if type(y) is not int or y < 0:
             raise PolicyGateError("a round outcome is a count")
         self.outcomes[i] = y
-        return {"trial_id": self.decl.trial_id, "round": round_no, "pair": i // 2, "arm": self.decl.schedule()[i],
-                "y": y}
+        return {"trial_id": self.decl.trial_id, "round": round_no, "pair": i // 2, "arm": self.arm(round_no), "y": y}
 
     @property
     def complete(self) -> bool:
         return all(v is not None for v in self.outcomes)
 
     def decision(self) -> dict[str, Any]:
-        return decision(self.decl, self.outcomes)
+        return decision(self.decl, self.outcomes, self.coins if self.decl.drawn else None)

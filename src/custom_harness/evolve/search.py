@@ -216,11 +216,13 @@ def evolve_islands(seed_spec: HarnessSpec, suite: list[SuiteTask], *, islands: l
                                                          "policy_version": d["policy_version"],
                                                          "trained": False, "export": _summary(out)})
                 log(json.dumps({"round": d["round"], "island": iid, "lever": "weights", "trained": False}))
+                orch.skip(iid)
                 continue
             n_edits = min(d["n_edits"], cfg.n_edits)
             if n_edits < 1:
                 store.append_record(ISLAND_SKIP_KIND, {"island": iid, "round": d["round"], "reason": "0 edits"})
                 log(json.dumps({"round": d["round"], "island": iid, "skipped": "0 edits this round"}))
+                orch.skip(iid)
                 continue
             ledger = ledgers[iid]
             assert ledger is not None  # open_campaign with a campaign name always returns a ledger
