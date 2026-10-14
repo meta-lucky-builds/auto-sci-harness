@@ -390,10 +390,11 @@ def cmd_alpha(a: argparse.Namespace, store: EvidenceStore) -> int:
     """`chh alpha open` is a HUMAN action (GOAL §16.4): it gives a held-out target a fixed budget of slots, each claim
     tested at alpha / slots and releases paid in slots (kernel/alpha.py). The ledger entry names the approver; no
     production code path opens an account. `chh alpha status` only reads."""
-    from .kernel import Kernel, KernelError, VaultError
+    from .kernel import KernelError, VaultError
     from .kernel import alpha as A
     from .kernel.checks import related_targets, slot_charge
-    kernel = Kernel(store)
+    from .kerneld.scope import ScopedKernel
+    kernel = ScopedKernel(store)
     try:
         if a.alpha_cmd == "open":
             e = kernel.open_alpha_account(a.dataset_id, a.alpha, a.slots, approver=a.approver)
@@ -446,10 +447,10 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
         real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
                            Path(a.record_dir) / "_export" if a.frozen else Path(a.out) / "_export")
     if a.frozen:
-        from .kernel import Kernel
+        from .kerneld.scope import ScopedKernel
         try:
             res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
-                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+                             vault=ScopedKernel(store).vault, store_root=store.root, real_data=real, name=a.name)
         except (RB.RebuildRefused, RB.MintRefused) as e:
             raise SystemExit(f"refused: {e}") from None
         print(json.dumps(res, indent=1))

@@ -264,10 +264,12 @@ def test_claim_is_preregistered_before_fresh_data_are_touched(honest):
 
 
 def test_ingest_refuses_an_unregistered_claim(tmp_path):
+    """The split is ingested by kerneld (kerneld/ingest.py, 2026-10-14): its ingest token is refused for a claim that
+    is not pre-registered, before the cached file is read."""
     a = Audit(tmp_path / "ingest")
     ds = a.loaded.spec.datasets[0]
     with pytest.raises(D.DataUnavailable, match="not pre-registered"):
-        D.ingest(Kernel(a.store), a.claim_hash, ds, a.arff)
+        CA._ingest(a.store, a.loaded.audit_id, a.claim_hash, ds, a.cache, None)
     assert not Kernel(a.store).vault.datasets()
     a.close()
 
