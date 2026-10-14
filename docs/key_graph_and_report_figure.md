@@ -26,7 +26,10 @@
   refs against the ledger and re-renders in a fresh sandbox (F1-F4).
 - New chart kind `interval` (`svg.interval_chart`): a point per estimate and one segment per bound, each bound to
   exactly one ref; the audit checks bindings, values, point geometry and rebuilds the exact SVG.
+- Labels never carry the target id (a content-addressed id like `data@3e5a.../test` reads as a number to the F3
+  free-text check); several targets are lettered in sorted order, and figure.json names each ref's pointer.
+- A figure that cannot be made fails the report node (fail closed; no report without its audited figure).
 - Not plotted: dev-racing intervals (computed on the fly from private dev labels; no ledgered artifact to resolve).
-- Tests: `tests/test_report_figure.py` (an injected fake value with rewritten hashes is caught by F3 and F4; a changed
+- Tests: `tests/test_report_figure.py` (a hex target id in the certificate; an injected fake value with rewritten hashes is caught by F3 and F4; a changed
   ledger value is caught; a raw number in the script or a foreign certificate is refused; the v1 run's figure passes
   I6 and fails it after one plotted value is inflated).
