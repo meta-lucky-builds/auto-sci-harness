@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from ..ablation import NO_ABLATION, AblationSet
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
@@ -299,8 +300,9 @@ class ExecutedRun:
 def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
                 budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
-                sealed_access: object | None = None) -> ExecutedRun:
-    """Run the harness; touch no shared in-memory state (the store is internally locked)."""
+                sealed_access: object | None = None, ablation: AblationSet = NO_ABLATION) -> ExecutedRun:
+    """Run the harness; touch no shared in-memory state (the store is internally locked). `ablation`: capability
+    switches OFF (custom_harness/ablation.py); the run is marked ABLATED."""
     if task.split == "sealed" and sealed_access is not _SEALED_ACCESS:  # invariant 6: sealed only via finalize
         raise ValueError(f"task {task.task_id} is in the sealed split: only `chh finalize` (a human action) runs it")
     h = spec.spec_hash()
@@ -311,7 +313,8 @@ def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
             task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
             [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"]))
     eng = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
+                 budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy(),
+                 ablation=ablation)
     rows = store.ledger_rows()
     before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)

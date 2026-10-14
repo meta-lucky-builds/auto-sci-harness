@@ -1,4 +1,5 @@
-"""`chh` commands of the L9 studio (CLI only): explain, graph, limitations, queue, kill, tier-policy."""
+"""`chh` commands of the L9 studio (CLI only): explain, graph, limitations, queue, kill (human), supervise (an
+automated controller, downgrade-only), tier-policy."""
 
 from __future__ import annotations
 
@@ -18,6 +19,18 @@ def cmd_kill(a: argparse.Namespace, store: EvidenceStore) -> int:
         raise SystemExit(f"refused: {e}") from e
     print(json.dumps({"killed": a.run_id, "ledger_seq": entry.seq, "detail": killed_detail(entry),
                       "note": "a step already in flight finishes; no further step runs and the run is not resumable"}))
+    return 0
+
+
+def cmd_supervise(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """One turn of an AUTOMATED controller over the killable runs. Its only path is the downgrade-only gate: kills
+    with code-checked evidence are applied and ledgered as `controller_action` (never `run_kill`); everything else
+    (grant, admit, enlarge, revive, ...) is rejected and ledgered."""
+    from ..cli import _backend
+    from .controller import result_json, supervise
+    res = supervise(store, _backend(a.controller), controller_id=a.controller_id, limit=a.limit,
+                    **({"stall_s": a.stall_s} if a.stall_s is not None else {}))
+    print(json.dumps(result_json(res), indent=1))
     return 0
 
 
@@ -93,6 +106,12 @@ def add_parsers(sub: Any) -> None:
     k.add_argument("run_id")
     k.add_argument("--by", required=True, help="the human stopping the run (recorded in the ledger)")
     k.add_argument("--reason", default="human_stop", choices=KILL_REASONS)
+    sv = sub.add_parser("supervise", help="one turn of an AUTOMATED controller over killable runs (downgrade-only "
+                                          "gate: it may only deny, shrink or kill with code-checked evidence)")
+    sv.add_argument("--controller", required=True, help="backend of the controller, e.g. codex or mock")
+    sv.add_argument("--controller-id", default="studio-supervisor", help="recorded in every controller_action")
+    sv.add_argument("--limit", type=int, default=50, help="most recent runs observed")
+    sv.add_argument("--stall-s", type=float, help="seconds without a step before `stalled` evidence holds")
     ex = sub.add_parser("explain", help="explain a certificate from the store (every value with its source)")
     ex.add_argument("cert", help="certificate hash (a unique prefix is enough)")
     ex.add_argument("--json", action="store_true", help="machine-readable facts with their sources")
@@ -110,5 +129,5 @@ def add_parsers(sub: Any) -> None:
     tp.add_argument("--sha256", help="pin: the sha256 of the file you reviewed; refused if it differs")
 
 
-COMMANDS = {"kill": cmd_kill, "tier-policy": cmd_tier_policy, "explain": cmd_explain, "graph": cmd_graph,
-            "queue": cmd_queue}
+COMMANDS = {"kill": cmd_kill, "supervise": cmd_supervise, "tier-policy": cmd_tier_policy, "explain": cmd_explain,
+            "graph": cmd_graph, "queue": cmd_queue}

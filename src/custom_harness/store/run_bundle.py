@@ -169,6 +169,8 @@ def build_run_bundle(store: EvidenceStore, run_id: str, out_path: Path, *, envir
         "cost": store.run_cost(run_id).model_dump(mode="json"), "environment": environment or {},
         "task_dir": task_dir, "task_files": task_files, "workspace_snapshot": snapshot,
         "refused_private_blobs": refused, "blobs": sorted(blobs), "artifacts": artifacts}
+    if run.ablated:  # custom_harness/ablation.py: an ablated run's bundle says so at the top level (absent otherwise)
+        manifest["ABLATED"] = {"disabled": list(run.ablated)}
     data = json.dumps(manifest, sort_keys=True, default=str).encode()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as z:

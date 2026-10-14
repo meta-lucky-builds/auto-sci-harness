@@ -55,6 +55,7 @@ NO_REQUEST = "no_request"
 PAGE_RANGE = "page_out_of_range"
 CAP = "recall_cap"
 BUDGET = "budget"
+ABLATED = "ablated"  # the `skills_paged_recall` ablation switch is set for this run: recall is switched off
 # Replaced in a quoted page: C0 controls except tab and newline, DEL, C1 controls, and the Bidi_Control marks (ALM,
 # LRM, RLM, embeddings/overrides, isolates). Lines are split on EVERY boundary str.splitlines() honours (CR LF, LF,
 # VT, FF, CR, FS, GS, RS, NEL, LS, PS), so recalled content can never start an unquoted line (red-team findings).
@@ -98,6 +99,8 @@ def recall(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
 
     if not isinstance(agent, str) or not agent:
         return refuse(R.MALFORMED)
+    if ctx.ablation.off("skills_paged_recall"):  # ablation run (custom_harness/ablation.py): no page is ever served
+        return refuse(ABLATED)
     if len(previous) >= max_recalls:
         return refuse(CAP)
     ask = None

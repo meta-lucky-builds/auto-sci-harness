@@ -54,3 +54,14 @@ changes:
     7-day cooling-off for core changes was NOT observed: this is a recorded deviation, not a tightening. The earlier
     record is left unchanged (history is not rewritten). Typed by the integrator agent, not by a human.
   recorded: '2026-10-08'
+- fingerprint: bc6ab30241c39d4a5d3c84826f275187a3722b81af9f520a0dd27368c4a42ed8
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; tighten-only changes may merge at once, GOAL 16.7)
+  note: >-
+    Ablation refusal (w2-ablation, GOAL invariant 12): Kernel.certify now raises KernelError before any check or
+    ledger write when any evidence was produced by a run whose record is marked ABLATED (Run.ablated,
+    custom_harness/ablation.py); helper Kernel._ablated_runs. Only adds a refusal; no pass condition is relaxed and no
+    check is skipped. Unresolvable evidence ids are still left to K0; a run id without a run record is not treated as
+    ablated. Tests: tests/test_kernel_ablation.py (in the Kernel coverage gate). Recorded by the w2-ablation builder
+    agent, not typed by a human.
+  recorded: '2026-10-08'

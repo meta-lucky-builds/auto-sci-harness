@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..ablation import NO_ABLATION
 from ..kernel.execution import OUT_PATH
 from ..runtime import register
 from ..runtime.modules import ModuleContext
@@ -53,6 +54,12 @@ def _task(state: dict[str, Any]) -> TaskSpec:
     return TaskSpec.model_validate(state["task"])
 
 
+def ablated(ctx: Any, switch: str) -> bool:
+    """Is capability `switch` switched off in this run (custom_harness/ablation.py)? Production runs: never. A context
+    without an AblationSet (test doubles) is a production context."""
+    return bool(getattr(ctx, "ablation", NO_ABLATION).off(switch))
+
+
 # The private dev labels are stored wrapped, so their blob ref can never equal the ref of a predictions list:
 # perfect dev predictions would otherwise share the labels' content hash and be scrubbed (and audited) as a
 # leaked private value (live run run_cd99288e65ba4a4f).
@@ -76,6 +83,19 @@ def cpu_exec_kwargs(sb: Sandbox, cpu_s: float | None) -> dict[str, Any]:
     return {"cpu_s": float(cpu_s)}
 
 
+# Characters of a failing dev run's stderr kept as `run_log` (run_candidate param `run_log_chars`, off = 0): the
+# fix step renders it through the verified-quote log reducer, which archives a long log behind a handle that the
+# agent can page through with research.recall (research_v2.yaml). UNCALIBRATED (owner decision, GOAL §13.8).
+RUN_LOG_MAX_CHARS = 64_000
+
+
+def _note(info: dict[str, Any], text: str) -> None:
+    """A harness note about a run: appended to the short tail AND the long log (both end with it)."""
+    info["stderr_tail"] += text
+    if "stderr_log" in info:
+        info["stderr_log"] += text
+
+
 def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
                   timeout_s: float, cpu_s: float | None = None) -> tuple[list[str] | None, dict[str, Any]]:
     """Run a solution under the CLI contract in sandbox `sb` (paths relative to its workspace). The output path is
@@ -88,13 +108,15 @@ def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
     res = sb.exec([sb.python, script, "--train", train, "--test", test,
                    "--out", out_rel, "--seed", str(seed)], timeout_s=timeout_s, **cpu_exec_kwargs(sb, cpu_s))
     info: dict[str, Any] = {"returncode": res.returncode, "timed_out": res.timed_out, "wall_s": round(res.wall_s, 2),
-            "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:]}
+            "stdout_tail": res.stdout[-1500:], "stderr_tail": res.stderr[-3000:],
+            # the longer log a failing run's fix step may page through (run_candidate `run_log_chars`, recall)
+            "stderr_log": res.stderr[-RUN_LOG_MAX_CHARS:]}
     try:
         out = safe_path(sb.workspace, out_rel)
     except WorkspaceEscape as e:
         # the agent's code planted a link where its output should be: a failed attempt by the agent,
         # recorded (and later flagged by the leak audit), never followed
-        info["stderr_tail"] += f"\n{ESCAPE_MARKER}: {e}"
+        _note(info, f"\n{ESCAPE_MARKER}: {e}")
         info["escape_attempt"] = str(e)
         return None, info
     if res.returncode != 0 or not out.exists():
@@ -102,7 +124,7 @@ def _run_solution(sb: Sandbox, script: str, train: str, test: str, seed: int,
     try:
         return read_predictions(out), info
     except ValueError as e:
-        info["stderr_tail"] += f"\n[harness] invalid predictions file: {e}"
+        _note(info, f"\n[harness] invalid predictions file: {e}")
         return None, info
 
 
@@ -171,9 +193,9 @@ def _dev_predict(ctx: ModuleContext, state: dict[str, Any], code: bytes,
                                   (state.get("limits") or {}).get("cpu_s"))
         wall += info["wall_s"]
         if out is None and info.get("timed_out") and timeout < task.solution_timeout_s:
-            info["stderr_tail"] += over
+            _note(info, over)
         if out is not None and len(out) != fold["n"]:
-            info["stderr_tail"] += f"\n[harness] fold {k}: expected {fold['n']} predictions, got {len(out)}"
+            _note(info, f"\n[harness] fold {k}: expected {fold['n']} predictions, got {len(out)}")
             out = None
         if out is None:
             return None, {**info, "fold": k, "wall_s": round(wall, 2), "contract": contract}
@@ -250,7 +272,11 @@ def setup(state, params, ctx: ModuleContext):
 
 @register("research.profile_data")
 def profile_data(state, params, ctx):
-    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it)."""
+    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it).
+    Ablation switch `data_profile_kway_rank` (custom_harness/ablation.py): no profile is computed; the prompts that
+    quote `profile` get only the statement that profiling is switched off."""
+    if ablated(ctx, "data_profile_kway_rank"):
+        return {"profile": {"ablated": "data profiling is switched off in this ablation run: no profile computed"}}
     return {"profile": profile(_ws(ctx, f"data/{_task(state).train_file}"), _task(state).target_column)}
 
 
@@ -302,6 +328,9 @@ def socratic_filter(state, params, ctx):
 # re-measure and dev racing (`tree.confirm`). The dev labels stay private: they are read here and handed to the
 # tree, never put in state. Sandbox work in a module happens BEFORE its tree commits, so an infrastructure retry of
 # the module never meets half-logged events.
+# Ablation switch (custom_harness/ablation.py): with it, a failed candidate gets no repair (`fix`) and no improve round
+# is opened, so each hypothesis is one draft run (the tree still logs and checks every run).
+TREE_SWITCH = "experiment_tree_repair_improve"
 HYPOTHESIS_DECISION = "which hypothesis to implement"
 IMPROVE_DECISION = "one refinement of the incumbent"
 ENSEMBLE_DECISION = "the pre-declared vote ensemble of distinct candidates"
@@ -431,6 +460,11 @@ def next_hypothesis(state, params, ctx):
     best = state.get("best")
     beats = best is not None and _better(_task(state), best["dev_score"], state["baseline_dev"])
     can_improve = beats and state.get("n_improves", 0) < params.get("max_improves", 0)
+    if current is None and can_improve and ablated(ctx, TREE_SWITCH):  # ablation run: no improve round opens
+        can_improve = False
+        updates["skipped_calls"] = [*(state.get("skipped_calls") or []),
+                                    {"node": "improve", "incumbent": best.get("hypothesis_id"),
+                                     "reason": f"ablation: {TREE_SWITCH} is switched off"}]
     if current is None and can_improve and params.get("headroom_gate", False):
         ok, why = headroom(_task(state), _dev_labels(state, ctx), ctx.store.blobs.get_json(best["dev_preds_ref"]))
         if not ok:  # the improve call provably cannot be accepted by dev racing: skip it (a skipped call is recorded)
@@ -672,6 +706,13 @@ def run_candidate(state, params, ctx):
             refused = e
     if refused is not None:  # the run is not a candidate: its result is discarded, the refusal is in the tree log
         s, error = None, f"refused by the experiment tree: {refused}"
+    # `run_log` (off unless `run_log_chars` > 0): the failing run's longer log for the fix step, which renders it
+    # through the log reducer (a long log is archived behind a handle an agent may page with research.recall)
+    log_chars = min(max(int(params.get("run_log_chars") or 0), 0), RUN_LOG_MAX_CHARS)
+    run_log = None
+    if log_chars and error:
+        run_log = (error if refused is not None or (s is None and preds is not None)
+                   else (info.get("stderr_log") or error))[-log_chars:]
     status = t.nodes[node].status if node in t.nodes else "abandoned"
     attempt = {"n": n_attempts, "hypothesis_id": hyp.get("id"), "dev_score": s, "error": error,
                # the hypothesis an improvement refines (improve-k inherits its root), for the replication brief
@@ -697,7 +738,8 @@ def run_candidate(state, params, ctx):
     improves_left = state.get("n_improves", 0) + (1 if is_improve else 0) < params.get("max_improves", 0)
     # the repair cap is the tree's (max_fixes, fixed when the tree was created): a provisional node after a failure
     # still has a repair left; an abandoned one has none
-    if error and refused is None and status == "provisional" and n_attempts < max_attempts:
+    if (error and refused is None and status == "provisional" and n_attempts < max_attempts
+            and not ablated(ctx, TREE_SWITCH)):  # ablation run: no repair; the failed node is abandoned below
         route = "fix"
     elif n_attempts < max_attempts and (state.get("queue") or state.get("pending")
                                         or (improves_left and best is not None)):
@@ -709,7 +751,8 @@ def run_candidate(state, params, ctx):
     if route != "fix":
         _close(t, node, "no repair: the loop moved on")
     fixes = t.nodes[node].repairs if node in t.nodes else 0
-    return {"dev_score": s, "run_error": error, "attempts": attempts, "n_attempts": n_attempts, **selection,
+    return {"dev_score": s, "run_error": error, **({"run_log": run_log} if log_chars else {}),
+            "attempts": attempts, "n_attempts": n_attempts, **selection,
             "best": best, "route": route, "fixes_for_current": fixes, "tree_node": node if route == "fix" else None,
             **({"tree_round": state["tree_round"]} if state.get("tree_round") else {}), **_tree_state(t),
             "n_improves": state.get("n_improves", 0) + (1 if is_improve and route != "fix" else 0)}

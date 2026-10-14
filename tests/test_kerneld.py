@@ -170,6 +170,20 @@ def test_leak_scan_reports_locations_never_values(world, kd, run):
     assert canary not in (kd.last_reply or "")
 
 
+def test_leak_scan_of_a_trace_with_non_finite_numbers(world, run):
+    """A real trace step can hold NaN/inf (a failed dev score); the wire is strict JSON (allow_nan=False). The scan
+    must still run and still find a leak next to the NaN (only strings are scanned, so numbers carry nothing)."""
+    labels = world.labels["test"]
+    window = ",".join(labels[:40])
+    tok = run.token("leakscan", "test", "test_y.csv")
+    step = {"index": 3, "node_id": "dev", "error": None,
+            "output": {"dev_score": float("nan"), "ci": [float("-inf"), float("inf")], "notes": f"x {window} y",
+                       "_redacted_private_values": 1}}
+    problems = run.leak_scan(tok, [step], None, {})
+    assert any("trace step 3 (dev)" in p and "redacted" in p for p in problems), problems
+    assert any("trace step 3 (dev)" in p and "redacted" not in p for p in problems), problems
+
+
 def test_leak_scan_workspace_copy(world, run, tmp_path):
     raw_labels = world.store.blobs.get(world.vault.dataset("test").files["test_y.csv"].blob)
     (tmp_path / "stolen.csv").write_bytes(raw_labels)

@@ -27,9 +27,15 @@ and the input files, each with a ref), `scorecard.json` (computed from facts alo
   and labels the verdict's basis.
 - **Comparison**: paired over the identical item set, with a seeded paired-bootstrap percentile interval. The verdict
   is win / lose / inconclusive against the best baseline.
-- **Ablation runner** (`runner.run_ablation`) and coverage (`capabilities.yaml`): every GOAL §9 row is listed with
-  its ablation switch. The rows are transcribed, 37 of them. No switch exists yet, so all 37 rows are reported as
-  invariant-12 gaps. This is an honest coverage failure, not an omission.
+- **Ablation runner** (`runner.run_ablation`, entry point `runner.ablation_set`) and coverage (`capabilities.yaml`):
+  every GOAL §9 row (37) carries an ablation record: a switch in the closed registry (`custom_harness/ablation.py`),
+  or the exact reason it is not ablatable. The switch mechanism, its safety design and the per-row table are in
+  `docs/ablation.md`. Coverage reports two numbers: rows with a real, tested switch (`capabilities_with_switch`, code
+  only) and rows whose ablation run is recorded and compared with a run of the full system
+  (`capabilities_with_ablation`). No ablation run has been made (it needs model calls and pinned benchmarks), so every
+  row is still an invariant-12 gap and the scorecard says why per row ("no ablation run recorded", "not ablatable:
+  ...", "partial switch: ..."). Ablated runs are listed apart in the facts (`ablated_runs`) and never counted on
+  axes F/G/H.
 - **Axis F** (from the store): claims without evidence, unverifiable citations, and reports with a checklist and a
   bundle. The exact definitions are in the `facts.py` docstring.
 - **Axis G**: total cost and cost per Kernel-certified claim. If there are 0 certified claims, the value is
