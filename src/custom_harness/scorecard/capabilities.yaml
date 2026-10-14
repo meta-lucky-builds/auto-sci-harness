@@ -1,192 +1,299 @@
-# Claimed capabilities (GOAL §9 coverage contract, transcribed row by row) and the ablation switch of each
-# (GOAL §2.1, invariant 12: every claimed capability has code, a test and an ablation).
-# `ablation: null` = no switch that turns the capability off exists yet. The scorecard reports every such row as an
-# invariant-12 gap; it never drops a row. Set `ablation` to the name of a switch the system under test understands
-# (passed to System.run as `disabled`) once one is wired, then record an ablation run (`scorecard.runner.run_ablation`).
+# Claimed capabilities (GOAL §9 coverage contract, transcribed row by row) and the ablation record of each
+# (GOAL §2.1, invariant 12: every claimed capability has code, a test and an ablation). docs/ablation.md is the table.
+# `ablation` is exactly one of:
+#   {switch: NAME}                       a real switch in the closed registry custom_harness.ablation.SWITCHES (with
+#                                        its code path and its test); `not_covered: {part: reason}` lists any part of
+#                                        the row the switch does NOT turn off (then the row is a partial switch: a gap)
+#   {not_ablatable: "exact reason"}      no switch: not built, or an integrity mechanism (never switched off in
+#                                        production; measured only inside the evaluation harness)
+# The scorecard counts a row as switched only for a full, registered, tested switch, and as ablated only once an
+# ablation run (`scorecard.runner.run_ablation`) is recorded and compared; every other row is an invariant-12 gap.
 capabilities:
 - id: meta-harness
   source: Meta-Harness
   capability: Proposer with full history filesystem
   home: L6.1–2
-  ablation: null
+  ablation:
+    switch: proposer-history
 - id: rhi
   source: RHI
   capability: Contracts and hops as edit types; compare to parent
   home: L6 edit types, race
-  ablation: null
+  ablation:
+    switch: contract-hop-edits
+    not_covered:
+      compare to parent: 'the paired comparison against the parent (evolve/selection.py race / paired_sample / gate) is the acceptance statistic, an integrity mechanism (invariant 6): no switch'
 - id: rrsi
   source: RRSI
   capability: Leakage critic, regularised proposals/acceptance, cost-aware admission
   home: L6.5, L6.8, L6.10
-  ablation: null
+  ablation:
+    switch: cost-term
+    not_covered:
+      leakage critic: 'the model critic (evolve/critic.py) needs a second model family (invariant 5 NOT MET) and is advisory, recorded only (evolve/loop.py), never gating; the deterministic leakage screens (evolve/edits.py screen_prediction / denied_tokens, evolve/export.py screen_digest) are integrity mechanisms: no switch'
+      regularised proposals: 'the annealed operator budget (evolve/generations.py AnnealSchedule) is applied in evolve/driver.py (CampaignLedger.begin), only when a campaign is declared, and the driver receives no AblationSet: not switched'
+      regularised acceptance: 'the regularised acceptance is the leave-one-family/domain-out non-regression gate (evolve/loop.py _lofo), an integrity gate (invariant 16): no switch'
 - id: self-harness
   source: Self-Harness
   capability: Causal failure signatures, held-in/out non-regression, decline path
   home: L6.3, L6.6, gate
-  ablation: null
+  ablation:
+    switch: causal-signatures
+    not_covered:
+      held-in/out non-regression: 'the held-out gate and the leave-one-family/domain-out non-regression (evolve/selection.py gate, evolve/loop.py _lofo) are integrity gates (invariants 6, 16): no switch'
+      decline path: offered in the proposer prompt and schema (evolve/propose.py) and recorded as a `declined` lineage status (evolve/loop.py); not switched (this row's switch is causal-signatures, one switch per row)
 - id: autosaddler
   source: AutoSaddler
   capability: Deep diagnosis, patch taxonomy, mini-batch pre-filter, composition DAG
   home: L6.3, edit types, L6.8
-  ablation: null
+  ablation:
+    switch: minibatch-prefilter
+    not_covered:
+      deep diagnosis: its first-divergence part is switched by `causal-signatures` (row self-harness, one switch per row); the failure clusters with trace excerpts (evolve/propose.py diagnose) are not switched
+      patch taxonomy: 'the typed edit taxonomy (evolve/edits.py EditType) is the only form an edit can take; removing it removes evolution itself, not one capability of it: no switch'
+      composition DAG: not built (no edit composition exists in evolve/)
 - id: milo
   source: MILO
   capability: Islands, lineage with rejects, adaptive orchestrator
   home: L7, ledger
-  ablation: null
+  ablation:
+    switch: orchestrator-reallocation
+    not_covered:
+      islands: 'control/islands.py is imported by no src module: no island population runs, and no run path constructs the Orchestrator, so its decisions (and this switch) are consumed by nothing in a run until the orchestrator drives a campaign; a single-population arm is not built'
+      lineage with rejects: the novelty gate's input (switched by `novelty-gate`, row harnessx) and part of the proposer's evidence export (evolve/export.py lineage.json, removed with the whole export by `proposer-history`, row meta-harness); not separately switched
+      'adaptive orchestrator: lever choice and edit-type quota': the lever choice is switched by `lever-choice` (row sia); the prompt-only edit-type quota (Orchestrator.step cap, admit) is not switched
 - id: mixture-of-branches
   source: Mixture of Branches
   capability: Coverage-based branching, router
   home: L6.9
-  ablation: null
+  ablation:
+    not_ablatable: 'branching: branch creation (evolve/branches.propose_branch) never happens in ANY ablated generation (evolve/loop.py: an ablated arm records no rejected_on, by design, so no branch is proposed), so a branching switch would not isolate it; router: the router (evolve/router.py) is wired into no run path (build_router / Router.route are called only in tests) and is measured only by router.finalize_routed on the sealed split, a one-shot human-run command (invariant 6) that an ablation run must never consume'
 - id: harnessx
   source: HarnessX
   capability: Typed multi-dimension harness, deterministic gate, per-task attribution, novelty gate
   home: spec, gate, ledger
-  ablation: null
+  ablation:
+    switch: novelty-gate
+    not_covered:
+      typed multi-dimension harness: 'the typed HarnessSpec (runtime/spec.py) is the harness format itself: no switch'
+      deterministic gate: 'the held-out gate (evolve/selection.py gate, evolve/loop.py _lofo) is an integrity mechanism (invariants 6, 16): no switch'
+      per-task attribution: 'evolve/loop.py _per_task reaches the proposer through its PAST EDITS ledger (evolve/export.py proposer_view: per_task, flipped, regressed restricted to evolve tasks); the ledger as a whole is switched by `proposer-history` (row meta-harness); per-task attribution alone is not switched'
 - id: adaptive-auto-harness
   source: Adaptive Auto-Harness
   capability: Branch tree, temporal reveal, solve-time routing, research logs
   home: L6.9, L6.11
-  ablation: null
+  ablation:
+    not_ablatable: 'branch tree: branch creation (evolve/branches.propose_branch) never happens in ANY ablated generation (evolve/loop.py: an ablated arm records no rejected_on, by design, so no branch is proposed), so a branching switch would not isolate it; solve-time routing: the router (evolve/router.py) is wired into no run path (build_router / Router.route are called only in tests) and is measured only by router.finalize_routed on the sealed split, a one-shot human-run command (invariant 6) that an ablation run must never consume; temporal reveal (evolve/reveal.py, imported by no src module): switching it off would reveal undated or future labels, a leak (invariants 2, 18): an integrity mechanism, no switch; research logs: generation reports (evolve/generations.py) are records only, read by nothing; the lineage / ledger / stats logs the proposer reads (evolve/export.py) are switched by `proposer-history` (row meta-harness), which this row cannot also own (one switch per row)'
 - id: scholarevolve
   source: ScholarEvolve
   capability: Literature → mechanism → code mutation; bootstrap CI; topic quotas
   home: L4.3 → L6.2, gate, L4.4
-  ablation: null
+  ablation:
+    not_ablatable: 'literature -> mechanism -> code mutation: not built (no evolve/ code reads literature/); bootstrap CI: evolve acceptance uses a paired Student-t CI (evolve/selection.py paired_ci, which replaced the percentile bootstrap), the acceptance statistic, an integrity mechanism (invariant 6): no switch; research dev racing''s bootstrap (research/tree.py, research/modules.py) is a selection rule that is not switched; topic quotas: research/hypotheses.apply_topic_quota has no caller in src (not wired into the research loop, its own docstring), so no run path reaches it to switch'
 - id: sol-pi
   source: SoL-Pi
   capability: Cost objective, ObservationPack, verified-quote reducer, frozen held-out
   home: L1, L4 context, gate
-  ablation: null
+  ablation:
+    switch: observation-pack
+    not_covered:
+      cost objective: 'the acceptance cost term is switched by `cost-term` (row rrsi); run and campaign budgets (budget.py) are fail-closed resource bounds: no switch'
+      frozen held-out: 'the sealed split and never-shown gate are integrity mechanisms (invariant 6): no switch'
 - id: continual-harness
   source: Continual Harness
   capability: Mid-episode refinement, adaptive cadence
   home: L6 (low-risk edit types, in-run only)
-  ablation: null
+  ablation:
+    not_ablatable: 'not built: no mid-episode (in-run) harness refinement and no adaptive edit cadence exist; evolution edits the harness only between runs (evolve/loop.py evolve_generation)'
 - id: sia
   source: SIA
   capability: Lever choice harness vs weights
   home: L7 lever, L8
-  ablation: null
+  ablation:
+    switch: lever-choice
+    not_covered:
+      weights lever: 'not built: the L8 weights lever is declared but never chosen (control/islands.py BUILT_LEVERS excludes `weights`)'
 - id: evomaster
   source: EvoMaster
   capability: Skills, progressive disclosure, context manager
   home: L5, L4 context
-  ablation: null
+  ablation:
+    switch: skills_paged_recall
+    not_covered:
+      context manager: 'switched by `observation-pack`, which belongs to row sol-pi (one switch per row): runtime/engine.py -> runtime/template.render keeps no archive handle and no `|log` reducer; the head/tail truncation limit itself is a fixed prompt bound and is not switched'
+      paged recall in the shipped specs: research.recall (the page-refusal half of this switch) is a node of neither examples/research_v1.yaml nor research_v2.yaml, so only a spec with a research.recall node reaches it; the skill-withholding half (research.recall_memory) is in both
 - id: weng-survey
   source: Weng survey
   capability: Decision observability, optimiser-of-optimiser
   home: calibration, L7
-  ablation: null
+  ablation:
+    not_ablatable: 'decision observability: orchestrator_decision records (control/islands.py) are read by nothing; proposer_calibration (evolve/loop.py) is only logged (evolve/driver.py); the per-edit predicted vs measured deltas it summarises reach the proposer''s PAST EDITS ledger, switched by `proposer-history` (row meta-harness, one switch per row); optimiser-of-optimiser: not built (control/islands.py Orchestrator.set_policy only versions and rate-limits a policy change; gating a change on measured meta-level gain is not built)'
 - id: ai-scientist-v1-v2
   source: AI Scientist v1/v2
   capability: End-to-end pipeline, reviewer ensemble, experiment tree, LaTeX loop
   home: L4, L3 T5, L4.7, L4.10
-  ablation: null
+  ablation:
+    switch: experiment_tree_repair_improve
+    not_covered:
+      end-to-end pipeline: 'the pipeline is the research loop itself (examples/research_v*.yaml run by runtime/engine.py): no run exists without it, so there is no off arm'
+      reviewer ensemble: 'the judge panel (verify/judge.py JudgePanel: >= 3 families, both orders, meta-review) is constructed nowhere in src and panel_status is REFUSED with one model family; a smaller panel would break invariant 5, which the panel enforces at construction'
+      LaTeX loop: not built
 - id: evoscientist
   source: EvoScientist
   capability: Cross-task idea and experiment memory, failed directions
   home: L5
-  ablation: null
+  ablation:
+    switch: cross_task_memory
+    not_covered:
+      idea memory: 'not built: the memory store keeps only Kernel-backed entries (certified findings, verified failures, dead-ends, lineage, skills; memory/model.py Kind); an idea with no certificate is never stored'
 - id: scientistone
   source: ScientistOne
   capability: Chain-of-Evidence, deterministic grounding, integrity audit
   home: Kernel K0, L2
-  ablation: null
+  ablation:
+    not_ablatable: 'Chain-of-Evidence and deterministic grounding are Kernel K0 (every claim resolves to stored evidence) and the append-only evidence store (L2); the integrity audit is research.audit I1-I6: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: scider
   source: SciDER
   capability: Data-first profiling, K-way ranking, trajectory data
   home: L4.2, L4.5, L8
-  ablation: null
+  ablation:
+    switch: data_profile_kway_rank
+    not_covered:
+      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml only; research_v2.yaml ranks by execution (research.execution_rank), so there only the profiling half of this switch acts
+      replication profile: the replication brief's trusted profile (research/claims.py _trusted_profile) is still computed
+      trajectory data: 'an offline export only (weights/trajectory.py, weights/export.py) that takes trajectories as inputs and is not wired to runs: no run produces or consumes it, so there is nothing in a run to switch off'
 - id: scienceflow
   source: ScienceFlow
   capability: Recoverable states, safe restore, resource controller
   home: L0 snapshots, L1
-  ablation: null
+  ablation:
+    not_ablatable: 'recoverable states (runtime/engine.py resume, evolve/loop.py Evaluator durable unit records) change no result unless a crash happens, and a run is never continued under another ablation (Engine._check_ablation); safe restore (sandbox/snapshot.py restore_snapshot: preflight, then rollback on failure) is an integrity mechanism (GOAL L0) and the resource controller (budget.py caps, fail closed) a safety bound (GOAL L1): no switch'
 - id: parness
   source: PARNESS
   capability: DAG kernel, full-text index, KG, provider adapters
   home: L0, L4.3, gateway
-  ablation: null
+  ablation:
+    not_ablatable: 'DAG kernel = the runtime graph interpreter (runtime/engine.py) that runs every capability, and provider adapters = the model gateway (gateway/) through which every model call passes with its provenance: no run exists without either; full-text index: not built (literature/fulltext.py is a remote Europe PMC full-text keyword search reached only from the literature CLI, plus optional full text on lookups for quote-span checks; the in-run citation audit uses an offline client without full text); KG: not built (memory/model.py relations link memory entries only; no literature or concept graph)'
 - id: auto-recsys
   source: Auto-RecSys
   capability: Cognition vs procedure split, playbook with dead-ends
   home: L1, L5 playbook
-  ablation: null
+  ablation:
+    switch: playbook_dead_ends
+    not_covered:
+      cognition vs procedure split: 'structural, not a switchable behaviour: every routing and acceptance decision is a code module and models fill only LLM nodes (runtime/spec.py node kinds); handing those decisions to a model would break GOAL §1.1 and invariant 21 (an LLM may only downgrade, never grant)'
 - id: mm-agent
   source: MM-Agent
   capability: Hierarchical method library, actor-critic, rubric decomposition
   home: L5, L4.8, L3 T5
-  ablation: null
+  ablation:
+    switch: method_library
+    not_covered:
+      actor-critic: 'the critic -> defend chain (research/socratic.py, research/critic_answers.py) changes no route, queue, score or certificate; its only effect is the deny-only publish blocker recomputed from the trace in research.certify (critic_answers.critic_gate, which also blocks when the filter round failed or was disabled); its filter and check nodes (socratic, critic_evidence, check_answers) are pinned against edits (evolve/edits.py PINNED_NODES): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      rubric decomposition: the judge panel's rubric (verify/judge.py JudgePanel) is a deny-only T5 verifier that no run uses (JudgePanel is constructed nowhere in src; panel_status is REFUSED unless >= 3 non-author model families are configured); the tournament's per-dimension rankings (research/tournament.py `dimensions`) are not switched by this switch
 - id: matagent
   source: MatAgent
   capability: Human-in-the-loop gates
   home: L9 approval nodes
-  ablation: null
+  ablation:
+    not_ablatable: 'human approval nodes (runtime approval nodes, L9: no model, module or evolved node can approve): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: feynman
   source: Feynman
   capability: Multi-source retrieval, citation verifier
   home: L4.3, K0
-  ablation: null
+  ablation:
+    switch: multi_source_retrieval
+    not_covered:
+      multi-source retrieval in a run: 'not reachable: literature search runs only from the literature CLI (literature/cli.py) and library callers, and live_client / offline_client take no AblationSet; the only in-run client (research/claims.py citation_audit) resolves IDs on an offline snapshot. The switch is tested at library level only'
+      citation verifier: 'K0 / audit I3 (literature/cite.py; ID lookups across sources are its resolution path and stay unchanged): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: the-station
   source: The Station
   capability: Decentralised agents, archive coordination, exact evaluators, stagnation lanes
   home: L4 multi-agent mode, L3, L7
-  ablation: null
+  ablation:
+    not_ablatable: 'decentralised agents and archive coordination: not built (no L4 multi-agent research mode exists; orchestration/ is the developer delegation driver of GOAL §15); stagnation lanes: separate lanes are not built, the nearest mechanism is the L7 stall rule (control/islands.py Orchestrator.step), switched by `orchestrator-reallocation` (row milo); exact evaluators are the verifier ladder and Kernel checks, integrity mechanisms (invariant 3): no switch'
 - id: autoopt
   source: AutoOPT
   capability: Lean + comparator, numerical certificates, statement fidelity
   home: L3 T0/T1
-  ablation: null
+  ablation:
+    not_ablatable: 'the Lean (T0) adapter with comparator, axiom audit and statement-fidelity gate (verify/lean_validation.py) and the exact-certificate (T1, kernel/lp.py) checker are Kernel verifiers: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: mda
   source: MDA
   capability: Bayesian evidence, EIG experiment design
   home: L4.7 (EIG mode), L1 allocator
-  ablation: null
+  ablation:
+    switch: voi-allocation
+    not_covered:
+      Bayesian evidence: 'no Bayesian evidence mode for research claims is built; the Kernel prediction ledger''s likelihood-ratio / information-gain score (kernel/predictions.py) is a Kernel mechanism (invariant 3): no switch'
+      EIG experiment design: the L4.7 EIG mode is not built (nothing in research/); the L1 allocator part is control/voi.py, which this switch turns off
 - id: robin
   source: Robin
   capability: Lab-in-loop, BTL tournament, replicated analysis + consensus
   home: L3 T3, L4.5, L4.9
-  ablation: null
+  ablation:
+    switch: btl_tournament
+    not_covered:
+      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml only; under research_v2.yaml (execution ranking) this switch changes nothing
+      lab-in-loop: 'the physical claim path (research/physical.py) runs through human approval nodes (protocol_review, data_received) and the human-only `chh return-data`: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      replicated analysis + consensus: 'the headline label (research/claims.py headline, printed by research.report) requires the claim certificate AND one independent replica certificate (replica_* nodes) both CERTIFIED and invariant 5 met: an integrity/reporting requirement, never switched off in production; consensus over more than one replicate analysis: not built'
 - id: ahois
   source: AHOIS
   capability: Socratic question-only critic, physical bench
   home: L4.8, L6.5, L3 T3
-  ablation: null
+  ablation:
+    not_ablatable: 'the Socratic critic changes no route, queue or certificate: its only effects are the question-only safety filter (research/socratic.py) and the deny-only publish blocker (research/critic_answers.py critic_gate); the filter and check nodes are pinned against edits (evolve/edits.py PINNED_NODES) and the gate is recomputed from the trace inside the protected research.certify; the physical bench runs through human approval nodes (research/physical.py): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: scienceide
   source: ScienceIDE
   capability: Codebase → verifiable environments, fault injection, calibrated tolerances, floor-normalised reward
   home: L3, task suite, L8
-  ablation: null
+  ablation:
+    not_ablatable: 'fault injection and calibrated tolerances validate the verifiers (kernel/adapters.py validation evidence, verify/tolerance.py, verify/synthesis.py) and the repair tasks are benchmark construction (research/suite.py), not run-time behaviour; floor-normalised reward: not built. Verifier validation is an integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: aworld-rl
   source: AWorld-RL
   capability: Reward-variance task selection, stateful verifier
   home: L8, L3 T1
-  ablation: null
+  ablation:
+    switch: reward_variance_selection
+    not_covered:
+      reward-variance task selection in a run: 'not reachable: weights/selection.py is called from nowhere in src (L8 is an offline data side, weights/__init__.py: not wired into any loop); the switch is tested at library level only'
+      stateful verifier: not built (no stateful T1 verifier in verify/ or kernel/)
 - id: prime-agent
   source: Prime Agent
   capability: Memory hierarchy, long durable runs, recursive spawn ledger
   home: L5, L0/L1
-  ablation: null
+  ablation:
+    not_ablatable: 'memory hierarchy: not built as a hierarchy (one store with kinds and a derivation graph, memory/store.py; its recall is switched under evoscientist''s `cross_task_memory`); long durable runs: per-step checkpoints and resume (runtime/engine.py) are the substrate the trace, run bundle and audit are built from (L2), so a run without them could not be audited; recursive spawn ledger: not built in the system under test (orchestration/driver.py keeps a spawn ledger for the developer delegation driver, GOAL §15, and refuses nested spawns)'
 - id: researchbench-sde
   source: ResearchBench / SDE
   capability: Research-judgment evaluation
   home: Scorecard E
-  ablation: null
+  ablation:
+    not_ablatable: 'an evaluation of the system (scorecard axis E), not a behaviour of the system under test: there is nothing in a run to switch off; no research-judgment benchmark is pinned yet (empty scorecard registry)'
 - id: langgraph
   source: LangGraph
   capability: Checkpoint, resume, fan-out, interrupts
   home: L0
-  ablation: null
+  ablation:
+    not_ablatable: 'checkpoint and resume are the runtime substrate the trace, run bundle and audit are built from (runtime/engine.py, L2), so a run without them could not be audited; fan-out (runtime/spec.py MapNode: sequential branches, a declared reducer that needs every branch; used by no shipped spec) is a graph construct, not a switchable behaviour; interrupts are human approval nodes: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: vg-audit-2608-05179
   source: VG audit (2608.05179)
   capability: Verification ladder, reporting checklist, mechanical vs validated
   home: Kernel tiers, L2, §6.1
-  ablation: null
+  ablation:
+    not_ablatable: 'the verification ladder (Kernel tiers), the reporting checklist (kernel/checklist.py) and the mechanical-vs-validated labels are Kernel and reporting requirements: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
 - id: openresearch-alphaxiv
   source: OpenResearch (alphaXiv)
   capability: Experiment-tree lifecycle and shape, fixed run contract, per-completion loop, compute backends, PubMed/bioRxiv/full-text retrieval with fixed windows, large-artifact manifest, figure scripts,
     delegation hygiene, bring-your-coding-agent front-ends
   home: L4.7, L1, L0, L4.3, L2, §15, gateway
-  ablation: null
+  ablation:
+    switch: per-completion-race
+    not_covered:
+      experiment-tree lifecycle and shape: 'repairs and improve rounds are switched by `experiment_tree_repair_improve` (row ai-scientist-v1-v2, one switch per row); the rest of the lifecycle and shape (immutable answered nodes, ledgered repairs, confirm-before-promote, shape diagnostics; research/tree.py) is fail-closed record integrity: no switch'
+      fixed run contract: 'research/tree.py refuses a run reported under another contract (CONTRACT_MISMATCH): record integrity, no switch'
+      compute backends: 'compute/ (declared isolation classes, recorded revisions) is the sandbox / isolation substrate, reached from the CLIs (cli.py, audit/cli.py): an integrity mechanism (GOAL L0), no switch'
+      PubMed/bioRxiv/full-text retrieval with fixed windows: 'no run path searches literature (literature/ is CLI and library; see row feynman), and the fixed as-of window is a leak guard (invariant 18): integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      large-artifact manifest and figure scripts: 'the run bundle''s artifact manifest (store/run_bundle.py) and the figure audit (figures/, audit I6 in research.audit) are audit mechanisms: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
+      delegation hygiene: 'orchestration/ is the developer delegation driver (GOAL §15), not behaviour of the system under test: nothing in a run to switch'
+      bring-your-coding-agent front-ends: 'provider adapters (gateway/codex_cli.py, gateway/openai_compat.py): no run exists without a backend, no switch'
