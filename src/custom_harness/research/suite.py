@@ -152,6 +152,9 @@ class TaskSpecFiles:
     # who made the task (GOAL §16.10 emergence rule): "human" (curated; any split) or "generated" (a self-generated
     # task family; EVOLVE split only, never gate, sealed or a held-out family: the system must not write its own exam)
     origin: str = "human"
+    # public (file, column) pairs that carry a copy of the held-out truth, declared by the task's author (e.g. a
+    # planted leak column); write_task adds every test_X column it detects as one (truth_copy_columns)
+    truth_copies: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.origin not in ORIGINS:
@@ -166,6 +169,35 @@ def _csv(rows: list[list[str]]) -> bytes:
     buf = io.StringIO()
     csv.writer(buf, lineterminator="\n").writerows(rows)
     return buf.getvalue().encode()
+
+
+TRUTH_COPY_MIN_ROWS = 20  # below this, any column "determines" the labels by chance; UNCALIBRATED
+
+
+def truth_copy_columns(header: list[str], rows: list[list[str]], labels: list[str], metric: str) -> list[str]:
+    """Columns of the public test features that carry a copy of the held-out labels (GOAL §16.5.4): for a
+    classification metric, a column whose values map one-to-one onto the labels (the labels under a renaming); for a
+    regression metric, a column numerically equal to the label on every row. Needs TRUTH_COPY_MIN_ROWS rows. A
+    copy encoded any other way (a hash, a lookup in another file) is NOT detected: authors declare those
+    (TaskSpecFiles.truth_copies)."""
+    if len(rows) < TRUTH_COPY_MIN_ROWS or len(rows) != len(labels):
+        return []
+    out = []
+    for j, name in enumerate(header):
+        col = [r[j] for r in rows]
+        if metric in ("rmse", "mae"):
+            try:
+                same = all(math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-12) for a, b in zip(col, labels, strict=True))
+            except ValueError:
+                same = False
+            if same:
+                out.append(name)
+            continue
+        fwd: dict[str, str] = {}
+        back: dict[str, str] = {}
+        if all(fwd.setdefault(v, y) == y and back.setdefault(y, v) == v for v, y in zip(col, labels, strict=True)):
+            out.append(name)
+    return out
 
 
 def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Path:
@@ -190,6 +222,11 @@ def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Pa
     (d / "public" / "train.csv").write_bytes(_csv([spec.header, *spec.train]))
     (d / "public" / "test_X.csv").write_bytes(_csv([feat, *[list(x(r)) for r in test]]))
     (truth / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in test]]))
+    detected = truth_copy_columns(feat, [list(x(r)) for r in test], [r[ti] for r in test], spec.metric)
+    copies = sorted(set(spec.truth_copies) | {("test_X.csv", c) for c in detected})
+    if copies:  # the exporter's declaration (truth dir only); research.claims.register_task declares it to the Kernel
+        (truth / "truth_copies.json").write_text(json.dumps([{"file": f, "column": c} for f, c in copies]) + "\n",
+                                                 encoding="utf-8")
     (truth / "canary.txt").write_text((canary or "CHH-CANARY-" + secrets.token_hex(16)) + "\n", encoding="utf-8")
     (d / "baseline.py").write_text(spec.baseline, encoding="utf-8")
     (d / "task.yaml").write_text(yaml.safe_dump({
