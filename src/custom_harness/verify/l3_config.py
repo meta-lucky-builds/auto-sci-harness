@@ -9,8 +9,9 @@ from ..kernel.claim import EvidenceClass
 from ..tiers import Tier
 
 # ---------------------------------------------------------------- verifier synthesis (synthesis.py)
-# A human-owned fault suite is usable only with at least this many golden cases and planted faults in EACH half
-# (public: shown to the authoring model; sealed: never shown). Fewer would let a verifier pass by luck.
+# A fault suite (agent-authored or human-approved) is usable only with at least this many golden cases and planted
+# faults in EACH half (public: shown to the authoring model; sealed: never shown). Fewer would let a verifier pass
+# by luck.
 SYNTH_MIN_GOLDEN_PER_HALF = 2  # UNCALIBRATED (owner decision, GOAL §13.8)
 SYNTH_MIN_FAULTS_PER_HALF = 2  # UNCALIBRATED (owner decision, GOAL §13.8)
 # A synthesized verifier is executable code (natural tier T1); until a human review is ledgered it is capped at T2
@@ -28,6 +29,11 @@ TOL_MAX_MISS_RATE = 0.10  # UNCALIBRATED (owner decision, GOAL §13.8)
 # A calibrated tolerance never exceeds the Kernel's own ceiling on declared re-execution tolerances (K1): a noise
 # floor above it means the claim cannot be checked by re-execution, and calibration refuses.
 TOL_CEILING = KernelConfig().max_reproduce_tolerance
+# The claim path (`tolerance.claim_tolerance`, used by research.claim): its declared miss rate and noise sources.
+# The research loop's K3 replays run in the same sandbox environment as the confirm runs, so the rebuild source is not
+# part of the purpose (fewer sources = a smaller, stricter tolerance). Never read from node params or run state.
+TOL_CLAIM_MISS_RATE = 0.10  # UNCALIBRATED (owner decision, GOAL §13.8)
+TOL_CLAIM_PURPOSE = "replay_same_env"  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 # ---------------------------------------------------------------- float screen -> exact certificate (screen.py)
 # Slack of the FLOAT screen only. It can only change what is pruned, never what is certified (the exact checker
