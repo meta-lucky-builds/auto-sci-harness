@@ -25,9 +25,9 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..kernel import Kernel
 from ..kernel.checks import family, releases_on, shared_examples
 from ..kernel.releases import transcript_bound
+from ..kerneld.scope import ScopedKernel
 from ..runtime.spec import HarnessSpec, ModuleNode
 from ..store import EvidenceStore
 
@@ -67,7 +67,7 @@ def held_out_target_id(task_dir: Path) -> str:
 def related(store: EvidenceStore, target: str) -> set[str]:
     """`target` plus every registered dataset sharing held-out example rows with it (K4's rule) or a byte-identical
     private file (R1-F4's rule): a superset of the Kernel's related targets on main and on the R1 fix."""
-    vault = Kernel(store).vault
+    vault = ScopedKernel(store).vault
     datasets = vault.datasets()
     if target not in datasets:
         return {target}
@@ -78,7 +78,7 @@ def related(store: EvidenceStore, target: str) -> set[str]:
 
 def family_size(store: EvidenceStore, target: str) -> int:
     rel = related(store, target)
-    return len({e.body.get("claim_hash") for e in Kernel(store).ledger.entries("prereg")
+    return len({e.body.get("claim_hash") for e in ScopedKernel(store).ledger.entries("prereg")
                 if rel & set((e.body.get("claim") or {}).get("generalization_targets") or [])})
 
 
@@ -86,7 +86,7 @@ def kernel_family_size(store: EvidenceStore, target: str) -> int:
     """K4's multiplicity N on `target` as the ledger stands now (kernel/checks.target_level without an
     alpha-account): the transcript bound over the family's claims, where every release logged before a claim
     multiplies its term (a verdict bit by 2). Equals family_size only while no release touched the family."""
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     rel = related(store, target)
     return transcript_bound([e.seq for e in family(kernel.ledger, rel)], releases_on(kernel.ledger, rel),
                             kernel.config.count_alphabet)
@@ -117,7 +117,7 @@ def check_run(store: EvidenceStore, since_seq: int) -> list[dict[str, Any]]:
     """After a run: every claim registered after ledger seq `since_seq` must have a family <= its declared
     n_comparisons on each target. Returns the checked claims; raises MultiplicityDrift otherwise."""
     checked = []
-    for e in Kernel(store).ledger.entries("prereg"):
+    for e in ScopedKernel(store).ledger.entries("prereg"):
         if e.seq <= since_seq:
             continue
         claim = e.body.get("claim") or {}
@@ -138,5 +138,5 @@ def check_run(store: EvidenceStore, since_seq: int) -> list[dict[str, Any]]:
 
 
 def last_prereg_seq(store: EvidenceStore) -> int:
-    entries = Kernel(store).ledger.entries("prereg")
+    entries = ScopedKernel(store).ledger.entries("prereg")
     return entries[-1].seq if entries else 0

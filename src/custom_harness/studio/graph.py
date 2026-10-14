@@ -14,14 +14,15 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from ..kernel import Kernel, KernelError
+from ..kernel import KernelError
 from ..kernel.predictions import score_predictions
+from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
 from . import limitations
 
 
 def research_graph(store: EvidenceStore, findings_path: Any = None) -> dict[str, Any]:
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     nodes: dict[str, dict[str, Any]] = {}
     edges: list[dict[str, str]] = []
     problems: list[str] = []

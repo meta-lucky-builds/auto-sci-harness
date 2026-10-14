@@ -12,17 +12,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..kernel import Kernel
 from ..kernel.adapters import REGISTRY, adapter_hash
 from ..kernel.claim import EvidenceClass
 from ..kernel.vault import EXTERNAL_ROLES
+from ..kerneld.scope import ScopedKernel
 from ..records import RunStatus
 from ..store import EvidenceStore
 
 
 def pending(store: EvidenceStore) -> list[dict[str, Any]]:
     from ..runtime.engine import approval_decision, paused_approval
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     out: list[dict[str, Any]] = []
     for run in reversed(store.list_runs(-1)):  # oldest first; SQLite LIMIT -1 = all rows
         status, _ = store.run_status(run.id)

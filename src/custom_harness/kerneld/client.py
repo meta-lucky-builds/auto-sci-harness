@@ -37,11 +37,13 @@ class KernelDUnavailable(InfraError):
 
 
 class KernelDError(Exception):
-    """kerneld refused a request; `.code` is the closed protocol code (no other detail exists)."""
+    """kerneld refused a request; `.code` is the closed protocol code. The only other detail that ever exists is
+    `.problems`: the closed problem classes of refused returned measurements (protocol.MEASUREMENT_PROBLEMS)."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, problems: tuple[str, ...] = ()):
         super().__init__(code)
         self.code = code
+        self.problems = problems
 
 
 def _wire_safe(v: Any) -> Any:
@@ -214,6 +216,46 @@ class RunHandle:
     def record_release(self, target_dataset_id: str, channel: str, alphabet: str, note: str) -> None:
         self._call("record_release", target_dataset_id=target_dataset_id, channel=channel, alphabet=alphabet,
                    note=note)
+
+    # ------------------------------------------------------------------------------- private ingest (kerneld/ingest.py)
+    def ingest_token(self, kind: str, subject: str, *, claim_hash: str | None = None) -> str:
+        return str(self._call("issue_ingest", kind=kind, subject=subject, claim_hash=claim_hash)["token"])
+
+    def _ingest(self, kind: str, subject: str, bind_claim: str | None = None, **args: Any) -> dict[str, Any]:
+        tok = self.ingest_token(kind, subject, claim_hash=bind_claim)
+        res = self._call("ingest", token=tok, kind=kind, **args)
+        if "refused" in res:
+            problems = res.get("problems")
+            if (res["refused"] != "measurements_refused" or not isinstance(problems, list)
+                    or not all(p in P.MEASUREMENT_PROBLEMS for p in problems)):
+                raise KernelDUnavailable("kerneld sent a malformed ingest refusal")
+            raise KernelDError("measurements_refused", tuple(problems))
+        return res
+
+    def ingest_research_task(self, task_id: str, task_dir: Path | str) -> dict[str, str]:
+        """Register a research task's data (kerneld reads the files; the labels never enter this process). Returns
+        the vault ids {train, test, baseline}."""
+        ids = self._ingest("research_task", task_id, task_dir=str(Path(task_dir).resolve()))["ids"]
+        if not isinstance(ids, dict) or set(ids) != {"train", "test", "baseline"}:
+            raise KernelDUnavailable("kerneld sent a malformed ingest reply")
+        return {str(k): str(v) for k, v in ids.items()}
+
+    def ingest_openml_split(self, claim_hash: str, cache_root: Path | str, spec: dict[str, Any]) -> dict[str, int]:
+        """Split and register a Claim Audit's pinned fresh dataset (kerneld loads it from the cache and splits it).
+        `spec` is the OpenMLDataset fields. Returns {n_train, n_test}."""
+        subject = f"openml-{spec.get('openml_id')}-{str(spec.get('sha256', ''))[:16]}"  # OpenMLDataset.dataset_id
+        res = self._ingest("openml_split", subject, bind_claim=claim_hash, cache_root=str(Path(cache_root).resolve()),
+                           spec=dict(spec))
+        return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"])}
+
+    def ingest_returned_measurements(self, dataset_id: str, file: Path | str, protocol: dict[str, Any], *,
+                                     claim_hash: str, attestation: str, approved_protocol_seq: int) -> str:
+        """Register measurements humans returned (`chh return-data`) as a FUTURE dataset; kerneld reads the file and
+        checks it against the protocol. Returns the data's sha256."""
+        res = self._ingest("returned_measurements", dataset_id, file=str(Path(file).resolve()),
+                           protocol=dict(protocol), claim_hash=claim_hash, attestation=attestation,
+                           approved_protocol_seq=int(approved_protocol_seq))
+        return str(res["data_sha256"])
 
     def held_out_score(self, dataset_id: str, file: str, metric: str, preds: Sequence[str], *, claim_hash: str,
                        arm: str, seed: int) -> float:

@@ -67,13 +67,11 @@ class Fingerprints:
 
     @classmethod
     def from_vault(cls, vault: Vault) -> Fingerprints:
-        canaries: list[str] = []
+        from ..kerneld.scope import screening_canaries  # canary blobs are private: read under a screen-only grant
         hashes: list[str] = []
         for ds in vault.datasets().values():
-            if ds.canary_ref:
-                canaries.append(vault.store.blobs.get(ds.canary_ref).decode())
             hashes += [ref.blob for ref in ds.files.values() if ref.private]
-        return cls(canaries, hashes)
+        return cls(screening_canaries(vault).values(), hashes)
 
 
 def screen_strings(strings: Iterable[str], fp: Fingerprints, secrets: Sequence[str] = ()) -> list[str]:

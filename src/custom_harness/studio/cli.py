@@ -58,7 +58,8 @@ def cmd_tier_policy(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_explain(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Explain a certificate from the store; every value carries the artifact it resolves to (invariant 8)."""
-    from ..kernel import Kernel, SandboxReplayer
+    from ..kernel import SandboxReplayer
+    from ..kerneld.scope import ScopedKernel
     from .explain import ExplainError, explain, render_text
     replayer = None
     if a.docker or a.dev_sandbox:
@@ -71,7 +72,7 @@ def cmd_explain(a: argparse.Namespace, store: EvidenceStore) -> int:
         raise SystemExit("explain re-derives the certificate (K3 re-executes): pass --docker (or --dev-sandbox for "
                          "trusted code), or --no-verify to skip it (the status is then UNVERIFIED)")
     try:
-        doc = explain(Kernel(store, replayer=replayer), a.cert, verify=not a.no_verify)
+        doc = explain(ScopedKernel(store, replayer=replayer), a.cert, verify=not a.no_verify)
     except ExplainError as e:
         raise SystemExit(f"refused: {e}") from e
     print(json.dumps(doc, indent=1, ensure_ascii=False) if a.json else render_text(doc))

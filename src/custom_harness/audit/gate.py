@@ -28,7 +28,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from ..kernel import Kernel, Ledger
+from ..kernel import Ledger
+from ..kerneld.scope import ScopedKernel
 from ..runtime.engine import approval_item_hash
 from ..store import EvidenceStore
 from . import config
@@ -161,7 +162,7 @@ def publish(store: EvidenceStore, outcome: dict[str, Any], report: str, out_dir:
         raise AuditRefused("refused: no human publication approval for this report after its right-of-reply "
                            "record (`chh audit approve-publication`)")
     cert_hash = outcome.get("cert_hash")
-    if cert_hash and Kernel(store).status(cert_hash) != "active":
+    if cert_hash and ScopedKernel(store).status(cert_hash) != "active":
         raise AuditRefused("refused: the certificate behind this verdict was retracted")
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

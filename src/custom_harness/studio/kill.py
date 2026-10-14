@@ -29,9 +29,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..kernel import Kernel, KernelError
+from ..kernel import KernelError
 from ..kernel.claim import Claim
 from ..kernel.ledger import Entry, Ledger
+from ..kerneld.scope import ScopedKernel
 from ..records import RunStatus
 from ..store import EvidenceStore
 
@@ -144,9 +145,10 @@ class _ModuleLedger(Ledger):
         return super().append(kind, body)
 
 
-class RunGuardedKernel(Kernel):
+class RunGuardedKernel(ScopedKernel):
     """The Kernel bound to one run (what `ModuleContext.kernel()` returns): refuses every claim-making call once the
-    run is killed, and retracts a certificate that was recorded after the kill."""
+    run is killed, and retracts a certificate that was recorded after the kill. A ScopedKernel: its private reads
+    happen only inside kerneld's per-claim grants (kerneld/scope.py, GOAL §16.5.2)."""
 
     def __init__(self, store: EvidenceStore, *, run_id: str, **kw: Any):
         super().__init__(store, **kw)

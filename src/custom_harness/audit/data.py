@@ -22,7 +22,6 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..kernel import DatasetRole, Kernel
 from . import config
 from .spec import OpenMLDataset
 
@@ -57,6 +56,17 @@ class OpenMLCache:
         if sha256(data) != ds.sha256:
             raise DataUnavailable(f"openml:{ds.openml_id}: cached file does not match its pinned sha256 (refused)")
         return data
+
+    def ensure_path(self, ds: OpenMLDataset, fetcher: Fetcher | None) -> Path:
+        """The cached file's path, fetching it first only if a fetcher is given (owner decision). A cached file is NOT
+        read here: kerneld re-hashes it against the pin when it ingests it (kerneld/ingest.py, GOAL §16.5.2)."""
+        p = self.path(ds)
+        if p.is_file() and not p.is_symlink():
+            return p
+        if fetcher is None:
+            self.load(ds)  # raises the owner-decision DataUnavailable (missing file)
+        self.ensure(ds, fetcher)
+        return p
 
     def ensure(self, ds: OpenMLDataset, fetcher: Fetcher | None) -> bytes:
         """The pinned bytes from the cache, fetching them first only if a fetcher is given (owner decision)."""
@@ -203,17 +213,3 @@ def split(table: Table, pin: str) -> Split:
                               f"training rows: too small to audit")
     return Split(train=_csv([table.header, *train]), test_x=_csv([table.header[:-1], *[r[:-1] for r in test]]),
                  test_y=_csv([("label",), *[(r[-1],) for r in test]]), n_train=len(train), n_test=len(test))
-
-
-def ingest(kernel: Kernel, claim_hash: str, ds: OpenMLDataset, data: bytes) -> Split:
-    """Register one fresh dataset (train split as dev data, held-out split as EXTERNAL) for a claim that is already
-    pre-registered. Refused otherwise: fresh data are touched only after the claim is committed."""
-    if not kernel.vault.registered(claim_hash):
-        raise DataUnavailable("the audit claim is not pre-registered: fresh data are not touched before it is")
-    if sha256(data) != ds.sha256:
-        raise DataUnavailable(f"openml:{ds.openml_id}: bytes do not match the pin")
-    sp = split(to_table(data, ds.target), ds.sha256)
-    kernel.vault.register_dataset(ds.train_id, DatasetRole.DEV, public={"train.csv": sp.train}, private={})
-    kernel.vault.register_dataset(ds.dataset_id, DatasetRole.EXTERNAL, public={"test_X.csv": sp.test_x},
-                                  private={"test_y.csv": sp.test_y}, canary=f"CHH-AUDIT-CANARY-{ds.dataset_id}")
-    return sp

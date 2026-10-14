@@ -161,13 +161,15 @@ class PrivateScreen:
 
     @classmethod
     def build(cls, vault: Any, secrets: Iterable[str]) -> PrivateScreen:
+        from ..kerneld.scope import screening_canaries  # canary blobs are private: read under a screen-only grant
         digests: set[str] = set()
         pats: set[str] = {CANARY_PREFIX}
+        canaries = screening_canaries(vault)
         for ds in vault.datasets().values():
             digests |= {ref.blob for ref in ds.files.values() if ref.private}
             if ds.canary_ref:
                 digests.add(ds.canary_ref)
-                canary = vault.store.blobs.get(ds.canary_ref).decode("utf-8", errors="replace")
+                canary = canaries.get(ds.dataset_id, "")
                 pats |= set(secret_patterns(canary, min_verbatim=1)) if canary else set()
         secrets = [s for s in secrets if s]
         digests |= {s for s in secrets if HANDLE_RE.fullmatch(s) and len(s) == 64}
