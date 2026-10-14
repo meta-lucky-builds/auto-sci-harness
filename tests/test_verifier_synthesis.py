@@ -123,6 +123,10 @@ def test_unreviewed_verifier_is_capped_at_t2_and_the_human_review_is_ledgered(le
     assert stored.hash == e.hash and stored.body["verifier_hash"] == v.hash() and stored.body["reviewer"] == "alice"
     assert stored.body["suite_hash"] == S.SUITES["sort"].hash() and stored.body["approve"] is True
     assert ledger.verify() == []
+    # s3-verifiers (tightened): the suite is AGENT-AUTHORED, so a verifier review alone does not lift the cap; a
+    # ledgered human approval of the suite is also needed
+    assert S.tier(v, ledger) == Tier.T2_STATISTICAL
+    S.record_suite_review(ledger, "sort", reviewer="alice", approve=True, note="read every case")
     assert S.tier(v, ledger) == Tier.T1_EXECUTABLE
     # any content change voids the review: same meaning, different bytes -> capped again
     edited = make("sort", "invariant", list(reversed(SORT_OK)))
@@ -181,7 +185,7 @@ def test_suite_below_the_minimum_size_or_unknown_problem_cannot_validate(monkeyp
     v = make("sort", "invariant", SORT_OK)
     small = S.SUITES["sort"]
     monkeypatch.setitem(S.SUITES, "sort", S.FaultSuite(
-        problem="sort", description=small.description, owner=small.owner, public_golden=small.public_golden,
+        problem="sort", description=small.description, author=small.author, public_golden=small.public_golden,
         sealed_golden=small.sealed_golden, public_faults=small.public_faults, sealed_faults=small.sealed_faults[:1]))
     val = S.validate(v)
     assert not val.passed and any("planted faults" in e for e in val.errors)
