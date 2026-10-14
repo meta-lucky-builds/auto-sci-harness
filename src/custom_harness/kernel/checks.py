@@ -71,6 +71,10 @@ class KernelConfig:
     self_reported_tier_cap: int = 4  # UNCALIBRATED (owner decision, GOAL §13.8)
     delta_floor: float = 0.02  # UNCALIBRATED (owner decision, GOAL §13.8): min_effect floor on minted targets
     nonstat_p0: float = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8): VDS p0 for classes without a null level
+    # §16.10 bounded nulls (docs/bounded_null.md): the declared power range and the plasmode's confidence 1 - gamma
+    min_power: float = 0.5  # UNCALIBRATED (owner decision, GOAL §13.8)
+    max_power: float = 0.95  # UNCALIBRATED (owner decision, GOAL §13.8): 0.95 -> 45 plantings at gamma 0.1
+    plasmode_gamma: float = 0.1  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 
 @dataclass
@@ -91,6 +95,7 @@ class Context:
     prereg: Entry | None = None
     adapter: dict[str, Any] | None = None  # the approved adapter K1 resolved for this claim
     certificates: list[ArtifactRecord] = field(default_factory=list)  # computational: certificate artifacts (K0)
+    exclusion: dict[str, Any] | None = None  # §16.10: a bounded-null claim's exclusion statement, set by K7
 
     @property
     def sign(self) -> float:
@@ -106,6 +111,12 @@ class Context:
             rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))
             self.labels[target] = [r[0] for r in rows[1:] if r]
         return self.labels[target]
+
+    def material(self) -> str:
+        """The plan-matched evidence (a claim target and a planned seed), fixed once the evidence is: it seeds K3's
+        replay choice and K7's plasmode, so neither can be known or steered in advance (R1-F2)."""
+        targets, seeds_planned = set(self.claim.generalization_targets), set(self.claim.analysis_plan.seeds)
+        return "|".join(sorted(r.preds_ref for _, r in self.records if r.target in targets and r.seed in seeds_planned))
 
 
 def procedures(ctx: Context) -> Any:
@@ -390,6 +401,10 @@ def k1_well_formed(ctx: Context) -> CheckResult:
     if not (0 < eps <= cfg.max_eps_max and 0 < beta <= cfg.max_beta):
         reasons.append(R(Code.K1_RELIABILITY, f"K3 reliability requirement must have eps_max in (0, {cfg.max_eps_max}] "
                                               f"and beta in (0, {cfg.max_beta}]"))
+    power = plan.power
+    if power is not None and not (c.kind == ClaimKind.NEGATIVE_RESULT and cfg.min_power <= power <= cfg.max_power):
+        reasons.append(R(Code.K1_POWER, f"a declared power is for negative_result claims only, in [{cfg.min_power}, "
+                                        f"{cfg.max_power}]"))
     return _result(reasons + p0_reasons(ctx))
 
 
@@ -576,10 +591,7 @@ def replay_seed(ctx: Context, rec: ExecRecord) -> int:
     is fixed, so a claimant cannot know in advance which seed will be checked. (Re-running evaluations to
     steer it would leave unreported held-out reads, which K4 rejects.) Only PLAN-MATCHED records (a claim target
     and a planned seed) enter the hash: extra records cannot steer it (R1-F2), and K4 rejects them anyway."""
-    targets, seeds_planned = set(ctx.claim.generalization_targets), set(ctx.claim.analysis_plan.seeds)
-    material = "|".join(sorted(r.preds_ref for _, r in ctx.records
-                               if r.target in targets and r.seed in seeds_planned))
-    digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{material}".encode()).digest()
+    digest = hashlib.sha256(f"{ctx.claim_hash}|{rec.arm}|{rec.target}|{ctx.material()}".encode()).digest()
     seeds = sorted(ctx.claim.analysis_plan.seeds)
     return seeds[int.from_bytes(digest[:8], "big") % len(seeds)]
 

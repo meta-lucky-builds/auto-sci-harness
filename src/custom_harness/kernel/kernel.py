@@ -299,6 +299,8 @@ class Kernel:
         p_nulls = [s.p_null for s in ctx.stats.values() if s.p_null is not None]
         resolution = {"outcome": ok, "declared_probability": claim.effect.probability,
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
+        if ok and ctx.exclusion is not None:  # §16.10: the bounded-null statement (absent otherwise: old bytes kept)
+            resolution["exclusion"] = ctx.exclusion
         tier = (Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T0_FORMAL if formal
                 else Tier.T2_STATISTICAL)
         # §16.7: a field only the claimant's pipeline reported (no human approved it) caps the tier
@@ -395,4 +397,6 @@ def _differences(cert: Certificate, again: Certificate) -> tuple[list[str], list
             f"label {cert.label.value} recorded, {again.label.value} re-derived")
     if again.tier != cert.tier:
         (better if cert.tier < again.tier else worse).append(f"tier {cert.tier} recorded, {again.tier} re-derived")
+    if cert.resolution.get("exclusion") != again.resolution.get("exclusion"):  # §16.10: the stated limit is re-derived
+        better.append("bounded-null exclusion statement differs from its re-derivation")
     return better, worse
