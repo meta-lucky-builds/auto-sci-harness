@@ -7,7 +7,7 @@ Status: **REGISTERED, UNAPPROVED.** It certifies nothing until a human runs `chh
 ## Files
 - `src/custom_harness/adapters/circuit/check.py`: the trusted checker the Kernel calls (`exact_module`): `check`
   (K3), `bounds` (K8), `scope_phrase`, `HIGHER_IS_BETTER`. Never solves: it stamps A, b from the netlist and multiplies.
-- `.../validation.py`: `CIRCUIT_CHECKS`, the validation evidence `approve` runs (37 checks: golden cases + planted faults).
+- `.../validation.py`: `CIRCUIT_CHECKS`, the validation evidence `approve` runs (39 checks: golden cases + planted faults).
 - `.../solver.py`: exact rational MNA (Gauss-Jordan on [A | b | I] in Fractions) that PRODUCES certificates; not part
   of the soundness argument, but hashed because the validation uses it to build golden witnesses.
 - `.../screen.py`: a float screen for `verify.screen.screen_then_certify` (may only prune; NOT hashed, never called
@@ -62,7 +62,7 @@ at parse (2 MB, 40 nodes, 120 elements, 80 unknowns, 100 digits) so no check can
   rational of <= 100 digits otherwise.
 
 ## Validation evidence (invariant 13)
-`CIRCUIT_CHECKS` (37): hand-checkable golden cases (divider V(n2) = 6 V, i(V1) = -2 A, P(V1) = -20 W, P(R2) = 12 W;
+`CIRCUIT_CHECKS` (39; 37 before the red-team encoding fix): hand-checkable golden cases (divider V(n2) = 6 V, i(V1) = -2 A, P(V1) = -20 W, P(R2) = 12 W;
 controlled sources 6 / 10 / 6 / -2 V; regular divider; parallel equal sources singular but consistent; clashing
 sources inconsistent; current source into an open node inconsistent) and planted faults that must be rejected FOR
 THE RIGHT REASON (off-by-one value; off-by-one rational in x; corrupted inverse; swapped x entries; swapped unknown

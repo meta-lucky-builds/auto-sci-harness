@@ -344,14 +344,14 @@ def test_certificates_must_be_plain_utf8_without_bom(encoding):
     assert k3 and k8, encoding
 
 
-def test_generalised_lp_reader_accepts_utf16_too():
-    """Generalisation, recorded as the CURRENT behaviour of the lp adapter (owner s3-kernel: kernel/lp.py or K9): its
-    reader also calls json.loads on raw bytes, so its `comment` carries the same K9 bypass. When it is fixed this
-    test fails and must be inverted."""
+@pytest.mark.xfail(strict=True, reason="generalisation: kernel/lp.py reads UTF-16/BOM/escaped documents too, so a "
+                   "canary in its `comment` evades K9 (owner: s3-kernel, kernel/lp.py or K9 scanning parsed strings)")
+def test_generalised_lp_reader_refuses_utf16():
+    """The same class of hole in the lp adapter's reader (it calls json.loads on raw bytes)."""
     from custom_harness.kernel import lp
     p = {"format": "chh-lp/1", "sense": "max", "c": ["1", "1"], "A": [["2", "1"], ["1", "3"]], "b": ["4", "5"]}
     c = {"format": "chh-lp-certificate/1", "x": ["7/5", "6/5"], "y": ["2/5", "1/5"], "comment": "x"}
-    assert lp.check(canonical_json(p), json.dumps(c).encode("utf-16"), F(13, 5)) == []
+    assert lp.check(canonical_json(p), json.dumps(c).encode("utf-16"), F(13, 5)) != []
 
 
 # ------------------------------------------------------------------ attack 1: number and JSON tricks (refused)
@@ -402,14 +402,14 @@ def test_json_tricks_in_the_netlist_are_refused(edit, why):
     assert any(why in r for r in k8), (why, k8)
 
 
-def test_a_byte_different_spelling_of_the_same_netlist_is_another_problem():
-    """A JSON-escaped spelling of the same netlist is another artifact (other bytes, other hash): the original's
-    certificate is refused for it; a certificate naming its own hash is accepted, which is right (same circuit)."""
+def test_a_byte_different_spelling_of_the_same_netlist_is_refused():
+    """A JSON-escaped spelling of the same netlist (other bytes, same parse) was accepted under its own hash on
+    fc24df8. Since the encoding fix the reader refuses every backslash escape, so only the literal spelling exists."""
     other = DIV.decode().replace('"n2"', '"n\\u0032"').encode()
     assert json.loads(other) == json.loads(DIV) and other != DIV
     _, cert = V.solved(DIV)
-    assert any("certificate is for problem" in r for r in both(other, cert, 6)[0])
-    assert both(other, {**cert, "problem_sha256": hashlib.sha256(other).hexdigest()}, 6) == ([], [])
+    k3, k8 = both(other, {**cert, "problem_sha256": hashlib.sha256(other).hexdigest()}, 6)
+    assert any("backslash escapes are refused" in r for r in k3) and any("backslash" in r for r in k8)
 
 
 # ------------------------------------------------------------------ attack 1: forged witnesses (refused)

@@ -201,6 +201,10 @@ CIRCUIT_CHECKS: Checks = (
     ("a decimal string is refused", lambda: rejects("exact rational string", problem(
         [vs("V1", "n1", "0", "10"), r("R1", "n1", "n2", "2.0"), r("R2", "n2", "0", "3")], node("n2")), 6)),
     ("a NaN constant is refused", lambda: rejects("JSON constant NaN", _DIV.replace(b'"10"', b"NaN"), 6)),
+    ("a UTF-16 document is refused (one byte spelling: what K9 scans is what is parsed)",
+     lambda: rejects("UTF-8", _DIV.decode().encode("utf-16"), 6)),
+    ("a backslash escape is refused (a JSON-escaped canary would evade K9)",
+     lambda: rejects("backslash escapes", _DIV.replace(b'"n2"', b'"n\\u0032"'), 6)),
     ("an unknown key is refused", lambda: rejects("unexpected keys", _DIV, 6, lambda c: c.update(note="trust me"))),
     ("a prefixed unit (kohm) is refused", lambda: rejects("not a registered SI unit", problem(
         [vs("V1", "n1", "0", "10"), r("R1", "n1", "n2", "2", "kohm"), r("R2", "n2", "0", "3")], node("n2")), 6)),

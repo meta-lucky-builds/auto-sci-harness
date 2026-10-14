@@ -151,8 +151,20 @@ def _no_constant(name: str) -> NoReturn:
 def _load(data: bytes, fmt: str) -> dict[str, Any]:
     if not isinstance(data, bytes) or len(data) > MAX_BYTES:
         _refuse(f"document is not bytes of at most {MAX_BYTES}")
+    # One byte spelling only (red-team finding, 2026-10-09): json.loads auto-detects UTF-16/32 and BOMs and decodes
+    # \u escapes, while K9 scans the raw bytes as UTF-8, so a canary could ride in `comment` unseen. The parser must
+    # see exactly the text a byte scan sees: plain UTF-8, no BOM, no NUL, no backslash escape (no legitimate field
+    # needs one).
     try:
-        doc = json.loads(data, object_pairs_hook=_unique, parse_constant=_no_constant)
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        _refuse("document is not plain UTF-8")
+    if text.startswith("﻿") or "\x00" in text:
+        _refuse("document must be plain UTF-8 without a byte-order mark or NUL bytes")
+    if "\\" in text:
+        _refuse("backslash escapes are refused: write every string literally")
+    try:
+        doc = json.loads(text, object_pairs_hook=_unique, parse_constant=_no_constant)
     except CircuitError:
         raise
     except ValueError as e:
