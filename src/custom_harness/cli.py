@@ -16,6 +16,7 @@ from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
 from .literature import cli as lit_cli
+from .records import Cost
 from .runtime import Engine, HarnessSpec
 from .sandbox import LocalSandbox, Sandbox
 from .scorecard import cli as scorecard_cli
@@ -45,6 +46,14 @@ def _backend(kind: str) -> Backend:
     raise SystemExit(f"unknown backend '{kind}'")
 
 
+def _cost_out(store: EvidenceStore, run_id: str, cost: Cost) -> dict[str, Any]:
+    """A run's cost as the CLI reports it (invariant 9): the recorded units, with usd taken from the cost-table record
+    (gateway/costs.py), so a usd the table cannot price is printed as null with its status, never as 0."""
+    from .gateway.costs import run_cost_record
+    rec = run_cost_record(store, run_id)
+    return {"cost": {**cost.model_dump(), "usd": rec["usd"], "usd_status": rec["usd_status"]}, "cost_record": rec}
+
+
 def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
     backends = {}
@@ -57,7 +66,8 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
         inputs[k] = v
     import custom_harness.research  # noqa: F401  registers research.* modules
     sandbox: Sandbox | None = None
-    ws = data_dir() / "sandboxes" / f"{spec.id}-{a.task}-{int(time.time())}"
+    from .compute import fresh_dir  # a NEW directory per run (GOAL L0): never one another run already used
+    ws = fresh_dir(data_dir() / "sandboxes", f"{spec.id}-{a.task}-{int(time.time())}")
     if a.docker:
         from .sandbox.docker import DockerSandbox
         sandbox = DockerSandbox(ws)
@@ -66,7 +76,7 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  allow_same_family=a.allow_same_family).run(a.task, inputs, seed=a.seed)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
-                      "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
+                      "steps": res.steps, **_cost_out(store, res.run_id, res.cost)}, indent=1))
     return 0 if res.status == "completed" else 1
 
 
@@ -88,7 +98,7 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  allow_same_family=a.allow_same_family).resume(a.run_id, force=a.force)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
-                      "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
+                      "steps": res.steps, **_cost_out(store, res.run_id, res.cost)}, indent=1))
     return 0 if res.status == "completed" else 1
 
 
@@ -187,6 +197,24 @@ def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
     return 0
 
 
+def _refuse_unpriced_usd_cap(backends: list[Backend]) -> None:
+    """A usd cap counts the usd each call's cost carries. A backend whose provider has no CALIBRATED cost-table row
+    reports no real usd (a subscription reports 0; the cost table today holds UNCALIBRATED placeholders only), so the
+    cap could never trigger: refuse it instead of pretending to enforce it (missing != 0)."""
+    from .gateway.costs import UnknownRate, rate_for
+    for b in backends:
+        model = getattr(b, "model", None) or "*"
+        try:
+            rate = rate_for(b.provider, str(model))
+        except UnknownRate:
+            rate = None
+        if rate is None or rate.placeholder or rate.usd_per_mtok_in is None or rate.usd_per_mtok_out is None:
+            raise SystemExit(f"refused: --max-usd needs a calibrated cost-table usd rate for every backend; "
+                             f"{b.name} (provider {b.provider!r}) has "
+                             f"{'no row' if rate is None else 'an UNCALIBRATED placeholder row'}, so its calls "
+                             f"carry no real usd and the cap would never trigger. Use --max-tokens / --max-quota.")
+
+
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
@@ -207,6 +235,8 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
     from .budget import persistent_budget
+    if a.max_usd is not None:
+        _refuse_unpriced_usd_cap([*backends.values(), proposer])
     limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
     campaign_id = a.campaign_id or run_tag
     campaign = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
@@ -571,7 +601,8 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
         print(json.dumps({"rerun_of": m["run"]["id"], "refused": True, "artifacts": arts.to_json()}, indent=1))
         raise SystemExit("run bundle refused (fail closed): " + "; ".join(arts.fatal[:10]))
     backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
-    ws = data_dir() / "sandboxes" / f"rerun-{m['run']['id']}-{int(time.time())}"
+    from .compute import fresh_dir  # a NEW directory per re-run (GOAL L0)
+    ws = fresh_dir(data_dir() / "sandboxes", f"rerun-{m['run']['id']}-{int(time.time())}")
     sandbox: Sandbox | None = None
     if a.docker:
         from .sandbox.docker import DockerSandbox
@@ -581,7 +612,8 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
     res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
                  allow_same_family=a.allow_same_family).run(m["run"]["task_id"], inputs, seed=int(m["seed"]))
     print(json.dumps({"rerun_of": m["run"]["id"], "run_id": res.run_id, "status": res.status,
-                      "detail": res.detail, "manifest_anchor": anchor, "artifacts": arts.to_json()}, indent=1))
+                      "detail": res.detail, "manifest_anchor": anchor, "artifacts": arts.to_json(),
+                      **_cost_out(store, res.run_id, res.cost)}, indent=1))
     return 0 if res.status == "completed" else 1
 
 
@@ -720,6 +752,22 @@ def cmd_salts_reveal(a: argparse.Namespace, store: EvidenceStore) -> int:
         raise SystemExit(f"refused: {e}") from None
     print(json.dumps({"campaign_hash": revealed.campaign_hash, "plant_list": list(revealed.plant_list)}, indent=1))
     return 0
+
+
+def cmd_verify_registry(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Verify the EFFECTIVE provider registry (bundled providers.yaml plus the local override) offline and statically:
+    unknown providers, missing licence flags, auth kinds that are not official and subscription entries off the BYOS
+    allowlist fail; with --release, so does any usable entry without a recent human verification or a cost-table row.
+    Exit 0 only when nothing is found (a release check that fails closed)."""
+    import datetime as dt
+
+    from .gateway.registry import load_registry, verify_registry
+    reg = load_registry(Path(a.override) if a.override else None)
+    today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
+    problems = verify_registry(reg, release=a.release, today=today)
+    print(json.dumps({"entries": sorted(reg), "release": a.release, "today": today.isoformat(),
+                      "problems": problems, "ok": not problems}, indent=1))
+    return 0 if not problems else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -884,6 +932,11 @@ def main(argv: list[str] | None = None) -> int:
     t = sub.add_parser("trace")
     t.add_argument("run_id")
     t.add_argument("--full", action="store_true")
+    vr = sub.add_parser("verify-registry", help="offline check of the provider registry against the BYOS allowlist "
+                        "and the licence/auth policy (invariant 11); --release adds the per-release human checks")
+    vr.add_argument("--release", action="store_true", help="also require recent human verification and cost rows")
+    vr.add_argument("--today", help="YYYY-MM-DD (default: today) for the --release age check")
+    vr.add_argument("--override", help="registry override file (default: $CHH_DATA_DIR/providers.override.yaml)")
     sr = sub.add_parser("salts-reveal", help="HUMAN: open a sealed salt campaign on/after its reveal date")
     sr.add_argument("sealed")
     sr.add_argument("--by", required=True, help="the human revealing (recorded in the ledger)")
@@ -912,6 +965,7 @@ def main(argv: list[str] | None = None) -> int:
                 "certificates": cmd_certificates, "ledger-verify": cmd_ledger_verify,
                 "predictions": cmd_predictions, "build-suite": cmd_build_suite, "memory": cmd_memory,
                 "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
+                "verify-registry": cmd_verify_registry,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
                 **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS}[a.cmd](a, store)
     finally:
