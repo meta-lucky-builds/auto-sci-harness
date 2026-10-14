@@ -20,7 +20,9 @@ JSON report holds counts, hashes and paths only). Checks:
    that reaches P(certify) >= 0.8 at the 0.02 floor (normal approximation, labelled; spot-checked with the real
    preflight);
 5. the salts detectability exam (salts.exam.run_exam) at the suite's own sizes, with a scripted spotter that reads
-   public files only (0 calls), and the distribution of its statistic in each arm.
+   public files only (0 calls), and the distribution of its statistic in each arm. Salts are the 2026-10-14 design
+   (docs/salts_redesign.md): positive salts of the suite's reference-rule families; a null arm only when the suite
+   has a genuinely null family.
 """
 
 from __future__ import annotations
@@ -310,53 +312,101 @@ def tell_statistic(pres: Mapping[str, bytes]) -> float:
     return sum(G.ORACLES[fam]([float(v) for v in r[:-1]]) == r[-1] for r in body) / len(body)
 
 
-def salts_exam(suite: Path, doc: dict, work: Path, per_arm: int) -> dict[str, Any]:
+def _task_sizes(t: dict) -> tuple[int, int | None]:
+    """A suite task's generator sizes (n_rows, heldout_rows): suite.yaml provenance, else the build plan's rows."""
+    prov = t.get("provenance") or {}
+    n = prov.get("rows")
+    if n is None:
+        plan = {gen(seed, 1, key=b"\x00" * 32).task_id: rows
+                for gen, seed, rows in S.synthetic_plan(tuple(sorted(S.NULL_FAMILIES)))}
+        n = plan[t["id"]]
+    return int(n), prov.get("heldout_rows")
+
+
+def _exam_arm(suite: Path, suite_tasks: list[dict], kind: str, work: Path, per_arm: int, pool: set[str],
+              mc_rows: int) -> dict[str, Any]:
+    """One exam arm (salts.exam.run_exam, unchanged): `per_arm` salts of `kind` against the suite's own tasks of the
+    salted families topped up with fresh draws of the SAME generators at the SAME sizes (n_rows, heldout_rows). Salts
+    cycle over the same task list, so both arms have the same family and size mix."""
     from custom_harness.salts import config as C
     from custom_harness.salts import generate as G
     from custom_harness.salts.exam import presentation, run_exam
 
-    fams = sorted(G.POSITIVE_FAMILIES)
-    sizes = {gen(seed, 1, key=b"\x00" * 32).task_id: n for gen, seed, n in S.SYNTHETIC}
-    suite_tasks = [t for t in doc["tasks"] if t["family"] in fams]
-    reals: list[Path] = [suite / t["id"] for t in suite_tasks]
+    reals: list[tuple[Path, str]] = [(suite / t["id"], t["family"]) for t in suite_tasks]
     i = 0
-    while len(reals) < per_arm:  # same generators, same sizes, fresh keys: more draws of "a real task"
+    while len(reals) < per_arm:  # more draws of "a real task": same generator, same sizes, fresh keys
         t = suite_tasks[i % len(suite_tasks)]
-        spec = S.synthetic_task(t["family"], 100 + i, sizes[t["id"]], secrets.token_bytes(32))
-        reals.append(S.write_task(spec, work / "real"))
+        n, ho = _task_sizes(t)
+        spec = S.synthetic_task(t["family"], 100 + i, n, secrets.token_bytes(32), heldout_rows=ho)
+        reals.append((S.write_task(spec, work / f"real-{kind}"), t["family"]))
         i += 1
-    salts = []
-    delta = 0.2  # as tests/test_salts.py's exam; a null salt (rho = 1/2) does not depend on delta for its labels' tell
+    salts: list[tuple[Path, str]] = []
+    planted: dict[str, list[float]] = {}
     for k in range(per_arm):
         t = suite_tasks[k % len(suite_tasks)]
-        g = G.null_salt(t["family"], sizes[t["id"]], key=secrets.token_bytes(32), task_id=f"exam-null-{k}",
-                        delta=delta, out=work / "salt")
+        n, ho = _task_sizes(t)
+        if kind == "positive":
+            g = G.positive_salt(t["family"], n, key=secrets.token_bytes(32), task_id=f"exam-pos-{k}",
+                                out=work / "salt-pos", pool_families=pool, heldout_rows=ho, mc_rows=mc_rows)
+            planted.setdefault(t["family"], []).append(round(g.planted_effect, 4))
+        else:
+            g = G.null_salt(t["family"], n, key=secrets.token_bytes(32), task_id=f"exam-null-{k}",
+                            out=work / "salt-null", pool_families=pool, heldout_rows=ho)
         salts.append((g.task_dir, t["family"]))
     key = secrets.token_bytes(32)
-    blind = run_exam(salts, reals, lambda pres: False, key=key)
-    capable = run_exam(salts, reals, lambda pres: tell_statistic(pres) < 0.85, key=key)
+    real_dirs = [d for d, _f in reals]
+    blind = run_exam(salts, real_dirs, lambda pres: False, key=key)
+    capable = run_exam(salts, real_dirs, lambda pres: tell_statistic(pres) < 0.85, key=key)
     stat_salt = sorted(tell_statistic(presentation(d)) for d, _f in salts)
-    stat_real = sorted(tell_statistic(presentation(d)) for d in reals)
+    stat_real = sorted(tell_statistic(presentation(d)) for d in real_dirs)
     # best threshold spotter (in-sample: an upper bound on what this one statistic can do)
     best = max(((sum(s < th for s in stat_salt) / len(stat_salt) - sum(r < th for r in stat_real) / len(stat_real),
                  th) for th in sorted(set(stat_salt + stat_real)) + [1.01]), key=lambda x: x[0])
     by_fam: dict[str, dict[str, list[float]]] = {}
-    for sd, f in salts:
-        by_fam.setdefault(f, {"salt": [], "real": []})["salt"].append(round(tell_statistic(presentation(sd)), 4))
-    for d in reals:
-        f = {"x1": "rings", "f1": "xor", "x": "spirals"}[_lines(d / "public" / "train.csv")[0].split(",")[0]]
-        by_fam.setdefault(f, {"salt": [], "real": []})["real"].append(round(tell_statistic(presentation(d)), 4))
+    for arm, items in (("salt", salts), ("real", reals)):
+        for d, f in items:  # family from the exam's own records (noise and xor share a header)
+            by_fam.setdefault(f, {"salt": [], "real": []})[arm].append(round(tell_statistic(presentation(d)), 4))
 
     def b(r: Any) -> dict[str, Any]:
         return {"tp": r.bound.tp, "n_salt": r.bound.n_salt, "fp": r.bound.fp, "n_real": r.bound.n_real,
                 "d_hat": round(r.bound.d_hat, 4), "upper_95_one_sided": round(r.bound.upper, 4), "passed": r.passed}
 
-    return {"per_arm": per_arm, "salt_kind": "null (rho = 1/2)", "delta": delta, "threshold": C.DETECTABILITY_MAX_UPPER,
-            "suite_tasks_in_real_arm": [t["id"] for t in suite_tasks], "blind_spotter": b(blind),
-            "capable_spotter_agree_lt_0.85": b(capable),
-            "best_threshold_on_statistic": {"d": round(best[0], 4), "threshold": round(best[1], 4)},
-            "statistic_by_family": {f: {k: {"min": min(v), "median": sorted(v)[len(v) // 2], "max": max(v)}
-                                        for k, v in arms.items() if v} for f, arms in sorted(by_fam.items())}}
+    out: dict[str, Any] = {
+        "salt_kind": kind, "per_arm": per_arm, "threshold": C.DETECTABILITY_MAX_UPPER,
+        "families": sorted({t["family"] for t in suite_tasks}),
+        "suite_tasks_in_real_arm": [t["id"] for t in suite_tasks], "blind_spotter": b(blind),
+        "capable_spotter_agree_lt_0.85": b(capable),
+        "best_threshold_on_statistic": {"d": round(best[0], 4), "threshold": round(best[1], 4)},
+        "statistic_by_family": {f: {k: {"min": min(v), "median": sorted(v)[len(v) // 2], "max": max(v)}
+                                    for k, v in arms.items() if v} for f, arms in sorted(by_fam.items())}}
+    if kind == "positive":
+        out["planted_effect_mc"] = {"mc_rows": mc_rows, "by_family": {
+            f: {"min": min(v), "median": sorted(v)[len(v) // 2], "max": max(v)} for f, v in sorted(planted.items())}}
+    return out
+
+
+def salts_exam(suite: Path, doc: dict, work: Path, per_arm: int, mc_rows: int = 2_000) -> dict[str, Any]:
+    """The detectability exam on the redesigned salts (decision 2026-10-14, docs/salts_redesign.md): a positive arm
+    (positive salts of the suite's reference-rule families vs real tasks of those families) and, only when the suite
+    has a genuinely null family, a null arm (null salts of it vs its real tasks). Salts are fresh draws of the same
+    generators, so a pass is expected by construction; this run MEASURES it. `mc_rows` only sets the Monte Carlo
+    behind the reported planted effects (it does not change any file the spotter sees)."""
+    from custom_harness.salts import generate as G
+
+    pool = {t["family"] for t in doc["tasks"]}
+    report: dict[str, Any] = {"design": "fresh generator draws (decision 2026-10-14)", "per_arm": per_arm}
+    pos_tasks = [t for t in doc["tasks"] if t["family"] in G.POSITIVE_FAMILIES]
+    if pos_tasks:
+        report["positive_arm"] = _exam_arm(suite, pos_tasks, "positive", work, per_arm, pool, mc_rows)
+    else:
+        report["positive_arm"] = {"not_run": "the suite has no task of a reference-rule family"}
+    null_tasks = [t for t in doc["tasks"] if t["family"] in G.NULL_FAMILIES]
+    if null_tasks:
+        report["null_arm"] = _exam_arm(suite, null_tasks, "null", work, per_arm, pool, mc_rows)
+    else:
+        report["null_arm"] = {"not_run": "the suite has no genuinely null family (build with --null-family noise: "
+                                         "owner decision, GOAL §13.8); no null salt may be drawn for it"}
+    return report
 
 
 # ---------------------------------------------------------------- main
@@ -443,7 +493,9 @@ def main(argv: list[str] | None = None) -> int:
     if "salts" in only:
         with tempfile.TemporaryDirectory(dir=a.record_dir) as tmp:
             report["salts_exam"] = salts_exam(suite, doc, Path(tmp), a.exam_per_arm)
-        log("salts exam:", report["salts_exam"]["capable_spotter_agree_lt_0.85"])
+        log("salts exam:", {arm: report["salts_exam"][arm].get("capable_spotter_agree_lt_0.85",
+                                                                 report["salts_exam"][arm].get("not_run"))
+                            for arm in ("positive_arm", "null_arm")})
         save()
     if "scan" in only and not a.skip_scan:
         roots = [*default_agent_readable_roots(), *(Path(r) for r in a.extra_root)]
