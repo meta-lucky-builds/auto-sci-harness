@@ -52,7 +52,10 @@ class KernelConfig:
     # 1.1: domain adapters (K1), evidence classes, shared-example checks (K4/K6), K7 fail-closed
     # 1.2 (§16): closed reason codes, q >= p0 (K1), alpha-accounts and releases (K4/K6), K3 reliability
     # demonstration, plan-code divergence (K4), replayed evidence refused (K0), self-reported tier cap
-    version: str = "1.2"
+    # 1.3 (s3-kernel): strict JSON, alpha slots pay releases (K4), K1 statement = adapter rendering (exact/formal),
+    # K3 non-interference and CPU-time replays, core/adapter split. A certificate of 1.2 that re-derives differently
+    # is then reported STALE ("other rules"), never "forged" (Kernel.verify_status)
+    version: str = "1.3"
     min_seeds: int = 3
     max_alpha: float = 0.2
     min_boot: int = 1000
