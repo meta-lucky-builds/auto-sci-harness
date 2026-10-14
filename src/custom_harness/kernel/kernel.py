@@ -27,8 +27,9 @@ from .checks import (
     fixed_terms,
     is_external,
     related_targets,
+    slot_charge,
 )
-from .claim import Claim, EvidenceClass
+from .claim import Claim, EvidenceClass, strict_json
 from .execution import ExecRecord
 from .ledger import AsOfLedger, Entry, Ledger
 from .reasons import Code, UncodedReason, exception_name
@@ -120,12 +121,18 @@ class Kernel:
         spent = sorted({a.dataset_id for a in accounts.values() if alpha.retired(self.ledger, a)})
         if spent:
             raise KernelError(f"target(s) {spent} are retired (alpha-account closed): register on fresh data")
+        charge = {s: slot_charge(self.ledger, self.vault, a, self.config) for s, a in accounts.items()}
+        short = sorted({a.dataset_id for s, a in accounts.items()
+                        if charge[s] > a.slots - alpha.charged(self.ledger, a)})
+        if short:  # releases made this claim cost more slots than remain: refused, never tested at a looser level
+            raise KernelError(f"the alpha-account of target(s) {short} cannot pay this claim's slot charge (releases "
+                              f"since it opened): register on fresh data")
         entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms})
         for a in sorted(accounts.values(), key=lambda a: a.seq):
             n = len(alpha.reservations(self.ledger, a)) + 1
             self.ledger.append("alpha_reserve", {"account": a.seq, "dataset_id": a.dataset_id, "claim_hash": h,
-                                                 "slot": n, "level": a.level})
-            if n >= a.slots:
+                                                 "slot": n, "level": a.level, "charge": charge[a.seq]})
+            if alpha.charged(self.ledger, a) >= a.slots:
                 self.ledger.append("alpha_retire", {"account": a.seq, "dataset_id": a.dataset_id,
                                                     "code": "slots_exhausted", "approver": None})
         return entry
@@ -182,6 +189,19 @@ class Kernel:
         return self.ledger.append("mint", {"dataset_id": dataset_id, "frozen_hash": frozen_hash, "beacon": beacon,
                                            "task_id": task_id})
 
+    def declare_truth_copy(self, target: str, dataset_id: str, file: str, column: str, declarer: str) -> Entry:
+        """Trusted host code (task registration) declares that public file `dataset_id/file`, column `column`, carries
+        a copy of `target`'s held-out truth (possibly encoded) that a program could receive. K3 then requires the
+        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks."""
+        rec = self.vault.dataset(dataset_id)
+        if target not in self.vault.datasets() or file not in rec.files or rec.files[file].private:
+            raise KernelError("a truth copy is a PUBLIC file of a registered dataset, for a registered target")
+        header = self.store.blobs.get(rec.files[file].blob).decode("utf-8", errors="replace").splitlines()[:1]
+        if not declarer.strip() or not header or column not in header[0].split(","):
+            raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
+        return self.ledger.append("truth_copy", {"target": target, "dataset_id": dataset_id, "file": file,
+                                                 "column": column, "declarer": declarer})
+
     def releases(self, target_dataset_id: str) -> list[Entry]:
         """Releases on the target and on every target sharing its held-out examples (the K4 family)."""
         related = related_targets(self.vault, target_dataset_id)
@@ -222,6 +242,9 @@ class Kernel:
         """Run K0-K9 and issue an immutable certificate (recorded in the ledger). A check that raises is a
         FAILED check. full_chain=False is only for reproducing from a bundle (a ledger excerpt). as_of=seq re-derives
         on the ledger as it stood up to entry seq (never recorded)."""
+        ablated = self._ablated_runs(evidence_ids)
+        if ablated:  # an ablation run is a measurement arm, never a source of certified truth (fail closed)
+            raise KernelError(f"certification refused: evidence produced by ABLATED run(s) {ablated}")
         ledger = self.ledger if as_of is None else AsOfLedger(self.store, as_of)
         vault = self.vault if as_of is None else Vault(self.store, ledger)
         record = record and as_of is None
@@ -279,6 +302,8 @@ class Kernel:
         p_nulls = [s.p_null for s in ctx.stats.values() if s.p_null is not None]
         resolution = {"outcome": ok, "declared_probability": claim.effect.probability,
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
+        if ok and ctx.exclusion is not None:  # §16.10: the bounded-null statement (absent otherwise: old bytes kept)
+            resolution["exclusion"] = ctx.exclusion
         tier = (Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T0_FORMAL if formal
                 else Tier.T2_STATISTICAL)
         # §16.7: a field only the claimant's pipeline reported (no human approved it) caps the tier
@@ -310,13 +335,27 @@ class Kernel:
                                            "label": label.value, "blob": blob, "resolution": resolution})
         return cert
 
+    def _ablated_runs(self, evidence_ids: list[str] | tuple[str, ...]) -> list[str]:
+        """The runs marked ABLATED (Run.ablated, custom_harness/ablation.py) that produced any of the evidence. An id
+        that does not resolve is left to K0 (which fails it); a run id with no run record is not an ablated run (a run
+        is only ever ablated through its own record)."""
+        out: list[str] = []
+        for e in evidence_ids:
+            try:
+                run_id = self.store.get_evidence(e).produced_by_run
+                if run_id is not None and self.store.get_run(run_id).ablated and run_id not in out:
+                    out.append(run_id)
+            except KeyError:
+                continue
+        return out
+
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:
         """Look up a certificate. Its content must hash to the id it is filed under (catches a mis-filed or
         edited blob). A forger with write access could still file a self-consistent fake: use verify()."""
         for e in self.ledger.entries("certificate"):
             if e.body.get("cert_hash") == cert_hash:  # a malformed entry never breaks other lookups
-                cert = Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
+                cert = Certificate.model_validate(strict_json(self.store.blobs.get(e.body["blob"])))
                 if cert.cert_hash() != cert_hash or cert.claim_hash != e.body.get("claim_hash"):
                     raise KernelError(f"certificate {cert_hash[:12]}: content does not match its ledger entry")
                 return cert
@@ -375,4 +414,6 @@ def _differences(cert: Certificate, again: Certificate) -> tuple[list[str], list
             f"label {cert.label.value} recorded, {again.label.value} re-derived")
     if again.tier != cert.tier:
         (better if cert.tier < again.tier else worse).append(f"tier {cert.tier} recorded, {again.tier} re-derived")
+    if cert.resolution.get("exclusion") != again.resolution.get("exclusion"):  # §16.10: the stated limit is re-derived
+        better.append("bounded-null exclusion statement differs from its re-derivation")
     return better, worse

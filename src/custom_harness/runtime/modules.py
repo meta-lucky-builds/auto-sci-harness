@@ -7,6 +7,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from ..ablation import NO_ABLATION, AblationSet
+
 if TYPE_CHECKING:
     from ..budget import Budget
     from ..gateway import Backend, ChatRequest, ChatResponse
@@ -79,6 +81,9 @@ class ModuleContext:
     # handle digest -> held-out targets of that prompt (empty = not target-derived). A missing handle has UNKNOWN
     # provenance (research/evidence_refs.py refuses it). In-memory per engine: empty after a resume.
     archive_taint: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # capability switches OFF in this run (custom_harness/ablation.py; set by the engine). A module whose capability
+    # has a switch reads `ctx.ablation.off(name)`; production runs get NO_ABLATION.
+    ablation: AblationSet = NO_ABLATION
     llm_calls: list[dict[str, Any]] = field(default_factory=list)
     _store: Any = field(init=False, repr=False, default=None)
     # engine-owned access record (runtime/taint.py): which context surfaces the module touched. The engine sets it to

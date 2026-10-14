@@ -36,6 +36,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .. import config
+from ..ablation import MARKER, NO_ABLATION, AblationSet
 from ..evolve.edits import EditType
 
 LEVERS = ("harness_edit", "more_evaluation", "weights")
@@ -217,7 +218,7 @@ def admit(edit_types: Iterable[str], policy: OrchestratorPolicy) -> tuple[list[i
 
 class Orchestrator:
     def __init__(self, islands: list[Island], policy: OrchestratorPolicy, *, total_budget: int,
-                 store: Any | None = None, initial_seeds: int = 1):
+                 store: Any | None = None, initial_seeds: int = 1, ablation: AblationSet = NO_ABLATION):
         if len(islands) < 2:
             raise IslandError("islands need at least two members")
         ids = [i.island_id for i in islands]
@@ -230,6 +231,8 @@ class Orchestrator:
             raise IslandError("the total budget must give every island at least one edit")
         self.islands = {i.island_id: i for i in islands}
         self.policy, self.total, self.store = policy, total_budget, store
+        # capability switches OFF (custom_harness/ablation.py): an ablated orchestrator logs to `<kind>:ABLATED`
+        self.ablation = ablation
         self.round = 0
         self.policy_changed_at = 0
         self.versions = [policy.version]
@@ -242,6 +245,8 @@ class Orchestrator:
 
     def _log(self, kind: str, body: dict[str, Any]) -> None:
         if self.store is not None:
+            if self.ablation:
+                kind, body = f"{kind}:{MARKER}", {**body, **self.ablation.marker()}
             self.store.append_record(kind, body)
 
     def observe(self, signal: GenerationSignal | Mapping[str, Any]) -> None:
@@ -291,11 +296,14 @@ class Orchestrator:
             weight = 1.0
             if stalled:
                 rej_evolve = ev["rejected_on"].get("evolve", 0)
-                if ev["gated"] and rej_evolve / ev["gated"] >= p.more_eval_share and st.n_seeds < p.max_seeds:
+                if (ev["gated"] and rej_evolve / ev["gated"] >= p.more_eval_share and st.n_seeds < p.max_seeds
+                        and not self.ablation.off("lever-choice")):  # ablation: no lever choice
                     lever = "more_evaluation"
                     why = (f"stalled; {rej_evolve}/{ev['gated']} gated rejections on the evolve re-measurement "
                            f">= {p.more_eval_share}: underpowered, evaluate more")
                     st.n_seeds += 1
+                elif self.ablation.off("orchestrator-reallocation"):  # ablation: no stall reallocation
+                    why = "stalled; reallocation switched off (ablation orchestrator-reallocation)"
                 else:
                     why = "stalled; rejections not dominated by the evolve re-measurement: diversify edits"
                     weight = p.stall_shrink

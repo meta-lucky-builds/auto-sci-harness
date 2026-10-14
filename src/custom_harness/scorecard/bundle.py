@@ -145,6 +145,9 @@ def render(card: dict[str, Any]) -> str:
     if "capabilities_with_ablation" in cov:
         lines.append(f"- capabilities with an ablation: {cov['capabilities_with_ablation']['value']} of "
                      f"{cov['capabilities_with_ablation']['of']}; gaps: {', '.join(cov['gaps']) or 'none'}")
+        lines.append(f"- capabilities with a real, tested switch (code coverage only, no run): "
+                     f"{cov['capabilities_with_switch']['value']} of {cov['capabilities_with_switch']['of']}")
+        lines += [f"  - {r['id']}: {r['why']}" for r in cov["rows"] if r.get("status") == "gap"]
     else:
         lines.append(f"- {cov.get('why')}")
     lines += ["", f"Reproduce: `chh scorecard check <this directory>` (facts sha256 `{card['facts_sha256']}`)", ""]

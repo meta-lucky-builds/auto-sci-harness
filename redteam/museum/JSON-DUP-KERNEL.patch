@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/claim.py b/src/custom_harness/kernel/claim.py
+index ae2bfe8..43db770 100644
+--- a/src/custom_harness/kernel/claim.py
++++ b/src/custom_harness/kernel/claim.py
+@@ -161,7 +161,7 @@ def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+ def strict_json(data: str | bytes) -> Any:
+     """json.loads that refuses a duplicated object key at any depth: one reader would see the first value and
+     another (the stdlib keeps the last) a different document (ValueError, so callers fail closed)."""
+-    return json.loads(data, object_pairs_hook=_unique_keys)
++    return json.loads(data)
+ 
+ 
+ def canonical_json(obj: Any) -> bytes:

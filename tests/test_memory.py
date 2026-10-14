@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from custom_harness.kernel import (
     Scope,
     canonical_json,
 )
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.memory import (
     WRAPPER,
     ExploitVerdict,
@@ -104,7 +106,8 @@ class MW:
         aid = f"lp-{tag}"
         ref = ArtifactRef(artifact_id=aid, hash=self.w.vault.register_artifact(aid, canonical_json(problem),
                                                                               "problem").hash)
-        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {aid} is 13/5", subject=ref,
+        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(canonical_json(problem), Fraction(13, 5)),
+                    subject=ref,
                     comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                     effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                     scope=Scope(datasets=()), development=(), generalization_targets=(),

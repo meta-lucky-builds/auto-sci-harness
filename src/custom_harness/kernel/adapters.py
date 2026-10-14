@@ -49,6 +49,10 @@ class AdapterSpec:
     # computational class: the module (one of `modules`) exporting the exact certificate checker the Kernel calls:
     # check(problem, certificate, value) -> reasons (K3), bounds(...) -> reasons (K8), HIGHER_IS_BETTER
     exact_module: str | None = None
+    # data class: the module of the domain procedures the Kernel core calls in K1 and K3-K8 (kernel/ml.py documents
+    # the interface: metric_reasons, recompute, replay_failure, is_regression, statistics, conformance, risk,
+    # record_bounds). It must be one of `modules`, so it is part of the adapter's identity.
+    procedures: str | None = None
 
 
 @functools.cache
@@ -119,6 +123,8 @@ def adapter_hash(spec: AdapterSpec) -> str:
                              "metrics": sorted(spec.metrics), "modules": {}}
     if spec.exact_module is not None:  # only when set: adapters without one keep their approved hashes
         parts["exact_module"] = spec.exact_module
+    if spec.procedures is not None:
+        parts["procedures"] = spec.procedures
     for mod, path in covered_modules(spec).items():
         parts["modules"][mod] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
@@ -127,8 +133,8 @@ def adapter_hash(spec: AdapterSpec) -> str:
 ML = AdapterSpec(
     name="ml", version="1", classes=frozenset({EvidenceClass.DATA}),
     modules=("custom_harness.verify.metrics", "custom_harness.verify.stats", "custom_harness.verify.leak",
-             "custom_harness.kernel.execution", "custom_harness.verify.transductive"),
-    metrics=frozenset(M.METRICS))
+             "custom_harness.kernel.execution", "custom_harness.verify.transductive", "custom_harness.kernel.ml"),
+    metrics=frozenset(M.METRICS), procedures="custom_harness.kernel.ml")
 
 
 def _raises(fn: Callable[[], object]) -> bool:
@@ -212,6 +218,15 @@ LEAN = AdapterSpec(
 REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
     "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS), "sim": (SIM, sim.SIM_CHECKS),
     "lean": (LEAN, lean_validation.LEAN_CHECKS)}
+
+
+def procedures_for(evidence_class: EvidenceClass, metric: str) -> str:
+    """The procedures module of the registered adapter serving (class, metric); if none serves it, the first adapter
+    (by name) that has procedures: K1 rejects such a claim anyway (no approved adapter), and its other checks then run
+    exactly as they did before the core/adapter split (docs/kernel_core_adapter_split.md)."""
+    have = [s for _, (s, _) in sorted(REGISTRY.items()) if s.procedures is not None]
+    serving = [s for s in have if evidence_class in s.classes and metric in s.metrics]
+    return str((serving or have)[0].procedures)
 
 
 def validate(checks: tuple[tuple[str, Callable[[], bool]], ...]) -> list[str]:

@@ -184,6 +184,10 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     delta, q, lo, hi = forecast(task, state, ctx, task.effect_floor(state["baseline_dev"]),
                                 fraction=params.get("delta_fraction", 0.5), candidate_key=candidate_key,
                                 fixed_delta=fixed)
+    # L3 calibrated K3 tolerance (s3-verifiers): 0.0 (identical predictions) unless `calibrate_tolerance` asks trusted
+    # code to measure the candidate's noise floor on public dev data; frozen into the pre-registration below
+    from .noise_floor import claim_tolerance_for
+    tol, tol_rec = claim_tolerance_for(state, params, ctx, ctx.store.blobs.get(best["code_ref"]))
     hid = _inline(best.get("hypothesis_id"), 80)  # model-written id: never raw in a claim statement
     who = ("an independent re-implementation (written from the claim text, without the code) of hypothesis "
            f"{hid}") if p else f"the solution for hypothesis {hid}"
@@ -203,7 +207,7 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         # max(declared, actual registered claims), so declaring a campaign's planned number of claims per task
         # keeps certification strictness constant during the campaign (no drift against later candidates).
         analysis_plan=AnalysisPlan(seeds=tuple(params.get("seeds", (0, 1, 2))), alpha=params.get("alpha", 0.05),
-                                   n_comparisons=int(params.get("n_comparisons", 1))),
+                                   n_comparisons=int(params.get("n_comparisons", 1)), reproduce_tolerance=tol),
         assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
                      "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
@@ -214,12 +218,13 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         extra = {f"{p}preflight": result.as_record()}
     else:
         extra = {}
+    tol_out = {f"{p}tolerance": tol_rec} if params.get("calibrate_tolerance") is True else {}
     entry = kernel.preregister(claim)
     if extra:
         return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
-                f"{p}prereg_seq": entry.seq, **extra, "route": "confirm"}
+                f"{p}prereg_seq": entry.seq, **extra, **tol_out, "route": "confirm"}
     return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
-            f"{p}prereg_seq": entry.seq}
+            f"{p}prereg_seq": entry.seq, **tol_out}
 
 
 # ------------------------------------------------------------------ confirm
@@ -267,7 +272,8 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                 preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
                                           argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
                                                                      "test": (task.test_features_file, test)},
-                                          seed=seed, timeout_s=task.solution_timeout_s)
+                                          seed=seed, timeout_s=task.solution_timeout_s,
+                                          cpu_s=float(task.solution_timeout_s))  # §16.8: load is infra, not policy
                 # validate the shape BEFORE touching the labels: an unusable output never causes a label read
                 if preds is None or len(preds) != n_rows:
                     failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
@@ -278,7 +284,8 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                                 claim_hash=h, arm=arm, seed=seed)
                 rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
                                  label_file=task.test_labels_file, seed=seed, env=env,
-                                 limits={"timeout_s": float(task.solution_timeout_s)},
+                                 limits={"timeout_s": float(task.solution_timeout_s),
+                                         "cpu_s": float(task.solution_timeout_s)},
                                  preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
                                  score=score, run_id=ctx.run_id)
                 evidence.append(kernel.record_evaluation(rec))
@@ -369,7 +376,8 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
         if not critic_ok:
             ok, blockers = False, [*blockers, why]
     from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
-    memory_rec = after_certify(kernel, state, h, ctx.secrets)
+    memory_rec = after_certify(kernel, state, h, ctx.secrets, run_id=ctx.run_id, spawn=_perturbed_spawn(ctx),
+                               targets=_dev_targets(state), candidate_key="replica_best" if p else "best")
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))
             for e in cert.evidence_ids]
     target = claim.generalization_targets[0]
@@ -407,6 +415,23 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                 # held-out value; only its existence depends on the target (the verdict bit)
                 "_release_alphabets": {"replication_brief": "verdict_bit"}} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
+
+
+def _perturbed_spawn(ctx: ModuleContext) -> Any:
+    """Fresh sandboxes for the skill writer's perturbed evaluator (memory_wiring.exploit_check); None without one."""
+    if ctx.sandbox is None:
+        return None
+    sb = _sb(ctx)
+    root = sb.workspace.parent / f"{sb.workspace.name}-perturbed"
+    return lambda name: sb.spawn(root / f"{name}-{uuid.uuid4().hex[:8]}")
+
+
+def _dev_targets(state: dict[str, Any]) -> dict[str, str] | None:
+    """The public development dataset and its target column (trusted: from the task spec and the vault ids)."""
+    try:
+        return {state["datasets"]["train"]: _task(state).target_column}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[str, Any]:

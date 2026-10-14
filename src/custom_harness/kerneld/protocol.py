@@ -43,9 +43,20 @@ def _line(obj: dict[str, Any]) -> str:
     return json.dumps(obj, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(",", ":")) + "\n"
 
 
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    if len({k for k, _ in pairs}) != len(pairs):
+        raise ValueError("duplicate key")
+    return dict(pairs)
+
+
+def _loads(line: str) -> Any:
+    """json.loads refusing a duplicated key (two readers would see two different requests)."""
+    return json.loads(line, object_pairs_hook=_unique)
+
+
 def _obj(line: str) -> dict[str, Any]:
     try:
-        obj = json.loads(line)
+        obj = _loads(line)
     except (ValueError, RecursionError):
         raise ProtocolError() from None
     if not isinstance(obj, dict):
@@ -76,7 +87,7 @@ def encode_request(rid: int, op: str, args: dict[str, Any]) -> str:
 def request_id(line: str) -> int | None:
     """The id of a (possibly malformed) request line, if it has a usable one (to address the error reply)."""
     try:
-        obj = json.loads(line)
+        obj = _loads(line)
     except (ValueError, RecursionError):
         return None
     rid = obj.get("id") if isinstance(obj, dict) else None
