@@ -193,7 +193,7 @@ def test_cli_prints_the_table_and_the_honesty_footer(tmp_path, monkeypatch, caps
     assert "HONESTY FOOTER" in out
     for a in ("A", "C", "D", "E"):
         assert f"axis {a}: NOT MEASURED (" in out
-    assert "axis G cost_per_certified_live_claim: NOT MEASURED (undefined: 0 certified claims)" in out
+    assert "axis G cost_per_certified_live_claim: NOT MEASURED (undefined: 0 certified claims (no runs" in out
     assert "axis H planted_exploit_catch_rate: NOT MEASURED (no museum run log given" in out
     assert "axis B gain_per_1k_rollouts: NOT MEASURED" in out
     rc = main(["scorecard", "local", "--repo", str(repo), "--json"])
