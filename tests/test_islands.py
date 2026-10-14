@@ -109,17 +109,28 @@ def test_edit_type_quota_prevents_collapse_into_prompt_only_edits():
     assert "prompt weight capped" in whys[0]  # capped on the first round that saw the collapse
 
 
+def _accept_if_challenger(orch):
+    """Trial evidence for the policy test below: an accepting island in the challenger's round, none otherwise."""
+    if orch.trial is not None and orch.trial.arm(orch.round) == "challenger":
+        orch.observe(_sig("good", orch.round, True, 1, [], ["contract"]))
+
+
 def test_the_policy_is_versioned_and_changes_only_on_a_slower_cadence(store):
     orch = Orchestrator(_islands(), POLICY, total_budget=30, store=store)
     new = OrchestratorPolicy(version="orch-2", stall_window=2, cadence=3)
+    # a change needs a passing policy trial (control/policy_gate.py; test_policy_gate.py tests the gate itself).
+    # Here the smallest trial that fits this test's three rounds: one AB/BA pair, min_nonzero 1, alpha 1/2.
+    decl = orch.declare_trial(new, order_seed="test", n_pairs=1, alpha=0.5, min_nonzero=1)
     orch.step()
+    _accept_if_challenger(orch)
     with pytest.raises(IslandError, match="every 3 rounds"):
         orch.set_policy(new)
     with pytest.raises(IslandError, match="used before"):
         orch.set_policy(OrchestratorPolicy(version="orch-1", stall_window=9))  # same version, other parameters
     orch.step()
+    _accept_if_challenger(orch)
     orch.step()
-    orch.set_policy(new)
+    orch.set_policy(new, trial_decision=orch.trial_decisions[decl.trial_id])
     assert orch.policy is new and [r["version"] for r in store.records(POLICY_KIND)] == ["orch-1", "orch-2"]
     assert store.records(POLICY_KIND)[-1]["round"] == 3
     assert orch.step()[0]["policy_version"] == "orch-2"
@@ -150,3 +161,70 @@ def test_signals_from_real_generation_records_use_only_the_proposer_visible_view
                 "gate": {"mean_diff": -0.3, "lo": -0.5}, "lofo": {"ood_drop": {"family:H": -0.3}}}]
     s = signal_from_generation("good", 4, stats, lineage)
     assert s == GenerationSignal("good", 4, False, 2, 1, ("held_out_gate",), ("hop", "prompt_text"))
+
+
+# ==================================================================================== one stall definition
+def test_the_orchestrator_stall_decision_is_generations_stall_evidence(monkeypatch):
+    """Exactly ONE function defines "stalled": the orchestrator follows evolve.generations.stall_evidence. Patched
+    to the opposite answer, every island's stall decision flips with it (an inline copy of the rule would not)."""
+    from custom_harness.evolve import generations
+    real = generations.stall_evidence
+    seen = []
+
+    def opposite(signals, window=generations.STALL_WINDOW):
+        ev = real(signals, window)
+        seen.append(window)
+        return ev | {"stalled": not ev["stalled"]}
+
+    orch = Orchestrator(_islands(), POLICY, total_budget=30)
+    _script(orch)
+    monkeypatch.setattr(generations, "stall_evidence", opposite)
+    d = {x["island"]: x for x in orch.step()}
+    assert (d["promptish"]["stalled"], d["noisy"]["stalled"], d["good"]["stalled"]) == (False, False, True)
+    assert d["good"]["why"].startswith("stalled") and d["noisy"]["lever"] == "harness_edit"
+    assert seen and set(seen) == {POLICY.stall_window}  # the policy's window is passed to the one rule
+    assert d["good"]["evidence"]["stalled"] is True  # the decision's evidence is that function's output
+
+
+def test_the_orchestrator_source_has_no_inline_stall_rule():
+    """Static check: in the decision methods of class Orchestrator (step, evidence) no comparison reads `accepted`,
+    `observed` or `stall_window` (the ingredients of the stall rule), and `stall_evidence` is called. Comments and
+    docstrings are not code."""
+    import ast
+    import inspect
+
+    from custom_harness.control import islands
+    tree = ast.parse(inspect.getsource(islands))
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Orchestrator")
+    banned = {"accepted", "observed", "stall_window"}
+
+    def names(node):
+        for x in ast.walk(node):
+            if isinstance(x, ast.Name):
+                yield x.id
+            elif isinstance(x, ast.Attribute):
+                yield x.attr
+            elif isinstance(x, ast.Constant) and isinstance(x.value, str):
+                yield x.value
+    methods = [f for f in cls.body if isinstance(f, ast.FunctionDef) and f.name in ("step", "evidence")]
+    assert len(methods) == 2
+    bad = [ast.unparse(c) for f in methods for c in ast.walk(f)
+           if isinstance(c, ast.Compare) and banned & set(names(c))]
+    assert bad == []
+    calls = {ast.unparse(c.func) for c in ast.walk(tree) if isinstance(c, ast.Call)}
+    assert "generations.stall_evidence" in calls and "stall_evidence" in calls
+
+
+def test_signals_inconsistent_with_the_ledger_shape_are_refused():
+    """An accept needs a gated candidate, and accepts + rejections cannot exceed the gated count; a GenerationSignal
+    built directly is re-validated too (it no longer bypasses the whitelist)."""
+    with pytest.raises(IslandError):
+        GenerationSignal.from_view(_sig("good", 0, True, 0, [], ["contract"]))
+    with pytest.raises(IslandError):
+        GenerationSignal.from_view(_sig("good", 0, True, 1, ["cost"], ["contract"]))
+    orch = Orchestrator(_islands(), POLICY, total_budget=30)
+    with pytest.raises(IslandError):
+        orch.observe(GenerationSignal("good", 0, True, 1, 0, (), ("contract",)))
+    with pytest.raises(IslandError):
+        orch.observe(GenerationSignal("good", 0, False, 1, 1, ("gate:0.13",), ("contract",)))
+    orch.observe(GenerationSignal("good", 0, True, 1, 1, (), ("contract",)))  # positive control

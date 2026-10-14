@@ -272,12 +272,18 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                       proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
                       releases: Releases | None = None,
                       critic: FamilySeparatedCritic | None = None,
-                      branching: BranchConfig | None = None) -> GenerationResult:
+                      branching: BranchConfig | None = None,
+                      edit_admission: Callable[[list[Edit]], tuple[list[int], list[int]]] | None = None
+                      ) -> GenerationResult:
     """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
     shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
     candidate rejected on its evolve re-measurement or the held-out gate is tested per gate cluster and may become
-    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour)."""
+    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour).
+    `edit_admission`: the L7 edit-type quota (control/islands.admit, bound by evolve/search.py): given the proposed
+    edits it returns (admitted, refused) indices, a partition of the proposal (fail closed otherwise). A refused edit
+    is recorded `rejected_static` (edit withheld, reason naming the quota, no signature: the duplicate gate is not
+    fed, the same edit may be admitted later) and never evaluated. None = every edit admitted (unchanged)."""
     cfg = cfg or EvolveConfig()
     check_race_config(cfg)  # fail closed before any run
     if critic is not None:
@@ -318,6 +324,14 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     else:
         proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
     edits, problems = proposal.edits, proposal.problems
+    admitted: list[Edit] = list(edits)
+    quota_refused: list[Edit] = []
+    if edit_admission is not None:
+        adm_ok, adm_refused = edit_admission(list(edits))
+        both = [*adm_ok, *adm_refused]
+        if any(type(i) is not int for i in both) or sorted(both) != list(range(len(edits))):
+            raise ValueError("edit_admission must partition the proposal's edit indices (fail closed)")
+        admitted, quota_refused = [edits[i] for i in sorted(adm_ok)], [edits[i] for i in sorted(adm_refused)]
     # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis, or the
     # one-shot proposer's diagnosis
     shown = getattr(proposal, "evidence_refs", None)
@@ -333,7 +347,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         # proposer free text written to the lineage (exported): screened like an edit's rationale
         reason = proposal.decline if not _token_hit(proposal.decline, deny) else "<withheld: names held-out data>"
         records.append({"status": "declined", "reason": reason})
-    for edit in edits:
+    records += [{"status": "rejected_static", "edit": withheld(e),
+                 "reason": "edit-type quota (L7 orchestrator admission): not admitted this generation"}
+                for e in quota_refused]
+    for edit in admitted:
         sig = edit_signature(edit)
         try:  # covert-channel / leak screen on the edit's text and predicted effect, before anything is stored
             edit, notes = screen_prediction(edit, task_ids=task_ids, deny=deny, max_text_chars=cfg.max_rationale_chars,
