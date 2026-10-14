@@ -99,6 +99,8 @@ class MapNode(_Strict):
     `body` must be an LLM, tool or module node that is reachable ONLY through maps: not the entry, no edges in or out
     (so a protected or approval node, which has wiring, can never be run as a branch). Branches run sequentially, in
     item order; each finished branch is persisted under a deterministic id, so a resume re-runs only unfinished ones.
+    Opt-in (`Engine(map_workers=N)`, `chh run --map-workers N`): when the body is an LLM node, the branches' model
+    calls run on up to N threads, and each branch is still committed in item order (same ids, records and output).
     More than `max_items` items fails the step (never truncated)."""
 
     kind: Literal["map"] = "map"

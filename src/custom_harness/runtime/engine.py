@@ -36,7 +36,8 @@ import socket
 import sys
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
@@ -293,7 +294,7 @@ class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
                  retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None,
-                 campaign: Campaign | None = None):
+                 campaign: Campaign | None = None, map_workers: int = 1):
         # invariant 5, checked before any model call; an override (argument or CHH_ALLOW_SAME_FAMILY=1) is
         # recorded in every run's state as NOT MET and reported in every certificate checklist
         allowed = allow_same_family if allow_same_family is not None else (
@@ -306,6 +307,13 @@ class Engine:
             if isinstance(node, MapNode):
                 get_reducer(node.reducer)
         self.spec = spec
+        # fan-out parallelism, OPT-IN (`chh run|resume --map-workers N`; default 1 = sequential): only a map whose body
+        # is an LLM node runs its branches' model calls on up to N worker threads (`_ParallelBranches`); every other
+        # map, and every map with N = 1, runs its branches sequentially. Results are committed on this thread in item
+        # order, so ids, persisted records, values, labels and errors equal the sequential run's.
+        if isinstance(map_workers, bool) or not isinstance(map_workers, int) or map_workers < 1:
+            raise ValueError("map_workers must be an integer >= 1")
+        self.map_workers = map_workers
         self._budget_owned = budget is None
         # fan-out bookkeeping: a resume of an infra-failed map step hands it the instance and the nonces already
         # charged (from that step's checkpoint); `_map_pending` is what the current map step adds to its checkpoint
@@ -858,6 +866,7 @@ class Engine:
         error: str | None = None
         infra = None
         reused = 0
+        discarded: list[dict[str, Any]] = []  # parallel fan-out only: branches started past the stop
         # 1. reuse the finished prefix (persisted by an earlier execution of this instance)
         for k, bid in enumerate(ids):
             r = done.get(bid)
@@ -895,93 +904,126 @@ class Engine:
                 lost_calls += 1
                 charged.add(n)
         acc = acc + lost
-        # 3. run the remaining branches in item order
+        # 3. run the remaining branches in item order. Opt-in parallel (Engine(map_workers=N), N > 1, LLM body):
+        # each branch is PREPARED here in item order (state copy, labels, prompt render and its releases), only its
+        # model call runs on a worker thread, and every branch is COMMITTED here in item order (record, charge,
+        # label, value): the same ids, persisted records, values, labels and errors as the sequential path. Workers
+        # write nothing but their own write-ahead cost-journal rows (`_ParallelBranches`).
         saved_ts = self._ts
         from ..kerneld.releases import attributed_reads
         if isinstance(body, ToolNode):
             surfaces.add(SANDBOX_SURFACE)
-        for k in range(reused, len(items)):
-            over = self._would_exceed(acc)
-            if over is not None:
-                error = f"BudgetExceeded: during fan-out before branch {k}: {over}"
-                break
-            bid, nonce = ids[k], uuid.uuid4().hex
-            bstate = copy.deepcopy(state)
-            bstate[node.item_key] = copy.deepcopy(items[k])
-            bstate["_map"] = {"node": node_id, "index": k, "branch_id": bid, "n": len(items)}
-            bstate["_last_error"] = None
-            # each branch sees the run's labels, with the item labelled like the list it came from
-            bts = saved_ts.copy()
-            bts.set_label(node.item_key, items_taint)
-            bts.set_label("_map", items_taint)  # n = len(items), index and branch id derive from the items
-            bts.set_label("_last_error", ())
-            self._ts = bts
-            for registry in (self._step_label, self._step_surface, self._step_writes):
-                registry.pop(id(body), None)
-            self._cursor = (run_id, index, bid, nonce)
-            seq_b = self._data_access_seq()
-            try:
-                out, cost, prov, berr, binfra = self._attempt(body, bstate, run_id)
-            finally:
-                self._cursor = (run_id, index)
-                self._ts = saved_ts
-            if not bts.pending:  # a control decision released inside the branch is released for the run
-                saved_ts.pending = []
-            reads_b, _ = attributed_reads(self.store, after_seq=seq_b, run_ids=run_family(run_id),
-                                          own_seqs=self._step_capture)
-            self._step_writes.pop(id(body), None)  # direct writes went to the branch's own copy of the state
-            surfaces |= self._step_surface.pop(id(body), set())
-            btaint = set(self._step_label.pop(id(body), set())) | set(reads_b)
-            prompt_taint |= btaint
-            acc = acc + cost
-            charged.add(nonce)
-            value: Any = None
-            if berr is None:
-                if getattr(body, "output_key", None) is not None:
-                    value = out.get("value")
+        par: _ParallelBranches | None = None
+        if (self.map_workers > 1 and isinstance(body, LLMNode) and len(items) - reused > 1
+                and self.backends.get(body.role) is not None):
+            par = _ParallelBranches(self, node_id, node, body, state, items, ids, run_id, index, items_taint,
+                                    saved_ts)
+        try:
+            for k in range(reused, len(items)):
+                over = self._would_exceed(acc)
+                if over is not None:
+                    error = f"BudgetExceeded: during fan-out before branch {k}: {over}"
+                    break
+                if par is not None:
+                    bid, nonce, out, cost, prov, berr, binfra, btaint = par.result(k, acc)
                 else:
-                    value = {kk: v for kk, v in out.items() if kk not in ("_module_llm_calls", "_infra_retries")}
-                    bad = sorted(kk for kk in value if engine_reserved(kk))
-                    if bad:
-                        berr = f"MapError: branch {k} wrote reserved state key(s) {bad}"
-            b_replayed = bool(prov is not None and prov.replayed) or any(
-                bool((c.get("provenance") or {}).get("replayed")) for c in out.get("_module_llm_calls", []))
-            replayed = replayed or b_replayed
-            if prov is not None and prov_out is None:
-                prov_out = prov
-            ws_ref = self._ws_ref
-            if self.sandbox is not None and binfra is None and not isinstance(body, LLMNode) and not (
-                    isinstance(body, ToolNode) and not body.snapshot_after):
-                ws_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
-                self._ws_ref = ws_ref
-            summary: dict[str, Any] = {"index": k, "branch_id": bid, "item_hash": hashes[k], "reused": False,
-                                       "cost": cost.model_dump(), "out": out}
-            if prov is not None:
-                summary["provenance"] = prov.model_dump(mode="json")
-            if binfra is None:
-                ref = self.store.blobs.put_json({"value": value, "trace": out})
-                # reduce what was persisted (canonical JSON: sorted keys), so a fresh branch and the same branch
-                # reused after a crash give byte-identical reducer input
-                value = self.store.blobs.get_json(ref)["value"]
-                summary["output_ref"] = ref
-                self.store.append_record("map_branch", {
-                    "instance": instance, "run_id": run_id, "step": index, "node_id": node_id, "index": k,
-                    "branch_id": bid, "item_hash": hashes[k], "nonce": nonce, "output_ref": ref,
-                    "cost": cost.model_dump(), "error": berr, "workspace": ws_ref, "replayed": b_replayed,
-                    "taint": sorted(btaint)})
-            if berr is not None:
-                summary["error"] = berr
-            branches.append(summary)
-            if berr is not None:
-                error, infra = (f"branch {k} ({bid[:12]}): {berr}", binfra)
-                break
-            values.append(value)
+                    bid, nonce = ids[k], uuid.uuid4().hex
+                    bstate, bts = self._branch_state(node_id, node, state, items, k, ids, items_taint, saved_ts)
+                    self._ts = bts
+                    for registry in (self._step_label, self._step_surface, self._step_writes):
+                        registry.pop(id(body), None)
+                    self._cursor = (run_id, index, bid, nonce)
+                    seq_b = self._data_access_seq()
+                    try:
+                        out, cost, prov, berr, binfra = self._attempt(body, bstate, run_id)
+                    finally:
+                        self._cursor = (run_id, index)
+                        self._ts = saved_ts
+                    if not bts.pending:  # a control decision released inside the branch is released for the run
+                        saved_ts.pending = []
+                    reads_b, _ = attributed_reads(self.store, after_seq=seq_b, run_ids=run_family(run_id),
+                                                  own_seqs=self._step_capture)
+                    self._step_writes.pop(id(body), None)  # direct writes went to the branch's own copy of the state
+                    surfaces |= self._step_surface.pop(id(body), set())
+                    btaint = set(self._step_label.pop(id(body), set())) | set(reads_b)
+                prompt_taint |= btaint
+                acc = acc + cost
+                charged.add(nonce)
+                value: Any = None
+                if berr is None:
+                    if getattr(body, "output_key", None) is not None:
+                        value = out.get("value")
+                    else:
+                        value = {kk: v for kk, v in out.items() if kk not in ("_module_llm_calls", "_infra_retries")}
+                        bad = sorted(kk for kk in value if engine_reserved(kk))
+                        if bad:
+                            berr = f"MapError: branch {k} wrote reserved state key(s) {bad}"
+                b_replayed = bool(prov is not None and prov.replayed) or any(
+                    bool((c.get("provenance") or {}).get("replayed")) for c in out.get("_module_llm_calls", []))
+                replayed = replayed or b_replayed
+                if prov is not None and prov_out is None:
+                    prov_out = prov
+                ws_ref = self._ws_ref
+                if self.sandbox is not None and binfra is None and not isinstance(body, LLMNode) and not (
+                        isinstance(body, ToolNode) and not body.snapshot_after):
+                    ws_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
+                    self._ws_ref = ws_ref
+                summary: dict[str, Any] = {"index": k, "branch_id": bid, "item_hash": hashes[k], "reused": False,
+                                           "cost": cost.model_dump(), "out": out}
+                if prov is not None:
+                    summary["provenance"] = prov.model_dump(mode="json")
+                if binfra is None:
+                    ref = self._persist_branch(instance, run_id, index, node_id, k, bid, hashes[k], nonce, value,
+                                               out, cost, berr, ws_ref, b_replayed, btaint)
+                    # reduce what was persisted (canonical JSON: sorted keys), so a fresh branch and the same branch
+                    # reused after a crash give byte-identical reducer input
+                    value = self.store.blobs.get_json(ref)["value"]
+                    summary["output_ref"] = ref
+                if berr is not None:
+                    summary["error"] = berr
+                branches.append(summary)
+                if berr is not None:
+                    error, infra = (f"branch {k} ({bid[:12]}): {berr}", binfra)
+                    break
+                values.append(value)
+            if par is not None:
+                # branches a parallel fan-out started past the stop (an error or the budget): their spend is real, so
+                # it is charged here, once (their nonces join `charged`), and a finished one is persisted like any
+                # branch; their values never reach the reducer and their labels never reach the output
+                for k, bid, nonce, done_ex, crash in par.drain():
+                    if done_ex is None:  # its worker raised: charge whatever its journal recorded
+                        lost_k = Cost()
+                        for j in self.store.records_where("cost_journal", "run_id", run_id):
+                            if j.get("nonce") == nonce:
+                                lost_k = lost_k + Cost.model_validate(j["cost"])
+                        acc = acc + lost_k
+                        charged.add(nonce)
+                        discarded.append({"index": k, "branch_id": bid, "cost": lost_k.model_dump(),
+                                          "crashed": crash})
+                        continue
+                    out, cost, prov, berr, binfra, btaint = done_ex
+                    acc = acc + cost
+                    charged.add(nonce)
+                    entry: dict[str, Any] = {"index": k, "branch_id": bid, "cost": cost.model_dump()}
+                    if binfra is None:
+                        val = out.get("value") if berr is None else None
+                        entry["output_ref"] = self._persist_branch(
+                            instance, run_id, index, node_id, k, bid, hashes[k], nonce, val, out, cost, berr,
+                            self._ws_ref, bool(prov is not None and prov.replayed), btaint)
+                    if berr is not None:
+                        entry["error"] = berr
+                    discarded.append(entry)
+        finally:
+            if par is not None:
+                par.shutdown()
         self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
         self._step_label[id(node)] = prompt_taint
         self._step_surface[id(node)] = surfaces
         out_doc: dict[str, Any] = {"reducer": node.reducer, "n_items": len(items), "instance": instance,
                                    "branches": branches, "reused_branches": reused,
                                    "recovered_lost_calls": lost_calls}
+        if discarded:
+            out_doc["discarded_branches"] = discarded
         if replayed:
             out_doc["replayed"] = True  # K0 refuses evidence from replayed output (invariant 21)
             if prov_out is not None:
@@ -992,6 +1034,33 @@ class Engine:
             except (TypeError, ValueError) as e:
                 error = f"ReducerError: {node.reducer}: {e}"
         return out_doc, acc, prov_out, error, infra
+
+    def _branch_state(self, node_id: str, node: MapNode, state: dict[str, Any], items: list[Any], k: int,
+                      ids: list[str], items_taint: set[str], saved_ts: TaintState) -> tuple[dict[str, Any], TaintState]:
+        """Branch k's own copy of the state and its labels: the run's labels, with the item labelled like the list it
+        came from (n = len(items), the index and the branch id derive from the items too)."""
+        bstate = copy.deepcopy(state)
+        bstate[node.item_key] = copy.deepcopy(items[k])
+        bstate["_map"] = {"node": node_id, "index": k, "branch_id": ids[k], "n": len(items)}
+        bstate["_last_error"] = None
+        bts = saved_ts.copy()
+        bts.set_label(node.item_key, items_taint)
+        bts.set_label("_map", items_taint)
+        bts.set_label("_last_error", ())
+        return bstate, bts
+
+    def _persist_branch(self, instance: str, run_id: str, index: int, node_id: str, k: int, bid: str, item_hash: str,
+                        nonce: str, value: Any, out: dict[str, Any], cost: Cost, berr: str | None,
+                        ws_ref: str | None, replayed: bool, btaint: set[str]) -> str:
+        """Persist one finished branch execution as a `map_branch` record (engine thread only); returns its output
+        blob ref."""
+        ref = self.store.blobs.put_json({"value": value, "trace": out})
+        self.store.append_record("map_branch", {
+            "instance": instance, "run_id": run_id, "step": index, "node_id": node_id, "index": k,
+            "branch_id": bid, "item_hash": item_hash, "nonce": nonce, "output_ref": ref,
+            "cost": cost.model_dump(), "error": berr, "workspace": ws_ref, "replayed": replayed,
+            "taint": sorted(btaint)})
+        return ref
 
     def _would_exceed(self, extra: Cost) -> str | None:
         """Would spend `extra` on top of the budget's current spend already be at a cap? (reason, or None)"""
@@ -1004,12 +1073,17 @@ class Engine:
     def _attempt(self, node, state: dict[str, Any], run_id: str):
         """Execute a node with the transient-infra retry policy.
         Returns (output, cost incl. failed attempts, provenance, error string | None, infra cause | None)."""
+        return self._attempt_with(lambda: self._execute(node, state, run_id))
+
+    def _attempt_with(self, execute: Callable[[], tuple[dict[str, Any], Cost, Any]]):
+        """`_attempt` over any execution (`execute` is called once per attempt). Reads only `self.retry` and
+        `self._sleep`, so a fan-out worker thread may call it (`_ParallelBranches`)."""
         failed = Cost()  # tokens/$/quota of failed infra attempts are charged; their wall time is not
         notes: list[str] = []
         for attempt in range(1, self.retry.max_attempts + 1):
             t0 = time.monotonic()
             try:
-                out, cost, prov = self._execute(node, state, run_id)
+                out, cost, prov = execute()
                 if notes:
                     out = {**out, "_infra_retries": notes}
                 return out, failed + _walled(cost, time.monotonic() - t0), prov, None, None
@@ -1238,6 +1312,13 @@ class Engine:
         backend = self.backends.get(node.role)
         if backend is None:
             raise ValueError(f"no backend bound to role '{node.role}'")
+        messages, archived = self._render_llm(node, state, max_chars, head_fraction)
+        return _call_llm(node, backend, messages, archived)
+
+    def _render_llm(self, node: LLMNode, state, max_chars, head_fraction) -> tuple[list[Message], list[str]]:
+        """Render an LLM node's messages: emits the releases of the labelled keys it renders, records its step label
+        (`_step_label`) and archives over-long values. Engine state is written here, so it runs on the engine's
+        thread only; the model call itself (`_call_llm`) touches no engine state."""
         node_id = next((k for k, v in self.spec.nodes.items() if v is node), "llm")
         targets = self._release_rendered(node_id, [node.system or "", node.prompt], state)
         self._step_label[id(node)] = set(targets)
@@ -1254,30 +1335,199 @@ class Engine:
             messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction,
                                                                   archive)))
         messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive)))
-        total = Cost()
-        attempts: list[str] = []
-        for _ in range(node.retries + 1):
-            resp = backend.complete(ChatRequest(messages=messages, json_schema=node.output_schema,
-                                                temperature=node.temperature, max_tokens=node.max_tokens))
-            total = total + resp.cost
-            if node.output_schema is None:
-                return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages),
-                         "archived": archived}, total, resp.provenance)
+        return messages, archived
+
+
+def _call_llm(node: LLMNode, backend: Any, messages: list[Message], archived: list[str]):
+    """The model call(s) of an LLM node over already-rendered messages, with its output-contract retries. Touches no
+    engine state (a fan-out worker thread runs it). Returns (output, cost, provenance); raises ContractError."""
+    total = Cost()
+    attempts: list[str] = []
+    for _ in range(node.retries + 1):
+        resp = backend.complete(ChatRequest(messages=messages, json_schema=node.output_schema,
+                                            temperature=node.temperature, max_tokens=node.max_tokens))
+        total = total + resp.cost
+        if node.output_schema is None:
+            return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages),
+                     "archived": archived}, total, resp.provenance)
+        try:
+            value = parse_json_output(resp.text)
+            jsonschema.validate(value, node.output_schema)
+            return ({"value": value, "attempts": attempts + [resp.text], "messages": _dump(messages),
+                     "archived": archived}, total, resp.provenance)
+        except (json.JSONDecodeError, jsonschema.ValidationError) as e:
+            msg = e.msg if isinstance(e, json.JSONDecodeError) else e.message
+            attempts.append(resp.text)
+            messages = messages + [
+                Message(role="assistant", content=resp.text),
+                Message(role="user", content=f"Your output violated the required JSON contract: {msg}. "
+                                             f"Reply with only valid JSON matching the schema."),
+            ]
+    raise ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts,
+                        _dump(messages))
+
+
+class _BranchJournal:
+    """A fan-out branch's model calls on a worker thread: the same write-ahead `cost_journal` row `_JournalingBackend`
+    writes, under the branch's OWN cursor (run, step, branch id, nonce), never the engine's shared `_cursor`. The row
+    is an append to the internally locked store, keyed by this execution's unique nonce: a worker appends nothing
+    else."""
+
+    def __init__(self, inner: Backend, store: EvidenceStore, cursor: tuple[str, int, str, str]):
+        self._inner, self._store, self._cursor = inner, store, cursor
+
+    def complete(self, req: ChatRequest) -> ChatResponse:
+        resp = self._inner.complete(req)
+        run_id, step, bid, nonce = self._cursor
+        self._store.append_record("cost_journal", {"run_id": run_id, "step": step, "cost": resp.cost.model_dump(),
+                                                   "branch": bid, "nonce": nonce})
+        return resp
+
+
+class _ParallelBranches:
+    """Opt-in parallel fan-out of a map whose body is an LLM node (`Engine(map_workers=N)`, N > 1). Single writer:
+    every engine-state and store write, except the model calls' own write-ahead cost-journal rows, happens on the
+    engine's thread.
+
+    - prepare (engine thread, in item order, at most N branches ahead of the next commit, and only while the
+      committed spend is under the budget): the branch state and labels (`Engine._branch_state`) and the prompt
+      render (`Engine._render_llm`: releases, archive, step label) under the branch's labels, exactly what the
+      sequential path does right before its model call;
+    - run (worker thread): `_call_llm` under the engine's transient-infra retry policy (`Engine._attempt_with`),
+      journalled through `_BranchJournal`;
+    - commit (engine thread, in item order, `result`): one more prompt release per transient retry (the sequential
+      path re-renders on every attempt) and the branch label: its rendered targets plus the private reads attributed
+      to the run from its preparation to its commit (a window that contains the sequential one, so it can only
+      over-taint).
+    A branch whose render raised is executed at its commit by the sequential `Engine._attempt` instead (the same
+    result, error or crash as the sequential path; releases its failed render already emitted stay emitted).
+
+    Stated limits: (1) budget: up to N-1 branches may already be running when the cap is reached; their spend is
+    charged (`drain`), so a parallel fan-out can overshoot a cap by at most N-1 branches (the sequential one by none),
+    with the same step error; (2) each branch's cost carries its own wall time, so a step's summed `wall_s` exceeds
+    its elapsed time; (3) the backend must be thread-safe, and outputs are equal across worker counts only when a
+    response depends on the request, not on the order of calls (a scripted list is order-dependent)."""
+
+    def __init__(self, eng: Engine, node_id: str, node: MapNode, body: LLMNode, state: dict[str, Any],
+                 items: list[Any], ids: list[str], run_id: str, index: int, items_taint: set[str],
+                 saved_ts: TaintState):
+        self.eng, self.node_id, self.node, self.body, self.state = eng, node_id, node, body, state
+        self.items, self.ids, self.run_id, self.index = items, ids, run_id, index
+        self.items_taint, self.saved_ts = items_taint, saved_ts
+        bound = eng.backends[body.role]
+        self.inner: Backend = bound._inner if isinstance(bound, _JournalingBackend) else bound
+        self.prepared: dict[int, dict[str, Any]] = {}
+        self.next: int | None = None  # next branch index to prepare
+        self.stopped = False  # no more preparation (the budget was reached)
+        self.pool = ThreadPoolExecutor(max_workers=eng.map_workers, thread_name_prefix="chh-map")
+
+    def _work(self, messages: list[Message], archived: list[str], cursor: tuple[str, int, str, str]):
+        """Worker thread: the branch's model call(s) only. Returns the `_attempt` tuple and the number of attempts."""
+        journal = _BranchJournal(self.inner, self.eng.store, cursor)
+        n = 0
+
+        def execute():
+            nonlocal n
+            n += 1
+            return _call_llm(self.body, journal, messages, archived)
+        out, cost, prov, berr, binfra = self.eng._attempt_with(execute)
+        return out, cost, prov, berr, binfra, n
+
+    def _prepare(self, k: int) -> None:
+        eng = self.eng
+        bid, nonce = self.ids[k], uuid.uuid4().hex
+        bstate, bts = eng._branch_state(self.node_id, self.node, self.state, self.items, k, self.ids,
+                                        self.items_taint, self.saved_ts)
+        p: dict[str, Any] = {"bid": bid, "nonce": nonce, "bstate": bstate, "bts": bts,
+                             "seq": eng._data_access_seq()}
+        for registry in (eng._step_label, eng._step_surface, eng._step_writes):
+            registry.pop(id(self.body), None)
+        ctx = eng.spec.context
+        eng._ts = bts
+        try:
+            messages, archived = eng._render_llm(self.body, bstate, ctx.max_value_chars, ctx.head_fraction)
+        except Exception:  # noqa: BLE001  (re-executed sequentially at its commit, which reproduces the outcome)
+            messages = None
+        finally:
+            eng._ts = self.saved_ts
+        p["targets"] = set(eng._step_label.pop(id(self.body), set()))
+        if not bts.pending:  # a control decision released inside the branch is released for the run
+            self.saved_ts.pending = []
+        if messages is not None:
+            p["future"] = self.pool.submit(self._work, messages, archived, (self.run_id, self.index, bid, nonce))
+        self.prepared[k] = p
+
+    def _fill(self, k: int, acc: Cost) -> None:
+        if self.next is None:
+            self.next = k
+        while not self.stopped and self.next < min(len(self.items), k + self.eng.map_workers):
+            if self.eng._would_exceed(acc) is not None:
+                self.stopped = True
+                break
+            self._prepare(self.next)
+            self.next += 1
+
+    def _label(self, p: dict[str, Any], targets: set[str]) -> set[str]:
+        from ..kerneld.releases import attributed_reads
+        reads, _ = attributed_reads(self.eng.store, after_seq=p["seq"], run_ids=run_family(self.run_id),
+                                    own_seqs=self.eng._step_capture)
+        return set(targets) | set(reads)
+
+    def _rerelease(self, p: dict[str, Any], n_attempts: int) -> None:
+        eng = self.eng
+        for _ in range(n_attempts - 1):
+            eng._ts = p["bts"]
             try:
-                value = parse_json_output(resp.text)
-                jsonschema.validate(value, node.output_schema)
-                return ({"value": value, "attempts": attempts + [resp.text], "messages": _dump(messages),
-                         "archived": archived}, total, resp.provenance)
-            except (json.JSONDecodeError, jsonschema.ValidationError) as e:
-                msg = e.msg if isinstance(e, json.JSONDecodeError) else e.message
-                attempts.append(resp.text)
-                messages = messages + [
-                    Message(role="assistant", content=resp.text),
-                    Message(role="user", content=f"Your output violated the required JSON contract: {msg}. "
-                                                 f"Reply with only valid JSON matching the schema."),
-                ]
-        raise ContractError(f"output contract failed after {node.retries + 1} attempts", total, attempts,
-                            _dump(messages))
+                eng._release_rendered(self.node.body, [self.body.system or "", self.body.prompt], p["bstate"])
+            finally:
+                eng._ts = self.saved_ts
+        eng._step_label.pop(id(self.body), None)
+
+    def result(self, k: int, acc: Cost):
+        """Commit branch k (engine thread): (bid, nonce, output, cost, provenance, error, infra, label)."""
+        eng = self.eng
+        self._fill(k, acc)
+        if k not in self.prepared:  # cannot happen after the caller's own budget check; kept fail safe
+            self._prepare(k)
+        p = self.prepared.pop(k)
+        if "future" not in p:  # its render raised: the sequential path, at its place in item order
+            eng._ts = p["bts"]
+            eng._cursor = (self.run_id, self.index, p["bid"], p["nonce"])
+            try:
+                out, cost, prov, berr, binfra = eng._attempt(self.body, p["bstate"], self.run_id)
+            finally:
+                eng._cursor = (self.run_id, self.index)
+                eng._ts = self.saved_ts
+            if not p["bts"].pending:
+                self.saved_ts.pending = []
+            targets = p["targets"] | eng._step_label.pop(id(self.body), set())
+            eng._step_surface.pop(id(self.body), None)
+            eng._step_writes.pop(id(self.body), None)
+        else:
+            out, cost, prov, berr, binfra, n = p["future"].result()
+            self._rerelease(p, n)
+            targets = p["targets"]
+        return p["bid"], p["nonce"], out, cost, prov, berr, binfra, self._label(p, targets)
+
+    def drain(self):
+        """Branches prepared past the stop, in item order: (k, bid, nonce, (output, cost, provenance, error, infra,
+        label) | None, crash text | None). A branch whose model call never started is cancelled and not listed."""
+        for k in sorted(self.prepared):
+            p = self.prepared.pop(k)
+            fut: Future | None = p.get("future")
+            if fut is None or fut.cancel():
+                continue
+            try:
+                out, cost, prov, berr, binfra, n = fut.result()
+            except Exception as e:  # noqa: BLE001  (its spend is recovered from its journal by the caller)
+                yield k, p["bid"], p["nonce"], None, f"{type(e).__name__}: {e}"[:500]
+                continue
+            self._rerelease(p, n)
+            yield k, p["bid"], p["nonce"], (out, cost, prov, berr, binfra, self._label(p, p["targets"])), None
+
+    def shutdown(self) -> None:
+        """No worker outlives the step: not-started calls are cancelled, running ones are waited for."""
+        self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 def _dump(messages: list[Message]) -> list[dict]:

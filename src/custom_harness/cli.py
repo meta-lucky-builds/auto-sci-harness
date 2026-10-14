@@ -44,6 +44,11 @@ def _backend(kind: str) -> Backend:
     raise SystemExit(f"unknown backend '{kind}'")
 
 
+MAP_WORKERS_HELP = ("opt-in: run the model calls of a map whose body is an LLM node on up to N threads (default 1 = "
+                    "sequential); results are committed in item order, so outputs equal the sequential run's "
+                    "(runtime/engine.py _ParallelBranches)")
+
+
 def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
     backends = {}
@@ -62,8 +67,8 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
         sandbox = DockerSandbox(ws)
     elif a.dev_sandbox:
         sandbox = LocalSandbox(ws, i_understand_no_isolation=True)
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 allow_same_family=a.allow_same_family).run(a.task, inputs, seed=a.seed)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox, allow_same_family=a.allow_same_family,
+                 map_workers=a.map_workers).run(a.task, inputs, seed=a.seed)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -84,8 +89,8 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
             sandbox = LocalSandbox(Path(run.workspace), i_understand_no_isolation=True)
         else:
             raise SystemExit("this run used a sandbox: pass --docker (or --dev-sandbox for trusted test code)")
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 allow_same_family=a.allow_same_family).resume(a.run_id, force=a.force)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox, allow_same_family=a.allow_same_family,
+                 map_workers=a.map_workers).resume(a.run_id, force=a.force)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, "cost": res.cost.model_dump()}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -599,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
     r.add_argument("--docker", action="store_true", help="Docker sandbox (required for agent-written code)")
+    r.add_argument("--map-workers", type=int, default=1, help=MAP_WORKERS_HELP)
     ev = sub.add_parser("evolve", help="evolve a harness spec on a task suite (never touches the sealed split)")
     ev.add_argument("spec")
     ev.add_argument("--suite", required=True)
@@ -626,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rr.add_argument("--map-workers", type=int, default=1, help=MAP_WORKERS_HELP)
     rd = sub.add_parser("return-data", help="HUMAN: register measurements returned for an approved physical protocol")
     rd.add_argument("run_id")
     rd.add_argument("--file", required=True)
