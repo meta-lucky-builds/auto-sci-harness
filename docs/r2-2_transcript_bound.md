@@ -20,7 +20,6 @@ The tests on `int16-fix` that record the open state:
 | `tests/test_review_loop.py::test_identical_harnesses_score_identically_in_a_paired_comparison` | **strict xfail**, `raises=MultiplicityDrift`, assertions unchanged |
 | `tests/test_evolve.py::test_generation_finds_structural_fix_and_blocks_unsafe_edits` | **strict xfail**, `raises=MultiplicityDrift`, assertions unchanged; keeps the acceptance coverage for when the fix lands |
 | `tests/test_evolve.py::test_generation_halts_fail_closed_while_releases_outgrow_the_declared_family` | new plain test: the same campaign stops with `MultiplicityDrift` naming the transcript bound, with no decision and no `harness_edit` record |
-
 | `tests/test_infra.py::test_docker_outage_mid_campaign_changes_no_decision` | **strict xfail**, `raises=MultiplicityDrift` (real campaign halts) |
 | `tests/test_infra.py::test_a_persistent_outage_ends_infra_aborted_never_rejected` | **strict xfail**, `raises=MultiplicityDrift` |
 | `tests/test_exclusion_asymmetry.py::test_outage_campaign_reaches_the_same_decision_with_the_rule` | **strict xfail**, `raises=MultiplicityDrift` |
