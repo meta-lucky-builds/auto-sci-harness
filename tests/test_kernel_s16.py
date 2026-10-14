@@ -368,17 +368,18 @@ def test_reasons_are_coded_and_carry_no_exception_text(world, monkeypatch):
 def test_k4_plan_code_divergence(world, monkeypatch):
     c, ids = _honest(world)
     assert world.kernel.certify(c, ids, record=False).checks["K4"].status == "pass"
-    real = K.paired_example_interval
+    from custom_harness.kernel import ml as ML  # the registered test is the ML adapter's procedure since the split
+    real = ML.paired_example_interval
 
     def percentile_instead(*a, **kw):  # a code change that silently runs another test than the registered one
         iv = real(*a, **kw)
         return Interval(iv.estimate, iv.lo, iv.hi, iv.n, iv.alpha, "percentile", iv.degenerate)
 
-    monkeypatch.setattr(K, "paired_example_interval", percentile_instead)
+    monkeypatch.setattr(ML, "paired_example_interval", percentile_instead)
     cert = world.kernel.certify(c, ids, record=False)
     assert Code.K4_PLAN_CODE_DIVERGENCE in cert.checks["K4"].codes and cert.label == Label.REJECTED
-    monkeypatch.setattr(K, "paired_example_interval", real)
-    monkeypatch.setattr(K, "REGISTERED_TESTS", {})
+    monkeypatch.setattr(ML, "paired_example_interval", real)
+    monkeypatch.setattr(ML, "REGISTERED_TESTS", {})
     assert Code.K4_PLAN_CODE_DIVERGENCE in world.kernel.certify(c, ids, record=False).checks["K4"].codes
     ctx = K.Context(claim=c, claim_hash=c.claim_hash(), store=world.store, vault=world.vault,
                     ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
