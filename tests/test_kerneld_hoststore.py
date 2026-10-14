@@ -263,8 +263,8 @@ def test_measurement_refusals_carry_closed_classes_only():
     from custom_harness.kerneld import ingest as I
     from custom_harness.kerneld.protocol import MEASUREMENT_PROBLEMS
     msgs = ["data is not UTF-8 text", "columns ['a'] differ from the protocol's ['b']",
-            "line 3: 2 values for 3 columns", "line 4: load='SECRET-VALUE' is not a finite number", "arm 'x': 1 replicates < the protocol's minimum 3",
-            "something new"]
+            "line 3: 2 values for 3 columns", "line 4: load='SECRET-VALUE' is not a finite number",
+            "arm 'x': 1 replicates < the protocol's minimum 3", "something new"]
     classes = [I._problem_class(m) for m in msgs]
     assert classes == ["not_utf8", "columns", "row_length", "non_finite", "replicates", "other"]
     assert set(classes) <= set(MEASUREMENT_PROBLEMS) and not any("SECRET" in c for c in classes)
