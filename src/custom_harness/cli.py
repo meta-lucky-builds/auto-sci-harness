@@ -377,12 +377,37 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Write the M2 task suite (synthetic families on the host; real + repair tasks inside the sandbox)."""
     from .research.suite import build_suite, export_real
     real = None
-    if a.docker:
+    if a.frozen or a.verify:  # GOAL §16.2: freeze the manifest, then mint (research/rebuild.py)
+        from .kernel import Ledger
+        from .research import rebuild as RB
+        if not (a.record_dir and a.beacon_file):
+            raise SystemExit("--frozen/--verify need --record-dir and --beacon-file (outside agent-readable roots)")
+        try:
+            RB.require_private_locations(Path(a.record_dir), Path(a.beacon_file))  # before any labelled export lands
+        except RB.RebuildRefused as e:
+            raise SystemExit(f"refused: {e}") from None
+        if a.verify:
+            res = RB.verify(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
+                            ledger_entries=Ledger(store).entries())
+            print(json.dumps(res, indent=1))
+            return 1 if res["problems"] else 0
+        if a.real_export:
+            real = RB.load_real_export(Path(a.real_export))
+    if a.docker and real is None:
         from .sandbox.docker import FULL_IMAGE, DockerSandbox
         # the ONLY full-image sandbox: trusted exporter code reads scikit-learn's bundled datasets (agent code runs
         # in the candidate image, which has none; tests/test_bundled_data.py pins this)
         real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
-                           Path(a.out) / "_export")
+                           Path(a.record_dir) / "_export" if a.frozen else Path(a.out) / "_export")
+    if a.frozen:
+        from .kernel import Kernel
+        try:
+            res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
+                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+        except (RB.RebuildRefused, RB.MintRefused) as e:
+            raise SystemExit(f"refused: {e}") from None
+        print(json.dumps(res, indent=1))
+        return 0
     path = build_suite(Path(a.out), real_data=real)
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
@@ -741,6 +766,13 @@ def main(argv: list[str] | None = None) -> int:
     bs = sub.add_parser("build-suite", help="write the ML task suite (>= 20 tasks with --docker)")
     bs.add_argument("out")
     bs.add_argument("--docker", action="store_true", help="also build real-data and repair tasks in the sandbox")
+    bs.add_argument("--frozen", action="store_true", help="GOAL 16.2: anchor the suite manifest, then mint the data "
+                    "from draw(manifest hash, sealed beacon); idempotent (docs/suite_rebuild.md)")
+    bs.add_argument("--verify", action="store_true", help="re-derive a --frozen suite and compare every file")
+    bs.add_argument("--record-dir", help="private record directory (outside agent-readable roots)")
+    bs.add_argument("--beacon-file", help="the sealed beacon (outside agent-readable roots)")
+    bs.add_argument("--real-export", help="real-data export written by the trusted exporter (instead of --docker)")
+    bs.add_argument("--name", default="m2", help="suite name recorded in the manifest")
     pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
     pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
     pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
