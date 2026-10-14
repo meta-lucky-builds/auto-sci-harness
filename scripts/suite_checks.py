@@ -88,8 +88,10 @@ def heldout_lines(task_dir: Path) -> set[bytes]:
 # matches it). Not found: copies with fewer than 6 significant digits than the suite's own values carry
 # (e.g. 3 decimals), binary formats (.npy, parquet, pickles: files with a NUL byte in their first 8 KiB are not
 # token-scanned), and transformed or split copies.
-_NUM = re.compile(rb"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?")
-_SEG = re.compile(rb"\r\n|\r|\n|\\r\\n|\\n|\\r|[\[\]{}()\"]")
+# one pass over the bytes: group 1 is a number; a separator (real newline, escaped \n or \r, bracket, brace,
+# parenthesis, double quote) matches with an empty group
+_TOK = re.compile(rb'(?=[-+.0-9\r\n\[\]{}()"\\])'
+                  rb'(?:([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)|[\r\n\[\]{}()"]|\\[rn])')
 
 
 @functools.lru_cache(maxsize=1 << 20)
@@ -119,26 +121,39 @@ class TokenIndex:
 
     def __init__(self) -> None:
         self.by_len: dict[int, dict[tuple[str, ...], list[tuple[str, str]]]] = {}
+        self.starts: dict[str, set[int]] = {}  # first number of a needle -> the needle lengths that start with it
 
     def add(self, needle: tuple[str, ...], tid: str, form: str) -> None:
         self.by_len.setdefault(len(needle), {}).setdefault(needle, []).append((tid, form))
+        self.starts.setdefault(needle[0], set()).add(len(needle))
 
     def scan(self, raw: bytes) -> list[tuple[tuple[str, ...], str, str]]:
         """(needle, task id, form) for every window of a segment of `raw` that equals a needle."""
-        out = []
-        lens = sorted(self.by_len)
-        for seg in _SEG.split(raw):
-            toks = _NUM.findall(seg)
-            if len(toks) < lens[0]:
-                continue
-            vals = [norm_number(t) for t in toks]
-            for n in lens:
-                idx = self.by_len[n]
-                for i in range(len(vals) - n + 1):
-                    hit = idx.get(tuple(vals[i:i + n]))
-                    if hit:
-                        out += [(tuple(vals[i:i + n]), tid, form) for tid, form in hit]
+        out: list[tuple[tuple[str, ...], str, str]] = []
+        shortest = min(self.by_len)
+        segs: list[list[bytes]] = [[]]
+        for tok in _TOK.findall(raw):  # one pass: a number, or b"" for a segment separator
+            if tok:
+                segs[-1].append(tok)
+            elif segs[-1]:
+                segs.append([])
+        for toks in segs:
+            if len(toks) >= shortest:
+                self._scan_segment([norm_number(t) for t in toks], out)
         return out
+
+    def _scan_segment(self, vals: list[str], out: list[tuple[tuple[str, ...], str, str]]) -> None:
+        starts = self.starts
+        for i, v in enumerate(vals):
+            lens = starts.get(v)
+            if not lens:
+                continue
+            for n in lens:
+                if i + n <= len(vals):
+                    w = tuple(vals[i:i + n])
+                    hit = self.by_len[n].get(w)
+                    if hit:
+                        out += [(w, tid, form) for tid, form in hit]
 
 
 def _walk(roots: Iterable[Path], skip: list[Path]) -> Iterable[Path]:
@@ -182,6 +197,8 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
     n_files = skipped_big = unreadable = not_token_scanned = 0
     for f in _walk(roots, skip):
         n_files += 1
+        if n_files % 5000 == 0:
+            log(f"truth scan: {n_files} files, now in {f.parent}")
         try:
             if f.stat().st_size > MAX_READ:
                 skipped_big += 1
