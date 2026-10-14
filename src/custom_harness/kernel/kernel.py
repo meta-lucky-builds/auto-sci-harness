@@ -258,6 +258,9 @@ class Kernel:
         """Run K0-K9 and issue an immutable certificate (recorded in the ledger). A check that raises is a
         FAILED check. full_chain=False is only for reproducing from a bundle (a ledger excerpt). as_of=seq re-derives
         on the ledger as it stood up to entry seq (never recorded)."""
+        ablated = self._ablated_runs(evidence_ids)
+        if ablated:  # an ablation run is a measurement arm, never a source of certified truth (fail closed)
+            raise KernelError(f"certification refused: evidence produced by ABLATED run(s) {ablated}")
         ledger = self.ledger if as_of is None else AsOfLedger(self.store, as_of)
         vault = self.vault if as_of is None else Vault(self.store, ledger)
         record = record and as_of is None
@@ -347,6 +350,20 @@ class Kernel:
         self.ledger.append("certificate", {"cert_hash": cert.cert_hash(), "claim_hash": ctx.claim_hash,
                                            "label": label.value, "blob": blob, "resolution": resolution})
         return cert
+
+    def _ablated_runs(self, evidence_ids: list[str] | tuple[str, ...]) -> list[str]:
+        """The runs marked ABLATED (Run.ablated, custom_harness/ablation.py) that produced any of the evidence. An id
+        that does not resolve is left to K0 (which fails it); a run id with no run record is not an ablated run (a run
+        is only ever ablated through its own record)."""
+        out: list[str] = []
+        for e in evidence_ids:
+            try:
+                run_id = self.store.get_evidence(e).produced_by_run
+                if run_id is not None and self.store.get_run(run_id).ablated and run_id not in out:
+                    out.append(run_id)
+            except KeyError:
+                continue
+        return out
 
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:

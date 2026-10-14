@@ -475,18 +475,14 @@ def test_campaign_refused_unless_claim_nodes_declare_the_multiplicity_bound(stor
     assert check_campaign(_declared(seed_spec(), 65), store, [d1, d2], runs_per_task=32) == 65
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "OPEN (owner decision, docs/r2-2_transcript_bound.md): check_run counts claims, but K4 (Kernel 1.2) certifies at "
-    "alpha / max(n_comparisons, N), N = the transcript bound, which every verdict-bit release doubles. Making "
-    "check_run fail closed on N (x-reviewloop 70d2ac6) stops every evolution campaign at its first release."))
 def test_run_check_uses_the_kernels_transcript_bound_not_the_claim_count(store, tmp_path):
     """K4 certifies at alpha / max(n_comparisons, N) with N the transcript bound over the target family: every
     release logged before a claim (e.g. each evolve run's verdict bits, channel evolution_score) doubles that claim's
     term. Counting claims (2 here) misses the drift K4 actually applies (1 + 2^3 = 9 here): with n_comparisons=2 the
     second claim was certified at alpha/9, so the arm evaluated later in a paired comparison is judged stricter.
     Secure: check_run refuses (MultiplicityDrift) whenever K4's family size exceeds the declared n_comparisons.
-    (Test from x-reviewloop 70d2ac6, kept here as a strict xfail so the open gap stays visible and its fix is
-    detected.)"""
+    Orchestrator decision 2026-10-09: fail closed until the Kernel's alpha-account charging lands (GOAL 16.4;
+    docs/r2-2_transcript_bound.md)."""
     from custom_harness.budget import Budget
     from custom_harness.evolve.multiplicity import MultiplicityDrift, check_run, held_out_target_id, last_prereg_seq
     from custom_harness.kernel import Kernel

@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .. import config
-from ..kerneld.releases import Releases, note_code, private_reads
+from ..kerneld.releases import Releases, note_code, run_targets
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .evaluate import RunOutcome, SuiteTask
@@ -89,7 +89,7 @@ def _default_targets(outcome: Callable[[HarnessSpec, Unit], RunOutcome], store: 
                      arms: tuple[HarnessSpec, HarnessSpec]) -> Callable[[list[Unit]], list[str]]:
     def targets(units: list[Unit]) -> list[str]:
         runs = {outcome(x, u).run_id for x in arms for u in units}
-        return sorted({t for r in runs if r for t in private_reads(store, run_id=r)})
+        return sorted({t for r in runs if r for t in run_targets(store, r)})
     return targets
 
 

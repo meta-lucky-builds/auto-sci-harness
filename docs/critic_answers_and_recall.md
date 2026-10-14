@@ -98,9 +98,16 @@ paged. The only release of such a value is the engine's own, made when it render
 
 ## Not enforced / limits (stated)
 
-- **Recall is not wired into research_v1/v2.** No node in the seed specs requests a page (it would add model calls).
-  It is a module any spec can use: agent -> `research.recall` -> a node rendering `{{recalled.text}}`. Keep
-  `page_chars` + about 300 below the spec's `context.max_value_chars`, or the page is truncated again.
+- **Recall is wired into research_v2's debug path only (2026-10-08, branch w2-wiring); research_v1 is unchanged.**
+  `run_candidate` keeps a failing dev run's longer log as `run_log` (param `run_log_chars`, hard cap
+  `RUN_LOG_MAX_CHARS` = 64000, UNCALIBRATED); `fix` renders it with `|log` (a long log is archived behind a handle) and
+  may add `"recall": {handle, page}` to its JSON; `fix_recall` (`research.recall`, agent `fix`, page_chars 4000,
+  max_recalls 3) serves or refuses; a served page goes to one `fix_paged` call, a refusal makes no further call.
+  Why on in v2 and off in v1: the cost is zero model calls unless the fixer asks, and at most one extra call per
+  served page, capped at 3 per run (GOAL §16.8 yield); v1 stays the unchanged baseline. Whether recall raises the fix
+  success rate is NOT measured. Tests: `tests/test_research_recall_wiring.py`. Other specs can use the same pattern:
+  agent -> `research.recall` -> a node rendering `{{recalled.text}}`. Keep `page_chars` + about 300 below the spec's
+  `context.max_value_chars`, or the page is truncated again.
 - **Engine taint does not follow copies** (existing engine limitation, red-team finding): a module copying a tainted
   key into a new key leaves the copy untainted, and a resumed engine starts with no taint. Recall and citations do not
   rely on it alone: anything produced after a private read of this run is refused. The engine's OWN release emission

@@ -35,6 +35,7 @@ from ..kernel.kernel import Kernel, KernelError
 from ..records import Claim as StoreClaim
 from ..store.evidence import EvidenceStore
 from .refs import all_claim_rows, canonical, record_ref, run_ref, sha
+from .registry import switch_fact
 from .runner import AS_REPORTED_KIND, RUN_KIND
 
 CERTIFIED_PREFIX = "CERTIFIED-"
@@ -175,9 +176,14 @@ def extract(store: EvidenceStore, *, museum_log: Path | None = None, findings: P
     kernel = Kernel(store)
     certs = _certificates(store, kernel)
     by_hash = {c["cert_hash"]: c for c in certs}
-    runs = [_run(store, kernel, r.id, by_hash) for r in reversed(store.list_runs(limit=2**62))]
+    all_runs = list(reversed(store.list_runs(limit=2**62)))
+    # ABLATED runs (custom_harness/ablation.py) are measurement arms of the ablation runner: they are listed apart and
+    # never enter the production axes (F/G/H read `runs`)
+    runs = [_run(store, kernel, r.id, by_hash) for r in all_runs if not r.ablated]
+    ablated_runs = [{"ref": run_ref(store, r.id), "run_id": r.id, "ablated": list(r.ablated)}
+                    for r in all_runs if r.ablated]
     facts: dict[str, Any] = {
-        "certificates": certs, "store_claims": _store_claims(store), "runs": runs,
+        "certificates": certs, "store_claims": _store_claims(store), "runs": runs, "ablated_runs": ablated_runs,
         "scorecard_runs": [{"ref": record_ref(RUN_KIND, b), **b} for b in store.records(RUN_KIND)],
         "as_reported": [{"ref": record_ref(AS_REPORTED_KIND, b), **b} for b in store.records(AS_REPORTED_KIND)],
         "claim_audit_citations": [
@@ -209,7 +215,8 @@ def extract(store: EvidenceStore, *, museum_log: Path | None = None, findings: P
     if k:
         rows = (yaml.safe_load(k[1].decode("utf-8")) or {}).get("capabilities") or []
         facts["inputs"]["capabilities"] = {"ref": k[0], "capabilities": [
-            {"id": str(c.get("id")), "ablation": c.get("ablation")} for c in rows]}
+            {"id": str(c.get("id")), "ablation": c.get("ablation"), **switch_fact(str(c.get("id")), c.get("ablation"))}
+            for c in rows]}
     t = _input(timesplit, "timesplit", inputs_dir)
     if t:
         facts["inputs"]["timesplit"] = {"ref": t[0], "comparison": json.loads(t[1].decode("utf-8"))}

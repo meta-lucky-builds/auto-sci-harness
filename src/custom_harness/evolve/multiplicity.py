@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from ..kernel import Kernel
-from ..kernel.checks import shared_examples
+from ..kernel.checks import family, releases_on, shared_examples
+from ..kernel.releases import transcript_bound
 from ..runtime.spec import HarnessSpec, ModuleNode
 from ..store import EvidenceStore
 
@@ -81,6 +82,16 @@ def family_size(store: EvidenceStore, target: str) -> int:
                 if rel & set((e.body.get("claim") or {}).get("generalization_targets") or [])})
 
 
+def kernel_family_size(store: EvidenceStore, target: str) -> int:
+    """K4's multiplicity N on `target` as the ledger stands now (kernel/checks.target_level without an
+    alpha-account): the transcript bound over the family's claims, where every release logged before a claim
+    multiplies its term (a verdict bit by 2). Equals family_size only while no release touched the family."""
+    kernel = Kernel(store)
+    rel = related(store, target)
+    return transcript_bound([e.seq for e in family(kernel.ledger, rel)], releases_on(kernel.ledger, rel),
+                            kernel.config.count_alphabet)
+
+
 def check_campaign(spec: HarnessSpec, store: EvidenceStore, task_dirs: list[Path], *, runs_per_task: int) -> int:
     """Refuse (MultiplicityDrift) unless every claim node declares n_comparisons >= the campaign's bound. Returns
     the bound. A spec without claim nodes registers no claims: nothing to declare."""
@@ -112,11 +123,14 @@ def check_run(store: EvidenceStore, since_seq: int) -> list[dict[str, Any]]:
         claim = e.body.get("claim") or {}
         declared = int((claim.get("analysis_plan") or {}).get("n_comparisons", 1))
         for target in claim.get("generalization_targets") or []:
-            size = family_size(store, target)
+            # K4 certifies at alpha / max(declared, N), N = the transcript bound (not the claim count): the
+            # releases between runs (each evolve run's verdict bits) grow N, so counting claims misses the drift
+            size = kernel_family_size(store, target)
             if size > declared:
                 raise MultiplicityDrift(
                     f"claim {str(e.body.get('claim_hash'))[:12]} declared n_comparisons={declared}, but {size} "
-                    f"claims are registered on target {target}'s family: its certification depended on evaluation "
+                    f"is K4's family size (transcript bound over claims and releases) on target {target}: its "
+                    "certification depended on evaluation "
                     "order (R2-2). Outcome discarded; campaign stopped.")
             checked.append({"claim_hash": e.body.get("claim_hash"), "target": target, "family": size,
                             "declared": declared})

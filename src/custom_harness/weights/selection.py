@@ -13,6 +13,7 @@ import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from ..ablation import NO_ABLATION, AblationSet
 from . import config as C
 
 
@@ -31,15 +32,22 @@ class VarianceSelection:
 
 def select_by_reward_variance(rewards: Mapping[str, Sequence[float]], *, k: int | None = None,
                               min_rollouts: int = C.VARIANCE_MIN_ROLLOUTS,
-                              min_variance: float = C.VARIANCE_MIN) -> VarianceSelection:
+                              min_variance: float = C.VARIANCE_MIN,
+                              ablation: AblationSet = NO_ABLATION) -> VarianceSelection:
+    """With the ablation switch `reward_variance_selection` (custom_harness/ablation.py) the variance is not used:
+    every task is selected in task-id order (the first k with `k`), none excluded; rewards are still checked."""
     if min_rollouts < 1 or (k is not None and k < 0):
         raise ValueError("min_rollouts must be >= 1 and k must be None or >= 0")
     out = VarianceSelection()
     ranked: list[TaskVariance] = []
+    uniform = ablation.off("reward_variance_selection")
     for task, rs in rewards.items():
         vals = [float(r) for r in rs]
         if not all(math.isfinite(v) for v in vals):
             raise ValueError(f"task {task!r} has a non-finite reward")
+        if uniform:
+            ranked.append(TaskVariance(task, statistics.pvariance(vals) if vals else 0.0, len(vals)))
+            continue
         if len(vals) < min_rollouts:
             out.excluded[task] = "TOO_FEW_ROLLOUTS"
             continue
@@ -48,6 +56,6 @@ def select_by_reward_variance(rewards: Mapping[str, Sequence[float]], *, k: int 
             out.excluded[task] = "LOW_VARIANCE"
             continue
         ranked.append(TaskVariance(task, var, len(vals)))
-    ranked.sort(key=lambda x: (-x.variance, x.task_id))
+    ranked.sort(key=(lambda x: x.task_id) if uniform else (lambda x: (-x.variance, x.task_id)))
     out.selected = ranked if k is None else ranked[:k]
     return out

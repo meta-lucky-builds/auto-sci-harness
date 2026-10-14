@@ -1,11 +1,41 @@
-# R2-2 after Kernel 1.2: paired evolution arms are certified at different strictness (OPEN, owner decision)
+# R2-2 after Kernel 1.2: paired evolution arms are certified at different strictness (OPEN; fail closed)
 
-Status on `int16-fix` (2026-10-08): **open, not fixed**. Nothing under `src/` was changed for it. Two tests record it:
+## Decision (orchestrator, owner-delegated, 2026-10-09)
 
-- `tests/test_review_loop.py::test_identical_harnesses_score_identically_in_a_paired_comparison` **fails** (unchanged;
-  it states the R2-2 guarantee).
-- `tests/test_evolve_hardening.py::test_run_check_uses_the_kernels_transcript_bound_not_the_claim_count` is a
-  **strict xfail** (it passes only once `check_run` mirrors K4's real family size).
+- **The fix:** GOAL §16.4's per-target α-accounts charge releases to an explicit test-set-wear budget. Option 2
+  below, with m fixed at registration (option 1, invariant 17). This makes R2-2 hold by construction.
+  - It is a Kernel change, assigned to **s3-kernel**.
+  - The exponential transcript bound is honest worst-case accounting and is **not** loosened.
+- **Until that lands: fail closed (option 4).** `evolve/multiplicity.py::check_run` now mirrors K4's real family
+  size (`kernel_family_size`, the transcript bound; merged from x-reviewloop 70d2ac6). It raises `MultiplicityDrift`
+  whenever that size exceeds the declared `n_comparisons`.
+  - In practice **every evolution campaign halts** at the first run after a verdict-bit release on its target.
+    No campaign is running today.
+
+The tests on `int16-fix` that record the open state:
+
+| Test | State |
+|---|---|
+| `tests/test_evolve_hardening.py::test_run_check_uses_the_kernels_transcript_bound_not_the_claim_count` | plain test, passes: the detector |
+| `tests/test_review_loop.py::test_identical_harnesses_score_identically_in_a_paired_comparison` | **strict xfail**, `raises=MultiplicityDrift`, assertions unchanged |
+| `tests/test_evolve.py::test_generation_finds_structural_fix_and_blocks_unsafe_edits` | **strict xfail**, `raises=MultiplicityDrift`, assertions unchanged; keeps the acceptance coverage for when the fix lands |
+| `tests/test_evolve.py::test_generation_halts_fail_closed_while_releases_outgrow_the_declared_family` | new plain test: the same campaign stops with `MultiplicityDrift` naming the transcript bound, with no decision and no `harness_edit` record |
+| `tests/test_infra.py::test_docker_outage_mid_campaign_changes_no_decision` | **strict xfail**, `raises=MultiplicityDrift` (real campaign halts) |
+| `tests/test_infra.py::test_a_persistent_outage_ends_infra_aborted_never_rejected` | **strict xfail**, `raises=MultiplicityDrift` |
+| `tests/test_exclusion_asymmetry.py::test_outage_campaign_reaches_the_same_decision_with_the_rule` | **strict xfail**, `raises=MultiplicityDrift` |
+
+These outage tests assert decisions of real campaigns. With the detector, both their clean and outage arms halt
+before any decision, so they are strict xfails with assertions unchanged. The halt itself is pinned by the new
+test_evolve halt test.
+
+Strict means a marker turns into a gate failure as soon as the Kernel fix makes its test pass, which forces the
+marker's removal. These markers record a known violation; they do not weaken anything.
+
+Known fidelity gap (not soundness): the certifiability preflight (`research/claims.py` and `research/preflight.py`)
+estimates the family as `max(n_comparisons, claims + 1)`, not the transcript bound.
+- The preflight is deny-only (invariant 21), so under-estimating m makes it deny less often than K4 would reject.
+- It can never cause a certification.
+- Not changed.
 
 ## Mechanism
 
@@ -74,7 +104,7 @@ old scratchpad). That branch contains both fc24adc and 2778d48.
 - **Fork the store per arm.** Hiding one arm's claims from the other's family under-counts multiplicity. That is not
   acceptable.
 
-## Options (need an owner decision; Kernel or statistics changes)
+## Options considered (decided above: 1+2 in the Kernel, 4 until then)
 
 1. **Kernel:** K4 uses the transcript bound fixed at registration, or a declared release budget, so m cannot move
    after a claim is registered. The R2-2 declaration would then cover both claims and releases.

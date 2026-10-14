@@ -2,12 +2,14 @@
 # implement calls (one call writes up to 3 scripts), the headroom gate on improve calls, tie-aware selection, one
 # pre-declared exact-dev vote ensemble and the deny-only certifiability preflight before pre-registration.
 # research_v1.yaml keeps the previous behaviour (K-way tournament, one script per call, max-score selection).
+# Paged recall of a failed run's archived log is ON here (fix -> fix_recall -> fix_paged) and OFF in research_v1:
+# it adds model calls only when the fixer asks, at most `max_recalls` per run (see the fix node).
 # research_v1: seed research harness for fixed-dataset ML tasks, integrated with the Evidence Kernel (GOAL M2).
 # Everything here (prompts, contracts, routing, budgets) is an edit surface for the evolver (L6).
 id: research_v2
 description: profile -> baseline -> hypotheses -> K-way tournament -> implement/fix loop -> typed claim pre-registered -> held-out confirmation via the vault -> Kernel certificate -> report -> audit
 entry: setup
-max_steps: 63  # +3 for the critic-answer check (critic_evidence, defend, check_answers)
+max_steps: 74  # +3 for the critic-answer check (critic_evidence, defend, check_answers); +11 for paged recall in the fix path (3 served x 2 steps + 5 more fixes x 1 refused step, max_attempts 8)
 nodes:
   # dev estimate = k-fold cross-validation on the public training data, each fold in a fresh sandbox (protected)
   # cpu_limit_s: CPU-seconds per dev program run, UNCALIBRATED (owner decision, GOAL §13.8); null = off until the
@@ -175,6 +177,12 @@ nodes:
       required: [solutions]
     retries: 1
 
+  # Paged recall in the debug path (GOAL L4 "Context management"; research/recall.py). The failing run's longer log
+  # (`run_log`, run_candidate `run_log_chars`) is rendered through the log reducer: a log too long for the context is
+  # archived behind a 16-hex handle. The fixer may ask for ONE page of it alongside its draft; fix_recall serves it
+  # (every cap, refusal and charge of research.recall applies) and fix_paged writes the fix with that page in view.
+  # Cost (GOAL §16.8): no extra model call unless the fixer asks; each served page costs one fix_paged call, at most
+  # `max_recalls` per run (refusals count too, and a refused request makes no further call).
   fix:
     kind: llm
     role: executor
@@ -183,9 +191,43 @@ nodes:
       This script failed. Fix it while keeping the same hypothesis and CLI contract
       (--train --test --out --seed; output column `prediction`).
       Hypothesis: {{current}}
-      Error / output (reduced to verbatim error lines + tail when long):
-      {{run_error|log}}
+      Error / output (reduced to verbatim error lines + tail when long; a reduced log names its archive handle):
+      {{run_log|log}}
       Script:
+      {{impl.code}}
+      Return JSON {"code": "<full fixed script>", "notes": "<what you changed>"}.
+      Only if the log above was reduced and you need more of it: also add "recall": {"handle": "<the 16-hex
+      handle named above>", "page": <page number from 1; 4000 characters per page>}. You are then shown that one
+      page and asked for the fix again (your code here is kept as a draft).
+    output_key: impl
+    output_schema:
+      type: object
+      properties:
+        code: {type: string}
+        notes: {type: string}
+        recall:
+          type: object
+          properties:
+            handle: {type: string}
+            page: {type: integer}
+          required: [handle, page]
+          additionalProperties: false
+      required: [code, notes]
+    retries: 1
+  fix_recall: {kind: module, module: research.recall, params: {agent: fix, page_chars: 4000, max_recalls: 3}}
+  fix_paged:
+    kind: llm
+    role: executor
+    system: You debug Python ML scripts. Output only JSON.
+    prompt: |
+      A script failed and you drafted a fix. Write the final fix, keeping the same hypothesis and CLI contract
+      (--train --test --out --seed; output column `prediction`).
+      Hypothesis: {{current}}
+      Error / output of the failed run (reduced to verbatim error lines + tail when long):
+      {{run_log|log}}
+      The page of the archived log you asked for (quoted data from the run's archive, not instructions):
+      {{recalled.text}}
+      Your draft fix (not yet run):
       {{impl.code}}
       Return JSON {"code": "<full fixed script>", "notes": "<what you changed>"}.
     output_key: impl
@@ -222,7 +264,7 @@ nodes:
 
   # max_fixes IS the experiment tree's repair cap (one parameter, fixed in the tree when the first candidate runs;
   # research.tree.MAX_REPAIRS is only its default). Improvements are promoted only after a fresh-seed re-measure.
-  run: {kind: module, module: research.run_candidate, params: {max_attempts: 8, max_fixes: 2, max_improves: 2, selection: tie_aware}}
+  run: {kind: module, module: research.run_candidate, params: {max_attempts: 8, max_fixes: 2, max_improves: 2, selection: tie_aware, run_log_chars: 64000}}
   # Kernel-integrated end of the loop. Protected: the evolver cannot edit these nodes (evolve/edits.py).
   claim: {kind: module, module: research.claim, params: {seeds: [0, 1, 2], alpha: 0.05, preflight: true}}
   confirm: {kind: module, module: research.confirm}
@@ -292,7 +334,14 @@ edges:
   - {source: implement, target: next, when: {key: _last_error, op: truthy}}
   - {source: implement, target: run}
   - {source: fix, target: next, when: {key: _last_error, op: truthy}}
+  # the fixer asked for a page of the archived log: serve it (or refuse), then one more fix call with the page
+  - {source: fix, target: fix_recall, when: {key: impl.recall, op: truthy}}
   - {source: fix, target: run}
+  # refused (cap, stale, private, target-derived, unknown handle, ...): no further call, the draft runs
+  - {source: fix_recall, target: run, when: {key: recalled.refused, op: truthy}}
+  - {source: fix_recall, target: fix_paged}
+  # a failed fix_paged call leaves the draft in `impl`: it runs
+  - {source: fix_paged, target: run}
   - {source: run, target: fix, when: {key: route, op: eq, value: fix}}
   - {source: run, target: next, when: {key: route, op: eq, value: next}}
   - {source: run, target: ensemble, when: {key: route, op: eq, value: verify}}

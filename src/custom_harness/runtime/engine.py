@@ -26,6 +26,7 @@ cannot approve.
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import hashlib
 import json
@@ -42,6 +43,7 @@ from typing import Any
 
 import jsonschema
 
+from ..ablation import NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded, Campaign
 from ..errors import InfraError, infra_cause, is_transient
 from ..gateway import Backend, BackendError, ChatRequest, ChatResponse, Message
@@ -50,7 +52,8 @@ from ..policy import model_policy
 from ..records import Cost, Run, RunStatus, StepKind, TraceStep
 from ..sandbox import Sandbox, restore_snapshot, take_snapshot
 from ..store import EvidenceStore
-from .modules import ModuleContext, get_module
+from ..store.evidence import add_ledger_observer
+from .modules import STEP_TOUCHED, ModuleContext, get_module
 from .spec import (
     END,
     ApprovalNode,
@@ -63,9 +66,64 @@ from .spec import (
     approval_state_keys,
     engine_reserved,
 )
+from .taint import (
+    MUTABLE,
+    SANDBOX_SURFACE,
+    SECRETS_SURFACE,
+    TaintState,
+    TrackedState,
+    changed_in_place,
+    decision_alphabet,
+    state_fingerprints,
+)
 from .template import lookup, references, render
 
 APPROVAL_DECISIONS = ("approved", "rejected")
+_STORE_TOUCH = frozenset({"store", "_store", "kernel"})  # ModuleContext surfaces that reach the whole store
+
+# The run whose step is executing in this context, and runs started (by an Engine) while another run's step was
+# executing in the same context: a nested run's private reads are attributed to its parent too (`run_family`).
+# Stated limit: a nested run started on a thread that does not copy the context is not linked (docs/taint.md).
+_ACTIVE_RUN: contextvars.ContextVar[str | None] = contextvars.ContextVar("chh_active_run", default=None)
+_NESTED_PARENT: dict[str, str] = {}
+
+
+def run_family(run_id: str) -> set[str]:
+    """`run_id` and every run nested (transitively) inside one of its steps in this process."""
+    fam = {run_id}
+    grew = True
+    while grew:
+        grew = False
+        for child, parent in list(_NESTED_PARENT.items()):
+            if parent in fam and child not in fam:
+                fam.add(child)
+                grew = True
+    return fam
+
+
+def _note_nested(child: str) -> None:
+    parent = _ACTIVE_RUN.get()
+    if parent is not None and parent != child:
+        _NESTED_PARENT[child] = parent
+
+
+# The ledger seqs of `data_access` entries appended in this execution context while a step (and every enclosing
+# step of an outer engine) executes: a private read a step makes ITSELF is attributed to its run whatever run id the
+# read names (kerneld/releases.attributed_reads `own_seqs`). Reads served by another process (kerneld) are not seen
+# here; they are attributed by the run id they name (docs/taint.md).
+_CAPTURE: contextvars.ContextVar[tuple[list[int], ...]] = contextvars.ContextVar("chh_read_capture", default=())
+# The label of what the module step executing in this context has read so far (a callable, evaluated when asked): a
+# run started inside that step (a nested Engine.run) starts with its `input` carrying it.
+_PARENT_LABEL: contextvars.ContextVar[Any] = contextvars.ContextVar("chh_parent_label", default=None)
+
+
+def _observe_ledger(seq: int, kind: str) -> None:
+    if kind == "data_access":
+        for seqs in _CAPTURE.get():
+            seqs.append(int(seq))
+
+
+add_ledger_observer(_observe_ledger)
 # (module id, output key) -> the reduced release alphabet that module may DECLARE for that key (`_release_alphabets`,
 # 2f1d54a). Owner decision 2026-10-08: kept, and pinned here (tests/test_release_embargo.py); a declaration from any
 # other module or for any other key is ignored (the key stays `continuous`, fail closed). Every module listed here
@@ -146,6 +204,7 @@ class _JournalingBackend(Backend):
         self.training_on_outputs = inner.training_on_outputs
 
     def complete(self, req: ChatRequest) -> ChatResponse:
+        self._engine._before_module_model_call()  # a module-built prompt is an agent-visible surface (releases)
         resp = self._inner.complete(req)
         cursor = self._engine._cursor
         if cursor is not None:
@@ -181,6 +240,18 @@ class RunResult:
     detail: str = ""
     steps: int = 0
     cost: Cost = field(default_factory=Cost)
+
+
+@dataclass
+class _ModuleFrame:
+    """The module step executing now (its model calls are release sites)."""
+
+    node_id: str
+    tracked: TrackedState
+    touched: set[str]
+    seq: int  # data_access ledger seq when the step started
+    run_id: str
+    own: list[int] = field(default_factory=list)  # seqs of private reads this step made itself (`_CAPTURE`)
 
 
 _FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
@@ -223,7 +294,7 @@ class Engine:
     def __init__(self, spec: HarnessSpec, *, backends: dict[str, Backend], store: EvidenceStore,
                  budget: Budget | None = None, sandbox: Sandbox | None = None,
                  retry: RetryPolicy | None = None, sleep=time.sleep, allow_same_family: bool | None = None,
-                 campaign: Campaign | None = None):
+                 campaign: Campaign | None = None, ablation: AblationSet = NO_ABLATION):
         # invariant 5, checked before any model call; an override (argument or CHH_ALLOW_SAME_FAMILY=1) is
         # recorded in every run's state as NOT MET and reported in every certificate checklist
         allowed = allow_same_family if allow_same_family is not None else (
@@ -236,6 +307,11 @@ class Engine:
             if isinstance(node, MapNode):
                 get_reducer(node.reducer)
         self.spec = spec
+        # capability switches OFF for this engine's runs (custom_harness/ablation.py): only the scorecard runner's
+        # ablation entry point makes a non-empty set; every run it starts is marked ABLATED in its record
+        if not isinstance(ablation, AblationSet):
+            raise TypeError("ablation must be an AblationSet (custom_harness.ablation)")
+        self.ablation = ablation
         self._budget_owned = budget is None
         # fan-out bookkeeping: a resume of an infra-failed map step hands it the instance and the nonces already
         # charged (from that step's checkpoint); `_map_pending` is what the current map step adds to its checkpoint
@@ -256,34 +332,91 @@ class Engine:
         self.campaign = campaign  # GOAL L1: one budget across every run of a campaign (derived from the store)
         self.spec_hash = store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=None)
         self._ws_ref: str | None = None  # latest workspace snapshot of the current run
-        # release emission (GOAL §16.5.3): state keys written by a step during which private files were read are
-        # TAINTED with those targets; rendering a tainted key into a prompt or tool command is a ledgered release.
-        # In-memory per engine (a resumed run re-taints only from steps it runs itself: stated limit).
-        self.taint: dict[str, set[str]] = {}
-        # a TRUSTED module may declare that a tainted output key carries at most the verdict bit or a count (e.g. the
+        # release emission (GOAL §16.5.3, runtime/taint.py, docs/taint.md): every state key carries the set of
+        # held-out targets it derives from (the union over what the step that wrote it READ, recorded by the engine,
+        # plus the private reads attributed to this run during that step and the run's control label). Rendering a
+        # labelled key into a prompt or tool command, or a module's own model call after it read one, is a ledgered
+        # release. The labels are written into every checkpoint and restored exactly by resume and fork.
+        # A TRUSTED module may declare that a labelled output key carries at most the verdict bit or a count (e.g. the
         # replication brief: built from non-target data, its existence is the verdict). Only module outputs can
         # declare (`_release_alphabets`, never stored in state); any other write of the key clears the declaration.
-        self.release_alphabet: dict[str, str] = {}
+        self._ts = TaintState()
         self.releases: Any = None  # None = live releases on the store's ledger
-        self._prompt_taint: dict[int, set[str]] = {}
+        self._step_label: dict[int, set[str]] = {}  # node -> label of what the step it is running read
+        self._step_surface: dict[int, set[str]] = {}  # node -> ModuleContext surfaces it touched
+        self._step_writes: dict[int, dict[str, str]] = {}  # node -> state keys a module wrote directly / in place
+        self._frame: _ModuleFrame | None = None  # the module step currently executing (for its model calls)
+        self._step_capture: list[int] = []  # seqs of the private reads the executing step made itself
+        from ..kernel import KernelConfig
+        self._count_alphabet = KernelConfig().count_alphabet
         # provenance of archived handles (paged recall / critic citations refuse unknown or target-derived ones): a
         # handle archived while rendering a prompt that rendered any tainted key carries all of that prompt's targets
         # (conservative). In-memory per engine, like `taint`.
         self.archive_taint: dict[str, frozenset[str]] = {}
+
+    @property
+    def taint(self) -> dict[str, frozenset[str]]:
+        """The current run's labels: state key -> held-out targets its value may derive from."""
+        return self._ts.labels
+
+    @property
+    def release_alphabet(self) -> dict[str, str]:
+        """Allowlisted reduced-alphabet declarations of the current run (state key -> alphabet)."""
+        return self._ts.alphabets
 
     # ------------------------------------------------------------------ public
     def run(self, task_id: str, inputs: dict[str, Any], seed: int = 0) -> RunResult:
         state = {"input": inputs, "_seed": seed, "model_policy": self.model_policy}
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash, task_id=task_id, seed=seed,
                   inputs_ref=self.store.blobs.put_json(state),
-                  workspace=str(self.sandbox.workspace) if self.sandbox is not None else None)
+                  workspace=str(self.sandbox.workspace) if self.sandbox is not None else None,
+                  ablated=self.ablation.names)
         self.store.add_run(run)
+        _note_nested(run.id)
         if self.campaign is not None:
             self.campaign.join(run.id)
         self._ws_ref = None
         self._map_resume = {}
+        # labels already held by this engine object are kept (as before: an engine reused for another run, or a test
+        # seeding `engine.taint`, can only over-taint, never under-taint)
+        self._ts.seq = self._data_access_seq()
+        parent = _PARENT_LABEL.get()
+        if parent is not None:  # nested inside a module step: its inputs may carry what that step read
+            lab = frozenset(parent())
+            if lab:
+                self._ts.set_label("input", self._ts.labels.get("input", frozenset()) | lab)
         self._started(run.id)
         return self._loop(run.id, state, self.spec.entry, start_index=0)
+
+    def _data_access_seq(self) -> int:
+        rows = self.store.ledger_rows("data_access")
+        return int(rows[-1][0]) if rows else 0
+
+    def _restore_taint(self, cp: Mapping[str, Any] | None, run_id: str, state: Mapping[str, Any]) -> TaintState:
+        """The labels of a checkpoint, exactly; fail closed when it has none (written before labels existed, or
+        malformed): every key then carries every target the run read. Private reads attributed to the run AFTER the
+        checkpoint (a step killed mid-flight read and maybe wrote to the store) join the run label."""
+        from ..kerneld.releases import attributed_reads
+        try:
+            since: float | None = self.store.get_run(run_id).started_at - 1.0
+        except KeyError:
+            since = None
+        ts: TaintState | None = None
+        if cp is not None and cp.get("taint") is not None:
+            try:
+                ts = TaintState.from_doc(cp["taint"])
+            except ValueError:
+                ts = None
+        if ts is None:
+            if cp is None:  # died before the first step finished: nothing it read reached state
+                ts = TaintState()
+            else:
+                targets, last = attributed_reads(self.store, after_seq=0, run_ids=run_family(run_id), since=since)
+                ts = TaintState.fail_closed(state, targets, last)
+        later, last = attributed_reads(self.store, after_seq=ts.seq, run_ids=run_family(run_id), since=since)
+        ts.run |= frozenset(later)
+        ts.seq = last
+        return ts
 
     def fork(self, run_id: str, step_index: int, state_patch: dict[str, Any] | None = None,
              task_id: str | None = None) -> RunResult:
@@ -306,6 +439,7 @@ class Engine:
         if kill is not None:
             raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not forked (it would continue "
                              f"under a new id)")
+        self._check_ablation(run_id, "forked")
         steps = self.store.trace(run_id)
         step = next((s for s in steps if s.index == step_index), None)
         if step is None or step.checkpoint_ref is None:
@@ -321,12 +455,20 @@ class Engine:
         self.budget.spent = carried if self._budget_owned else _unit_max(self.budget.spent, carried)
         parent = self.store.get_run(run_id)
         state = dict(cp["state"])
-        state.update(copy.deepcopy(patch))
+        # the child continues from the parent's labels (a fork in a fresh engine must not launder them); patched keys
+        # hold caller-supplied values (refused if they carry a private value): unlabelled
+        self._ts = self._restore_taint(cp, run_id, state)
+        for k, v in patch.items():  # each value on its own: two patched keys never share one object
+            state[k] = copy.deepcopy(v)
+        for k in patch:
+            self._ts.set_label(k, ())
+            self._ts.alphabets.pop(k, None)
         run = Run(harness_id=self.spec.id, harness_hash=self.spec_hash,
                   task_id=task_id or parent.task_id, seed=parent.seed, inputs_ref=parent.inputs_ref,
                   workspace=str(self.sandbox.workspace) if self.sandbox is not None else None,
-                  forked_from=(run_id, step_index))
+                  forked_from=(run_id, step_index), ablated=self.ablation.names)
         self.store.add_run(run)
+        _note_nested(run.id)
         body = {"parent_run_id": run_id, "step": step_index, "child_run_id": run.id, "patch_keys": sorted(patch),
                 "patch_sha256": patch_sha, "carried_spent": carried.model_dump()}
         from ..kernel.ledger import KINDS
@@ -369,6 +511,7 @@ class Engine:
             raise ValueError(f"run {run_id} was {killed_detail(kill)}; a killed run is not resumable")
         if run.harness_hash != self.spec_hash:
             raise ValueError("resume needs the exact harness spec the run started with")
+        self._check_ablation(run_id, "resumed")
         resumable = (status in (RunStatus.RUNNING, RunStatus.INFRA_FAILED, RunStatus.PAUSED)
                      or (status == RunStatus.FAILED and detail.startswith("engine crash")))
         if not resumable:
@@ -391,12 +534,14 @@ class Engine:
             pending = cp.get("map_instance") and last.node_id == next_node
             self._map_resume = ({next_node: {"instance": cp["map_instance"],
                                              "charged": list(cp.get("map_charged", []))}} if pending else {})
+            self._ts = self._restore_taint(cp, run_id, state)
         else:  # died before the first step finished
             if run.inputs_ref is None:
                 raise ValueError(f"run {run_id} predates resumable runs (no stored inputs)")
             self._map_resume = {}
             state, next_node, start, spent, ws_ref = (self.store.blobs.get_json(run.inputs_ref), self.spec.entry,
                                                       0, Cost(), None)
+            self._ts = self._restore_taint(None, run_id, state)
         if self.sandbox is not None and ws_ref:
             restore_snapshot(ws_ref, self.sandbox.workspace, self.store.blobs)
         self._ws_ref = ws_ref
@@ -427,7 +572,8 @@ class Engine:
         for e in entries:
             spent = spent + Cost.model_validate(e["cost"])
         cp_ref = self.store.blobs.put_json({"state": state, "next": node_id, "workspace": ws_ref,
-                                            "spent": (self.budget.spent + spent).model_dump()})
+                                            "spent": (self.budget.spent + spent).model_dump(),
+                                            "taint": self._ts.doc()})
         node = self.spec.nodes[node_id]
         now = time.time()
         self.store.add_step(TraceStep(
@@ -438,6 +584,14 @@ class Engine:
             cost=spent, started_at=now, ended_at=now, checkpoint_ref=cp_ref))
         self.budget.spent = self.budget.spent + spent
         return index + 1
+
+    def _check_ablation(self, run_id: str, what: str) -> None:
+        """A run continues (resume) or is forked only under the ablation it was started with: an ablated run is never
+        laundered into a production run, and a production run never continues ablated."""
+        recorded = self.store.run_ablated(run_id)
+        if recorded != self.ablation.names:
+            raise ValueError(f"run {run_id} was started with ablation {list(recorded)}; it cannot be {what} under "
+                             f"ablation {list(self.ablation.names)}")
 
     def _started(self, run_id: str, note: str = "") -> None:
         owner = {"pid": os.getpid(), "host": socket.gethostname()}
@@ -502,45 +656,80 @@ class Engine:
             node = self.spec.nodes[node_id]
             t0 = time.time()
             paused = False
+            prev_ws = self._ws_ref
             if isinstance(node, ApprovalNode):
                 out, error, paused = self._approval(node_id, node, state, run_id)
                 cost, prov, infra = Cost(), None, None
                 state["_last_error"] = error
+                # a decision about a labelled item carries the item's label (and the run's control label)
+                step_label = set(self._ts.labels.get(node.item_key.split(".")[0], frozenset())) | self._ts.control
+                for k in approval_state_keys(node_id):
+                    self._ts.set_label(k, step_label if k in state else ())
+                self._ts.set_label("_last_error", step_label)
             else:
+                from ..kerneld.releases import attributed_reads
                 self._cursor = (run_id, index)
-                rows = self.store.ledger_rows("data_access")
-                seq_before = rows[-1][0] if rows else 0
+                seq_before = self._data_access_seq()
                 self._run_id = run_id
                 self._map_pending = None
-                if isinstance(node, MapNode):
-                    out, cost, prov, error, infra = self._map(node_id, node, state, run_id, index)
-                else:
-                    out, cost, prov, error, infra = self._attempt(node, state, run_id)
+                for registry in (self._step_label, self._step_surface, self._step_writes):
+                    registry.pop(id(node), None)
+                # in-place changes are found over the WHOLE state (an alias of a key, or a reference a module kept
+                # from an earlier step, changes a key the step never read); LLM and tool steps cannot change state
+                fp_before = state_fingerprints(state) if isinstance(node, (ModuleNode, MapNode)) else {}
+                capture: list[int] = []
+                self._step_capture = capture
+                token = _ACTIVE_RUN.set(run_id)
+                ctoken = _CAPTURE.set((*_CAPTURE.get(), capture))
+                try:
+                    if isinstance(node, MapNode):
+                        out, cost, prov, error, infra = self._map(node_id, node, state, run_id, index)
+                    else:
+                        out, cost, prov, error, infra = self._attempt(node, state, run_id)
+                finally:
+                    _CAPTURE.reset(ctoken)
+                    _ACTIVE_RUN.reset(token)
                 self._cursor = None
+                # the label of everything this step wrote: what it read (engine-recorded), the private reads
+                # attributed to this run while it ran (incl. those it made itself, whatever run they name), and the
+                # run's control label
+                read, self._ts.seq = attributed_reads(self.store, after_seq=seq_before, run_ids=run_family(run_id),
+                                                      own_seqs=capture)
+                step_label = set(read) | self._step_label.pop(id(node), set()) | self._ts.control
+                surfaces = self._step_surface.pop(id(node), set())
+                writes = self._step_writes.pop(id(node), {})
+                for k in changed_in_place(state, fp_before):
+                    writes.setdefault(k, "mutate")
+                for k, how in writes.items():  # direct writes / deletes / in-place mutations
+                    self._ts.alphabets.pop(k, None)
+                    # a delete keeps a label (a tombstone): the key's ABSENCE can tell what the step read
+                    keep = how in ("mutate", "delete")
+                    self._ts.set_label(k, step_label | (self._ts.labels.get(k, frozenset()) if keep else set()))
+                if isinstance(node, ToolNode) or SANDBOX_SURFACE in surfaces:
+                    self._ts.workspace |= frozenset(step_label)
+                self._ts.run |= frozenset(step_label)
                 if infra is None:
                     state["_last_error"] = error
+                    self._ts.set_label("_last_error", step_label)
                     if error is None:
-                        from ..kerneld.releases import private_reads
-                        read = set(private_reads(self.store, after_seq=seq_before))
                         key = getattr(node, "output_key", None)
                         if key is not None:
-                            self.release_alphabet.pop(key, None)
+                            self._ts.alphabets.pop(key, None)
                             state[key] = out.get("value")
-                            carried = read | self._prompt_taint.get(id(node), set())
-                            if carried:
-                                self.taint[key] = carried
+                            self._ts.set_label(key, step_label)
                         else:
                             declared = out.pop("_release_alphabets", None)
                             for k in out:
-                                self.release_alphabet.pop(k, None)
+                                self._ts.alphabets.pop(k, None)
                             if isinstance(declared, dict):
                                 module = str(getattr(node, "module", ""))
-                                self.release_alphabet |= {k: a for k, a in declared.items() if k in out and a in (
+                                self._ts.alphabets |= {k: a for k, a in declared.items() if k in out and a in (
                                     "verdict_bit", "count") and RELEASE_ALPHABET_ALLOWLIST.get((module, k)) == a}
-                            state.update(out)  # module nodes return a dict of state updates
-                            if read:
-                                for k in out:
-                                    self.taint[k] = self.taint.get(k, set()) | read
+                            # module nodes return a dict of state updates, each value deep-copied ON ITS OWN by
+                            # _execute (one deepcopy of the whole dict would keep two returned keys one object)
+                            for k, v in out.items():
+                                state[k] = v
+                                self._ts.set_label(k, step_label)
 
             # An infra failure is not the harness's doing: never route it through the harness's error
             # edges. Stop, and checkpoint so that a resume retries this same node. A pause checkpoints the same
@@ -551,7 +740,7 @@ class Engine:
             elif isinstance(node, ApprovalNode) and error is not None:
                 next_node = None
             else:
-                next_node = self._next(node_id, state)
+                next_node = self._route(node_id, state)
             workspace_ref = None
             if self.sandbox is not None:
                 if isinstance(node, (LLMNode, ApprovalNode)):
@@ -559,10 +748,13 @@ class Engine:
                 elif not (isinstance(node, ToolNode) and not node.snapshot_after):
                     workspace_ref = take_snapshot(self.sandbox.workspace, self.store.blobs, previous=self._ws_ref)
                 self._ws_ref = workspace_ref
+                # a step that CHANGED the workspace (by any path, not only through ctx.sandbox) wrote its label there
+                if not isinstance(node, (LLMNode, ApprovalNode)) and workspace_ref != prev_ws:
+                    self._ts.workspace |= frozenset(step_label)
             # next=None marks a failed terminal (distinct from END), so resume/fork never mistake a
             # failure for completion; spent = cumulative cost after this step (persisted budget)
             cp = {"state": state, "next": next_node, "workspace": workspace_ref,
-                  "spent": (self.budget.spent + cost).model_dump()}
+                  "spent": (self.budget.spent + cost).model_dump(), "taint": self._ts.doc(step_label)}
             if infra is not None and self._map_pending is not None:  # a resume continues this fan-out instance
                 cp.update(self._map_pending)
             cp_ref = self.store.blobs.put_json(cp)
@@ -651,6 +843,10 @@ class Engine:
         instance = res["instance"] if res else f"{run_id}:{index}"
         charged: set[str] = set(res["charged"]) if res else set()
         self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
+        # the items' label first: every early MapError below quotes something about them (count, type)
+        items_root = node.items_key.split(".")[0]
+        items_taint = set(self._ts.labels.get(items_root, frozenset()))
+        self._step_label[id(node)] = set(items_taint)
         try:
             items = lookup(state, node.items_key)
         except KeyError:
@@ -669,9 +865,8 @@ class Engine:
         done = {r["branch_id"]: r for r in records if r.get("node_id") == node_id and r.get("error") is None}
         known_nonces = {r["nonce"] for r in records}
 
-        items_root = node.items_key.split(".")[0]
-        items_taint = set(self.taint.get(items_root, set()))
-        prompt_taint = set(items_taint)
+        prompt_taint = set(items_taint)  # the label of the reduced value: the items' and every branch's
+        surfaces: set[str] = set()
         acc = Cost()
         values: list[Any] = []
         branches: list[dict[str, Any]] = []
@@ -698,6 +893,7 @@ class Engine:
             if r.get("workspace") and self.sandbox is not None:
                 restore_snapshot(r["workspace"], self.sandbox.workspace, self.store.blobs)
                 self._ws_ref = r["workspace"]
+                surfaces.add(SANDBOX_SURFACE)
             reused += 1
         # 2. spend of earlier executions of this instance that is not reused and was never charged: persisted
         # branches past the reused prefix (e.g. a policy-failed branch whose step row the kill prevented), then the
@@ -717,7 +913,10 @@ class Engine:
                 charged.add(n)
         acc = acc + lost
         # 3. run the remaining branches in item order
-        saved_taint = self.taint
+        saved_ts = self._ts
+        from ..kerneld.releases import attributed_reads
+        if isinstance(body, ToolNode):
+            surfaces.add(SANDBOX_SURFACE)
         for k in range(reused, len(items)):
             over = self._would_exceed(acc)
             if over is not None:
@@ -728,22 +927,28 @@ class Engine:
             bstate[node.item_key] = copy.deepcopy(items[k])
             bstate["_map"] = {"node": node_id, "index": k, "branch_id": bid, "n": len(items)}
             bstate["_last_error"] = None
-            self.taint = {kk: set(v) for kk, v in saved_taint.items()}
-            if items_taint:
-                self.taint[node.item_key] = set(items_taint)
-            else:
-                self.taint.pop(node.item_key, None)
-            self._prompt_taint.pop(id(body), None)
+            # each branch sees the run's labels, with the item labelled like the list it came from
+            bts = saved_ts.copy()
+            bts.set_label(node.item_key, items_taint)
+            bts.set_label("_map", items_taint)  # n = len(items), index and branch id derive from the items
+            bts.set_label("_last_error", ())
+            self._ts = bts
+            for registry in (self._step_label, self._step_surface, self._step_writes):
+                registry.pop(id(body), None)
             self._cursor = (run_id, index, bid, nonce)
-            rows = self.store.ledger_rows("data_access")
-            seq_b = rows[-1][0] if rows else 0
+            seq_b = self._data_access_seq()
             try:
                 out, cost, prov, berr, binfra = self._attempt(body, bstate, run_id)
             finally:
                 self._cursor = (run_id, index)
-                self.taint = saved_taint
-            from ..kerneld.releases import private_reads
-            btaint = set(self._prompt_taint.pop(id(body), set())) | set(private_reads(self.store, after_seq=seq_b))
+                self._ts = saved_ts
+            if not bts.pending:  # a control decision released inside the branch is released for the run
+                saved_ts.pending = []
+            reads_b, _ = attributed_reads(self.store, after_seq=seq_b, run_ids=run_family(run_id),
+                                          own_seqs=self._step_capture)
+            self._step_writes.pop(id(body), None)  # direct writes went to the branch's own copy of the state
+            surfaces |= self._step_surface.pop(id(body), set())
+            btaint = set(self._step_label.pop(id(body), set())) | set(reads_b)
             prompt_taint |= btaint
             acc = acc + cost
             charged.add(nonce)
@@ -789,7 +994,8 @@ class Engine:
                 break
             values.append(value)
         self._map_pending = {"map_instance": instance, "map_charged": sorted(charged)}
-        self._prompt_taint[id(node)] = prompt_taint
+        self._step_label[id(node)] = prompt_taint
+        self._step_surface[id(node)] = surfaces
         out_doc: dict[str, Any] = {"reducer": node.reducer, "n_items": len(items), "instance": instance,
                                    "branches": branches, "reused_branches": reused,
                                    "recovered_lost_calls": lost_calls}
@@ -845,17 +1051,57 @@ class Engine:
                 return detail, failed + final, None, f"{type(e).__name__}: {e}", cause
         raise AssertionError("unreachable")
 
-    def _next(self, node_id: str, state: dict[str, Any]) -> str | None:
-        """First matching outgoing edge. Errors only follow edges that explicitly test _last_error."""
+    def _next(self, node_id: str, state: dict[str, Any], consulted: set[str] | None = None) -> str | None:
+        """First matching outgoing edge. Errors only follow edges that explicitly test _last_error. `consulted`
+        collects the top-level state keys whose values the decision read."""
         errored = state.get("_last_error") is not None
         for edge in self.spec.outgoing(node_id):
             if errored and (edge.when is None or "_last_error" not in edge.when.key):
                 continue
-            if edge.when is None or _holds(edge.when, state):
+            if edge.when is None:
+                return edge.target
+            if consulted is not None:
+                consulted.add(edge.when.key.split(".")[0])
+            if _holds(edge.when, state):
                 return edge.target
         if errored:
             return None
         return END if not self.spec.outgoing(node_id) else None
+
+    def _route(self, node_id: str, state: dict[str, Any]) -> str | None:
+        """`_next`, recording a TAINTED decision (an implicit flow): when the keys the decision read carry targets
+        and the node has more than one possible successor, which successor ran tells something about those targets.
+        Every later step's output carries them (control label), and the decision is released, once, at the next
+        agent-visible surface (`_release_control`). Stated limit: whether the run ENDS here (an error without an error
+        edge, a step or budget limit) is not counted (termination channel; docs/taint.md)."""
+        consulted: set[str] = set()
+        target = self._next(node_id, state, consulted)
+        edges = self.spec.outgoing(node_id)
+        # whether the step errored decides which edges are even looked at (`_next`), whatever their order
+        # (the same rule as `_next`: an edge whose key CONTAINS `_last_error` is followed after an error)
+        if any(e.when is not None and "_last_error" in e.when.key for e in edges):
+            consulted.add("_last_error")
+        successors = {e.target for e in edges}
+        lab = self._ts.label_of(consulted)
+        if lab and len(successors) > 1:
+            d = {"node": node_id, "targets": sorted(lab), "chosen": target,
+                 "alphabet": decision_alphabet(len(successors), self._count_alphabet)}
+            self._ts.pending.append(d)
+            self._ts.decisions.append(d)
+            self._ts.control |= lab
+            self._ts.run |= lab
+        return target
+
+    def _release_control(self, renderer: str) -> None:
+        """Release every tainted routing decision not yet released (the surface `renderer` reveals that it ran)."""
+        if not self._ts.pending:
+            return
+        from ..kerneld.releases import Releases, note_code
+        rel = self.releases or Releases.live(self.store)
+        for d in self._ts.pending:
+            rel.emit(d.get("chosen"), targets=d["targets"], channel="prompt", alphabet=str(d["alphabet"]),
+                     note=note_code("control", d["node"], renderer), key=getattr(self, "_run_id", ""))
+        self._ts.pending = []
 
     def _execute(self, node, state: dict[str, Any], run_id: str):
         ctx = self.spec.context
@@ -865,40 +1111,142 @@ class Engine:
             if self.sandbox is None:
                 raise ValueError("tool node requires a sandbox")
             node_id = next((k for k, v in self.spec.nodes.items() if v is node), "tool")
-            self._prompt_taint[id(node)] = self._release_rendered(node_id, list(node.command), state)
-            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction) for c in node.command]
+            # the command runs over the workspace: its output also carries every label written into it
+            self._step_label[id(node)] = (self._release_rendered(node_id, list(node.command), state)
+                                          | set(self._ts.workspace))
+            cmd = [render(c, state, ctx.max_value_chars, ctx.head_fraction,
+                          observation_pack=not self.ablation.off("observation-pack")) for c in node.command]
             res = self.sandbox.exec(cmd, timeout_s=node.timeout_s)
             if res.limit_exceeded:  # the command's own failure (policy): route through the harness's error edges
                 raise ValueError(f"tool command exceeded a sandbox limit: {res.limit_exceeded}")
             return {"value": res.model_dump()}, Cost(wall_s=res.wall_s), None
         if isinstance(node, ModuleNode):
             fn = get_module(node.module)
+            node_id = next((k for k, v in self.spec.nodes.items() if v is node), "module")
             # the run's private values (and their encodings) go to modules as `secrets`, so content screens that
             # modules apply (e.g. the L5 memory screen) refuse them; they are never module-visible state otherwise
             mctx = ModuleContext(run_id=run_id, store=self.store, backends=self.backends,
                                  budget=self.budget, sandbox=self.sandbox, secrets=tuple(_private_values(state)),
-                                 archive_taint=MappingProxyType(self.archive_taint))
+                                 archive_taint=MappingProxyType(self.archive_taint), ablation=self.ablation)
+            # the engine records what the module reads (state keys, context surfaces); the module reports nothing
+            tracked = TrackedState(state)
+            touched: set[str] = set()
+            mctx._touched = touched
+            outer = self._frame
+            self._frame = _ModuleFrame(node_id, tracked, touched, self._data_access_seq(), run_id,
+                                       own=self._step_capture)
+            ttoken = STEP_TOUCHED.set(touched)
+
+            def _label_so_far() -> set[str]:
+                from ..kerneld.releases import attributed_reads
+                lab = set(self._ts.control)
+                for t in self._module_reads(tracked, touched).values():
+                    lab |= t
+                reads, _ = attributed_reads(self.store, after_seq=self._frame.seq if self._frame else 0,
+                                            run_ids=run_family(run_id), own_seqs=self._step_capture)
+                return lab | set(reads)
+            ptoken = _PARENT_LABEL.set(_label_so_far)
             try:
-                updates = fn(state, node.params, mctx)
+                updates = fn(tracked, node.params, mctx)
+                # copied WHILE the engine still records: returning the TrackedState (or a structure holding it) is a
+                # bulk read; each value on its own, so no two returned keys share one object
+                if isinstance(updates, Mapping):
+                    updates = {k: copy.deepcopy(v) for k, v in updates.items()}
             except Exception as e:
                 raise ModuleError(f"{type(e).__name__}: {e}", mctx.spent, mctx.llm_calls) from e
+            finally:
+                _PARENT_LABEL.reset(ptoken)
+                STEP_TOUCHED.reset(ttoken)
+                self._frame = outer
+                mctx._touched = None
+                self._finish_module(node, state, tracked, touched)
             if mctx.llm_calls:
                 updates = {**updates, "_module_llm_calls": mctx.llm_calls}
             return updates, mctx.spent, None
         raise ValueError(f"unknown node type {type(node)}")
 
+    def _module_reads(self, tracked: TrackedState, touched: set[str]) -> dict[str, frozenset[str]]:
+        """What a module read so far, as (source -> targets): each labelled state key it read (every key after a bulk
+        read), plus the run label for the store/Kernel, the workspace label for the sandbox and the `_private*` keys'
+        labels for the secrets."""
+        # every key READ: a bulk read recorded every key present at that moment (a key popped before it stays in);
+        # after a bulk read also every key still present (coarser, never finer)
+        keys = set(tracked.reads) | (set(dict.keys(tracked)) if tracked.bulk else set())
+        out = {k: self._ts.labels[k] for k in sorted(keys) if self._ts.labels.get(k)}
+        if touched & _STORE_TOUCH and self._ts.run:
+            out["_store"] = self._ts.run
+        if SANDBOX_SURFACE in touched and self._ts.workspace:
+            out["_workspace"] = self._ts.workspace
+        if "archive_taint" in touched:
+            arch: set[str] = set()
+            for t in self.archive_taint.values():
+                arch |= t
+            if arch:
+                out["_archive"] = frozenset(arch)
+        if SECRETS_SURFACE in touched:
+            sec = self._ts.label_of(k for k in dict.keys(tracked) if str(k).startswith("_private"))
+            if sec:
+                out["_secrets"] = sec
+        return out
+
+    def _finish_module(self, node: Any, state: dict[str, Any], tracked: TrackedState, touched: set[str]) -> None:
+        """Apply the module's direct writes to the real state and record its label, surfaces and written keys
+        (accumulated over retried attempts)."""
+        writes = dict(self._step_writes.get(id(node), {}))
+        for k in tracked.deleted:
+            state.pop(k, None)
+            writes[k] = "delete"
+        for k in tracked.written:
+            value = dict.__getitem__(tracked, k)
+            try:  # a copy: `state['b'] = state['a']` must not make two keys one object
+                state[k] = copy.deepcopy(value)
+            except Exception:  # noqa: BLE001  (uncopyable: kept; an aliased change is still found by fingerprints)
+                state[k] = value
+            writes[k] = "write"
+        self._step_writes[id(node)] = writes
+        lab: set[str] = set()
+        for t in self._module_reads(tracked, touched).values():
+            lab |= t
+        self._step_label[id(node)] = self._step_label.get(id(node), set()) | lab
+        self._step_surface[id(node)] = self._step_surface.get(id(node), set()) | touched
+
+    def _before_module_model_call(self) -> None:
+        """A model call made by a module is an agent-visible surface: everything the module read so far may be in it.
+        Emits one release per labelled source (state key, store, workspace, secrets), one `continuous` release for
+        the private reads attributed to the run during the step so far, and the pending control decisions."""
+        f = self._frame
+        if f is None:
+            return  # an LLM node: released when its prompt was rendered
+        from ..kerneld.releases import Releases, alphabet_of, attributed_reads, note_code
+        rel = self.releases or Releases.live(self.store)
+        self._release_control(f.node_id)
+        for src, targets in self._module_reads(f.tracked, f.touched).items():
+            # the value as the module READ it (it may have overwritten the key since): a mutable value, a surface or
+            # a key never read as such is `continuous`
+            first = f.tracked.first.get(src, MUTABLE)
+            value = None if first is MUTABLE else first
+            alphabet = self._ts.alphabets.get(src) or (alphabet_of(first) if first is not MUTABLE else "continuous")
+            rel.emit(value, targets=targets, channel="prompt", alphabet=alphabet,
+                     note=note_code("module_llm", f.node_id, src), key=getattr(self, "_run_id", ""))
+        reads, _ = attributed_reads(self.store, after_seq=f.seq, run_ids=run_family(f.run_id), own_seqs=f.own)
+        if reads:
+            rel.emit(None, targets=reads, channel="prompt", alphabet="continuous",
+                     note=note_code("module_llm", f.node_id, "private_read"), key=getattr(self, "_run_id", ""))
+
     def _release_rendered(self, node_id: str, templates: list[str], state: dict[str, Any]) -> set[str]:
-        """Emit a `prompt` release for every tainted state key the templates render; returns the targets."""
+        """Emit a `prompt` release for every labelled state key the templates render (and the pending control
+        decisions); returns the targets of the rendered keys."""
         from ..kerneld.releases import Releases, alphabet_of, note_code
+        self._release_control(node_id)
         targets: set[str] = set()
         for t in templates:
             for path in references(t):
-                tk = self.taint.get(path.split(".")[0])
+                tk = self._ts.labels.get(path.split(".")[0])
                 if not tk:
                     continue
                 targets |= tk
                 rel = self.releases or Releases.live(self.store)
-                alphabet = self.release_alphabet.get(path.split(".")[0]) or alphabet_of(lookup(state, path, None))
+                alphabet = self._ts.alphabets.get(path.split(".")[0]) or alphabet_of(lookup(state, path, None))
                 rel.emit(lookup(state, path, None), targets=tk, channel="prompt",
                          alphabet=alphabet, note=note_code("prompt", node_id, path),
                          key=getattr(self, "_run_id", ""))
@@ -910,7 +1258,7 @@ class Engine:
             raise ValueError(f"no backend bound to role '{node.role}'")
         node_id = next((k for k, v in self.spec.nodes.items() if v is node), "llm")
         targets = self._release_rendered(node_id, [node.system or "", node.prompt], state)
-        self._prompt_taint[id(node)] = targets
+        self._step_label[id(node)] = set(targets)
         archived: list[str] = []  # handles of values truncated in the prompt (full text kept as blobs)
 
         def archive(text: str) -> str:
@@ -920,10 +1268,12 @@ class Engine:
             return digest
 
         messages = []
+        pack = not self.ablation.off("observation-pack")  # ablation switch (custom_harness/ablation.py)
         if node.system:
             messages.append(Message(role="system", content=render(node.system, state, max_chars, head_fraction,
-                                                                  archive)))
-        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive)))
+                                                                  archive, observation_pack=pack)))
+        messages.append(Message(role="user", content=render(node.prompt, state, max_chars, head_fraction, archive,
+                                                            observation_pack=pack)))
         total = Cost()
         attempts: list[str] = []
         for _ in range(node.retries + 1):

@@ -103,6 +103,17 @@ class TraceStep(Frozen):
     started_at: float
     ended_at: float
     checkpoint_ref: str | None = None
+    # ABLATED marker (custom_harness/ablation.py): the switches the step's run was ablated with. Stamped by the store
+    # from the run record, never by the writer. Serialised ONLY when non-empty, so every production step keeps its
+    # bytes and hashes.
+    ablated: tuple[str, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_unablated(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("ablated"):
+            doc.pop("ablated", None)
+        return doc
 
 
 class RunStatus(StrEnum):
@@ -130,6 +141,18 @@ class Run(Frozen):
     inputs_ref: str | None = None  # blob of the initial state
     workspace: str | None = None  # sandbox workspace path on this host
     forked_from: tuple[str, int] | None = None
+    # ABLATED marker (custom_harness/ablation.py): the capability switches this run was run with switched OFF. Only
+    # `Engine(ablation=...)` sets it, and only the scorecard runner's ablation entry point can make a non-empty set.
+    # Nothing an ablated run produces is certified, persisted or accepted. Serialised ONLY when non-empty, so every
+    # production run keeps its bytes and hashes.
+    ablated: tuple[str, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def _omit_unablated(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        doc: dict[str, Any] = handler(self)
+        if not doc.get("ablated"):
+            doc.pop("ablated", None)
+        return doc
 
 
 class EvidenceKind(StrEnum):

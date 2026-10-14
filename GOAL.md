@@ -3,8 +3,8 @@
 Date: 2026-10-06; scope revised 2026-10-07 (user decision: life sciences + engineering, core/adapter split, §4.7,
 §5 "Domain adapters", §11, §15). Owner: user (product decisions) · Claude (design + build).
 **This is the single source of truth for WHAT custom-harness is and when it is done.**
-(State: M0 ✅, M1 ✅, M2 built with exit test pending; markers in §5/§11 reflect it, details and verification state in
-`STATUS.md`.)
+(State: see `STATUS.md`, which is the only place that records build state, rewritten 2026-10-08. The ✅/🟡/❌
+markers in §5/§11 are historical (2026-10-07 morning) and are no longer maintained here.)
 `PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
 
 Inputs this file is built on (read them only if a detail is needed):
@@ -248,7 +248,8 @@ and the attestation is listed as an untested assumption on every such certificat
 ## 5. Component specifications
 
 Each component lists **Must** (requirements), **Never** (invariants), **Done when** (acceptance test), and the sources
-it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing, as of 2026-10-06, after M0; proofs in STATUS.md.)
+it absorbs and surpasses. (✅ already built · 🟡 partial · ❌ missing: HISTORICAL markers as of 2026-10-06/07, no longer
+updated; many ❌ items have since been built. Current state and proofs: STATUS.md.)
 
 ### L0 Substrate
 **Runtime** (🟡) — typed `HarnessSpec` (JSON Schema) interpreted as a graph.
@@ -454,13 +455,21 @@ reallocates budget across islands, edit types and **levers** (harness edit / wei
 lever chosen plus its evidence (what SIA claimed but doesn't do). Edit-type quotas prevent collapse into prompt-only
 edits. The orchestrator policy is itself versioned and gated on a slower cadence.
 
-### L8 Weights (❌, after M2)
+### L8 Weights: OUT OF SCOPE (owner decision 2026-10-14)
+**Owner decision 2026-10-14: no model training.** Self-improvement means harness evolution only (L6/L7). The
+certified-trajectory export already built (`weights/`, licence filter off by default, Goodhart isolation) may stay as
+an archive, but nothing trains weights, and the L7 "weights" lever only routes to that export. The original design
+below is kept for history.
+
 Two-timescale co-evolution: the harness evolves against verifier set A (fast); weights train against a disjoint verifier set
 B (slow) on trajectories certified by **both**; coupled-Goodhart indicator = gap between A-score and sealed score.
 Task selection by reward variance (AWorld idea); SFT format filtered by outcome (SciDER format, fixed); the trajectory
 licence filter is enforced (only outputs whose terms allow training).
 
 ### L9 Governance & Studio (❌, CLI only today)
+**Owner decision 2026-10-14: a UI/UX is REQUIRED** (no longer "CLI first, dashboard deferred"). It is built in a
+later, separate phase. Rule for it: the UI only displays what the Kernel decided and records human actions with the
+human's identity; it never grants anything itself.
 Tier policy as human-only config; approval queue; dashboard (claim graph, certificates, prediction ledger and calibration,
 lineage, cost, live runs); kill switch; `finalize`; "explain this certificate" view. Telemetry is opt-in only.
 
@@ -648,7 +657,7 @@ Principle: always keep one end-to-end path working. Build the Kernel early so ev
 | **M6 Memory, verifiers, branching** (was M4) | L5 store API; exploit quarantine; red team; judge panel validated; fault-injection verifiers; branching/routing | planted-exploit suite caught; router beats single best on sealed |
 | **M7 Literature + time-split** (was M5) | literature module + citation check; dated snapshots; time-split prediction benchmark; Problem Formulator | §6.4 headline experiment run (VALIDATED loop) |
 | **M8 Scorecard** (was M6) | pinned benchmarks A–H, re-run baselines, ablations, bundles | SOTA criteria §2 evaluated and published honestly |
-| **M9 Discovery & weights** (was M7, minus T0) | L7 islands; verifier synthesis; L8 two-timescale | ≥ 1 independently verified result on a known-value problem; coupled-Goodhart gap not widening |
+| **M9 Discovery** (was "Discovery & weights"; L8 training removed by owner 2026-10-14) | L7 islands; verifier synthesis | ≥ 1 independently verified result on a known-value problem |
 
 Each milestone updates `STATUS.md` and is committed with its tests.
 

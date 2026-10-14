@@ -54,6 +54,17 @@ changes:
     7-day cooling-off for core changes was NOT observed: this is a recorded deviation, not a tightening. The earlier
     record is left unchanged (history is not rewritten). Typed by the integrator agent, not by a human.
   recorded: '2026-10-08'
+- fingerprint: bc6ab30241c39d4a5d3c84826f275187a3722b81af9f520a0dd27368c4a42ed8
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; tighten-only changes may merge at once, GOAL 16.7)
+  note: >-
+    Ablation refusal (w2-ablation, GOAL invariant 12): Kernel.certify now raises KernelError before any check or
+    ledger write when any evidence was produced by a run whose record is marked ABLATED (Run.ablated,
+    custom_harness/ablation.py); helper Kernel._ablated_runs. Only adds a refusal; no pass condition is relaxed and no
+    check is skipped. Unresolvable evidence ids are still left to K0; a run id without a run record is not treated as
+    ablated. Tests: tests/test_kernel_ablation.py (in the Kernel coverage gate). Recorded by the w2-ablation builder
+    agent, not typed by a human.
+  recorded: '2026-10-08'
 - fingerprint: 8dc2497ea06f669c2aa7bdd0bf711b37c9572caa556f979ac12eeb65971f18bc
   kind: tighten
   approver: orchestrator (owner delegation of 2026-10-08; R2-2 decision of 2026-10-08/09)
@@ -86,4 +97,32 @@ changes:
   note: >-
     Recorded by the s3-kernel agent, not typed by a human. The 7-day cooling-off for core changes was NOT observed.
     The owner should review these changes and either confirm or replace this with a window record.
+  recorded: '2026-10-14'
+- fingerprint: d9524887c18781db548ff59f51e9116dcd528b0d5d26017b7c7a88798ae5a6ed
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; R2-2 decision of 2026-10-08/09)
+  note: >-
+    Integration record (branch int17, s4-int17 integrator agent; typed by the agent, not a human). The Kernel core
+    here is the textual union of two already-recorded core changes, auto-merged with no conflict and no Kernel edit
+    by the integrator: the w2-ablation refusal (bc6ab302..., tighten) and Kernel 1.3 from s3-kernel (8dc2497e...,
+    tighten + deviation). GOAL §10/§4.3 are unchanged by the merge. Like the 8dc2497e record, this one is NOT purely
+    tightening; the deviation record that follows corrects its classification. Not test-verified (owner rule for
+    this round: no tests): the Kernel suite with the coverage gate must run on int17 (docs/int17_test_plan.md).
+  recorded: '2026-10-14'
+- fingerprint: d9524887c18781db548ff59f51e9116dcd528b0d5d26017b7c7a88798ae5a6ed
+  kind: deviation
+  corrects: d9524887c18781db548ff59f51e9116dcd528b0d5d26017b7c7a88798ae5a6ed
+  changes:
+  - carries the non-tightening Kernel 1.3 changes of 8dc2497e (alpha-account slot charging with K4 fixed at
+    alpha_T / S_T on account targets; core/adapter split into kernel/ml.py, bit-identity not yet proven; bounded-null
+    certificates through a plasmode K7; Kernel version 1.3)
+  - no change of its own beyond composing them with the w2-ablation refusal (Kernel.certify refuses evidence from an
+    ABLATED run)
+  cooling_off_observed: false
+  basis: GOAL §16.4, §5/§11 M3, §16.10, invariant 12 (ablation arms never certify); orchestrator decisions of
+    2026-10-08/09 under the owner's delegation; integration of already-recorded changes
+  approver: owner (delegated to orchestrator, 2026-10-08)
+  note: >-
+    Recorded by the s4-int17 integrator agent, not typed by a human. The 7-day cooling-off was NOT observed. The owner
+    should review together with the 8dc2497e records.
   recorded: '2026-10-14'
