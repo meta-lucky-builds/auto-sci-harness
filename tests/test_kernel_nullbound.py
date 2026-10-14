@@ -12,10 +12,9 @@ import random
 
 import pytest
 
-from custom_harness.kernel import AnalysisPlan, ClaimKind, DatasetRole, Effect, KernelConfig, Label
+from custom_harness.kernel import AnalysisPlan, ClaimKind, DatasetRole, Effect, KernelConfig, Label, ml
 from custom_harness.kernel import checks as K
 from custom_harness.kernel import kernel as kernel_module
-from custom_harness.kernel import ml
 from custom_harness.kernel.reasons import Code
 from kernel_world import World
 
