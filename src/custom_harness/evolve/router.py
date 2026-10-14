@@ -5,6 +5,8 @@ Building (`build_router`):
   1. reads the `branch` records of the CURRENT trunk (branches made against an older trunk compared against a
      harness that is no longer the default: stale, ignored) and re-checks each against the whitelist
      (branches.check_record);
+  1b. refuses a record whose routed harness has no passing leave-one-family/domain-out bit, re-checked against the
+     release ledger like the cluster bits (invariant 16: routing never bypasses LOFO/LODO; branches.py);
   2. re-checks every tested cluster bit against the release ledger: each of its targets must carry a release with
      the record's note, channel `evolution_score`, alphabet `verdict_bit` (kerneld/releases.released). A bit the
      ledger does not account for is refused (RouteRefused), never silently dropped;
@@ -153,6 +155,12 @@ def verified_bits(store: EvidenceStore, trunk_hash: str, cluster_key: str) -> di
             raise RouteRefused(f"branch record {str(rec.get('branch_id'))[:40]!r} refused: {err}") from None
         if rec["cluster_key"] != cluster_key:
             raise RouteRefused("branch records on this trunk use different cluster keys")
+        # invariant 16: the routed harness's leave-one-family/domain-out bit must be a ledgered, passing release
+        lofo = rec["lofo"]
+        missing = [t for t in lofo["targets"] if not _ledgered(store, t, lofo["note"])]
+        if missing:
+            raise RouteRefused(f"branch {rec['branch_id']}: LOFO/LODO bit not in the release ledger for "
+                               f"{len(missing)} target(s) (fail closed)")
         for c, e in rec["clusters"].items():
             if not e["tested"]:
                 continue
@@ -165,6 +173,21 @@ def verified_bits(store: EvidenceStore, trunk_hash: str, cluster_key: str) -> di
                 raise RouteRefused(f"conflicting released bits for branch {rec['branch_id']} cluster {c!r}")
             bits[key] = e["wins"]
     return bits
+
+
+def _checked_tables(store: EvidenceStore, trunk_hash: str) -> list[dict[str, str]]:
+    """The route tables branch records on this trunk were LOFO/LODO-checked on (records verified by
+    verified_bits first; their `lofo.routes` is bound into the released LOFO note)."""
+    return [dict(r["lofo"]["routes"]) for r in store.records(BRANCH_KIND)
+            if isinstance(r, dict) and r.get("trunk") == trunk_hash]
+
+
+def current_routes(store: EvidenceStore, trunk: HarnessSpec, cluster_key: str) -> dict[str, str]:
+    """The table the router serves over `trunk` now ({} when it routes nothing or is refused)."""
+    try:
+        return dict(build_router(store, trunk, cluster_key=cluster_key).routes)
+    except RouteRefused:
+        return {}
 
 
 def build_router(store: EvidenceStore, trunk: HarnessSpec, *, cluster_key: str = "family",
@@ -185,6 +208,17 @@ def build_router(store: EvidenceStore, trunk: HarnessSpec, *, cluster_key: str =
             raise RouteRefused(f"route {c!r} -> {b[:12]} is not backed by a released winning verdict bit "
                                "(the embargo forbids routing on anything else)")
         routes.append((c, b))
+    # no choice is left to a policy: among released winning bits the table is fixed (default_policy, which refuses
+    # two winners on one cluster). A policy may only reproduce it; any other table is refused, so WHICH winner is
+    # routed, or whether a won cluster is routed, can never carry information no release accounts for.
+    canonical = default_policy(view) if policy is not default_policy else dict(table)
+    if dict(routes) != canonical:
+        raise RouteRefused("a route policy may not choose among released winning bits: its table differs from the "
+                           "fixed one (fail closed)")
+    # invariant 16 for COMPOSED routes: the table served must be one that a branch record LOFO/LODO-checked as a
+    # whole (branches.propose_branch checks the table it extends; each record's `lofo.routes` is note-bound)
+    if routes and dict(routes) not in _checked_tables(store, trunk_hash):
+        raise RouteRefused("this route table as a whole was never LOFO/LODO-checked (composed routes; fail closed)")
     specs = {trunk_hash: json.dumps(trunk.model_dump(mode="json"), sort_keys=True)}
     for _, b in routes:
         try:

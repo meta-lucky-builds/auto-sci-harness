@@ -15,6 +15,14 @@ per-row sources (provider/mode/model/backend). No truncation of tool output. `ma
 the licence-policy digest, the outcome filter and the exclusion counts per reason. The export is written beside its
 destination and renamed into place; an existing destination is refused (`DEST_EXISTS`).
 
+Licence boundary (s3-verifiers, invariant 11): nothing is exported without a licence decision. `licence` must be a real
+`LicencePolicy` (a duck-typed object with a permissive `permits` is refused, `LICENCE_INVALID`); every kept row is
+re-checked against it just before it is written (`LICENCE_RECHECK` refuses the whole export); the manifest records the
+decision (`licence`: policy digest, the permitted provider/mode keys, whether the default "nothing permitted" applies).
+With the default policy (weights/config.py: no provider permitted) no row is ever written.
+Goodhart isolation (invariant 18): the rows and manifest are screened against `goodhart.sealed_fingerprints(store)` when
+an evidence `store` is passed, and against the Goodhart marker always (`GOODHART_LEAK`).
+
 A weight update itself stays a human decision (tiers.DEFAULT_POLICY[WEIGHT_UPDATE] is None). The sealed scores used by
 the coupled-Goodhart indicator are not part of this export.
 """
@@ -33,6 +41,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config as C
+from . import goodhart
 from .licence import LicencePolicy
 from .trajectory import DeclaredPair, ExportRefused, Trajectory, Verdict, certified_by
 
@@ -58,6 +67,7 @@ def select_for_training(trajectories: Sequence[Trajectory], verdicts: Iterable[V
                         licence: LicencePolicy, *, outcomes: frozenset[str] = C.SFT_OUTCOMES) -> Selection:
     if not isinstance(pair, DeclaredPair):
         raise ExportRefused("SET_INVALID", "verifier sets must be declared with declare_disjoint")
+    _require_policy(licence)
     DeclaredPair(pair.a, pair.b)  # re-checked at use: disjointness and the tier floor
     vs = list(verdicts)
     sel = Selection()
@@ -85,6 +95,16 @@ def select_for_training(trajectories: Sequence[Trajectory], verdicts: Iterable[V
     return sel
 
 
+def _require_policy(licence: object) -> None:
+    if type(licence) is not LicencePolicy:  # exactly the owner-flag policy: no subclass, no duck type
+        raise ExportRefused("LICENCE_INVALID",
+                            f"a licence decision needs a LicencePolicy, not {type(licence).__name__}")
+
+
+def _licensed(t: Trajectory, licence: LicencePolicy) -> bool:
+    return all(licence.permits(s.provenance) for s in t.steps if s.role == "assistant" or s.provenance is not None)
+
+
 def sft_row(t: Trajectory, pair: DeclaredPair) -> dict[str, Any]:
     sources: list[dict[str, str]] = []
     for s in t.steps:
@@ -108,17 +128,28 @@ class ExportResult:
 
 def export_trajectories(trajectories: Sequence[Trajectory], verdicts: Iterable[Verdict], pair: DeclaredPair,
                         licence: LicencePolicy, dest: Path | str, *,
-                        outcomes: frozenset[str] = C.SFT_OUTCOMES) -> ExportResult:
+                        outcomes: frozenset[str] = C.SFT_OUTCOMES, store: Any = None) -> ExportResult:
     dest = Path(dest)
+    _require_policy(licence)
     if dest.exists():
         raise ExportRefused("DEST_EXISTS", f"{dest} exists; an export is never overwritten")
     sel = select_for_training(trajectories, verdicts, pair, licence, outcomes=outcomes)
+    unlicensed = [t.id for t in sel.kept if not _licensed(t, licence)]  # defence in depth, at the write boundary
+    if unlicensed:
+        raise ExportRefused("LICENCE_RECHECK", f"rows {unlicensed[:5]} are not licence-permitted at write time")
     rows = [sft_row(t, pair) for t in sel.kept]
     counts = Counter(r.value for rs in sel.excluded.values() for r in rs)
     manifest = {"format": "chh-l8-sft/1", "pair": pair.digest(), "A": pair.a.digest(), "B": pair.b.digest(),
                 "licence_policy": licence.digest(), "outcomes": sorted(outcomes),
                 "tier_floor": C.EXPORT_TIER_FLOOR.name, "kept": len(rows), "excluded": dict(sorted(counts.items())),
-                "excluded_ids": {k: [r.value for r in v] for k, v in sorted(sel.excluded.items())}}
+                "excluded_ids": {k: [r.value for r in v] for k, v in sorted(sel.excluded.items())},
+                "licence": {"policy": licence.digest(), "permitted": sorted(licence.permitted),
+                            "default_nothing_permitted": not licence.permitted, "rows_checked": len(rows)}}
+    fp = goodhart.sealed_fingerprints(store) if store is not None else {"markers": [goodhart.MARKER,
+                                                                                    goodhart.RECORD_KIND]}
+    found = sorted({w for doc in (*rows, manifest) for w in goodhart.scan(json.dumps(doc, sort_keys=True), fp)})
+    if found:
+        raise ExportRefused("GOODHART_LEAK", f"the export would contain {', '.join(found)} (owner-only, invariant 18)")
     tmp = dest.parent / f".{dest.name}.tmp-{uuid.uuid4().hex[:10]}"
     tmp.mkdir(parents=True)
     try:

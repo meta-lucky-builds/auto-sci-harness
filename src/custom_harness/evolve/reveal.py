@@ -4,12 +4,22 @@ every evolver mount and become visible only once a watermark has passed their da
 Rules (all fail closed):
   - Seal: the labels live in a host-only JSONL file under `root`; `root` must not be inside, nor contain, any
     evolver mount (the evidence export, a proposer sandbox, a task directory). Checked when the seal is opened and
-    again before every write of revealed labels.
+    again before every write of revealed labels, against the mounts as given, re-resolved at every check (an 8.3
+    short name, or a path that only later comes to exist), and compared by file identity as well as by path (the
+    Windows device-path prefixes are stripped; os.path.samefile over every existing ancestor catches other aliases
+    of the same directory). The seal is bound to its stream and target by `seal.json`: opening it under another
+    stream id or target is refused (K4 counts the reveals on the right target).
   - Watermark: a label is visible iff it is DATED and its date is at or before the watermark. A date-only label
-    ("2026-10-08") counts as the END of that day (it may have been produced at any time that day); a date-only
-    watermark counts as the START of its day. A datetime without a timezone, an unparsable date or no date at all is
+    ("2026-10-08") counts as the END of that calendar day ANYWHERE ON EARTH (UTC-12, i.e. 12:00Z the next day: it
+    may have been produced at any time of that day in any time zone); a date-only watermark counts as the START of
+    its day in UTC. A datetime without a timezone, an unparsable date or no date at all is
     UNDATED, and undated means unrevealed, whatever the watermark.
-  - The watermark only moves forward, never past the clock (`now`), and each move is a store record.
+  - The watermark only moves forward, never past the clock (`now`), and each move is a store record. Reading it
+    re-validates EVERY record of the stream (each at or before its recording time and the clock, none backwards),
+    so a record appended to the store around `advance` fails closed instead of revealing early.
+  - Wiring (evolve/driver.py `reveals`): before the campaign the seal is checked against every task directory and
+    the output directory too (`check_mounts`); before each generation the visible labels are written to the
+    stream's destination inside a declared mount (`write_revealed`).
   - Each reveal is ledgered: the first time an item becomes visible, one Kernel `release` entry (channel `export`,
     alphabet of the label value: kerneld/releases.alphabet_of) on the stream's registered target dataset, plus a
     `reveal` store record naming the item, its date and the watermark that released it. A reveal that cannot be
@@ -23,7 +33,7 @@ import os
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 from datetime import time as dtime
 from pathlib import Path
 from typing import Any
@@ -54,8 +64,8 @@ def label_time(value: Any) -> datetime | None:
     v = value.strip()
     try:
         if len(v) == 10:
-            d = date.fromisoformat(v)
-            return datetime.combine(d, dtime.max, tzinfo=UTC)
+            d = date.fromisoformat(v)  # the latest end of that calendar day anywhere: UTC-12
+            return datetime.combine(d, dtime.max, tzinfo=timezone(timedelta(hours=-12))).astimezone(UTC)
         dt = datetime.fromisoformat(v)
     except ValueError:
         return None
@@ -78,8 +88,36 @@ def watermark_time(value: str) -> datetime:
     return dt.astimezone(UTC)
 
 
-def _inside(a: Path, b: Path) -> bool:
-    return a == b or b in a.parents
+# Windows device-path prefixes (\\?\UNC\, \\?\, \\.\): Path.resolve keeps them, so the same directory would look
+# like a different path
+_PREFIXES = (("\\\\?\\UNC\\", "\\\\"), ("\\\\?\\", ""), ("\\\\.\\", ""))
+
+
+def _canon(p: Path | str) -> Path:
+    """`p` resolved, with the Windows device-path prefixes stripped."""
+    s = os.fspath(p)
+    for pre, sub in _PREFIXES:
+        if s.startswith(pre):
+            s = sub + s[len(pre):]
+            break
+    return Path(s).resolve()
+
+
+def _inside(a: Path | str, b: Path | str) -> bool:
+    """`a` is `b` or lies under it: by path, then by file identity of every existing ancestor of `a` (aliases such as
+    8.3 short names or admin shares of the same directory)."""
+    a, b = _canon(a), _canon(b)
+    if a == b or b in a.parents:
+        return True
+    if not b.exists():
+        return False
+    for x in (a, *a.parents):
+        try:
+            if x.exists() and os.path.samefile(x, b):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 class TemporalReveal:
@@ -91,14 +129,36 @@ class TemporalReveal:
         if not stream_id or not target_dataset_id:
             raise RevealRefused("a stream needs an id and a registered target dataset")
         self.store, self.stream_id, self.target = store, stream_id, target_dataset_id
-        self.root = Path(root).resolve()
-        self.mounts = [Path(m).resolve() for m in mounts]
-        if not self.mounts:
+        self.root = _canon(root)
+        self._mounts = [os.fspath(m) for m in mounts]  # as given: re-resolved at every check
+        if not self._mounts:
             raise RevealRefused("the evolver mounts must be named (an empty list cannot be checked)")
         self.clock = clock
         self.sink = sink if sink is not None else LedgerSink(store)
         self._check_seal()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._check_seal()  # again now that the root exists (an alias may only resolve to it now)
+        self._bind()
+
+    @property
+    def mounts(self) -> list[Path]:
+        return [_canon(m) for m in self._mounts]
+
+    def _bind(self) -> None:
+        """Bind the seal to (stream, target): opening it under another stream or target is refused, and so are
+        labels found without a binding (their stream is unknown)."""
+        manifest, want = self.root / "seal.json", {"stream": self.stream_id, "target": self.target}
+        if manifest.exists():
+            try:
+                have = json.loads(manifest.read_text(encoding="utf-8"))
+            except ValueError:
+                raise RevealRefused("seal binding unreadable (fail closed)") from None
+            if have != want:
+                raise RevealRefused("this seal belongs to another stream or target (fail closed)")
+            return
+        if self._file.exists():
+            raise RevealRefused("sealed labels without a stream binding (fail closed)")
+        manifest.write_text(json.dumps(want, sort_keys=True), encoding="utf-8")
 
     # ------------------------------------------------------------------ the seal
     def _check_seal(self) -> None:
@@ -132,9 +192,31 @@ class TemporalReveal:
         return [json.loads(ln) for ln in self._file.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
     # ------------------------------------------------------------------ the watermark
+    def check_mounts(self, paths: Iterable[Path]) -> None:
+        """Refuse (fail closed) if the seal overlaps any of `paths`: the caller's actual evolver mounts (the driver
+        passes every task directory and its output directory), checked in addition to the declared `mounts`."""
+        for p in paths:
+            if _inside(self.root, p) or _inside(p, self.root):
+                raise RevealRefused(f"sealed labels at {self.root} overlap an evolver mount {_canon(p)}")
+
     def watermark(self) -> datetime | None:
+        """The current watermark, re-validated from EVERY record of this stream (not only the last): each must
+        parse, be at or before the instant it was recorded and the clock, and none may move backwards. A record
+        that breaks any rule (e.g. one appended to the store directly, bypassing `advance`) fails closed."""
         recs = [r for r in self.store.records(WATERMARK_KIND) if r.get("stream") == self.stream_id]
-        return watermark_time(recs[-1]["watermark"]) if recs else None
+        now = datetime.fromtimestamp(self.clock(), tz=UTC)
+        cur: datetime | None = None
+        for r in recs:
+            at = r.get("at")
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                raise RevealRefused("watermark record without a recording time (fail closed)")
+            wm = watermark_time(r.get("watermark", ""))
+            if wm > datetime.fromtimestamp(at, tz=UTC) or wm > now:
+                raise RevealRefused("a watermark record is ahead of its recording time or the clock (fail closed)")
+            if cur is not None and wm < cur:
+                raise RevealRefused("watermark records move backwards (fail closed)")
+            cur = wm
+        return cur
 
     def advance(self, value: str) -> datetime:
         wm = watermark_time(value)
@@ -173,14 +255,23 @@ class TemporalReveal:
             out.append({"item_id": r["item_id"], "label": r["label"], "date": r["date"]})
         return out
 
-    def write_revealed(self, dest: Path) -> Path:
-        """Write the visible labels to `dest` (a file inside an evolver mount); refuses a destination in the seal."""
+    def check_destination(self, dest: Path) -> Path:
+        """The resolved destination, refused unless it lies outside the seal and inside a declared mount."""
         self._check_seal()
-        dest = Path(dest).resolve()
+        dest = _canon(dest)
         if _inside(dest, self.root):
             raise RevealRefused("revealed labels are written outside the seal")
         if not any(_inside(dest, m) for m in self.mounts):
             raise RevealRefused("revealed labels go to an evolver mount (name it in `mounts`)")
+        return dest
+
+    def n_revealed(self) -> int:
+        """How many items of this stream have been released so far (count of `reveal` records)."""
+        return len(self._revealed_before())
+
+    def write_revealed(self, dest: Path) -> Path:
+        """Write the visible labels to `dest` (a file inside an evolver mount); refuses a destination in the seal."""
+        dest = self.check_destination(dest)
         rows = self.visible()
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + f".tmp{os.getpid()}")

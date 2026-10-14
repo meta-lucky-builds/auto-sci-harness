@@ -197,6 +197,10 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     delta, q, lo, hi = forecast(task, state, ctx, task.effect_floor(state["baseline_dev"]),
                                 fraction=params.get("delta_fraction", 0.5), candidate_key=candidate_key,
                                 fixed_delta=fixed)
+    # L3 calibrated K3 tolerance (s3-verifiers): 0.0 (identical predictions) unless `calibrate_tolerance` asks trusted
+    # code to measure the candidate's noise floor on public dev data; frozen into the pre-registration below
+    from .noise_floor import claim_tolerance_for
+    tol, tol_rec = claim_tolerance_for(state, params, ctx, ctx.store.blobs.get(best["code_ref"]))
     hid = _inline(best.get("hypothesis_id"), 80)  # model-written id: never raw in a claim statement
     who = ("an independent re-implementation (written from the claim text, without the code) of hypothesis "
            f"{hid}") if p else f"the solution for hypothesis {hid}"
@@ -216,7 +220,7 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         # max(declared, actual registered claims), so declaring a campaign's planned number of claims per task
         # keeps certification strictness constant during the campaign (no drift against later candidates).
         analysis_plan=AnalysisPlan(seeds=tuple(params.get("seeds", (0, 1, 2))), alpha=params.get("alpha", 0.05),
-                                   n_comparisons=int(params.get("n_comparisons", 1))),
+                                   n_comparisons=int(params.get("n_comparisons", 1)), reproduce_tolerance=tol),
         assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
                      "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
@@ -227,12 +231,13 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         extra = {f"{p}preflight": result.as_record()}
     else:
         extra = {}
+    tol_out = {f"{p}tolerance": tol_rec} if params.get("calibrate_tolerance") is True else {}
     entry = kernel.preregister(claim)
     if extra:
         return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
-                f"{p}prereg_seq": entry.seq, **extra, "route": "confirm"}
+                f"{p}prereg_seq": entry.seq, **extra, **tol_out, "route": "confirm"}
     return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
-            f"{p}prereg_seq": entry.seq}
+            f"{p}prereg_seq": entry.seq, **tol_out}
 
 
 # ------------------------------------------------------------------ confirm
@@ -384,7 +389,8 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
         if not critic_ok:
             ok, blockers = False, [*blockers, why]
     from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
-    memory_rec = after_certify(kernel, state, h, ctx.secrets)
+    memory_rec = after_certify(kernel, state, h, ctx.secrets, run_id=ctx.run_id, spawn=_perturbed_spawn(ctx),
+                               targets=_dev_targets(state), candidate_key="replica_best" if p else "best")
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))
             for e in cert.evidence_ids]
     target = claim.generalization_targets[0]
@@ -422,6 +428,23 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                 # held-out value; only its existence depends on the target (the verdict bit)
                 "_release_alphabets": {"replication_brief": "verdict_bit"}} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
+
+
+def _perturbed_spawn(ctx: ModuleContext) -> Any:
+    """Fresh sandboxes for the skill writer's perturbed evaluator (memory_wiring.exploit_check); None without one."""
+    if ctx.sandbox is None:
+        return None
+    sb = _sb(ctx)
+    root = sb.workspace.parent / f"{sb.workspace.name}-perturbed"
+    return lambda name: sb.spawn(root / f"{name}-{uuid.uuid4().hex[:8]}")
+
+
+def _dev_targets(state: dict[str, Any]) -> dict[str, str] | None:
+    """The public development dataset and its target column (trusted: from the task spec and the vault ids)."""
+    try:
+        return {state["datasets"]["train"]: _task(state).target_column}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[str, Any]:
@@ -668,7 +691,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
         return {"replica_best": {"hypothesis_id": "replication", "dev_score": None, "dev_preds_ref": None,
                                  "code_ref": ctx.store.blobs.put(code.encode()), "error": f"not independent: {why}"},
                 "route": "report"}
-    _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "replica.py").write_bytes(code.encode("utf-8"))  # byte-identical to the code that runs (no CRLF)
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
@@ -794,8 +817,17 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
         rep = t.report()
         tree = {"tree_report": {"shape": rep["shape"], "selection": rep["selection"], "head": rep["head"]},
                 "tree_seq": t.seq}
+    figs: dict[str, Any] = {}
+    if params.get("figure", False):  # GOAL L2: a figure rendered by a script stored next to it, re-rendered by I6
+        from ..figures.report_figure import FIGURE_NAME, make_report_figure
+        root = data_dir() / "figures" / ctx.run_id
+        box = _sb(ctx).spawn(data_dir() / "sandboxes" / f"figure-make-{ctx.run_id}-{time.time_ns()}")
+        fig = make_report_figure(state, ctx.kernel(), ctx.store, box, root / FIGURE_NAME)
+        if fig is not None:
+            figs = {"figures": [*(state.get("figures") or []), fig]}
+            state = {**state, **figs}
     text = render_report(state, ctx)
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree}
+    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree, **figs}
 
 
 # ------------------------------------------------------------------ audit
@@ -855,7 +887,12 @@ def _figure_audit(state: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     from ..figures import audit_figures
     allowed = {str(e) for e in [*(state.get("evidence_ids") or []), *(state.get("replica_evidence_ids") or [])]}
     root = data_dir() / "sandboxes" / f"figure-audit-{ctx.run_id}-{time.time_ns()}"
-    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed)
+    certs = {str(c["hash"]) for c in (state.get("certificate"), state.get("replica_certificate"))
+             if isinstance(c, dict) and isinstance(c.get("hash"), str)}
+    kernel = ctx.kernel()
+    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed,
+                         certificate_of=lambda h: kernel.certificate(h).model_dump(mode="json"),
+                         allowed_certificates=certs)
 
 
 def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:

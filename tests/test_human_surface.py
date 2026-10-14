@@ -10,6 +10,7 @@ phase); see agent_worklogs/s4-human/RESUME.md for the command.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -272,8 +273,6 @@ def test_provider_signoff_is_ledgered_bound_to_the_entry_and_counted_by_the_rele
 
 # ------------------------------------------------------------------ human-held check registration
 def test_human_check_registration_binds_the_file_hash_and_never_records_content(tmp_path, store):
-    import hashlib
-
     from custom_harness.assure import humancheck as H
     from custom_harness.human import checks as K
     from custom_harness.human.guard import HumanActionRefused
