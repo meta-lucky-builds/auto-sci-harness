@@ -61,10 +61,12 @@ def audit_checklist(store: EvidenceStore, outcome: dict[str, Any], bundle_hash: 
             "right of reply: NOT recorded",
             f"publication approved by {approval['approver']} (ledger {approval['ledger_seq']})" if approval else
             "publication: NOT approved"]
+    # a missing human step is no answer: the item stays empty and blocks publication (fail closed)
+    complete = bool(fid) and all("NO role approval" not in r for r in roles) and bool(reply) and bool(approval)
     checklist = fill(cert, run_costs=run_costs, models=_models(store, run_ids), bundle_hash=bundle_hash,
                      selection_policy=("no selection among alternatives: one claim typed by a human from the "
                                        "paper's sentence and pre-registered before the fresh data were read"),
-                     human_in_the_loop="; ".join(hitl),
+                     human_in_the_loop="; ".join(hitl) if complete else None,
                      novelty="not applicable: a Claim Audit confirms an already published claim and makes no new "
                              "claim")
     checklist["loop_label"] = NOT_A_LOOP

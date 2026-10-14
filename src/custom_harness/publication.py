@@ -45,7 +45,7 @@ def loop_label_problem(value: Any, *, is_loop: bool) -> str | None:
     v = str(value).strip()
     if is_loop and v not in LOOP_LABELS:
         return f"loop label {v[:60]!r} is not MECHANICAL or VALIDATED (GOAL §6.1, invariant 10)"
-    if not is_loop and not v.startswith(NOT_A_LOOP_PREFIX):
+    if not is_loop and (not v.startswith(NOT_A_LOOP_PREFIX) or not v[len(NOT_A_LOOP_PREFIX):].strip()):
         return (f"loop label {v[:60]!r} on a report that is not of a loop: it must say "
                 f"'{NOT_A_LOOP_PREFIX} <why>' (it may not claim MECHANICAL or VALIDATED)")
     return None

@@ -141,6 +141,15 @@ def test_gate_rules():
     assert P.blockers({**full, "seeds": True, "loop_label": "MECHANICAL"}, is_loop=True) == [
         "checklist item missing: seeds"]
     assert P.blockers(None, is_loop=True) == ["reporting checklist missing entirely (VG Table 10)"]
+    assert P.blockers({**full, "loop_label": "not a loop: one confirmation"}, is_loop=False) == []
+    assert P.blockers({**full, "loop_label": "not a loop:  "}, is_loop=False)  # the reason is required
+
+
+def test_audit_checklist_without_the_human_steps_has_no_human_in_the_loop_answer(honest, tmp_path):  # noqa: F811
+    from custom_harness.audit.checklist import audit_checklist
+    a, out = honest
+    cl = audit_checklist(a.store, out, "b" * 64, None, None)  # no right-of-reply, no publication approval
+    assert cl["human_in_the_loop"] is None
 
 
 def _research(store, tmp_path, task, monkeypatch, blank: str | None):

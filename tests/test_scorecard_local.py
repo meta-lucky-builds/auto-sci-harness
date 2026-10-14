@@ -133,6 +133,7 @@ def test_local_axes_every_number_resolves_and_nothing_is_hidden(tmp_path):
     assert (h["numerator"], h["denominator"], h["value"]) == (1, 1, 1.0)
     assert h["museum_patches_not_in_log"] == ["B"] and h["log_findings_not_in_registry"] == ["Z"]
     assert h["status"] == "fail" and h["log_head"] == "abc1234"
+    assert "stale" in h["stale"]  # the log's commit is not this checkout's: its verdicts are not this code's
     assert h["ci95_wilson_two_sided"] == pytest.approx([0.20654931, 1.0])
     t = ax["H"]["red_team_trend_by_date"]["value"]
     assert [(p["date"], p["open"], p["fixed"], p["accepted"], p["total"]) for p in t] == [
@@ -199,3 +200,64 @@ def test_cli_prints_the_table_and_the_honesty_footer(tmp_path, monkeypatch, caps
     rc = main(["scorecard", "local", "--repo", str(repo), "--json"])
     card = json.loads(capsys.readouterr().out)
     assert rc == 0 and card["source_problems"] == [] and card["format"] == "chh-scorecard-local/1"
+
+
+def test_every_ood_drop_is_shown_and_a_negative_one_is_a_loss(store, tmp_path):
+    """Two accepted edits report the same held-out family: neither value may overwrite the other, and the drop of
+    -0.5 is a loss (GOAL §2 rule 5)."""
+    from custom_harness.scorecard.local_axes import build_local, check_local, extract_local
+    (tmp_path / "redteam").mkdir()
+    (tmp_path / "redteam" / "findings.yaml").write_text("findings: []\n", encoding="utf-8")
+    for parent, d, runs in (("p1", -0.5, 40), ("p2", 0.01, 60)):
+        store.append_record("generation_stats", {"parent": parent, "accepted": 1, "loop_label": "MECHANICAL",
+                                                 "harness_runs": runs})
+        store.append_record("harness_edit", {"parent": parent, "accepted": True, "actual_gate_delta": 0.1,
+                                             "lofo": {"ood_drop": {"family:famA": d}}, "loop_label": "MECHANICAL"})
+    card = build_local(extract_local(store, tmp_path, use_git=False))
+    b = card["axes"]["B"]
+    rows = b["ood_drop_after_evolution"]["value"]
+    assert sorted(r["mean_diff"] for r in rows) == [-0.5, 0.01]
+    assert len(b["ood_drop_after_evolution"]["regressions"]) == 1
+    assert b["status"] == "fail" and any(x.startswith("axis B ood_drop_after_evolution: fail") for x in card["losses"])
+    assert b["gain_per_1k_rollouts"]["value"] == pytest.approx(1000 * 0.2 / 100)
+    assert check_local(card, store, tmp_path) == []
+
+
+def test_a_deleted_run_bundle_is_caught_by_the_source_check(store, tmp_path):
+    from custom_harness.scorecard.local_axes import build_local, check_local, extract_local
+    from custom_harness.store.run_bundle import build_run_bundle
+    (tmp_path / "redteam").mkdir()
+    (tmp_path / "redteam" / "findings.yaml").write_text("findings: []\n", encoding="utf-8")
+    r = Run(harness_id="x", harness_hash="h", task_id="t")
+    store.add_run(r)
+    _step(store, r.id, 0, cost=Cost(wall_s=1.0), mode=None)
+    zp = tmp_path / "rb.zip"
+    digest = build_run_bundle(store, r.id, zp, environment=None, workspace_ref=None)
+    store.append_record("run_bundle", {"run_id": r.id, "path": str(zp), "manifest_sha256": digest})
+    card = build_local(extract_local(store, tmp_path, use_git=False))
+    m = card["axes"]["F"]["runs_with_bundle_and_cost_record"]
+    assert m["numerator"] == 1 and any(s.startswith("runbundle:") for s in m["sources"])
+    assert check_local(card, store, tmp_path) == []
+    zp.unlink()
+    assert any(p.startswith("runbundle:") for p in check_local(card, store, tmp_path))
+
+
+def test_two_api_calls_in_one_step_leave_usd_unknown(store, tmp_path):
+    """A step records one TOTAL cost: with two real calls in it, a positive total does not say each was priced."""
+    from custom_harness.scorecard.local_axes import axis_g, extract_local
+    (tmp_path / "redteam").mkdir()
+    (tmp_path / "redteam" / "findings.yaml").write_text("findings: []\n", encoding="utf-8")
+    r = Run(harness_id="x", harness_hash="h", task_id="t")
+    store.add_run(r)
+    prov = Provenance(backend="api", provider="x", model="m", mode="api", training_on_outputs="unknown")
+    now = time.time()
+    store.add_step(TraceStep(run_id=r.id, index=0, node_id="n", kind=StepKind.MODULE, input={},
+                             output={"_module_llm_calls": [{"provenance": prov.model_dump(mode="json")},
+                                                           {"provenance": prov.model_dump(mode="json")}]},
+                             cost=Cost(prompt_tokens=10, usd=0.3), started_at=now, ended_at=now))
+    one = Run(harness_id="x", harness_hash="h", task_id="t")
+    store.add_run(one)
+    store.add_step(TraceStep(run_id=one.id, index=0, node_id="n", kind=StepKind.LLM, input={}, output={},
+                             provenance=prov, cost=Cost(prompt_tokens=10, usd=0.2), started_at=now, ended_at=now))
+    g = axis_g(extract_local(store, tmp_path, use_git=False))
+    assert g["total_cost"]["value"]["usd"] == "unknown" and g["total_cost"]["runs_usd_unknown"] == [r.id]

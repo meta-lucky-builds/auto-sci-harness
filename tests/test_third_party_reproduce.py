@@ -68,7 +68,10 @@ def test_a_third_party_reproduces_the_headline_numbers_from_the_bundle_alone(tmp
 
     cwd, fresh_data = third / "cwd", third / "chh-data"
     cwd.mkdir()
-    env = {**os.environ, "PYTHONPATH": str(SRC), "CHH_DATA_DIR": str(fresh_data), "CHH_ALLOW_UNISOLATED": "1"}
+    assert not fresh_data.exists()  # the third party starts with nothing
+    # no CHH_* setting of this test process leaks into the third party's (only the trusted-code switch is set)
+    env = {**{k: v for k, v in os.environ.items() if not k.upper().startswith("CHH_")},
+           "PYTHONPATH": str(SRC), "CHH_DATA_DIR": str(fresh_data), "CHH_ALLOW_UNISOLATED": "1"}
     proc = subprocess.run([sys.executable, "-m", "custom_harness.cli", "reproduce", str(bundle), "--dev-sandbox"],
                           cwd=cwd, env=env, capture_output=True, text=True, timeout=900, check=False)
     assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
@@ -76,10 +79,42 @@ def test_a_third_party_reproduces_the_headline_numbers_from_the_bundle_alone(tmp
     assert out["reproduced"] is True, out["problems"]
     assert out["original_label"] == out["reproduced_label"] == "CERTIFIED-INTERNAL"
     assert out["headline"] == want  # exact: recomputed by the Kernel from the bundled evidence
+    assert out["original_headline"] == want  # and compared by the command itself with the bundled certificate
 
-    # the third party's store held nothing of the original: no run, no certificate before the command
+    # the command wrote nothing into the third party's store (it reproduces in a temporary store)
     s = EvidenceStore(fresh_data / "store")
     try:
         assert s.list_runs(limit=10) == [] and s.ledger_rows() == []
     finally:
         s.close()
+
+
+def test_reproduce_fails_when_a_headline_number_differs(tmp_path, monkeypatch, capsys):
+    """`chh reproduce` itself compares the re-derived headline numbers with the bundled certificate's (a third party
+    has only the bundle): a difference makes it fail even when the label and every check status agree."""
+    from custom_harness import cli
+    from custom_harness.kernel.bundle import build_bundle
+    from kernel_world import World
+    w = World(tmp_path / "world", seed=11)
+    c = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2)
+    w.kernel.preregister(c)
+    cert = w.kernel.certify(c, w.evaluate_all(c))
+    bundle = tmp_path / "b.zip"
+    build_bundle(w.kernel, cert.cert_hash(), bundle)
+    w.close()
+    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "third"))
+    capsys.readouterr()
+    assert cli.main(["reproduce", str(bundle), "--dev-sandbox"]) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["reproduced"] is True and out["headline"] == out["original_headline"] and out["headline"]["targets"]
+    real = cli._original_headline
+
+    def shifted(path):  # the bundled certificate's number differs from the re-derived one by 1e-9
+        h = real(path)
+        t = next(iter(h["targets"]))
+        h["targets"][t] = {**h["targets"][t], "estimate": h["targets"][t]["estimate"] + 1e-9}
+        return h
+    monkeypatch.setattr(cli, "_original_headline", shifted)
+    assert cli.main(["reproduce", str(bundle), "--dev-sandbox"]) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["reproduced"] is False and any("headline numbers differ" in p for p in out["problems"])

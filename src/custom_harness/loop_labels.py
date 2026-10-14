@@ -80,11 +80,12 @@ def audit_store(store: EvidenceStore) -> dict[str, Any]:
         why = None
         if text != want:
             why = f"report states loop label {text!r}, the certificate gives {want}"
-        cl = state.get("checklist")
         # the checklist item exists since 2026-10-09 (publication.py; its ABSENCE is a publication blocker, counted
-        # on axis F); when present it must agree
-        if isinstance(cl, dict) and "loop_label" in cl and cl.get("loop_label") != want:
-            why = why or f"checklist loop_label {cl.get('loop_label')!r}, the certificate gives {want}"
+        # on axis F); when present, in the claim's or the replica's checklist, it must agree
+        for key in ("checklist", "replica_checklist"):
+            cl = state.get(key)
+            if isinstance(cl, dict) and "loop_label" in cl and cl.get("loop_label") != want:
+                why = why or f"{key} loop_label {cl.get('loop_label')!r}, the certificate gives {want}"
         add("research_run", ref, text, why)
     bad = [i for i in inst if i["problem"]]
     counts: dict[str, dict[str, int]] = {}

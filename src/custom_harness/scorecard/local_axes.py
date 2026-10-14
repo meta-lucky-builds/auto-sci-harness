@@ -85,26 +85,34 @@ def _git(repo: Path, *args: str) -> bytes:
 
 # ------------------------------------------------------------------ extraction (reads the store, repo and log)
 def _modes(store: EvidenceStore, run_id: str) -> tuple[list[dict[str, Any]], Any]:
-    calls: list[dict[str, Any]] = []
-    total = None
+    """Every model call of the run (step provenance and module calls) with its step's USD and how many real calls
+    share that step: a step records only a TOTAL cost, so a call's own price is known only when it is the step's
+    single real call."""
     from ..records import Cost
+    calls: list[dict[str, Any]] = []
     total = Cost()
     for step in store.trace(run_id):
         total = total + step.cost
         provs = [step.provenance.model_dump(mode="json")] if step.provenance else []
         out = step.output if isinstance(step.output, dict) else {}
         provs += [c.get("provenance") or {} for c in out.get("_module_llm_calls", []) or [] if isinstance(c, dict)]
-        for p in provs:
-            if p:
-                calls.append({"mode": str(p.get("mode")), "replayed": bool(p.get("replayed")),
-                              "backend": str(p.get("backend")), "usd": float(step.cost.usd)})
+        here = [{"mode": str(p.get("mode")), "replayed": bool(p.get("replayed")), "backend": str(p.get("backend")),
+                 "usd": float(step.cost.usd)} for p in provs if p]
+        n_real = sum(1 for c in here if c["mode"] != "mock" and not c["replayed"])
+        calls += [{**c, "step_real_calls": n_real} for c in here]
     return calls, total
+
+
+def _priced(c: dict[str, Any]) -> bool:
+    """A real call's USD is known only for an API call that is the single real call of a step reporting USD > 0
+    (subscription, open-weights and unpriced API calls carry usd 0.0 = unknown in records.Cost)."""
+    return c["mode"] == "api" and c["usd"] > 0 and c["step_real_calls"] == 1
 
 
 def _run_fact(store: EvidenceStore, run_id: str, bundles: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     calls, cost = _modes(store, run_id)
     real = [c for c in calls if c["mode"] != "mock" and not c["replayed"]]
-    unpriced = [c for c in real if c["mode"] in ("byos", "ow") or (c["mode"] == "api" and c["usd"] <= 0)]
+    unpriced = [c for c in real if not _priced(c)]
     steps = store.trace(run_id)
     fact: dict[str, Any] = {
         "ref": run_ref(store, run_id), "run_id": run_id, "n_steps": len(steps),
@@ -123,6 +131,8 @@ def _run_fact(store: EvidenceStore, run_id: str, bundles: dict[str, list[dict[st
             try:
                 _, got = read_run_bundle_bytes(Path(str(rec.get("path"))))
                 row["present"] = got == rec.get("manifest_sha256")
+                if row["present"]:
+                    row["zip_ref"] = f"runbundle:{got}:{Path(str(rec.get('path'))).resolve()}"
             except (OSError, RunBundleError, ValueError):
                 row["present"] = False
         bl.append(row)
@@ -257,7 +267,9 @@ def axis_b(f: dict[str, Any]) -> dict[str, Any]:
         out["gain_per_1k_rollouts"] = _metric(1000.0 * gain / runs, refs,
                                               harness_runs=runs, accepted_edits=len(acc), generations=len(counted),
                                               generations_without_run_count=uncounted,
-                                              note="sum of accepted edits' gate mean differences per 1000 harness "
+                                              note="accepted edits are matched to generations by parent hash (two "
+                                                   "campaigns from one parent in one store are not told apart); "
+                                                   "sum of accepted edits' gate mean differences per 1000 harness "
                                                    "runs (fixed objective, evolve/evaluate.py); internal gate data: "
                                                    "MECHANICAL unless every gate run was CERTIFIED-VALIDATED")
     else:
@@ -265,12 +277,16 @@ def axis_b(f: dict[str, Any]) -> dict[str, Any]:
             f"{len(stats)} generation(s) recorded, none with a harness-run count (recorded since 2026-10-09)")
     drops = [(e["ref"], k, v) for e in acc if isinstance(e["ood_drop"], dict) for k, v in e["ood_drop"].items()
              if isinstance(v, int | float)]
-    out["ood_drop_after_evolution"] = (
-        _metric({f"{k}": float(v) for _, k, v in drops}, [r for r, _, _ in drops],
-                note="held-out family/domain mean difference of each accepted edit (LOFO gate)")
+    worse = [{"edit": r, "target": k, "mean_diff": float(v)} for r, k, v in drops if v < 0]
+    out["ood_drop_after_evolution"] = (  # one row per (accepted edit, held-out target): none overwrites another
+        _metric([{"edit": r, "target": k, "mean_diff": float(v)} for r, k, v in drops], [r for r, _, _ in drops],
+                regressions=worse, status="fail" if worse else "pass",
+                note="held-out family/domain mean difference (candidate - parent) of each accepted edit (LOFO "
+                     "gate); a negative value is an OOD drop and is reported as a loss")
         if drops else _unmeasured("no accepted edit with a held-out family/domain result"))
-    out["status"] = "not compared" if any(v.get("sources") for v in out.values() if isinstance(v, dict)) \
-        else "not measured"
+    measured = [v for v in out.values() if isinstance(v, dict) and v.get("sources")]
+    out["status"] = ("fail" if any(v.get("status") == "fail" for v in measured) else
+                     "not compared" if measured else "not measured")
     return out
 
 
@@ -281,13 +297,15 @@ def axis_f(f: dict[str, Any]) -> dict[str, Any]:
     certs = {c["cert_hash"]: c for c in f["base"]["certificates"]}
     claimed = [(r["ref"], cl) for r in f["runs"] for cl in (r.get("report") or {}).get("claims", [])]
     bad: dict[str, list[str]] = {}
+    srcs: list[str] = []
     for ref, cl in claimed:
         c = certs.get(cl["cert_hash"])
+        srcs += [ref] + ([c["ref"]] + [b["ref"] for b in c["bundles"]] if c else [])
         why = list(cl["gate_blockers"]) + ([] if c and c["bundles"] else ["claim bundle not ledgered"])
         if why:
             bad.setdefault(f"{ref}#{cl['prefix'] or 'claim'}", []).extend(why)
     out["reports_with_checklist_and_bundle"] = (
-        _metric(100.0 * (len(claimed) - len(bad)) / len(claimed), [r for r, _ in claimed], unit="%",
+        _metric(100.0 * (len(claimed) - len(bad)) / len(claimed), srcs, unit="%",
                 numerator=len(claimed) - len(bad), denominator=len(claimed),
                 offenders=[{"report": k, "why": v} for k, v in sorted(bad.items())],
                 publishable=sum(1 for _, cl in claimed if cl["publishable"]),
@@ -299,7 +317,9 @@ def axis_f(f: dict[str, Any]) -> dict[str, Any]:
     runs = f["runs"]
     ok = [r for r in runs if r["n_steps"] > 0 and any(b.get("present") for b in r["run_bundles"])]
     out["runs_with_bundle_and_cost_record"] = (
-        _metric(100.0 * len(ok) / len(runs), [r["ref"] for r in runs], unit="%", numerator=len(ok),
+        _metric(100.0 * len(ok) / len(runs), [r["ref"] for r in runs] + [  # the run_bundle records and zips too
+            x for r in runs for b in r["run_bundles"] for x in (b["ref"], b.get("zip_ref")) if x],
+                unit="%", numerator=len(ok),
                 denominator=len(runs), offenders=sorted(r["run_id"] for r in runs if r not in ok),
                 status="pass" if len(ok) == len(runs) else "fail",
                 note="invariant 9: a run_bundle record whose zip still has that manifest, and a trace (cost record)")
@@ -358,12 +378,17 @@ def axis_h(f: dict[str, Any]) -> dict[str, Any]:
         unknown = sorted(set(mu["outcomes"]) - set(patched))
         if ran:
             lo, hi = wilson(len(killed), len(ran))
+            lh, rh = mu["log_head"], fd.get("git_head")
+            stale = (None if lh and rh and rh.startswith(lh) else
+                     "the museum log names no commit: its verdicts cannot be tied to this code" if not lh else
+                     "the registry's commit is unknown (git history not read)" if not rh else
+                     f"the museum log was made at {lh}, this checkout is at {rh[:12]}: stale")
             out["planted_exploit_catch_rate"] = _metric(
                 len(killed) / len(ran), [mu["ref"], fd["ref"]], numerator=len(killed), denominator=len(ran),
                 ci95_wilson_two_sided=[lo, hi], not_killed=sorted(set(ran) - set(killed)),
                 museum_patches_not_in_log=not_run, log_findings_not_in_registry=unknown,
                 log_head=mu["log_head"], registry_head=fd.get("git_head"),
-                status="pass" if len(killed) == len(ran) and not not_run else "fail",
+                stale=stale, status="pass" if len(killed) == len(ran) and not not_run and not stale else "fail",
                 note="KILLED = at least one of the finding's tests fails on the re-introduced loophole")
         else:
             out["planted_exploit_catch_rate"] = _unmeasured("the museum log names no finding of the registry")
@@ -453,6 +478,13 @@ def resolve_local(ref: str, store: EvidenceStore | None, repo: Path) -> str | No
             commit, _, more = rest.partition(":")
             rel, _, h = more.rpartition(":")
             return None if _sha_bytes(_git(Path(repo), "show", f"{commit}:{rel}")) == h else f"{ref}: differs"
+        if kind == "runbundle":
+            from ..store.run_bundle import RunBundleError, read_run_bundle_bytes
+            h, _, path = rest.partition(":")
+            try:
+                return None if read_run_bundle_bytes(Path(path))[1] == h else f"{ref}: manifest changed"
+            except (RunBundleError, ValueError):
+                return f"{ref}: not a readable run bundle"
         if kind == "file":
             h, _, path = rest.partition(":")
             p = Path(path)
