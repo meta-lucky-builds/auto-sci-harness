@@ -35,6 +35,8 @@ claimed from `finalize_routed` on the sealed split.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import time
 from collections.abc import Callable
@@ -55,7 +57,7 @@ CLUSTER_KEYS = ("family", "domain")  # closed set of PUBLIC task attributes a ro
 RECORD_FIELDS = frozenset({"branch_id", "trunk", "spec_hash", "cluster_key", "clusters", "won", "lofo",
                            "policy_version", "at"})
 CLUSTER_FIELDS = frozenset({"tested", "wins", "n_tasks", "targets", "note", "why"})
-LOFO_FIELDS = frozenset({"passed", "targets", "note"})
+LOFO_FIELDS = frozenset({"passed", "targets", "note", "routes"})
 UNTESTED_WHY = ("too_few_tasks", "no_targets")
 
 
@@ -98,17 +100,38 @@ def branch_id(trunk: str, spec_hash: str) -> str:
     return f"{trunk[:12]}-{spec_hash[:12]}"
 
 
-def cluster_note(bid: str, cluster: str) -> str:
-    return note_code("branch", bid, cluster)
+def _digest(*parts: Any) -> str:
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:32]
 
 
-def lofo_note(bid: str) -> str:
-    """A different prefix from cluster_note, so no cluster name can collide with it."""
-    return note_code("branch_lofo", bid)
+def _bit(b: bool) -> str:
+    return "1" if b else "0"
+
+
+def cluster_note(trunk: str, spec_hash: str, cluster: str, wins: bool) -> str:
+    """The release note of one cluster bit. It binds the FULL trunk and spec hashes, the exact cluster name and the
+    released VALUE (through a digest, so note_code's lower-casing and truncation cannot merge two clusters): a record
+    can be backed only by a release of exactly its own bit (router.verified_bits)."""
+    return note_code("branch", _digest(trunk, spec_hash, cluster), _bit(wins))
+
+
+def lofo_note(trunk: str, spec_hash: str, routes: dict[str, str], passed: bool) -> str:
+    """The release note of a branch's LOFO/LODO bit: binds the trunk, the branch, the WHOLE route table that was
+    checked (cluster -> spec hash) and the released value."""
+    return note_code("branch_lofo", _digest(trunk, spec_hash, sorted(routes.items())), _bit(passed))
+
+
+def _released_bit(releases: Releases, value: bool, *, targets: list[str], note: str, key: str) -> bool:
+    bit = releases.emit(value, targets=targets, channel="evolution_score", alphabet="verdict_bit", note=note, key=key)
+    if not isinstance(bit, bool):  # a pinned value that is not a bit: fail closed
+        raise BranchRefused("released verdict is not a bit")
+    if bit != value:  # the note names the computed value; a pinned value that differs cannot be backed (fail closed)
+        raise BranchRefused("released bit differs from the computed one (replay divergence; fail closed)")
+    return bit
 
 
 def _default_targets(outcome: Callable[[HarnessSpec, Unit], RunOutcome], store: EvidenceStore,
-                     arms: tuple[HarnessSpec, HarnessSpec]) -> Callable[[list[Unit]], list[str]]:
+                     arms: tuple[HarnessSpec, ...]) -> Callable[[list[Unit]], list[str]]:
     def targets(units: list[Unit]) -> list[str]:
         runs = {outcome(x, u).run_id for x in arms for u in units}
         return sorted({t for r in runs if r for t in private_reads(store, run_id=r)})
@@ -137,6 +160,7 @@ def propose_branch(trunk: HarnessSpec, candidate: HarnessSpec, tasks: list[Suite
     if trunk_hash == cand_hash:
         raise BranchRefused("a branch must differ from its trunk")
     bid = branch_id(trunk_hash, cand_hash)
+    own_targets = targets_for is None
     targets_for = targets_for or _default_targets(outcome, store, (candidate, trunk))
     by_cluster: dict[str, list[SuiteTask]] = {}
     for t in tasks:
@@ -157,33 +181,41 @@ def propose_branch(trunk: HarnessSpec, candidate: HarnessSpec, tasks: list[Suite
             clusters[c] = entry | {"tested": False, "wins": False, "why": "no_targets"}
             continue
         win = _cluster_win(units, candidate, trunk, outcome, cfg, level)  # host-only interval, reduced to a bit
-        note = cluster_note(bid, c)
-        bit = releases.emit(win, targets=targets, channel="evolution_score", alphabet="verdict_bit", note=note,
-                            key=f"{trunk_hash}|{cand_hash}|{c}")
-        if not isinstance(bit, bool):  # a pinned value that is not a bit: fail closed
-            raise BranchRefused(f"cluster {c}: released verdict is not a bit")
+        note = cluster_note(trunk_hash, cand_hash, c, win)
+        bit = _released_bit(releases, win, targets=targets, note=note, key=f"{trunk_hash}|{cand_hash}|{c}")
         clusters[c] = entry | {"tested": True, "wins": bit, "targets": targets, "note": note}
     won = sorted(c for c, e in clusters.items() if e["wins"])
     if not won:
         return None
-    # invariant 16: the ROUTED harness (candidate on the won clusters, trunk elsewhere) must pass LOFO/LODO on every
-    # held-out family and domain, host-only, reduced to one released bit
+    # invariant 16: the WHOLE route table this branch would make the router serve (the table it serves now, plus this
+    # candidate on its won clusters) must pass LOFO/LODO on every held-out family and domain against the trunk;
+    # host-only, reduced to one released bit. Routes compose, so each table is checked as a whole.
+    from .router import current_routes  # router imports this module
     eps = cfg.non_regression_eps if lofo_eps is None else min(cfg.non_regression_eps, lofo_eps)
     groups = _held_out_groups(tasks, seeds)
+    routes = current_routes(store, trunk, cfg.cluster_key) | dict.fromkeys(won, cand_hash)
+    specs = {cand_hash: candidate}
+    for h in sorted(set(routes.values()) - {cand_hash}):
+        try:
+            other = HarnessSpec.model_validate(store.harness_spec(h))
+        except Exception:  # noqa: BLE001 - an unloadable routed branch: the table cannot be checked (fail closed)
+            raise BranchRefused(f"routed branch {h[:12]} cannot be loaded") from None
+        if other.spec_hash() != h:
+            raise BranchRefused(f"routed branch {h[:12]} does not re-hash")
+        specs[h] = other
+    if own_targets:  # every arm of the checked table, and the trunk
+        targets_for = _default_targets(outcome, store, (*specs.values(), trunk))
     lofo_units = sorted({u for us in groups.values() for u in us})
     lofo_targets = sorted(set(targets_for(lofo_units)))
     if not lofo_targets:  # the LOFO bit could not be ledgered: no branch (fail closed)
         return None
-    passed = _routed_lofo(groups, set(won), {t.task_id: t for t in tasks}, candidate, trunk, outcome, cfg, eps)
-    lnote = lofo_note(bid)
-    lbit = releases.emit(passed, targets=lofo_targets, channel="evolution_score", alphabet="verdict_bit",
-                         note=lnote, key=f"{trunk_hash}|{cand_hash}|lofo")
-    if not isinstance(lbit, bool):
-        raise BranchRefused("released LOFO verdict is not a bit")
-    if not lbit:
+    passed = _routed_lofo(groups, routes, specs, {t.task_id: t for t in tasks}, trunk, outcome, cfg, eps)
+    lnote = lofo_note(trunk_hash, cand_hash, routes, passed)
+    if not _released_bit(releases, passed, targets=lofo_targets, note=lnote, key=f"{trunk_hash}|{cand_hash}|lofo"):
         return None
     rec = {"branch_id": bid, "trunk": trunk_hash, "spec_hash": cand_hash, "cluster_key": cfg.cluster_key,
-           "clusters": clusters, "won": won, "lofo": {"passed": True, "targets": lofo_targets, "note": lnote},
+           "clusters": clusters, "won": won,
+           "lofo": {"passed": True, "targets": lofo_targets, "note": lnote, "routes": routes},
            "policy_version": POLICY_VERSION, "at": time.time()}
     check_record(rec)
     store.add_harness_version(candidate.id, candidate.model_dump(mode="json"), parent_hash=trunk_hash)
@@ -206,14 +238,15 @@ def _held_out_groups(tasks: list[SuiteTask], seeds: tuple[int, ...]) -> dict[str
     return out
 
 
-def _routed_lofo(groups: dict[str, list[Unit]], won: set[str], by_id: dict[str, SuiteTask], cand: HarnessSpec,
-                 trunk: HarnessSpec, outcome: Callable[[HarnessSpec, Unit], RunOutcome], cfg: BranchConfig,
-                 eps: float) -> bool:
-    """Every held-out group non-regressing for the routed harness vs the trunk (selection.non_regression, the
-    global LOFO gate's check). On a unit of an unrouted cluster the routed harness IS the trunk (difference 0)."""
+def _routed_lofo(groups: dict[str, list[Unit]], routes: dict[str, str], specs: dict[str, HarnessSpec],
+                 by_id: dict[str, SuiteTask], trunk: HarnessSpec, outcome: Callable[[HarnessSpec, Unit], RunOutcome],
+                 cfg: BranchConfig, eps: float) -> bool:
+    """Every held-out group non-regressing for the routed harness (the route table `routes`) vs the trunk
+    (selection.non_regression, the global LOFO gate's check). On a unit of an unrouted cluster the routed harness IS
+    the trunk (difference 0)."""
     def routed(u: Unit) -> float | None:
-        on_branch = cluster_of(by_id[u[0]], cfg.cluster_key) in won
-        return outcome(cand if on_branch else trunk, u).score
+        h = routes.get(cluster_of(by_id[u[0]], cfg.cluster_key))
+        return outcome(specs[h] if h is not None else trunk, u).score
 
     for units in groups.values():
         r = non_regression(paired_sample(units, routed, lambda u: outcome(trunk, u).score),
@@ -266,8 +299,18 @@ def check_record(rec: Any) -> None:
     won = rec["won"]
     if not isinstance(won, list) or sorted(won) != sorted(c for c, e in clusters.items() if e["wins"]) or not won:
         raise BranchRefused("branch record `won` disagrees with its cluster bits")
+    if rec["branch_id"] != branch_id(rec["trunk"], rec["spec_hash"]):
+        raise BranchRefused("branch record id is not its (trunk, spec) id")
+    for c, e in clusters.items():  # every note names exactly this record's (trunk, spec, cluster, bit)
+        if e["tested"] and e["note"] != cluster_note(rec["trunk"], rec["spec_hash"], c, e["wins"]):
+            raise BranchRefused(f"cluster {c!r}: release note is not this record's bit")
     lofo = rec["lofo"]
+    routes = lofo.get("routes") if isinstance(lofo, dict) else None
     if not isinstance(lofo, dict) or set(lofo) != LOFO_FIELDS or lofo["passed"] is not True \
-            or lofo["note"] != lofo_note(rec["branch_id"]) or not isinstance(lofo["targets"], list) \
-            or not lofo["targets"] or not all(isinstance(t, str) and t for t in lofo["targets"]):
+            or not isinstance(routes, dict) \
+            or not all(isinstance(k, str) and isinstance(v, str) and k and v for k, v in routes.items()) \
+            or any(routes.get(c) != rec["spec_hash"] for c in won) \
+            or lofo["note"] != lofo_note(rec["trunk"], rec["spec_hash"], routes, True) \
+            or not isinstance(lofo["targets"], list) or not lofo["targets"] \
+            or not all(isinstance(t, str) and t for t in lofo["targets"]):
         raise BranchRefused("branch record has no passing leave-one-family/domain-out bit (invariant 16)")

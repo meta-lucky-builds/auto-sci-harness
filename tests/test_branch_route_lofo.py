@@ -67,7 +67,7 @@ def test_the_same_domain_win_without_the_regression_is_routed_and_carries_its_lo
     rec = _domain_branch(store, tasks, h_delta=0.1)  # positive control: H improves too
     assert rec is not None and rec["won"] == ["ml"]
     lofo = rec["lofo"]
-    assert lofo["passed"] is True and lofo["note"] == lofo_note(rec["branch_id"])
+    assert lofo["passed"] is True and lofo["note"] == lofo_note(TRUNK.spec_hash(), CA.spec_hash(), {"ml": CA.spec_hash()}, True)
     # the bit is ledgered on every held-out group's target (H, and domain bio = family B)
     assert {b["dataset_id"] for b in released(store) if b["note"] == lofo["note"]} == set(lofo["targets"])
     assert len(lofo["targets"]) == 5  # gH0, gH1, gB0, gB1, gB2
@@ -92,28 +92,31 @@ def test_a_campaign_without_a_held_out_family_cannot_branch(store, tmp_path):
 
 
 def test_router_refuses_records_without_a_released_passing_lofo_bit(store, tmp_path):
-    from test_router import _spec
+    """Each forged record sits on the REAL trunk, next to the honest ones, in a fresh store: the router refuses it
+    for its own reason."""
+    from custom_harness.kernel import Kernel
+    from custom_harness.store import EvidenceStore
     tasks = _gate_tasks(tmp_path)
     (ra, _), _ = _branches(store, tasks)
     assert build_router(store, TRUNK).routes  # positive control
-    for i, mutate in enumerate((
-            lambda r: r.pop("lofo"),                                   # an old-format record: no LOFO at all
-            lambda r: r["lofo"].update(passed=False),                  # a failing bit
-            lambda r: r["lofo"].update(note="branch_lofo:forged"),     # a bit for another branch
-    )):
-        t = _spec(f"lofo-trunk-{i}")
-        bad = json.loads(json.dumps(ra)) | {"trunk": t.spec_hash()}
+    cases = (
+        (lambda r: r.pop("lofo"), "whitelist"),                                     # old format: no LOFO at all
+        (lambda r: r["lofo"].update(passed=False), "leave-one-family/domain-out"),  # a failing bit
+        (lambda r: r["lofo"].update(note="branch_lofo:forged"), "leave-one-family/domain-out"),  # another note
+        (lambda r: r["lofo"].update(routes={}), "leave-one-family/domain-out"),     # a table without its own route
+        (lambda r: r["lofo"].update(targets=[*r["lofo"]["targets"], "tgt-never-released"]),
+         "LOFO/LODO bit not in the release ledger"),                                # note right, release missing
+    )
+    for i, (mutate, why) in enumerate(cases):
+        st = EvidenceStore(tmp_path / f"st{i}")
+        Kernel(st).approve_adapter("ml", approver="pytest")
+        (good, _), _ = _branches(st, tasks)
+        bad = json.loads(json.dumps(good))
         mutate(bad)
-        store.append_record(BRANCH_KIND, bad)
-        with pytest.raises(RouteRefused, match=r"leave-one-family/domain-out|whitelist"):
-            build_router(store, t)
-    # well-formed, but the LOFO bit was never released on one of its targets: the ledger re-check refuses it
-    t = _spec("lofo-trunk-unledgered")
-    bad = json.loads(json.dumps(ra)) | {"trunk": t.spec_hash()}
-    bad["lofo"]["targets"] = [*bad["lofo"]["targets"], "tgt-never-released"]
-    store.append_record(BRANCH_KIND, bad)
-    with pytest.raises(RouteRefused, match="LOFO/LODO bit not in the release ledger"):
-        build_router(store, t)
+        st.append_record(BRANCH_KIND, bad)
+        with pytest.raises(RouteRefused, match=why):
+            build_router(st, TRUNK)
+        st.close()
 
 
 def test_the_generation_loop_does_not_branch_around_a_held_out_family(store, tmp_path):

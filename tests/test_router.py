@@ -127,17 +127,22 @@ def test_a_cluster_winner_that_does_not_win_globally_becomes_a_branch(store, tmp
     assert ra["won"] == ["A"] and rb["won"] == ["B"]
     assert ra["clusters"]["B"] == {"n_tasks": 3, "tested": True, "wins": False,
                                    "targets": sorted(tid(f"gB{i}") for i in range(3)),
-                                   "note": cluster_note(ra["branch_id"], "B")}
+                                   "note": cluster_note(TRUNK.spec_hash(), CA.spec_hash(), "B", False)}
     # every tested cluster bit is a ledgered verdict-bit release on each target its runs read (2 branches x 2 x 3)
     # plus each branch's leave-one-family-out bit on every held-out family's target (A and B are both held out
     # here: 2 branches x 6 targets; invariant 16, branches.py)
     rel = released(store)
     assert len(rel) == 12 + 12 and {(b["channel"], b["alphabet"]) for b in rel} == {("evolution_score",
                                                                                      "verdict_bit")}
-    assert {b["note"] for b in rel} == ({cluster_note(r["branch_id"], c) for r in (ra, rb) for c in "AB"}
-                                        | {lofo_note(r["branch_id"]) for r in (ra, rb)})
+    assert {b["note"] for b in rel} == (
+        {cluster_note(TRUNK.spec_hash(), r["spec_hash"], c, c in r["won"]) for r in (ra, rb) for c in "AB"}
+        | {lofo_note(TRUNK.spec_hash(), r["spec_hash"], r["lofo"]["routes"], True) for r in (ra, rb)})
+    # the LOFO bit is computed for the WHOLE table the router would serve: CB's record extends CA's route table
+    assert ra["lofo"]["routes"] == {"A": CA.spec_hash()}
+    assert rb["lofo"]["routes"] == {"A": CA.spec_hash(), "B": CB.spec_hash()}
     assert ra["lofo"] == {"passed": True, "targets": sorted(tid(f"g{f}{i}") for f in "AB" for i in range(3)),
-                          "note": lofo_note(ra["branch_id"])}
+                          "note": lofo_note(TRUNK.spec_hash(), CA.spec_hash(), {"A": CA.spec_hash()}, True),
+                          "routes": {"A": CA.spec_hash()}}
     # aggregate only: the stored record holds counts and a timestamp, never a mean, CI bound or score
     for rec in store.records(BRANCH_KIND):
         assert {p for p, _ in _numbers(rec)} <= {".at", ".clusters.A.n_tasks", ".clusters.B.n_tasks"}
@@ -264,9 +269,10 @@ def test_attack_policy_probing_the_evidence_view_finds_only_bits(store, tmp_path
             view.store = store  # an attempt to attach a handle
         return {}
 
-    r = build_router(store, TRUNK, policy=probing_policy)
+    with pytest.raises(RouteRefused, match="may not choose"):  # a policy cannot drop or pick routes either
+        build_router(store, TRUNK, policy=probing_policy)
     view = seen[0]
-    assert view.attempts == ["per_task", "scores", "_store", "gate_mean"] and r.routes == ()
+    assert view.attempts == ["per_task", "scores", "_store", "gate_mean"]
     # introspection: everything the view references is a hash, a cluster name or a bit
     leaves = []
     for k, v in view._bits.items():
@@ -294,13 +300,19 @@ def test_attack_records_that_smuggle_values_or_skip_the_ledger_are_refused(store
     store.append_record(BRANCH_KIND, mean_in_cluster)
     with pytest.raises(RouteRefused, match="whitelist"):
         build_router(store, t3)
-    # a well-formed record whose bit was never released (forged note): refused by the ledger re-check
+    # a record moved to another trunk: its notes bind (trunk, spec, cluster, bit), so it is refused outright
     t4 = _spec("trunk4")
-    unreleased = json.loads(json.dumps(ra)) | {"trunk": t4.spec_hash()}
-    unreleased["clusters"]["A"]["note"] = "branch:forged:a"
+    moved = json.loads(json.dumps(ra)) | {"trunk": t4.spec_hash()}
+    store.append_record(BRANCH_KIND, moved)
+    with pytest.raises(RouteRefused, match="refused"):
+        build_router(store, t4)
+    # a well-formed record on the real trunk whose bit was never released on one of its targets: refused by the
+    # ledger re-check (the note is right, the release is missing)
+    unreleased = json.loads(json.dumps(ra))
+    unreleased["clusters"]["A"]["targets"] = [*unreleased["clusters"]["A"]["targets"], "tgt-never-released"]
     store.append_record(BRANCH_KIND, unreleased)
     with pytest.raises(RouteRefused, match="not in the release ledger"):
-        build_router(store, t4)
+        build_router(store, TRUNK)
 
 
 # ---------------------------------------------------------------------------------------------- loop hook
