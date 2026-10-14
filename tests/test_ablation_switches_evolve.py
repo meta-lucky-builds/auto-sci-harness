@@ -332,7 +332,8 @@ def test_per_completion_race_switch(tmp_path, monkeypatch):
         return race(list(candidates), units, lambda h, u: evaluator.score(candidates[h], u), parent_scores,
                     rounds=rounds, keep=keep), None, None
     monkeypatch.setattr(evalrace, "race_evaluator", spy)
-    cfg = EvolveConfig(seeds=(0, 1), n_edits=2, race_rounds=2, race_allocator="per_completion", race_slots=2)
+    # race_slots stays 1: more slots need an owner acknowledgement (check_race_config, race_concurrency_ack)
+    cfg = EvolveConfig(seeds=(0, 1), n_edits=2, race_rounds=2, race_allocator="per_completion")
 
     def run(name, off=()):
         return _gen(tmp_path, name, off=off, proposer=MockBackend([_proposal(EDIT0, PROPOSALS["edits"][1])]),
@@ -341,16 +342,16 @@ def test_per_completion_race_switch(tmp_path, monkeypatch):
     def raced(r):
         return [c["race"] for c in r["res"].candidates if c["status"] == "raced"]
     on = run("on")
-    assert calls == [2]  # production: the per-completion allocator with its 2 slots
+    assert calls == [1]  # production: the per-completion allocator (1 slot)
     off = run("off", {"per-completion-race"})
-    assert calls == [2]  # the allocator did not run
+    assert calls == [1]  # the allocator did not run
     assert len(raced(off)) == 2 and raced(off) == raced(on)  # the batch race decides the same way on these scores
     ctl = run("ctl", {OTHER})
-    assert calls == [2, 2] and raced(ctl) == raced(on)
+    assert calls == [1, 1] and raced(ctl) == raced(on)
     batch = _gen(tmp_path, "batch", off={"per-completion-race"},
                  proposer=MockBackend([_proposal(EDIT0, PROPOSALS["edits"][1])]),
                  cfg=EvolveConfig(seeds=(0, 1), n_edits=2, race_rounds=2))
-    assert calls == [2, 2] and raced(batch) == raced(on)  # under the default batch allocator: a no-op
+    assert calls == [1, 1] and raced(batch) == raced(on)  # under the default batch allocator: a no-op
 
 
 # ===================================================================== milo / sia: the L7 orchestrator
