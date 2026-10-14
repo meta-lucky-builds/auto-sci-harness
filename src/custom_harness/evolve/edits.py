@@ -87,7 +87,14 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   "figures",
                                   # critic-answer check and recall (research/critic_answers.py, research/recall.py;
                                   # tests/test_evolve_hardening.py checks these keys are really written)
-                                  "critic_answers", "critic_evidence", "recalled", "recall_log"})
+                                  "critic_answers", "critic_evidence", "recalled", "recall_log",
+                                  # read by trusted code (claims._hypotheses idea text in reports, memory_wiring's
+                                  # skill writer; research.recall_memory's quoted context): s3-verifiers review M1
+                                  "hypotheses", "memory"})
+# Reserved keys that an EXISTING model node legitimately writes (the hypothesize node's LLM output): that node may
+# still be edited (its prompt is the proposer's main surface) as long as it keeps writing the key under the same node
+# id; no other added or changed node may start writing it. Every other reserved key has no such exception.
+ESTABLISHED_WRITER_KEYS = frozenset({"hypotheses"})
 # Approval-node outcomes (`<node_id>_approval`, `<node_id>_decision`) are written only by the engine; node ids vary,
 # so any key with these suffixes is reserved. (The engine also discards such values before an approval node runs.)
 RESERVED_OUTPUT_SUFFIXES = ("_approval", "_decision")
@@ -99,7 +106,9 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.next_hypothesis", "research.run_candidate", "research.claim", "research.confirm", "research.certify",
     "research.replica_dev", "research.report", "research.audit",
     # the critic-answer check and recall write reserved keys (ids checked against the registry by a test)
-    "research.critic_evidence", "research.check_critic_answers", "research.recall"})
+    "research.critic_evidence", "research.check_critic_answers", "research.recall",
+    # writes the reserved `memory` key (s3-verifiers review M1)
+    "research.recall_memory"})
 # Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
 # critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
 PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
@@ -309,8 +318,11 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
         if nid in spec.nodes and node == spec.nodes[nid]:
             continue  # unchanged nodes were already accepted
         key = getattr(node, "output_key", None)
-        if key is not None and (key in RESERVED_OUTPUT_KEYS or key.startswith("_")
-                                or key.endswith(RESERVED_OUTPUT_SUFFIXES)):
+        established = (key in ESTABLISHED_WRITER_KEYS and nid in spec.nodes
+                       and getattr(spec.nodes[nid], "output_key", None) == key
+                       and getattr(spec.nodes[nid], "kind", None) == getattr(node, "kind", None))
+        if key is not None and not established and (key in RESERVED_OUTPUT_KEYS or key.startswith("_")
+                                                    or key.endswith(RESERVED_OUTPUT_SUFFIXES)):
             raise EditRejected(f"node '{nid}' would write reserved state key '{key}'")
         if getattr(node, "module", None) in protected_modules:
             raise EditRejected(f"node '{nid}' reuses a protected module outside its protected node")
