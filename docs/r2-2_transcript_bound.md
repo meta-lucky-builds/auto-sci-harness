@@ -21,7 +21,13 @@ The tests on `int16-fix` that record the open state:
 | `tests/test_evolve.py::test_generation_finds_structural_fix_and_blocks_unsafe_edits` | **strict xfail**, `raises=MultiplicityDrift`, assertions unchanged; keeps the acceptance coverage for when the fix lands |
 | `tests/test_evolve.py::test_generation_halts_fail_closed_while_releases_outgrow_the_declared_family` | new plain test: the same campaign stops with `MultiplicityDrift` naming the transcript bound, with no decision and no `harness_edit` record |
 
-Other evolution tests the detector halts are listed in the integrator's report, each with its treatment.
+| `tests/test_infra.py::test_docker_outage_mid_campaign_changes_no_decision` | **strict xfail**, `raises=MultiplicityDrift` (real campaign halts) |
+| `tests/test_infra.py::test_a_persistent_outage_ends_infra_aborted_never_rejected` | **strict xfail**, `raises=MultiplicityDrift` |
+| `tests/test_exclusion_asymmetry.py::test_outage_campaign_reaches_the_same_decision_with_the_rule` | **strict xfail**, `raises=MultiplicityDrift` |
+
+These outage tests assert decisions of real campaigns. With the detector, both their clean and outage arms halt
+before any decision, so they are strict xfails with assertions unchanged. The halt itself is pinned by the new
+test_evolve halt test.
 
 Strict means a marker turns into a gate failure as soon as the Kernel fix makes its test pass, which forces the
 marker's removal. These markers record a known violation; they do not weaken anything.
