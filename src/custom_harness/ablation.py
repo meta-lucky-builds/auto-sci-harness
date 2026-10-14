@@ -166,7 +166,7 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
     Switch(name="data_profile_kway_rank", capability="scider",
            turns_off="research/modules.py profile_data computes no profile (an 'ablated' marker instead); "
                      "research/tournament.py tournament_module (in specs with a research.tournament node, e.g. "
-                     "examples/research_v1.yaml, or research_v2 with the opt-in research.execution_rank "
+                     "examples/research_v1.yaml, or research_v2 with the opt-in research.admit_rank "
                      "params.tournament; as shipped research_v2 ranks by execution) makes no judge call and keeps "
                      "the proposer's order",
            test=_T + "test_data_profile_kway_rank_switch_skips_profile_and_ranking"),
@@ -174,7 +174,7 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            turns_off="research/tournament.py tournament_module: no judge call, no Bradley-Terry fit; the queue keeps "
                      "the proposer's order (in specs with a research.tournament node, e.g. examples/research_v1.yaml, "
                      "or under "
-                     "research_v2.yaml only with the opt-in research.execution_rank params.tournament; as shipped, "
+                     "research_v2.yaml only with the opt-in research.admit_rank params.tournament; as shipped, "
                      "research_v2 ranks by execution and this switch changes nothing there)",
            test=_T + "test_btl_tournament_switch_keeps_the_proposer_order"),
     Switch(name="experiment_tree_repair_improve", capability="ai-scientist-v1-v2",

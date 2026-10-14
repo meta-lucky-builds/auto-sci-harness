@@ -282,7 +282,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                       releases: Releases | None = None,
                       critic: FamilySeparatedCritic | None = None,
                       branching: BranchConfig | None = None, ablation: AblationSet | None = None,
-                      proposals: ProposalLog | None = None) -> GenerationResult:
+                      proposals: ProposalLog | None = None,
+                      edit_admission: Callable[[list[Edit]], tuple[list[int], list[int]]] | None = None
+                      ) -> GenerationResult:
     """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
     in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
     shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
@@ -296,7 +298,12 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     harness-edit, stats and proposer-session records go to `<kind>:ABLATED` record kinds, which no production reader
     (novelty gate, proposer ledger, calibration, export) reads. Any acceptance run that is itself ABLATED also blocks
     acceptance (fail closed). An ablated generation is refused a durable proposal log (int17 merge: the log writes
-    the production `PROPOSAL_KIND`, which an ablated arm must never enter)."""
+    the production `PROPOSAL_KIND`, which an ablated arm must never enter).
+
+    `edit_admission`: the L7 edit-type quota (control/islands.admit, bound by evolve/search.py): given the proposed
+    edits it returns (admitted, refused) indices, a partition of the proposal (fail closed otherwise). A refused edit
+    is recorded `rejected_static` (edit withheld, reason naming the quota, no signature: the duplicate gate is not
+    fed, the same edit may be admitted later) and never evaluated. None = every edit admitted (unchanged)."""
     abl = ablation if ablation is not None else getattr(evaluator, "ablation", NO_ABLATION)
     if getattr(evaluator, "ablation", abl) != abl:
         raise ValueError(f"the generation's ablation {list(abl.names)} differs from its evaluator's "
@@ -368,6 +375,16 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if proposals is not None:  # persisted BEFORE any candidate runs: a crash from here on resumes, not re-asks
             proposals.save(parent_hash, proposal, known, rejected_before)
     edits, problems = proposal.edits, proposal.problems
+    admitted: list[Edit] = list(edits)
+    quota_refused: list[Edit] = []
+    if edit_admission is not None:
+        # the quota sees each edit's EFFECTIVE type: an edit whose ops only rewrite prompt text is prompt-only,
+        # whatever type it declares (red-team finding: mislabelled prompt edits passed the quota)
+        adm_ok, adm_refused = edit_admission([_quota_view(e) for e in edits])
+        both = [*adm_ok, *adm_refused]
+        if any(type(i) is not int for i in both) or sorted(both) != list(range(len(edits))):
+            raise ValueError("edit_admission must partition the proposal's edit indices (fail closed)")
+        admitted, quota_refused = [edits[i] for i in sorted(adm_ok)], [edits[i] for i in sorted(adm_refused)]
     claims_by: dict[str, dict[str, Any]] = {}
     deny = denied_tokens(tasks)
     task_ids = {t.task_id for t in tasks}
@@ -378,7 +395,10 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         # proposer free text written to the lineage (exported): screened like an edit's rationale
         reason = proposal.decline if not _token_hit(proposal.decline, deny) else "<withheld: names held-out data>"
         records.append({"status": "declined", "reason": reason})
-    for edit in edits:
+    records += [{"status": "rejected_static", "edit": withheld(e),
+                 "reason": "edit-type quota (L7 orchestrator admission): not admitted this generation"}
+                for e in quota_refused]
+    for edit in admitted:
         sig = edit_signature(edit)
         if abl.off("contract-hop-edits") and edit.type in (EditType.CONTRACT, EditType.HOP):
             # ablation: these edit types do not exist in this arm (unscreened text never stored: withheld)
@@ -529,6 +549,16 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 decision, rejected_on = "rejected: " + cost["reason"], "cost"
             else:
                 decision, rejected_on = d.reason, None
+            # the rejecting stage reaches the proposer (proposer_view, lineage_view) and the L7 orchestrator, and it
+            # is gate-derived ('cost' says the pooled gate and every LOFO group passed): a ledgered `count` release
+            # on the same targets, pinned in a replayed campaign (GOAL §16.5.3, invariant 18)
+            # (emitted only for a rejection: an accepted candidate has no stage beyond the accept bit)
+            if rejected_on is not None:
+                code = rel.emit(GATE_STAGES.index(rejected_on), targets=gate_targets, channel="evolution_score",
+                                alphabet="count", note="evolve.gate:stage", key=f"{parent_hash}|{best}")
+                if type(code) is not int or not 1 <= code < len(GATE_STAGES):
+                    raise ValueError("released gate stage is not a rejecting stage (fail closed)")
+                rejected_on = GATE_STAGES[code]
             per_task = _per_task(fresh_units + gate_units, tasks, lambda u: evaluator.score(spec, u),
                                  lambda u: evaluator.score(parent, u))
             flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
@@ -567,7 +597,8 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 accepted_spec, accepted = spec, True
             elif branching is not None and rejected_on in ("evolve", "held_out_gate"):
                 branch = propose_branch(parent, spec, tasks, seeds=cfg.seeds, outcome=evaluator.outcome,
-                                        store=store, releases=rel, globally_accepted=False, cfg=branching)
+                                        store=store, releases=rel, globally_accepted=False, cfg=branching,
+                                        lofo_eps=cfg.non_regression_eps)
     for r in records:
         store.append_record("lineage" + sfx, {"parent": parent_hash, **r, **abl.marker()})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
@@ -578,6 +609,18 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
 
 
 RACE_ALLOCATORS = ("batch", "per_completion", "voi")
+# spec fields that hold prompt text (runtime/spec.py: LLM node `system` / `prompt`, approval node `prompt`, the spec
+# `description`): an edit whose every op ends in one of them only changes wording
+PROMPT_TEXT_FIELDS = frozenset({"system", "prompt", "description"})
+
+
+def _quota_view(edit: Edit) -> Edit:
+    """`edit` as the L7 edit-type quota sees it: typed prompt_text when every op targets a prompt-text field."""
+    if edit.ops and all(op.path.rstrip("/").rsplit("/", 1)[-1] in PROMPT_TEXT_FIELDS for op in edit.ops):
+        return edit.model_copy(update={"type": EditType.PROMPT_TEXT})
+    return edit
+# the released gate-stage code (index): None = accepted, else the rejecting stage
+GATE_STAGES: tuple[str | None, ...] = (None, "evolve", "held_out_gate", "cost", "exclusion_asymmetry")
 
 
 def check_race_config(cfg: EvolveConfig) -> None:

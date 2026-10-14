@@ -55,3 +55,11 @@ ISLAND_MIN_SHARE = 0.1  # UNCALIBRATED (owner decision, GOAL §13.8): no island 
 ISLAND_PROMPT_MAX_SHARE = 0.4  # UNCALIBRATED (owner decision, GOAL §13.8): edit-type quota on prompt-only edits
 ISLAND_MIN_EDIT_TYPES = 2  # UNCALIBRATED (owner decision, GOAL §13.8): distinct edit types per planned batch
 ISLAND_POLICY_CADENCE = 5  # UNCALIBRATED (owner decision, GOAL §13.8): orchestrator rounds between policy changes
+ISLAND_WEIGHTS_AFTER = 2  # UNCALIBRATED (owner decision, GOAL §13.8): consecutive stalled harness-edit
+#   diversifications of an island before the `weights` lever (L8 export route; nothing is trained) is chosen
+# Orchestrator policy gate (control/policy_gate.py): exact one-sided sign test over W declared AB/BA round pairs
+POLICY_TRIAL_ALPHA = 0.05  # UNCALIBRATED (owner decision, GOAL §13.8): per-trial level (not across trials)
+POLICY_TRIAL_MIN_NONZERO = 5  # UNCALIBRATED (owner decision, GOAL §13.8): non-zero pairs needed; 0.5^5 = 0.03125
+#   is the smallest p 5 non-zero pairs can reach, so 5 is the smallest value at which alpha 0.05 can be reached
+POLICY_TRIAL_PAIRS = 10  # UNCALIBRATED (owner decision, GOAL §13.8): window W in round pairs (20 rounds); twice
+#   min_nonzero, so a trial can still pass when half its pairs tie, and 9 of 10 positive pairs give p = 11/1024

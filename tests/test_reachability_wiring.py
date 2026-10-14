@@ -2,13 +2,12 @@
 reachable from a shipped spec or the CLI, each behind an explicit opt-in; the defaults are unchanged.
 
 Fail-first (stated, not run in the no-test round): at the parent commit `chh evolve` has no --race-allocator
-(argparse exits 2), `research.execution_rank` ignores params (no tournament, so no 'ablated' tournament mode), and
+(argparse exits 2), the registry texts do not name research_v2's opt-in tournament, and
 `live_client` / `offline_client` take no `ablation` keyword (TypeError)."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -40,31 +39,19 @@ def test_chh_evolve_race_allocator_is_an_explicit_opt_in(tmp_path, monkeypatch, 
 
 
 # ------------------------------------------------------------------------------------------- BTL tournament (v2)
-def _rank_state():
-    hyps = [{"id": f"h{i}", "idea": f"idea {i}", "rationale": "r"} for i in range(3)]
-    return {"hypotheses": {"hypotheses": hyps}, "task": {"description": "d", "metric": "acc"}, "profile": {}}
-
-
-def test_execution_rank_is_the_default_and_the_tournament_is_opt_in():
-    from custom_harness.research.modules import execution_rank
-    ctx = SimpleNamespace(ablation=NO_ABLATION)
-    out = execution_rank(_rank_state(), {}, ctx)
-    assert out["ranking"]["order"] == ["h0", "h1", "h2"] and "execution" in out["ranking"]["method"]
-    # opt-in: params.tournament delegates to research/tournament.py, so its ablation switches reach research_v2
-    ctx_off = SimpleNamespace(ablation=ablation_set({"btl_tournament"}))
-    out2 = execution_rank(_rank_state(), {"tournament": {"rounds": 3}}, ctx_off)
-    assert out2["ranking"]["mode"] == "ablated" and "btl_tournament" in out2["ranking"]["method"]
-    assert [h["id"] for h in out2["queue"]] == ["h0", "h1", "h2"]
-    with pytest.raises(ValueError, match=r"params.tournament"):
-        execution_rank(_rank_state(), {"tournament": 3}, ctx)
-
-
-def test_shipped_research_v2_still_ranks_by_execution():
+def test_shipped_research_v2_ranks_by_execution_and_the_tournament_is_opt_in():
+    """research_v2's rank node is research.admit_rank (s3-hypo) with `tournament: null`: execution ranks as shipped;
+    the opt-in `params.tournament` reaches research/tournament.py, where btl_tournament / data_profile_kway_rank act
+    (their registry text says so)."""
     import yaml
+
+    from custom_harness.ablation import SWITCHES
     doc = yaml.safe_load((Path(__file__).resolve().parent.parent / "examples" / "research_v2.yaml").read_text(
         encoding="utf-8"))
     rank = doc["nodes"]["rank"]
-    assert rank["module"] == "research.execution_rank" and "tournament" not in (rank.get("params") or {})
+    assert rank["module"] == "research.admit_rank" and rank["params"]["tournament"] is None
+    for sw in ("btl_tournament", "data_profile_kway_rank"):
+        assert "research.admit_rank params.tournament" in " ".join(SWITCHES[sw].turns_off.split())
 
 
 # ------------------------------------------------------------------------------------------- literature retrieval

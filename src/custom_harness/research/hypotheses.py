@@ -21,15 +21,25 @@ far-domain inspiration available as a prompt-side option that is never evidence.
   Nothing in this module or the Kernel path reads it: it can change WHICH hypotheses are proposed, never how any
   of them is judged (dedup, quotas, dev racing and the Kernel ignore it).
 
-Not wired into the research loop yet (the hypothesize prompt does not ask for a topic; no diversity node): see the
-mailbox post for the hooks it needs.
+- **Literature-mined mechanisms** (`mine_mechanisms`): verbatim sentences of papers THIS run retrieved (offline
+  snapshot), each citing retrieval-log ids; prompt-side only (`is_evidence=False`).
+- **Admission** (`admit`): the front declared before generation is enforced in code. A hypothesis citing an id that
+  is not in the run's retrieval log, with an undeclared topic, or over its topic's cap is REJECTED (removed from the
+  queue, reason recorded); a set with too few hypotheses that use the forced distance-3 inspiration or a retrieved
+  mechanism is rejected as a whole (AdmissionRefused).
+
+Wired into research_v2 (research/front.py): `research.hypothesis_front` (off by default, spec flag), admission in
+`research.admit_rank`, and `research.diversity_select` (error-correlation dedup of executed candidates, feeding the
+ensemble's member choice). None of them makes a model call.
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
 import random
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -229,3 +239,108 @@ def inspiration(task_area: str, *, seed: int, distance: int = DEFAULTS.inspirati
             f"method from {src} might transfer to this {task_area} problem. Any hypothesis it suggests is judged "
             f"only by dev cross-validation and the Kernel, like every other hypothesis.")
     return Inspiration(task_area=task_area, source_area=src, distance=distance, prompt=text)
+
+
+# ---------------------------------------------------------------- literature-mined mechanisms (prompt-side, cited)
+#: Declared cue lexicon for mechanism sentences (UNCALIBRATED, owner decision GOAL §13.8): a sentence of a retrieved
+#: paper's stored abstract containing one of these (case-insensitive substring) is shown VERBATIM as a mechanism.
+MECHANISM_CUES: tuple[str, ...] = ("mechanism", "because", "due to", "driven by", "works by", "explained by",
+                                   "we propose", "we introduce", "improves")
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+class Mechanism(_Frozen):
+    """A verbatim sentence from a paper this run RETRIEVED. `cites` are retrieval-log ids (doi:/arxiv:/pmid:). It can
+    change which hypotheses are proposed; it is never evidence for any claim."""
+
+    id: str
+    cites: tuple[str, ...]
+    title: str
+    quote: str
+    is_evidence: Literal[False] = False
+
+
+def mine_mechanisms(records: Sequence[Mapping[str, Any]], retrieved_ids: Collection[str]) -> list[Mechanism]:
+    """Mechanism sentences of retrieved records ({ids, title, abstract}); a record none of whose ids is in the
+    retrieval log is skipped. Deterministic and order-independent (sorted by id)."""
+    out: dict[str, Mechanism] = {}
+    for rec in records:
+        ids = tuple(sorted(i for i in rec.get("ids") or () if i in retrieved_ids))
+        text = rec.get("abstract")
+        if not ids or not isinstance(text, str):
+            continue
+        for sent in (s.strip() for s in _SENTENCE.split(text)):
+            if any(c in sent.lower() for c in MECHANISM_CUES):
+                mid = "mech-" + hashlib.sha256(f"{ids}|{sent}".encode()).hexdigest()[:12]
+                out[mid] = Mechanism(id=mid, cites=ids, title=str(rec.get("title") or ""), quote=sent)
+    return [out[k] for k in sorted(out)]
+
+
+# ---------------------------------------------------------------- admission: quotas enforced in code
+class AdmissionRefused(ValueError):
+    """The hypothesis SET violates a quota (too few inspired or mechanism-citing hypotheses, or nothing admissible):
+    the set is rejected, never just logged."""
+
+
+def _cites(h: Mapping[str, Any]) -> list[str] | None:
+    raw = h.get("mechanism_cites")
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(x, str) and x.strip() for x in raw):
+        return None
+    return [x.strip() for x in raw]
+
+
+def admit(hypotheses: Sequence[Mapping[str, Any]], front: Mapping[str, Any], retrieved_ids: Collection[str]
+          ) -> tuple[list[Mapping[str, Any]], dict[str, Any]]:
+    """Enforce the hypothesis front declared BEFORE generation (`front`, written by research.hypothesis_front).
+
+    Per hypothesis, in the given order (a rejected hypothesis is removed from the queue, with its reason):
+      1. `mechanism_cites`, if given, must be a list of ids that ALL appear in this run's retrieval log (GOAL L4.3
+         provenance; the same rule K0/I3 applies to citations); a hypothesis citing anything else is rejected;
+      2. its `topic` must be declared, and the topic's cap not yet reached (`apply_topic_quota`).
+    For the set (raises AdmissionRefused, so the whole set is rejected):
+      3. at least `min_inspired` admitted hypotheses set `inspired_by` to the forced distance-3 source area;
+      4. at least `min_mechanisms` admitted hypotheses cite the paper of a SHOWN mechanism (0 when none was mined:
+         the waiver is recorded);
+      5. at least one hypothesis is admitted."""
+    quota = TopicQuota.model_validate(front["quota"])
+    rejected: list[dict[str, Any]] = []
+    cited_ok: list[Mapping[str, Any]] = []
+    retrieved = set(retrieved_ids)
+    for h in hypotheses:
+        c = _cites(h)
+        if c is None:
+            rejected.append({"id": h.get("id"), "reason": "mechanism_cites must be a list of id strings"})
+            continue
+        missing = sorted(set(c) - retrieved)
+        if missing:
+            rejected.append({"id": h.get("id"), "reason": f"cites id(s) not in this run's retrieval log: {missing}"})
+            continue
+        cited_ok.append(h)
+    kept, dropped = apply_topic_quota(cited_ok, quota)
+    rejected.extend(dropped)
+    source = _norm((front.get("inspiration") or {}).get("source_area"))
+    n_inspired = sum(1 for h in kept if source is not None and _norm(h.get("inspired_by")) == source)
+    # a hypothesis counts toward the mechanism quota only if it cites a SHOWN mechanism's paper (citing another
+    # retrieved paper is allowed, but is not "using a literature-mined mechanism")
+    shown = {i for m in front.get("mechanisms") or () for i in m.get("cites") or ()}
+    n_mech = sum(1 for h in kept if set(_cites(h) or ()) & shown)
+    min_inspired = int(front.get("min_inspired", 0))
+    min_mech = int(front.get("min_mechanisms", 0))
+    record = {"enabled": True, "admitted": [h.get("id") for h in kept], "rejected": rejected,
+              "inspired": n_inspired, "min_inspired": min_inspired, "mechanism_citing": n_mech,
+              "min_mechanisms": min_mech, "retrieved_ids": len(retrieved),
+              "mechanisms_waived": bool(front.get("mechanisms_waived"))}
+    problems = []
+    if not kept:
+        problems.append("no hypothesis was admitted")
+    if n_inspired < min_inspired:
+        problems.append(f"{n_inspired} admitted hypothesis(es) set inspired_by={source!r}; at least {min_inspired} "
+                        f"required (forced distance-3 inspiration)")
+    if n_mech < min_mech:
+        problems.append(f"{n_mech} admitted hypothesis(es) cite a retrieved mechanism; at least {min_mech} required")
+    if problems:
+        raise AdmissionRefused("hypothesis set rejected by the front quotas: " + "; ".join(problems)
+                               + f" (record: {record})")
+    return kept, record

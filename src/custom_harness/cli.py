@@ -194,6 +194,7 @@ def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
+    from .evolve.branches import BranchConfig
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
@@ -221,7 +222,8 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     out = data_dir() / "evolve" / campaign_id
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
            store=store, sandbox_factory=factory, cfg=cfg, out_dir=out, campaign_budget=campaign,
-           campaign=campaign_id)
+           campaign=campaign_id,
+           branching=BranchConfig(cluster_key=a.branch_by) if a.branch_by else None)
     print(f"outputs: {out}")
     print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
           f"{campaign_id})")
@@ -697,6 +699,10 @@ def main(argv: list[str] | None = None) -> int:
         return delegate_main(args[1:])
     if args[:2] == ["evolve", "report"]:  # `chh evolve report CAMPAIGN` (a spec file named "report": ./report)
         args = ["evolve-report", *args[2:]]
+    from .evolve import cli as evolve_cli
+    # read-only L6.9 views (`chh evolve branches|route ...`, own parser); they use the ONE store open below (int17
+    # merge: the kerneld boundary ratchet lists a single EvidenceStore construction in cli.py)
+    views = args[:1] == ["evolve"] and len(args) > 1 and args[1] in evolve_cli.SUBCOMMANDS
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
@@ -734,6 +740,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
+    ev.add_argument("--branch-by", choices=["family", "domain"],
+                    help="L6.9: make branches of gate-rejected cluster winners and record the route table "
+                         "(see `chh evolve branches|route SPEC`)")
     er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
                                               "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
     er.add_argument("campaign")
@@ -859,7 +868,7 @@ def main(argv: list[str] | None = None) -> int:
     scorecard_cli.add_parsers(sub)
     timesplit_cli.add_parsers(sub)
     studio_cli.add_parsers(sub)
-    a = p.parse_args(args)
+    a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -867,6 +876,8 @@ def main(argv: list[str] | None = None) -> int:
                              f"{TEST_MODE_ENV}=1 (trusted test code only). Use --docker.")
     store = EvidenceStore(data_dir() / "store")
     try:
+        if a is None:
+            return evolve_cli.main(args[1:], store)
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
                 "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role, "alpha": cmd_alpha,

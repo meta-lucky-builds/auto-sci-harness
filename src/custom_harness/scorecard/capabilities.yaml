@@ -159,7 +159,7 @@ capabilities:
   ablation:
     switch: data_profile_kway_rank
     not_covered:
-      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution (research.execution_rank) as shipped, so there only the profiling half of this switch acts unless the opt-in params.tournament is set
+      K-way ranking under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution (research.admit_rank, tournament off) as shipped, so there only the profiling half of this switch acts unless the opt-in research.admit_rank params.tournament is set
       replication profile: the replication brief's trusted profile (research/claims.py _trusted_profile) is still computed
       trajectory data: 'an offline export only (weights/trajectory.py, weights/export.py) that takes trajectories as inputs and is not wired to runs: no run produces or consumes it, so there is nothing in a run to switch off'
 - id: scienceflow
@@ -234,7 +234,7 @@ capabilities:
   ablation:
     switch: btl_tournament
     not_covered:
-      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution as shipped and reaches the tournament (and this switch) only with the opt-in research.execution_rank params.tournament
+      BTL tournament under research_v2: research.tournament is a node of examples/research_v1.yaml; research_v2.yaml ranks by execution as shipped and reaches the tournament (and this switch) only with the opt-in research.admit_rank params.tournament
       lab-in-loop: 'the physical claim path (research/physical.py) runs through human approval nodes (protocol_review, data_received) and the human-only `chh return-data`: integrity mechanism: measured only in the evaluation harness (e.g. the planted-exploit museum''s simulated check-off arm), never switched off in production'
       replicated analysis + consensus: 'the headline label (research/claims.py headline, printed by research.report) requires the claim certificate AND one independent replica certificate (replica_* nodes) both CERTIFIED and invariant 5 met: an integrity/reporting requirement, never switched off in production; consensus over more than one replicate analysis: not built'
 - id: ahois
