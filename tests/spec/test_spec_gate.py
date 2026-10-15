@@ -176,3 +176,40 @@ def test_a_deviation_record_corrects_an_earlier_record_and_never_satisfies_the_g
     assert governance.problems(root)
     _records(root, old, {**dev, "fingerprint": fp, "corrects": "a" * 64})  # no window/tighten for the current core
     assert "with no record" in " ".join(governance.problems(root))
+
+
+_DELEGATED = {"kind": "delegated", "recorded": "2026-10-15", "approver": "orchestrator", "delegated_by": "owner",
+              "basis": "GOAL §13.5", "changes": ["equivalence claims get TOST bounded-null certificates"],
+              "cooling_off_observed": False}
+
+
+@pytest.mark.parametrize(("change", "ok"), [
+    ({}, True),
+    ({"delegated_by": " "}, False), ({"basis": ""}, False), ({"changes": []}, False), ({"changes": [""]}, False),
+    ({"cooling_off_observed": True}, False), ({"cooling_off_observed": "false"}, False), ({"approver": ""}, False),
+])
+def test_a_delegated_record_satisfies_the_gate_only_when_it_admits_the_skipped_cooling_off(tmp_path, change, ok):
+    """s4-kernel (item 8): an owner-DELEGATED core change gets its own record kind instead of the tighten-plus-deviation
+    pattern. Fails first on the old script: kind 'delegated' was 'neither window nor tighten' (the ok case fails)."""
+    root = _gov_tree(tmp_path)
+    _record(root, **{**_DELEGATED, **change})
+    assert (governance.problems(root, today=dt.date(2026, 10, 15)) == []) is ok, governance.problems(root)
+
+
+def test_record_delegated_appends_without_rewriting_history(tmp_path, monkeypatch):
+    """--record --kind delegated appends one record and leaves the earlier bytes unchanged (the s3-domain note: the old
+    --record rewrote the whole yaml). Fails first: the old CLI refused --kind delegated (argparse exit 2)."""
+    root = _gov_tree(tmp_path)
+    _record(root, kind="baseline", approver="owner", recorded="2026-10-07")
+    path = root / governance.RECORDS
+    before = path.read_bytes()
+    monkeypatch.setattr(governance, "ROOT", root)
+    argv = ["--record", "--kind", "delegated", "--approver", "orchestrator", "--delegated-by", "owner", "--basis",
+            "GOAL §13.5", "--change", "TOST equivalence"]
+    assert governance.main(argv) == 0
+    assert path.read_bytes().startswith(before)
+    recs = yaml.safe_load(path.read_text(encoding="utf-8"))["changes"]
+    assert recs[-1]["kind"] == "delegated" and recs[-1]["cooling_off_observed"] is False
+    assert recs[-1]["changes"] == ["TOST equivalence"]
+    assert governance.main(argv[:-2]) == 1  # no --change: refused, nothing written
+    assert len(yaml.safe_load(path.read_text(encoding="utf-8"))["changes"]) == len(recs)

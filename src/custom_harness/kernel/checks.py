@@ -392,8 +392,8 @@ def k1_well_formed(ctx: Context) -> CheckResult:
     if unknown:
         reasons.append(R(Code.K1_DATASETS, f"unregistered datasets: {unknown}"))
     if c.evidence_class == EvidenceClass.DATA:  # s4: the ML adapter's scope vocabulary, as for the exact classes
-        roles, phrase = {d: r.role.value for d, r in known.items()}, getattr(procedures(ctx), "scope_phrase", None)
-        reasons += statement_reasons(ctx, None if phrase is None else lambda: str(phrase(c, roles)))
+        phrase, notes = (getattr(procedures(ctx), k, None) for k in ("scope_phrase", "PROVENANCE_NOTES"))
+        reasons += statement_reasons(ctx, None if phrase is None else lambda: str(phrase(c)), notes or frozenset())
         reasons += [R(Code.K1_STATEMENT, f"identifier {x[:40]!r} is not a plain id ({_PLAIN_ID.pattern}): ids are "
                                          f"rendered into the statement") for x in (c.subject.artifact_id,
                     c.comparator.artifact_id, *c.generalization_targets) if not _PLAIN_ID.fullmatch(x)]
@@ -909,15 +909,15 @@ def _exact_spec(ctx: Context) -> adapters.AdapterSpec | None:
     return adapters.REGISTRY[ctx.adapter["name"]][0] if ctx.adapter is not None else None
 
 
-def statement_reasons(ctx: Context, phrase: Callable[[], str] | None) -> list[str]:
-    """Computational, formal and data claims (invariant 14): no scope conditions (none is in the adapters'
-    vocabularies: a certificate or a proof holds for the registered instance or the approved statement only; a data
-    claim for its targets' populations) and the statement is exactly the adapter's rendering, so no prose (e.g. "this
-    circuit works when built", "cures X") rides on a result. An adapter without a rendering fails."""
+def statement_reasons(ctx: Context, phrase: Callable[[], str] | None, notes: frozenset[str] = frozenset()) -> list[str]:
+    """Computational, formal and data claims (invariant 14): no scope conditions except the adapter's provenance
+    `notes` keys (never scope; none for the exact classes, whose certificate or proof holds for the registered
+    instance or the approved statement only) and the statement is exactly the adapter's rendering, so no prose (e.g.
+    "this circuit works when built", "cures X") rides on a result. An adapter without a rendering fails."""
     c, reasons = ctx.claim, []
-    if c.scope.conditions:
+    if set(c.scope.conditions) - notes:
         reasons.append(R(Code.K1_SCOPE, f"a {c.evidence_class.value} claim has no scope conditions (none is in its "
-                                        f"adapter's vocabulary), got {sorted(c.scope.conditions)}"))
+                                        f"adapter's vocabulary), got {sorted(set(c.scope.conditions) - notes)}"))
     if phrase is None:
         return [*reasons, R(Code.K1_STATEMENT, "the adapter renders no scope phrase: the statement cannot be checked")]
     try:

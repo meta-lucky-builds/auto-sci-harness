@@ -473,7 +473,11 @@ def test_independent_replication_certifies_the_headline_without_seeing_the_code(
     assert s["model_policy"]["invariant_5"] == "met"
     assert s["replica_certificate"]["label"] == "CERTIFIED-INTERNAL", s["replica_certificate"]
     assert headline(s) and s["audit"]["passed"], s["audit"]
-    assert "independent re-implementation" in s["replica_claim"]["statement"]
+    # s4-kernel: a data statement is exactly the ML adapter's scope rendering (no prose); the replica is told apart by
+    # its own subject (the independent re-implementation's code), not by words in the statement
+    from custom_harness.kernel import Claim, ml
+    replica = Claim.model_validate(s["replica_claim"])
+    assert replica.statement == ml.scope_phrase(replica) and replica.subject != Claim.model_validate(s["claim"]).subject
     assert s["replica_claim"]["effect"]["min_effect"] == s["claim"]["effect"]["min_effect"]  # same bar
     replicate_prompt = next(r for r in other.requests if "Re-implement the method" in r.messages[-1].content)
     assert not any("Re-implement the method" in r.messages[-1].content for r in author.requests)

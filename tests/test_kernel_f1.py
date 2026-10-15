@@ -32,6 +32,7 @@ from custom_harness.kernel import (
     KernelConfig,
     MetricRef,
     Scope,
+    ml,
 )
 from custom_harness.kernel import checks as K
 from custom_harness.kernel.reasons import Code
@@ -50,11 +51,13 @@ def _csv(rows: list[list[str]]) -> bytes:
 
 
 def _claim(subject: ArtifactRef, comparator: ArtifactRef, i: int) -> Claim:
-    return Claim(kind=ClaimKind.IMPROVEMENT, statement=f"claim {i}", subject=subject, comparator=comparator,
+    c = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"claim {i}", subject=subject, comparator=comparator,
                  metric=MetricRef(id="accuracy", higher_is_better=True),
                  effect=Effect(min_effect=0.001, predicted_lo=0.01, predicted_hi=0.2, probability=0.5),
                  scope=Scope(datasets=("t",)), development=(), generalization_targets=("t",),
                  analysis_plan=AnalysisPlan(seeds=SEEDS, n_boot=1000), resolve_by=time.time() + 1e6)
+    # s4-kernel: K1 takes only the ML adapter's rendering; `i` stays in the subject id so claims stay distinct
+    return c.model_copy(update={"statement": ml.scope_phrase(c)})
 
 
 def one_campaign(root: Path, rng: random.Random, policy: str) -> tuple[bool, set[Code]]:

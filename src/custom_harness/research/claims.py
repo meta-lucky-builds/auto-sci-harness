@@ -44,6 +44,7 @@ from ..kernel import (
     Risk,
     SandboxReplayer,
     Scope,
+    ml,
     run_program,
 )
 from ..kernel.bundle import build_bundle
@@ -201,13 +202,14 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     # code to measure the candidate's noise floor on public dev data; frozen into the pre-registration below
     from .noise_floor import claim_tolerance_for
     tol, tol_rec = claim_tolerance_for(state, params, ctx, ctx.store.blobs.get(best["code_ref"]))
-    hid = _inline(best.get("hypothesis_id"), 80)  # model-written id: never raw in a claim statement
-    who = ("an independent re-implementation (written from the claim text, without the code) of hypothesis "
-           f"{hid}") if p else f"the solution for hypothesis {hid}"
+    tol_ev = None
+    if tol > 0:  # K1 (s4-kernel) accepts a tolerance > 0 only with its noise-floor record, which it re-calibrates
+        from ..verify.tolerance import NoiseFloor
+        f = tol_rec["floor"]
+        tol_ev = kernel.record_noise_floor(NoiseFloor(f["reference"], tuple(f["nominal"]), tuple(f["perturbed"]),
+                                                      (), ()))
     claim = Claim(
-        kind=ClaimKind.IMPROVEMENT,
-        statement=f"On task {task.id}, {who} beats the task baseline on {task.metric} by at least {delta:.4g} "
-                  f"on held-out data",
+        kind=ClaimKind.IMPROVEMENT, statement="",  # rendered below: K1 takes only the ML adapter's scope phrase
         subject=ArtifactRef(artifact_id=subject.artifact_id, hash=subject.hash),
         comparator=ArtifactRef(artifact_id=baseline.artifact_id, hash=baseline.hash),
         metric=MetricRef(id=task.metric, higher_is_better=task.higher_is_better),
@@ -220,10 +222,12 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
         # max(declared, actual registered claims), so declaring a campaign's planned number of claims per task
         # keeps certification strictness constant during the campaign (no drift against later candidates).
         analysis_plan=AnalysisPlan(seeds=tuple(params.get("seeds", (0, 1, 2))), alpha=params.get("alpha", 0.05),
-                                   n_comparisons=int(params.get("n_comparisons", 1)), reproduce_tolerance=tol),
+                                   n_comparisons=int(params.get("n_comparisons", 1)), reproduce_tolerance=tol,
+                                   tolerance_evidence=tol_ev),
         assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
                      "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
+    claim = claim.model_copy(update={"statement": ml.scope_phrase(claim)})
     if params.get("preflight", False):  # GOAL §16.8: deny-only; it never registers or certifies anything
         result = _preflight(task, state, ctx, claim, candidate_key)
         if result.denied:

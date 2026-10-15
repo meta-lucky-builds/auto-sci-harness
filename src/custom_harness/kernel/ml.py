@@ -63,14 +63,19 @@ _RELATION = {ClaimKind.IMPROVEMENT: "beats {c} by at least {d}", ClaimKind.ABLAT
              ClaimKind.EQUIVALENCE: "differs from {c} by less than {d}"}
 
 
-def scope_phrase(c: Claim, roles: Mapping[str, str]) -> str:
-    """The data class's scope vocabulary (K1, invariant 14): the ONLY statement a data claim may make (datasets, splits,
-    population, metric phrase; min_effect by repr, never rounded). docs/kernel_s4.md, item 4."""
+# scope.conditions keys a data claim may carry: provenance notes of the Claim Audit (audit/spec.py), never scope (they
+# are not rendered into the statement and no check reads them); any other key fails K1
+PROVENANCE_NOTES = frozenset({"audit_id", "paper_doi", "paper_title", "paper_sentence", "paper_datasets",
+                              "paper_reported_effect", "budget_timeout_s", "wrapper_sha256", "protocol", "licences"})
+
+
+def scope_phrase(c: Claim) -> str:
+    """The data class's scope vocabulary (K1, invariant 14): the ONLY statement a data claim may make, a pure function
+    of the claim (datasets, split, population, metric phrase; min_effect by repr). docs/kernel_s4.md, item 4."""
     relation = _RELATION.get(c.kind, "?").format(c=c.comparator.artifact_id, d=repr(c.effect.min_effect))
-    held = ", ".join(f"{t} (split {roles.get(t, '?')})" for t in c.generalization_targets)
     return (f"{c.subject.artifact_id} {relation} in {c.metric.id} ({'higher' if c.metric.higher_is_better else 'lower'}"
-            f" is better) on the held-out examples of {held}; population: the examples each target is an i.i.d. "
-            f"sample of")
+            f" is better) on the held-out test examples of {', '.join(c.generalization_targets)}; population: the "
+            f"examples each target is an i.i.d. sample of")
 
 
 def recompute(ctx: Any) -> list[str]:
