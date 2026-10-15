@@ -273,8 +273,10 @@ def test_provider_signoff_is_ledgered_bound_to_the_entry_and_counted_by_the_rele
 
 # ------------------------------------------------------------------ human-held check registration
 def test_human_check_registration_binds_the_file_hash_and_never_records_content(tmp_path, store):
-    from custom_harness.assure import humancheck as H
+    import importlib  # module by name: the import block sorts the same with or without s3-assure
+
     from custom_harness.human import checks as K
+    H = importlib.import_module("custom_harness.assure.humancheck")
     from custom_harness.human.guard import HumanActionRefused
     repo, ddir = tmp_path / "repo", tmp_path / "data"
     (repo / "redteam").mkdir(parents=True)
