@@ -124,9 +124,9 @@ latest ledgered sign-off of the entry's **current** hash. If there is none, it c
 - any change to the entry's terms voids the sign-off;
 - the age rule (`costs.RELEASE_MAX_AGE_DAYS`) applies to the sign-off date.
 
-**Wiring still to do.** `chh verify-registry --release` (cli.py, from the unmerged s3-gateway branch) must call
-`with_ledgered_signoffs` before `verify_registry`. This happens when int17 holds s3-gateway; see
-agent_worklogs/s4-human/RESUME.md.
+`chh verify-registry --release` (cli.py `cmd_verify_registry`) applies `with_ledgered_signoffs` before
+`verify_registry`, so the release check fails until a human signs off each usable entry with
+`chh sign-off-provider`. The pure function `costs.release_problems` is unchanged.
 
 ### Human-held check registration (invariant 22; s3-assure)
 
@@ -190,7 +190,7 @@ All of these are accountability checks, not authentication.
 
 ## Tests to run (NOT run; owner deferred tests)
 
-Run these once int17 holds s3-verifiers, s3-gateway and s3-assure:
+Run these once int17 holds s3-assure (s3-verifiers and s3-gateway are merged):
 
 ```
 pytest -q tests/test_human_surface.py tests/test_human_static.py tests/test_approval.py tests/test_studio.py \
