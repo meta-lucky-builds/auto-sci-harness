@@ -115,8 +115,11 @@ class TokenTable:
             raise TokenError("bad_request")
         if kind == "openml_split" and (claim_hash is None or not self.vault.registered(claim_hash)):
             raise TokenError("not_registered")
-        if kind == "returned_measurements" and subject in self.vault.datasets():
-            raise TokenError("already_registered")
+        if kind == "returned_measurements":
+            if claim_hash is None:  # the claim the measurements answer is bound here, not taken from the ingest call
+                raise TokenError("bad_request")
+            if subject in self.vault.datasets():
+                raise TokenError("already_registered")
         token = secrets.token_hex(32)
         self.tokens[token] = Token(run_cap, INGEST, subject, kind, claim_hash, None, None)
         return token

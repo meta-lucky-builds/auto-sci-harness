@@ -307,7 +307,13 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     roots = [Path(r) for r in getattr(a, "artifact_root", None) or []]
 
     def local(sha: str) -> bytes | None:  # a large artifact the bundle lists but does not carry: this machine's copy
-        for f in [store.blobs._path(sha), *(r / sha for r in roots)]:
+        from .kerneld.hoststore import PrivateDataRefused
+        try:  # through the HostStore: a private blob is refused (= missing), never copied out (GOAL §16.5.2)
+            if store.blobs.has(sha):
+                return store.blobs.get(sha)
+        except (PrivateDataRefused, OSError):
+            return None
+        for f in (r / sha for r in roots):
             if f.is_file():
                 return f.read_bytes()
         return None
@@ -490,12 +496,14 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
         from .kerneld.scope import ScopedKernel
         try:
             res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
-                             vault=ScopedKernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+                             vault=ScopedKernel(store).vault, store_root=store.root, real_data=real, name=a.name,
+                             heldout_rows=a.heldout_rows, null_families=tuple(a.null_family or ()))
         except (RB.RebuildRefused, RB.MintRefused) as e:
             raise SystemExit(f"refused: {e}") from None
         print(json.dumps(res, indent=1))
         return 0
-    path = build_suite(Path(a.out), real_data=real)
+    path = build_suite(Path(a.out), real_data=real, heldout_rows=a.heldout_rows,
+                       null_families=tuple(a.null_family or ()))
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
 
@@ -877,6 +885,11 @@ def main(argv: list[str] | None = None) -> int:
     bs.add_argument("--beacon-file", help="the sealed beacon (outside agent-readable roots)")
     bs.add_argument("--real-export", help="real-data export written by the trusted exporter (instead of --docker)")
     bs.add_argument("--name", default="m2", help="suite name recorded in the manifest")
+    bs.add_argument("--heldout-rows", type=int, default=None,
+                    help="held-out rows per synthetic task (GOAL 16.2 small train / large test; frozen in manifest). "
+                         "Proposed 4500 (research.suite.PROPOSED_HELDOUT_ROWS, UNCALIBRATED, from a partial preflight)")
+    bs.add_argument("--null-family", action="append", choices=["noise"],
+                    help="add a genuinely null family to the real pool (null salts may only come from such a family)")
     pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
     pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
     pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")

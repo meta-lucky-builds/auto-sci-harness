@@ -1,4 +1,4 @@
-"""The host store facade and the Kernel's per-claim grants (GOAL §16.5.2, kerneld/hoststore.py, kerneld/scope.py), and
+"""The host store facade and the Kernel's per-claim grants (GOAL Â§16.5.2, kerneld/hoststore.py, kerneld/scope.py), and
 kerneld's private-ingest op (kerneld/ingest.py).
 
 Written 2026-10-14 (s4-kerneld) to FAIL on origin/int17 684f213 and pass with the branch:
@@ -269,3 +269,89 @@ def test_measurement_refusals_carry_closed_classes_only():
     assert classes == ["not_utf8", "columns", "row_length", "non_finite", "replicates", "other"]
     assert set(classes) <= set(MEASUREMENT_PROBLEMS) and not any("SECRET" in c for c in classes)
     assert json.dumps(classes)  # wire-safe
+
+
+# ----------------------------------------------------------------------------------- 5. review fixes (2026-10-15)
+def test_a_caller_chosen_replayer_runs_without_the_certify_grant(world):
+    """s4-kerneld-review finding 1: the replayer is the caller's code; inside K3 it must not see the target labels."""
+    hs = host_store(world.store)
+    seen: list[str] = []
+
+    class Spy:
+        def replay(self, record, vault):
+            try:
+                vault.store.blobs.get(_private_blob(world))
+                seen.append("read")
+            except PrivateDataRefused:
+                seen.append("refused")
+            return world.replayer.replay(record, vault)
+
+    ScopedKernel(hs, replayer=Spy()).certify(world.claim_obj, world.evidence, record=False)
+    assert seen and set(seen) == {"refused"}
+
+
+def test_scoped_kernel_on_a_raw_store_still_runs_on_the_host_view(world):
+    k = ScopedKernel(world.store)
+    assert isinstance(k.store, HostStore)
+    with pytest.raises(PrivateDataRefused):
+        k.store.blobs.get(_private_blob(world))
+
+
+def test_module_kernel_bundles_only_into_the_bundles_dir_and_records_it(world, tmp_path):
+    from custom_harness.config import data_dir
+    from custom_harness.kernel import KernelError
+    from custom_harness.studio.kill import RunGuardedKernel
+    cert = world.kernel.certify(world.claim_obj, world.evidence)
+    k = RunGuardedKernel(world.store, run_id="r-bundle", replayer=world.replayer)
+    with pytest.raises(KernelError, match="bundle refused"):
+        k.bundle(cert.cert_hash(), tmp_path / "elsewhere.zip")
+    h = k.bundle(cert.cert_hash(), data_dir() / "bundles" / "ok.zip")
+    recs = [r for r in world.store.records("kerneld_bundle") if r["bundle_hash"] == h]
+    assert recs and _private_blob(world) in recs[-1]["private_blobs"]
+
+
+def test_host_store_holds_no_reference_to_the_raw_store(world):
+    hs = host_store(world.store)
+    assert not any(isinstance(v, type(world.store)) and not isinstance(v, HostStore) for v in vars(hs).values())
+    assert not any(callable(v) and getattr(v, "__self__", None) is world.store for v in vars(hs).values())
+
+
+def test_ingest_maps_a_refused_truth_layout_to_its_own_code(tmp_path, monkeypatch, rings):
+    """A truth location the layout refuses is `truth_layout`, never `not_found` (reviewer finding 10)."""
+    from custom_harness.kerneld import ingest as I
+    from custom_harness.truth_layout import TruthLayoutError
+
+    def refuse(task_dir):
+        raise TruthLayoutError("inside an agent-readable root")
+
+    monkeypatch.setattr("custom_harness.truth_layout.truth_dir", refuse)
+    s = open_host_store(tmp_path / "store")
+    try:
+        with pytest.raises(I.IngestRefused) as ei:
+            I.research_task(Vault(s), "r", "rings", str(rings))  # in-process call of the kerneld-side function
+        assert ei.value.code == "truth_layout"
+    finally:
+        s.close()
+
+
+def test_fake_labels_reads_and_writes_through_the_truth_layout(tmp_path, rings):
+    from custom_harness.kerneld.campaign import fake_labels
+    from custom_harness.truth_layout import truth_dir, truth_files
+    out = fake_labels(rings, tmp_path / "fake")
+    before = truth_files(rings)
+    after = truth_files(out)
+    assert set(after) == set(before)  # canary and every other truth file come along
+    assert (truth_dir(out) / "test_y.csv").read_text() != before["test_y.csv"].read_text()  # labels flipped
+    assert (truth_dir(out) / "canary.txt").read_text() == before["canary.txt"].read_text()
+
+
+def test_returned_measurements_token_binds_the_claim(tmp_path):
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-measure")
+            with pytest.raises(KernelDError) as ei:  # the claim must be bound when the token is issued
+                run.ingest_token("returned_measurements", "returned-x")
+            assert ei.value.code == "bad_request"
+    finally:
+        s.close()

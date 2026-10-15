@@ -30,7 +30,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..commitment import as_key, default_agent_readable_roots, draw, stream, subkey
+from ..commitment import agent_readable_root_of, as_key, draw, stream, subkey
 from . import config as C
 from .generate import (
     PLASMODE_DATASETS,
@@ -169,12 +169,9 @@ def _record(campaign_hash: str, commitment: str, reveal_on: str, exam_hash: str)
 
 
 def _under_agent_readable(path: Path) -> Path | None:
-    p = Path(path).resolve()
-    for r in default_agent_readable_roots():
-        r = Path(r).resolve()
-        if p == r or p.is_relative_to(r):
-            return r
-    return None
+    """Alias-safe (pathsafe via commitment.agent_readable_root_of): a `\\\\?\\`, admin-share, 8.3 or other-case
+    spelling of a path inside an agent-readable root is inside it."""
+    return agent_readable_root_of(path)
 
 
 def seal(plan: AssignmentPlan, salts: Sequence[GeneratedSalt], exam: Any, sealed_path: Path, vault: Any) -> str:

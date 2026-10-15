@@ -16,6 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..pathsafe import canon, is_within, overlaps
 from .hermetic import WITNESS_CONTENDED_RATIO, EntropyPin, parse_supervisor, split_record
 
 
@@ -41,7 +42,7 @@ def safe_path(workspace: Path, rel: str | Path) -> Path:
         cur = cur / part
         if is_link_like(cur):
             raise WorkspaceEscape(f"refusing to follow link or special entry at {cur.relative_to(root).as_posix()!r}")
-    if not cur.resolve().is_relative_to(root):
+    if not is_within(cur, root):
         raise WorkspaceEscape(f"path {str(rel)!r} resolves outside the workspace")
     return cur
 
@@ -236,7 +237,7 @@ class ProtectedMount(PermissionError):
 
 
 def _norm(p: Path | str) -> Path:
-    return Path(os.path.normcase(str(Path(p).resolve())))
+    return Path(os.path.normcase(str(canon(p))))
 
 
 def protect_path(p: Path | str) -> None:
@@ -246,16 +247,20 @@ def protect_path(p: Path | str) -> None:
 
 def protected_paths() -> list[Path]:
     from ..config import data_dir
+    from ..truth_layout import protected_truth_dirs
     d = data_dir()
-    # d / "human": the human-only L9 config (studio/tierpolicy.py), never inside an agent mount
-    return sorted({_norm(d / "store"), _norm(d / "bundles"), _norm(d / "human"), *(Path(p) for p in _PROTECTED)})
+    # d / "human": the human-only L9 config (studio/tierpolicy.py), never inside an agent mount; the held-out truth
+    # dirs (truth_layout: every mapped task's private files) likewise, whether or not a task registered them yet
+    return sorted({_norm(d / "store"), _norm(d / "bundles"), _norm(d / "human"),
+                   *(_norm(t) for t in protected_truth_dirs()), *(Path(p) for p in _PROTECTED)})
 
 
 def check_mount(workspace: Path | str) -> None:
-    """Refuse a workspace that is, is inside, or contains a protected path."""
-    ws = _norm(workspace)
+    """Refuse a workspace that is, is inside, or contains a protected path. Alias-safe (pathsafe.overlaps): a
+    `\\\\?\\` or `\\\\.\\` prefix, an admin share, an 8.3 short name or other case of the same directory is the same
+    directory (s3-evolve red team, 2026-10-14: the `\\\\?\\` alias of the evidence store was accepted)."""
     for p in protected_paths():
-        if ws == p or ws.is_relative_to(p) or p.is_relative_to(ws):
+        if overlaps(workspace, p):
             raise ProtectedMount(f"sandbox workspace {workspace} overlaps the protected path {p} "
                                  "(evidence store, bundles or a task's private files must never be agent-visible)")
 

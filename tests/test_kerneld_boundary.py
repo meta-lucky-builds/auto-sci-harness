@@ -142,6 +142,34 @@ def _raw_blob_access(node: ast.AST) -> bool:
             and isinstance(node.func.value, ast.Name) and node.func.value.id in ("BlobStore", "EvidenceStore"))
 
 
+_GUARDED_CLASSES = ("Kernel", "BlobStore", "EvidenceStore", "HostStore", "HostBlobs")
+_INTROSPECTION_ATTRS = ("__self__", "__mro__", "__bases__", "__dict__", "__globals__", "__closure__")
+# callers allowed to receive canary tokens for CONTENT SCREENS (kerneld/scope.screening_canaries; reviewer finding 6)
+SCREENING_CALLERS = {"memory/screen.py": 1, "research/evidence_refs.py": 1}
+
+
+def _alias_or_introspection(node: ast.AST) -> bool:
+    """Bypasses of the name-based detectors (s4-kerneld-review finding 8): an aliased import of a guarded class
+    (`from ..kernel import Kernel as K`), a two-argument `super(<guarded class>, x)` (skips HostBlobs.get), `vars(...)`,
+    introspection attributes that reach a bound object or a class's bases, and `<x>.blobs._path(...)` (the raw blob
+    file)."""
+    if isinstance(node, ast.ImportFrom) and any(a.name in _GUARDED_CLASSES and a.asname for a in node.names):
+        return True
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id == "vars":
+            return True
+        if node.func.id == "super" and len(node.args) == 2:
+            return True
+    if isinstance(node, ast.Attribute) and node.attr in _INTROSPECTION_ATTRS:
+        return True
+    return (isinstance(node, ast.Attribute) and node.attr == "_path" and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "blobs")
+
+
+def _screening_call(node: ast.AST) -> bool:
+    return _call_name(node) == "screening_canaries"
+
+
 def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites():
     assert _sites(_private_read) == OLD_PATH_PRIVATE_READS | SCRATCH_STORE_SITES
 
@@ -177,6 +205,14 @@ def test_host_code_never_reaches_the_blob_store_around_the_facade():
     assert _sites(_raw_blob_access, others) == {"literature/snapshot.py": 1}
 
 
+def test_no_aliased_guarded_class_and_no_introspection_bypass():
+    assert _sites(_alias_or_introspection) == {}
+
+
+def test_canary_tokens_reach_only_the_listed_content_screens():
+    assert _sites(_screening_call) == SCREENING_CALLERS
+
+
 def test_covered_host_modules_have_no_private_read_or_store_open():
     sites = {**_sites(_private_read), **_sites(_store_open)}
     bad = [f for f in sites if f not in SCRATCH_STORE_SITES and any(f == c or f.startswith(c + "/") for c in COVERED)]
@@ -209,7 +245,12 @@ def test_detectors_catch_planted_bypasses(tmp_path):
         _direct_bundle: "build_bundle(k, h, out)",
         _grant_machinery: "from custom_harness.kerneld.hoststore import _grant",
         _raw_blob_access: "BlobStore.get(store.blobs, digest)",
+        _alias_or_introspection: "data = super(HostBlobs, store.blobs).get(digest)",
     }
+    more = ["from custom_harness.kernel import Kernel as K", "inner = vars(hs)", "f = hs.close.__self__",
+            "p = store.blobs._path(d)"]
+    for line in more:
+        assert sum(1 for n in ast.walk(ast.parse(line)) if _alias_or_introspection(n)) == 1, line
     for pred, line in planted.items():
         p = tmp_path / f"{pred.__name__}.py"
         p.write_text(line + "\n", encoding="utf-8")

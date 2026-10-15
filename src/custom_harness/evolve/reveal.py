@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from ..kerneld.releases import LedgerSink, Sink, alphabet_of, note_code
+from ..pathsafe import canon, is_within
 from ..store import EvidenceStore
 
 REVEAL_KIND = "reveal"
@@ -88,36 +89,16 @@ def watermark_time(value: str) -> datetime:
     return dt.astimezone(UTC)
 
 
-# Windows device-path prefixes (\\?\UNC\, \\?\, \\.\): Path.resolve keeps them, so the same directory would look
-# like a different path
-_PREFIXES = (("\\\\?\\UNC\\", "\\\\"), ("\\\\?\\", ""), ("\\\\.\\", ""))
-
-
+# The Windows path-alias rule (\\?\, \\.\, admin shares, 8.3 names, case) first fixed here now lives in ONE helper,
+# custom_harness.pathsafe (s4-integrity item 5); these names stay for existing callers and tests.
 def _canon(p: Path | str) -> Path:
-    """`p` resolved, with the Windows device-path prefixes stripped."""
-    s = os.fspath(p)
-    for pre, sub in _PREFIXES:
-        if s.startswith(pre):
-            s = sub + s[len(pre):]
-            break
-    return Path(s).resolve()
+    """`p` in canonical form (pathsafe.canon)."""
+    return canon(p)
 
 
 def _inside(a: Path | str, b: Path | str) -> bool:
-    """`a` is `b` or lies under it: by path, then by file identity of every existing ancestor of `a` (aliases such as
-    8.3 short names or admin shares of the same directory)."""
-    a, b = _canon(a), _canon(b)
-    if a == b or b in a.parents:
-        return True
-    if not b.exists():
-        return False
-    for x in (a, *a.parents):
-        try:
-            if x.exists() and os.path.samefile(x, b):
-                return True
-        except OSError:
-            continue
-    return False
+    """`a` is `b` or lies under it, alias-safe (pathsafe.is_within)."""
+    return is_within(a, b)
 
 
 class TemporalReveal:

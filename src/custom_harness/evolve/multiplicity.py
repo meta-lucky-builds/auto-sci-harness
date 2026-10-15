@@ -55,11 +55,12 @@ def runs_per_task_bound(*, generations: int, n_edits: int, n_seeds: int, n_fresh
 def held_out_target_id(task_dir: Path) -> str:
     """The vault id research.setup registers for a task's held-out data (content-based; register_task)."""
     from ..research.task import load_task
+    from ..truth_layout import truth_file
     task_dir = Path(task_dir)
     task = load_task(task_dir)
     parts = [(task_dir / "public" / task.train_file).read_bytes(),
              (task_dir / "public" / task.test_features_file).read_bytes(),
-             (task_dir / "private" / task.test_labels_file).read_bytes()]
+             truth_file(task_dir, task.test_labels_file).read_bytes()]
     digest = hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
     return task.dataset_ids(digest, digest)["test"]
 

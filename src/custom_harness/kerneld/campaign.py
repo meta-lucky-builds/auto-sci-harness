@@ -87,14 +87,25 @@ class ReplayBackend(Backend):
 
 
 def fake_labels(task_dir: Path, out_dir: Path, how: str = "flip", label_files: tuple[str, ...] = ()) -> Path:
-    """Copy a task, replacing every private CSV's label column (first column after the header): `flip` maps each
-    label to the next distinct label value (cyclic), `constant` sets all labels to the least frequent value."""
+    """Copy a task, replacing every truth CSV's label column (first column after the header): `flip` maps each
+    label to the next distinct label value (cyclic), `constant` sets all labels to the least frequent value.
+
+    The truth is read from `truth_layout.truth_files(task_dir)` (s4-integrity: a suite task's truth is NOT inside
+    task_dir) and written to `truth_layout.truth_dir(out_dir)`; every other truth file (canary, records) is copied
+    unchanged. Both refuse (TruthLayoutError) a truth location inside an agent-readable root: an `out_dir` whose
+    truth dir would be agent-readable is refused, never written."""
+    from ..truth_layout import truth_dir, truth_files
+    sources = truth_files(task_dir)  # before anything is written: a refused layout leaves nothing behind
+    dest = truth_dir(out_dir)
     shutil.copytree(task_dir, out_dir)
-    priv = out_dir / "private"
-    for p in sorted(priv.glob("*.csv")) if priv.is_dir() else []:
-        if label_files and p.name not in label_files:
+    dest.mkdir(parents=True, exist_ok=True)
+    for rel, src in sources.items():
+        target = dest / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not rel.endswith(".csv") or "/" in rel or (label_files and rel not in label_files):
+            shutil.copyfile(src, target)
             continue
-        rows = list(csv.reader(io.StringIO(p.read_text(encoding="utf-8"))))
+        rows = list(csv.reader(io.StringIO(src.read_text(encoding="utf-8"))))
         vals = [r[0] for r in rows[1:] if r]
         uniq = sorted(set(vals))
         if how == "flip":
@@ -108,7 +119,7 @@ def fake_labels(task_dir: Path, out_dir: Path, how: str = "flip", label_files: t
         w.writerow(rows[0] if rows else ["label"])
         for v in new:
             w.writerow([v])
-        p.write_text(buf.getvalue(), encoding="utf-8", newline="")
+        target.write_text(buf.getvalue(), encoding="utf-8", newline="")
     return out_dir
 
 

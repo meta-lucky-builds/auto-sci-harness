@@ -8,7 +8,8 @@ JSON report holds counts, hashes and paths only). Checks:
 1. split isolation (research.suite.check_split_isolation);
 2. host truth scan: every held-out row WITH its label, as a CSV line (the format of every train.csv), and every
    canary, searched line by line in every file under the agent-readable roots (commitment.default_agent_readable_roots,
-   minus the by-design truth location <suites>/<suite>/<task>/private and .git object stores); the same rows
+   minus the by-design truth location (truth_layout.truth_dir; legacy <task>/private) and .git object stores);
+   the same rows
    format-agnostically (numbers normalised to 6 significant digits, any delimiter, JSON-escaped newlines, an index
    column: see TokenIndex); plus the sealed beacon in every encoding (commitment.secret_leak_scan). The report and
    the record directory are refused inside an agent-readable root (the report scores attacks against the truth);
@@ -45,6 +46,7 @@ import yaml
 from custom_harness.commitment import default_agent_readable_roots, secret_leak_scan
 from custom_harness.research import rebuild as RB
 from custom_harness.research import suite as S
+from custom_harness.truth_layout import legacy_truth_dir, truth_dir, truth_file
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = ROOT / "tests" / "fixtures" / "suite_prefix_401c00a.py"
@@ -64,7 +66,7 @@ def _lines(p: Path) -> list[str]:
 def heldout_lines(task_dir: Path) -> set[bytes]:
     """Every held-out row as `features...,label` (the column order of train.csv), as bytes."""
     xs = _lines(task_dir / "public" / "test_X.csv")[1:]
-    ys = _lines(task_dir / "private" / "test_y.csv")[1:]
+    ys = _lines(truth_file(task_dir, "test_y.csv"))[1:]
     if len(xs) != len(ys):
         raise ValueError(f"{task_dir}: test_X and test_y differ in length")
     head = _lines(task_dir / "public" / "train.csv")[0].split(",")
@@ -104,7 +106,7 @@ def norm_number(tok: bytes) -> str:
 def heldout_tuples(task_dir: Path) -> dict[str, set[tuple[str, ...]]]:
     """Every held-out row as normalised numbers: features then label, and label then features."""
     xs = _lines(task_dir / "public" / "test_X.csv")[1:]
-    ys = _lines(task_dir / "private" / "test_y.csv")[1:]
+    ys = _lines(truth_file(task_dir, "test_y.csv"))[1:]
     if len(xs) != len(ys):
         raise ValueError(f"{task_dir}: test_X and test_y differ in length")
     last, first = set(), set()
@@ -185,9 +187,11 @@ def host_truth_scan(suite: Path, tasks: list[dict], beacon: str, roots: list[Pat
         for form, tuples in heldout_tuples(d).items():
             for tup in tuples:
                 index.add(tup, t["id"], form)
-        canaries.setdefault((d / "private" / "canary.txt").read_text(encoding="utf-8").strip().encode(),
+        canaries.setdefault(truth_file(d, "canary.txt").read_text(encoding="utf-8").strip().encode(),
                             []).append(t["id"])
-    skip = [(suite / t["id"] / "private").resolve() for t in tasks]
+    # the by-design truth locations (truth_layout: outside the roots for a suite under <data>/suites; the legacy
+    # in-task private/ for an archived or scratch suite)
+    skip = [p.resolve() for t in tasks for p in {truth_dir(suite / t["id"]), legacy_truth_dir(suite / t["id"])}]
     hits: dict[str, dict[str, int]] = {t["id"]: {} for t in tasks}
     found: dict[str, set[bytes]] = {t["id"]: set() for t in tasks}
     agn_files: dict[str, dict[str, dict[str, int]]] = {t["id"]: {"label_last": {}, "label_first": {}} for t in tasks}
@@ -256,7 +260,7 @@ def keyed_attack(suite: Path, doc: dict, manifest: dict | None) -> dict[str, dic
         tid = gen(seed, 1, key=b"\x00" * 32).task_id
         entry = next(t for t in doc["tasks"] if t["id"] == tid)
         cands = [*pub, bytes.fromhex(entry["provenance"]["key_commitment"]), hashlib.sha256(tid.encode()).digest()]
-        truth = _lines(suite / tid / "private" / "test_y.csv")[1:]
+        truth = _lines(truth_file(suite / tid, "test_y.csv"))[1:]
         train = set(_lines(suite / tid / "public" / "train.csv")[1:])
         best = {"exact": False, "agree": 0, "train_rows_matched": 0}
         for master in cands:
@@ -275,7 +279,7 @@ def chance_agreement(suite: Path, tid: str) -> float:
     """Expected agreement of a guess drawn from the training label distribution (classification only)."""
     ys = [r.rsplit(",", 1)[1] for r in _lines(suite / tid / "public" / "train.csv")[1:]]
     freq = {v: ys.count(v) / len(ys) for v in set(ys)}
-    truth = _lines(suite / tid / "private" / "test_y.csv")[1:]
+    truth = _lines(truth_file(suite / tid, "test_y.csv"))[1:]
     return sum(freq.get(v, 0.0) for v in truth) / len(truth)
 
 
@@ -370,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--extra-root", action="append", default=[], help="another agent-readable root to scan")
     a = ap.parse_args(argv)
     # the report scores attacks against held-out truth (aggregate counts): it belongs with the private record
-    readable = default_agent_readable_roots()
+    readable = default_agent_readable_roots(existing_only=False)
     for what, p in (("report", Path(a.out)), ("record directory", Path(a.record_dir))):
         inside = RB._inside(p, readable)
         if inside is not None:

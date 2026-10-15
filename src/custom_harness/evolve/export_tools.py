@@ -60,6 +60,34 @@ def _parts(rel: Any) -> list[str]:
     return parts
 
 
+_PREFIXES = (("\\\\?\\UNC\\", "\\\\"), ("\\\\.\\UNC\\", "\\\\"), ("\\\\?\\", ""), ("\\\\.\\", ""))
+
+
+def _canon(p: Path) -> Path:
+    """A stdlib-only copy of custom_harness.pathsafe.canon's prefix rule (this file may not import the package;
+    tests/test_pathsafe.py checks the two agree): device prefixes stripped, then resolved."""
+    s = os.fspath(p)
+    for pre, sub in _PREFIXES:
+        if s[: len(pre)].upper() == pre.upper():
+            s = sub + s[len(pre):]
+            break
+    return Path(s).resolve()
+
+
+def _within(a: Path, b: Path) -> bool:
+    """`a` is `b` or under it: canonical path, then file identity of every existing ancestor (pathsafe.is_within)."""
+    ca, cb = _canon(a), _canon(b)
+    if ca == cb or cb in ca.parents:
+        return True
+    for x in (ca, *ca.parents):
+        try:
+            if x.exists() and cb.exists() and os.path.samefile(x, cb):
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def resolve(root: Path, rel: Any) -> Path:
     root = Path(root)
     if _link_like(root):
@@ -69,7 +97,7 @@ def resolve(root: Path, rel: Any) -> Path:
         cur = cur / part
         if _link_like(cur):
             raise ToolRefused(f"refusing to follow a link at {rel!r}")
-    if not cur.resolve().is_relative_to(root.resolve()):
+    if not _within(cur, root):  # alias-safe: \\?\ and \\.\ prefixes, 8.3 and case spellings
         raise ToolRefused(f"path {rel!r} resolves outside the export")
     return cur
 

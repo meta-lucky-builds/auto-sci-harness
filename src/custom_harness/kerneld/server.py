@@ -198,6 +198,8 @@ class Server:
                 return I.openml_split(self.vault, run_id, tok.dataset_id, str(tok.claim_hash),
                                       P.arg(args, "cache_root", str), spec)
             if kind == "returned_measurements":
+                if P.arg(args, "claim_hash", str) != tok.claim_hash:  # the provenance claim is bound at issue
+                    raise TokenError("token_scope")
                 return I.returned_measurements(
                     self.vault, run_id, tok.dataset_id, P.arg(args, "file", str), P.arg(args, "protocol", dict),
                     P.arg(args, "claim_hash", str), P.arg(args, "attestation", str),

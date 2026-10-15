@@ -28,7 +28,9 @@ from pathlib import Path
 from typing import Any
 
 from ..kernel import Certificate, Claim, ExecRecord, Kernel
-from .hoststore import PrivateDataRefused, _grant
+from .hoststore import PrivateDataRefused, _grant, host_store
+
+BUNDLE_RECORD = "kerneld_bundle"
 
 
 def _private_files(vault: Any, datasets: Iterable[str]) -> set[str]:
@@ -40,8 +42,38 @@ def _canary_blobs(vault: Any) -> set[str]:
     return {r.canary_ref for r in vault.datasets().values() if r.canary_ref}
 
 
+class _UngrantedReplayer:
+    """A replayer whose calls run under an EMPTY grant (s4-kerneld-review finding 1): the replayer is chosen by the
+    caller, so it must not inherit the certify grant (it would read the targets' labels). Replays need public data
+    only (kernel/execution.py reads inputs with read_public). Attributes the Kernel probes (`run_inputs`) are wrapped
+    the same way; a missing one stays missing (getattr default)."""
+
+    def __init__(self, inner: Any):
+        self.__inner = inner
+
+    def replay(self, record: Any, vault: Any) -> Any:
+        with _grant((), why="replay"):
+            return self.__inner.replay(record, vault)
+
+    def __getattr__(self, name: str) -> Any:
+        attr = getattr(self.__inner, name)
+        if not callable(attr):
+            return attr
+
+        def call(*a: Any, **kw: Any) -> Any:
+            with _grant((), why="replay"):
+                return attr(*a, **kw)
+        return call
+
+
 class ScopedKernel(Kernel):
-    """The Evidence Kernel for host code: identical checks, private reads only inside the grants above."""
+    """The Evidence Kernel for host code: identical checks, private reads only inside the grants above. Whatever store
+    it is given, it runs on the HostStore view of it, and its replayer runs without any grant."""
+
+    def __init__(self, store: Any, **kw: Any):
+        replayer = kw.pop("replayer", None)
+        super().__init__(host_store(store), replayer=_UngrantedReplayer(replayer) if replayer is not None else None,
+                         **kw)
 
     def certify(self, claim: Claim, evidence_ids: Sequence[str], *, full_chain: bool = True, record: bool = True,
                 as_of: int | None = None) -> Certificate:
@@ -54,8 +86,15 @@ class ScopedKernel(Kernel):
         """`kernel.bundle.build_bundle` under a grant for exactly the private files the bundle packs."""
         from ..kernel.bundle import build_bundle
         datasets = _bundle_datasets(self, cert_hash)
-        with _grant(_private_files(self.vault, datasets) | _canary_blobs(self.vault), why="bundle"):
-            return build_bundle(self, cert_hash, Path(out_path))
+        packed = _private_files(self.vault, datasets)
+        with _grant(packed | _canary_blobs(self.vault), why="bundle"):
+            bundle_hash = build_bundle(self, cert_hash, Path(out_path))
+        # accountability (s4-kerneld-review finding 2): the bundle carries private files to a file on disk without a
+        # vault read, so each bundling is recorded (not hash-chained: ledger kinds are the Kernel's closed set)
+        self.store.append_record(BUNDLE_RECORD, {"cert_hash": cert_hash, "bundle_hash": bundle_hash,
+                                                 "path": str(Path(out_path)), "datasets": sorted(datasets),
+                                                 "private_blobs": sorted(packed)})
+        return bundle_hash
 
 
 def _bundle_datasets(kernel: Kernel, cert_hash: str) -> set[str]:

@@ -22,6 +22,7 @@ from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..sandbox.base import Sandbox, WorkspaceEscape, check_mount, protect_path, safe_path
 from ..sandbox.snapshot import take_snapshot
+from ..truth_layout import legacy_truth_dir, truth_dir
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
 from ..verify.stats import paired_example_interval
@@ -233,7 +234,10 @@ def setup(state, params, ctx: ModuleContext):
     task = load_task(task_dir)
     # the hidden labels must never be inside the agent's mount (invariant 2): protect the task's private files for
     # every sandbox created from now on, and refuse the run's own workspace if it overlaps them
-    protect_path(task_dir / "private")
+    # (truth_layout: a suite task's truth lives OUTSIDE the task dir and every agent-readable root; truth_dir refuses
+    # a truth location inside one. Both the resolved truth dir and the legacy in-task location are protected.)
+    protect_path(truth_dir(task_dir))
+    protect_path(legacy_truth_dir(task_dir))
     check_mount(_sb(ctx).workspace)
     _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
     for name in (task.train_file, task.test_features_file, *task.aux_files):

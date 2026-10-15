@@ -5,8 +5,8 @@ same SQLite database and blob directory as the Kernel's store, with four refusal
 `PrivateDataRefused` BEFORE anything is read or written:
 
 1. `blobs.get` / `blobs.get_json` of a PRIVATE blob: the bytes of any private file of any registered dataset, or any
-   dataset's canary blob. The digests come from the ledger's `register_dataset` entries (re-read whenever their count
-   changes), so a dataset registered by the kerneld process is covered on the host's next read.
+   dataset's canary blob. The digests come from the ledger's `register_dataset` entries (new ones read whenever the
+   ledger head moves), so a dataset registered by the kerneld process is covered on the host's next read.
 2. a `register_dataset` ledger entry that names a private file: private ingest is a kerneld op (`kerneld/ingest.py`,
    `RunHandle.ingest_*`). A public-only registration is allowed.
 3. a `data_access` ledger entry with `private: true`: a private read is logged only by the code that may make it.
@@ -67,23 +67,25 @@ def _grant(digests: Iterable[str], datasets: Iterable[str] = (), purposes: Itera
 
 
 class _PrivateIndex:
-    """Private digests (private files + canary blobs) of every registered dataset, from the ledger."""
+    """Private digests (private files + canary blobs) of every registered dataset, from the ledger. Refreshed
+    incrementally: one primary-key lookup (`max(seq)`) per read, and only the NEW `register_dataset` rows when the
+    ledger grew (s4-kerneld-review finding 9: no full scan per blob read). Ledger rows are immutable and a private
+    registration cannot be imported below the head through the HostStore (`_check_entry`), so new rows always have a
+    higher seq."""
 
-    _COUNT = "SELECT count(*), coalesce(max(seq), 0) FROM ledger WHERE kind='register_dataset'"
-    _BODIES = "SELECT body FROM ledger WHERE kind='register_dataset' ORDER BY seq"
+    _HEAD = "SELECT coalesce(max(seq), 0) FROM ledger"
+    _NEW = "SELECT body FROM ledger WHERE kind='register_dataset' AND seq > ? AND seq <= ? ORDER BY seq"
 
-    def __init__(self, rows: Callable[[str], list[tuple]]):
+    def __init__(self, rows: Callable[..., list[tuple]]):
         self.__rows = rows
-        self.__key: tuple[int, int] | None = None
-        self.__private: frozenset[str] = frozenset()
+        self.__seen = 0
+        self.__private: set[str] = set()
 
     def _refresh(self) -> None:
-        count, last = self.__rows(self._COUNT)[0]
-        key = (int(count), int(last))
-        if key == self.__key:
+        head = int(self.__rows(self._HEAD)[0][0])
+        if head <= self.__seen:
             return
-        private: set[str] = set()
-        for (body,) in self.__rows(self._BODIES):
+        for (body,) in self.__rows(self._NEW, (self.__seen, head)):
             try:
                 b = json.loads(body)
             except ValueError:
@@ -94,11 +96,10 @@ class _PrivateIndex:
             for f in files.values() if isinstance(files, dict) else ():
                 # fail closed: a file entry whose privacy is not exactly False counts as private
                 if isinstance(f, dict) and f.get("private") is not False and isinstance(f.get("blob"), str):
-                    private.add(f["blob"])
+                    self.__private.add(f["blob"])
             if isinstance(b.get("canary_ref"), str):
-                private.add(b["canary_ref"])
-        self.__private = frozenset(private)
-        self.__key = key
+                self.__private.add(b["canary_ref"])
+        self.__seen = head
 
     def is_private(self, digest: str) -> bool:
         self._refresh()
@@ -127,8 +128,7 @@ class HostStore(EvidenceStore):
     def __init__(self, inner: EvidenceStore):
         self.root = inner.root
         self._db = inner._db
-        self._lock = inner._lock
-        self.__close: Callable[[], None] = inner.close
+        self._lock = inner._lock  # no reference to `inner` is kept (s4-kerneld-review finding 8)
         self.__index = _PrivateIndex(self._rows)
         self.blobs = HostBlobs(inner.blobs.root, self.__index)
 
@@ -168,7 +168,8 @@ class HostStore(EvidenceStore):
         super().ledger_import(row)
 
     def close(self) -> None:
-        self.__close()
+        with self._lock:
+            self._db.close()  # what EvidenceStore.close does; the HostStore holds no other handle
 
 
 def host_store(store: EvidenceStore) -> HostStore:

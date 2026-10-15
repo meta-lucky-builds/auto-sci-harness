@@ -21,7 +21,7 @@ ERRORS = ("bad_request", "unknown_op", "bad_secret", "bad_token", "token_scope",
           "not_target", "not_private", "vault_error", "release_error", "rate_limited", "internal",
           # private ingest (kerneld/ingest.py, 2026-10-14)
           "not_found", "data_unavailable", "already_registered", "canary_mismatch", "ingest_refused",
-          "measurements_refused")
+          "measurements_refused", "truth_layout")
 PURPOSES = ("evaluate", "kernel", "leakscan")  # the only READ purposes a token can carry (`issue`)
 INGEST = "ingest"  # the purpose of an ingest token (`issue_ingest` only; never a read)
 INGEST_KINDS = ("research_task", "openml_split", "returned_measurements")  # kerneld/ingest.py

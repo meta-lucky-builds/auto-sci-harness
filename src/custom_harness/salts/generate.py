@@ -138,8 +138,16 @@ def _relabel(rows: list[list[str]], ti: int, labels: Sequence[str]) -> list[list
 
 
 def _file_hashes(d: Path) -> dict[str, str]:
-    return {p.relative_to(d).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(d.rglob("*")) if p.is_file() and p.name != "canary.txt"}
+    """Every file of the salt task (its truth under `private/<name>` wherever truth_layout keeps it), canary
+    excluded (fresh per task)."""
+    from ..truth_layout import LEGACY_DIRNAME, truth_files
+
+    out = {p.relative_to(d).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+           for p in sorted(d.rglob("*")) if p.is_file() and p.name != "canary.txt"}
+    for rel, p in truth_files(d).items():
+        if p.name != "canary.txt":
+            out.setdefault(f"{LEGACY_DIRNAME}/{rel}", hashlib.sha256(p.read_bytes()).hexdigest())
+    return dict(sorted(out.items()))
 
 
 def _acc(a: Sequence[str], b: Sequence[str]) -> float:

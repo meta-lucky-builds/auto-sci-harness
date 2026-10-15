@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..kernel import DatasetRole, Vault, VaultError
+from ..kernel import DatasetRole, Kernel, Vault, VaultError
 from .protocol import INGEST_KINDS, MEASUREMENT_PROBLEMS
 
 __all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "openml_split", "research_task",
@@ -56,38 +56,53 @@ def _read(path: Path) -> bytes:
 
 # ------------------------------------------------------------------------------------------- research task
 def task_private_dir(task_dir: Path) -> Path:
-    """Where a task's held-out truth lives (labels, canary). With s4-integrity's `truth_layout` (held-out truth outside
-    every agent-readable root) it is `truth_layout.truth_dir`, which refuses an unmigrated or agent-readable location
-    (TruthLayoutError, an OSError: the ingest then fails `not_found`). Before that module is merged, the legacy
-    `<task>/private/` (research/task.py layout). Only this process calls this function."""
-    try:
-        from .. import truth_layout  # type: ignore[attr-defined, unused-ignore]
-    except ImportError:  # s4-integrity not merged yet: the layout every task has today
-        return task_dir / "private"
-    return Path(truth_layout.truth_dir(task_dir))
+    """Where a task's held-out truth lives (labels, canary, truth-copy records): `truth_layout.truth_dir` (s4-integrity:
+    outside every agent-readable root). It refuses an agent-readable location with TruthLayoutError, which the ingest
+    maps to the closed code `truth_layout` (never to `not_found`). Only this process calls this function."""
+    from ..truth_layout import truth_dir
+    return Path(truth_dir(task_dir))
 
 
 def research_task(vault: Vault, run_id: str, task_id: str, task_dir: str) -> dict[str, Any]:
-    from ..research.task import load_task
-    root = Path(task_dir)
+    """Register a research task (module docstring). A truth location the layout refuses (agent-readable, or still in
+    the unmigrated legacy place) is `truth_layout`; a missing file `not_found`; the task's truth-copy records
+    (s4-integrity research/truth_copies.py) are declared to the Kernel right after the registration, so K3's
+    non-interference replay perturbs every declared copy; a malformed record is `ingest_refused`."""
+    from ..truth_layout import TruthLayoutError
     try:
-        task = load_task(root)
+        return _research_task(vault, run_id, task_id, Path(task_dir))
+    except TruthLayoutError:  # a PermissionError (OSError): caught FIRST so it never reads as a missing file
+        raise IngestRefused("truth_layout") from None
+
+
+def _research_task(vault: Vault, run_id: str, task_id: str, root: Path) -> dict[str, Any]:
+    from ..research.task import load_task
+    from ..research.truth_copies import TruthCopyRecordError, declare_task_truth_copies
+    from ..truth_layout import TruthLayoutError, truth_file
+    try:
+        task = load_task(root)  # checks the labels exist where the layout says (truth_file)
+    except TruthLayoutError:
+        raise
     except (OSError, ValueError):
         raise IngestRefused("not_found") from None
     if task.id != task_id:
         raise IngestRefused("token_scope")
-    private = task_private_dir(root)
     train = _read(root / "public" / task.train_file)
     test_x = _read(root / "public" / task.test_features_file)
-    test_y = _read(private / task.test_labels_file)
+    test_y = _read(truth_file(root, task.test_labels_file))
     baseline = _read(root / task.baseline_file)
 
     def digest(*parts: bytes) -> str:  # fixed-length per-file digests: no separator ambiguity (as before, 2026-10-08)
         return hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
 
     ids = task.dataset_ids(digest(train, test_x, test_y), digest(train, test_x, test_y, baseline))
-    canary_path = private / task.canary_file
-    canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.is_file() else None
+    canary_path = truth_file(root, task.canary_file)
+    canary = None
+    if canary_path.exists() or canary_path.is_symlink():
+        try:
+            canary = _read(canary_path).decode("utf-8").strip()  # no symlink; undecodable -> closed code
+        except UnicodeDecodeError:
+            raise IngestRefused("ingest_refused") from None
     try:
         vault.register_dataset(ids["train"], DatasetRole.DEV, public={task.train_file: train}, private={})
         vault.register_dataset(ids["test"], DatasetRole.TEST, public={task.test_features_file: test_x},
@@ -99,6 +114,11 @@ def research_task(vault: Vault, run_id: str, task_id: str, task_dir: str) -> dic
     try:
         vault.register_artifact(ids["baseline"], baseline, "baseline")
     except VaultError:
+        raise IngestRefused("ingest_refused") from None
+    # GOAL §16.5.4: every exporter-recorded public copy of the truth becomes a Kernel truth-copy declaration (K3)
+    try:
+        declare_task_truth_copies(Kernel(vault.store), task, root, ids)
+    except TruthCopyRecordError:  # a ValueError: malformed record or a file the task does not have
         raise IngestRefused("ingest_refused") from None
     _record(vault, run_id, "research_task", task_id, [ids["train"], ids["test"]])
     return {"ids": ids}
@@ -115,8 +135,11 @@ def openml_split(vault: Vault, run_id: str, subject: str, claim_hash: str, cache
         raise IngestRefused("bad_request") from None
     if ds.dataset_id != subject:  # the token names the held-out dataset this ingest may create
         raise IngestRefused("token_scope")
-    if not vault.registered(claim_hash):  # fresh data are touched only after the claim is committed
+    targets = vault.registered_targets(claim_hash)
+    if targets is None:  # fresh data are touched only after the claim is committed
         raise IngestRefused("not_registered")
+    if ds.dataset_id not in targets:  # the held-out split may only be one of THIS claim's targets
+        raise IngestRefused("token_scope")
     try:
         raw = D.OpenMLCache(Path(cache_root)).load(ds)  # re-hashed against the pin on every read
         sp = D.split(D.to_table(raw, ds.target), ds.sha256)

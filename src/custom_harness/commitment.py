@@ -168,10 +168,16 @@ def load_secret(path: Path | None = None) -> bytes:
     return raw
 
 
-def default_agent_readable_roots(repo_root: Path | None = None) -> list[Path]:
+AGENT_READABLE_DATA_SUBDIRS = ("sandboxes", "repos", "suites", "tasks")
+
+
+def default_agent_readable_roots(repo_root: Path | None = None, *, existing_only: bool = True) -> list[Path]:
     """Every place an agent can read, by default: the repo checkout, the data dir's sandboxes/repos/suites/tasks
     (agents read public task files and their own workspaces) and the agent scratchpads under the system temp dir.
-    $CHH_AGENT_READABLE replaces this list."""
+    $CHH_AGENT_READABLE replaces this list. Held-out truth is NOT under any of them: it lives under
+    truth_layout.truth_root() (`<data>/private/...`), and truth_layout.truth_layout_problems() checks that statically.
+    `existing_only=False` also lists roots that do not exist yet (a containment check must not pass merely because a
+    root has not been created)."""
     env = os.environ.get(AGENT_READABLE_ENV)
     if env:
         return [Path(p) for p in env.split(os.pathsep) if p]
@@ -179,8 +185,16 @@ def default_agent_readable_roots(repo_root: Path | None = None) -> list[Path]:
 
     root = repo_root or Path(__file__).resolve().parents[2]
     d = data_dir()
-    roots = [root, *(d / s for s in ("sandboxes", "repos", "suites", "tasks")), Path(tempfile.gettempdir()) / "claude"]
-    return [r for r in roots if r.exists()]
+    roots = [root, *(d / s for s in AGENT_READABLE_DATA_SUBDIRS), Path(tempfile.gettempdir()) / "claude"]
+    return [r for r in roots if r.exists()] if existing_only else roots
+
+
+def agent_readable_root_of(path: Path | str, roots: Iterable[Path | str] | None = None) -> Path | None:
+    """The agent-readable root that `path` is or lies under (alias-safe: pathsafe.is_within), else None. Default
+    roots: default_agent_readable_roots(existing_only=False)."""
+    from .pathsafe import root_containing
+
+    return root_containing(path, default_agent_readable_roots(existing_only=False) if roots is None else roots)
 
 
 def secret_forms(secret: bytes) -> list[bytes]:
@@ -210,12 +224,14 @@ def secret_leak_scan(secret: bytes, roots: Iterable[Path], *, secret_file: Path 
     Messages name paths only, never the secret."""
     if len(secret) < MIN_SECRET_BYTES:
         return [f"secret shorter than {MIN_SECRET_BYTES} bytes: too short to scan for without false matches"]
+    from .pathsafe import is_within
+
     roots = [Path(r).resolve() for r in roots]
     problems: list[str] = []
     if secret_file is not None:
         sf = Path(secret_file).resolve()
         problems += [f"the secret file {sf} is inside agent-readable root {r}" for r in roots
-                     if sf == r or sf.is_relative_to(r)]
+                     if is_within(secret_file, r)]
     forms = secret_forms(secret)
     for f in _files(roots):
         try:

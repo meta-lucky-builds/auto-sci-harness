@@ -252,7 +252,7 @@ class RunHandle:
                                      claim_hash: str, attestation: str, approved_protocol_seq: int) -> str:
         """Register measurements humans returned (`chh return-data`) as a FUTURE dataset; kerneld reads the file and
         checks it against the protocol. Returns the data's sha256."""
-        res = self._ingest("returned_measurements", dataset_id, file=str(Path(file).resolve()),
+        res = self._ingest("returned_measurements", dataset_id, bind_claim=claim_hash, file=str(Path(file).resolve()),
                            protocol=dict(protocol), claim_hash=claim_hash, attestation=attestation,
                            approved_protocol_seq=int(approved_protocol_seq))
         return str(res["data_sha256"])

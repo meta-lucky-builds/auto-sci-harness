@@ -75,3 +75,33 @@ on the privileged code it exempts, and a planted line per bypass is caught.
   function, `kerneld/ingest.task_private_dir`, run only inside kerneld. Their new location plugs in there.
 - s4-kernel owns kernel/: nothing there was changed. `_bundle_datasets` in scope.py mirrors bundle.py's dataset rule;
   if that rule widens, bundles fail closed (PrivateDataRefused) rather than pack more.
+
+## Red-team review (s4-kerneld-review, 2026-10-15) and what changed
+Fixed (built, not test-verified):
+1. A caller-chosen replayer ran inside the certify grant: `ScopedKernel` now wraps it (`_UngrantedReplayer`), every
+   replay call runs under an EMPTY grant (replays read public inputs only).
+2. Module-held kernels could bundle a claim's labels to any path, unlogged: `RunGuardedKernel.bundle` writes only
+   under `<data>/bundles` and not on a killed run; every bundling appends a `kerneld_bundle` record (cert, path,
+   datasets, private blobs packed). Not a ledger kind (the Kernel's kinds are closed; kernel/ is s4-kernel's).
+3. `ScopedKernel` wraps any store it gets in a HostStore; `RunGuardedKernel` builds its ledger/vault on that view.
+4. run bundles: a workspace file equal to a private blob is `refused` again (PrivateDataRefused caught) instead of
+   crashing the run. `chh reproduce` reads local artifacts through the HostStore (a private blob = missing).
+5. `HostStore` keeps no reference to the raw store (closes the shared connection itself); `_PrivateIndex` is
+   incremental (one primary-key lookup per read). Ratchet: aliased imports of guarded classes, two-argument
+   `super(...)`, `vars(...)`, `__self__`/`__mro__`/`__bases__`/`__dict__`/`__globals__`/`__closure__`,
+   `.blobs._path(...)`, and `screening_canaries` only from memory/screen.py and research/evidence_refs.py.
+6. Ingest: truth through `truth_layout` (refusal = `truth_layout` code); canary read via the no-symlink reader;
+   `openml_split` only for one of the claim's targets; `returned_measurements` binds the claim at token issue;
+   research tasks declare their truth copies (`research/truth_copies.declare_task_truth_copies`, K3).
+Stated limits (not fixed):
+- The ledger carries sha256 of every private file (`register_dataset` bodies are readable through the HostStore): for
+  low-entropy labels the host can confirm a guessed label file offline, without the leak-scan budget. Fix needs
+  private blobs keyed by an HMAC only kerneld holds (a vault change: kernel/).
+- Host code still reads task truth from disk outside kerneld where s4-integrity's layout routes it (evolve/export.py
+  leak fingerprints, evolve/multiplicity.held_out_target_id, research/rebuild.py): trusted host code, not behind
+  kerneld; a kerneld op returning ids/findings only is the next step.
+- The audit host holds the pinned raw ARFF, so `openml_split` hides nothing from host code in substance.
+- K9: a non-target private file used as code/input now fails as CHECK_RAISED instead of its coded K9 reason (the
+  refusal is fail-closed; better coding needs a kernel/ change).
+- Ingest is not atomic (a failure after the train registration leaves it registered; the token is spent) and each
+  idempotent re-ingest appends another `kerneld_ingest` record.
