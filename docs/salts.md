@@ -1,5 +1,9 @@
 # Salts (GOAL §16.9)
 
+> **Redesigned 2026-10-14: see `docs/salts_redesign.md`.** Salts are now fresh generator draws (positive:
+> rings/xor/spirals, scored against a Monte Carlo expected effect; null: genuinely null families in the real pool
+> only). The rho-planting, rho = 1/2 null and plasmode constructions below are HISTORICAL (refused in code).
+
 Package `src/custom_harness/salts/`. Tests: `tests/test_salts.py` (helpers and ported toy devices:
 `tests/salts_world.py`). Every parameter the owner has not set is in `salts/config.py`, marked UNCALIBRATED.
 
