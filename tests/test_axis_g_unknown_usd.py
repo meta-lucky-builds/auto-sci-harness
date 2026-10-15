@@ -1,8 +1,8 @@
 """Axis G shows unknown USD as "unknown", never as a 0 sum (s3-report finding; s4-integrity item 7).
 
-Fail-first reasoning (NOT run: owner rule): at 82719e1 axis_g summed float(r["cost"]["usd"]) over runs, so a subscription
-(byos) run recorded at usd 0.0 made the total $0 (and a facts record with usd None raised TypeError); facts._run
-recorded usd 0.0 for unpriced calls.
+Fail-first reasoning (NOT run: owner rule): at 82719e1 axis_g summed float(r["cost"]["usd"]) over runs, so a
+subscription (byos) run recorded at usd 0.0 made the total $0 (and a facts record with usd None raised TypeError);
+facts._run recorded usd 0.0 for unpriced calls.
 """
 
 from __future__ import annotations
