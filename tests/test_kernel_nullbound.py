@@ -2,8 +2,9 @@
 
 A negative-result claim that declares its power (AnalysisPlan.power, frozen in the pre-registration) is certified
 only when a positive plasmode control proves that power on the target's real stored predictions; the certificate
-states the exclusion with the limit clipped at the proven sensitivity. Without the declaration (and for equivalence
-claims) K7 still fails closed.
+states the exclusion with the limit clipped at the proven sensitivity. Without the declaration K7 still fails closed.
+Equivalence claims (TOST, s4-kernel): tests/test_kernel_s4.py. A declared power on an equivalence claim is no longer
+misplaced (the parametrised K1 case moved from (EQUIVALENCE, 0.8) to the out-of-range (EQUIVALENCE, 0.99)).
 """
 
 from __future__ import annotations
@@ -77,7 +78,7 @@ def test_without_the_declaration_k7_still_fails_closed(world):
 
 
 @pytest.mark.parametrize(("kind", "power"), [(ClaimKind.NEGATIVE_RESULT, 0.4), (ClaimKind.NEGATIVE_RESULT, 0.99),
-                                             (ClaimKind.IMPROVEMENT, 0.8), (ClaimKind.EQUIVALENCE, 0.8)])
+                                             (ClaimKind.IMPROVEMENT, 0.8), (ClaimKind.EQUIVALENCE, 0.99)])
 def test_k1_refuses_an_out_of_range_or_misplaced_declaration(world, kind, power):
     c = negative(world, 0.1, kind=kind, power=power)
     cx = K.Context(claim=c, claim_hash=c.claim_hash(), store=world.store, vault=world.vault,
