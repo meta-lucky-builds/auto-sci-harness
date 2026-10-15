@@ -369,7 +369,10 @@ class StationMode:
         return f"station:{self.mid}:r{r}"
 
     def lock_path(self) -> Path:
-        return Path(self.store.root) / f"station-{self.mid}.lock"
+        """Lower case plus a hash of the EXACT mode id: file names are case-insensitive on Windows (NTFS), so
+        `x-ABLATED` and `x-ablated` must not share one lock file."""
+        digest = hashlib.sha256(self.mid.encode("utf-8")).hexdigest()[:16]
+        return Path(self.store.root) / f"station-{self.mid.lower()}-{digest}.lock"
 
     # ------------------------------------------------------------------ the exclusive per-mode lock
     @contextmanager
