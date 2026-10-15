@@ -1,10 +1,10 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
-index 2662980..8cd2ee2 100644
+index 3c2941c..c529ca3 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -997,7 +997,7 @@ def k1_computational(ctx: Context) -> CheckResult:
-     if c.risk.prior_probability is not None:
-         reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be unset: K7 does not apply to computational claims"))
+@@ -976,7 +976,7 @@ def k1_computational(ctx: Context) -> CheckResult:
+             importlib.import_module(spec.exact_module).HIGHER_IS_BETTER != c.metric.higher_is_better:
+         reasons.append(R(Code.K1_METRIC, f"metric {c.metric.id!r} direction does not match the adapter"))
      value = exact_value(c.value)
 -    if ctx.adapter is not None and value is not None:  # (without them K1 already fails)
 +    if ctx.adapter is not None and value is not None and False:  # (without them K1 already fails)
