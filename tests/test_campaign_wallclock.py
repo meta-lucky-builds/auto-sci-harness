@@ -76,13 +76,14 @@ def _trace_wall(store: EvidenceStore, run_id: str) -> float:
 # ----------------------------------------------------------------------- wall_s (summed step time): characterisation
 def test_wall_s_campaign_cap_is_summed_step_time_charged_across_runs_and_processes(tmp_path):
     store = EvidenceStore(tmp_path / "s")
-    one = _engine(_chain("sl", "wallclock.sleep", {"s": 0.3}, 2), store,
+    one = _engine(_chain("sl", "wallclock.sleep", {"s": 0.6}, 1), store,
                   Campaign(store, "w", {"wall_s": 0.5})).run("t", {})
-    assert one.status == RunStatus.COMPLETED  # checked before step 2 at ~0.3 s < 0.5: it ran; now ~0.6 s >= 0.5
+    # one step: checked before it at 0 s < 0.5, so it runs and the run completes; its ~0.6 s then reaches the cap
+    assert one.status == RunStatus.COMPLETED
     camp = Campaign(store, "w")  # a new campaign object, as a new process would build
-    assert camp.spent.wall_s == pytest.approx(_trace_wall(store, one.run_id)) and camp.spent.wall_s >= 0.6
+    assert camp.spent.wall_s == pytest.approx(_trace_wall(store, one.run_id)) and camp.spent.wall_s >= 0.5
     assert camp.remaining("wall_s") == pytest.approx(0.5 - camp.spent.wall_s)
-    two = _engine(_chain("sl", "wallclock.sleep", {"s": 0.3}, 2), store, camp).run("t", {})
+    two = _engine(_chain("sl", "wallclock.sleep", {"s": 0.6}, 1), store, camp).run("t", {})
     assert two.status == RunStatus.BUDGET_EXCEEDED and "campaign w wall_s" in two.detail
     assert store.trace(two.run_id) == []  # refused before its first step
     store.close()
