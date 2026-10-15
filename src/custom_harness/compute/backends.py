@@ -6,8 +6,9 @@ asserted by the caller.
   network makes it TRUSTED_ONLY; the full image (bundled datasets, trusted task building) refuses agent code
   outright (invariant 2).
 - LocalProcessBackend: the test-only LocalSandbox. Always TRUSTED_ONLY.
-- SSHBackend: a DECLARED stub for a plain SSH host. Always TRUSTED_ONLY; its execution path is not built and it
-  never opens a connection (RemoteNotBuilt), so even an approved trusted request does not run.
+- SSHBackend: a plain SSH host. Always TRUSTED_ONLY (trusted code with a recorded human approval only; agent code
+  never). Without a transport it never opens a connection (RemoteNotBuilt). With one (compute/ssh.py) an approved
+  trusted request runs in a fresh remote directory per run. The OpenSSH transport is NOT verified against a real host.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from typing import Any
 from ..sandbox.base import Sandbox
 from ..store import EvidenceStore
 from .backend import ComputeBackend, IsolationProperties, RemoteNotBuilt
+from .ssh import SSHSandbox, SSHTransport, check_remote_root
 
 SandboxMaker = Callable[[Path], Sandbox]
 
@@ -57,16 +59,21 @@ class LocalProcessBackend(ComputeBackend):
 
 
 class SSHBackend(ComputeBackend):
-    """Declared, not built: a plain SSH host runs programs as a host user with that host's files, credentials and
-    network. No connection is ever opened."""
+    """A plain SSH host runs programs as a host user with that host's files, credentials and network: TRUSTED_ONLY,
+    whatever the transport. With `transport=None` (the default) no connection is ever opened: an admitted run raises
+    RemoteNotBuilt. With a transport, each run uploads the materialised revision into a NEW remote directory under
+    `remote_root` (never reused, also not by a retry of the same request) and runs the command there."""
 
     name = "ssh"
     isolation = IsolationProperties(container=False, no_secrets=False, network_policy="unknown",
                                     read_only_root=False, non_root=False)
 
-    def __init__(self, store: EvidenceStore, runs_root: Path, *, host: str):
+    def __init__(self, store: EvidenceStore, runs_root: Path, *, host: str, transport: SSHTransport | None = None,
+                 remote_root: str = "chh-runs"):
         super().__init__(store, runs_root)
-        self.host = host
+        self.host, self.transport, self.remote_root = host, transport, check_remote_root(remote_root)
 
     def _sandbox(self, run_dir: Path) -> Sandbox:
-        raise RemoteNotBuilt(f"the SSH backend ({self.host}) is declared but not built: no remote execution")
+        if self.transport is None:
+            raise RemoteNotBuilt(f"the SSH backend ({self.host}) has no transport: no remote execution")
+        return SSHSandbox(run_dir, host=self.host, transport=self.transport, remote_root=self.remote_root)

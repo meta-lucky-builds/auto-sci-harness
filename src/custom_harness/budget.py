@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -87,10 +89,26 @@ def persistent_budget(store: EvidenceStore, budget_id: str, limits: dict[str, fl
 CAMPAIGN_OPEN = "campaign_open"
 CAMPAIGN_MEMBER = "campaign_member"
 CAMPAIGN_CHARGE = "campaign_charge"
+# A campaign-only unit: real (calendar) seconds since the campaign was opened, from the open time persisted in the
+# campaign_open record. Not a Cost field, so it is not in the per-run UNITS (docs/campaign_wallclock.md).
+ELAPSED = "elapsed_s"
+CAMPAIGN_UNITS = (*UNITS, ELAPSED)
 
 
 class CampaignError(ValueError):
     pass
+
+
+class CampaignClockError(BudgetExceeded):
+    """The campaign clock cannot be trusted (it went backwards). A BudgetExceeded, so the engine's check before every
+    step stops the run there (fail closed) instead of continuing on a reset or negative elapsed time."""
+
+
+def _timestamp(value: object) -> float | None:
+    """A usable recorded wall-clock timestamp, or None (missing or malformed: callers fail closed on None)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
 
 
 class Campaign:
@@ -108,27 +126,69 @@ class Campaign:
     The caps are fixed when the campaign is opened. Re-opening with other caps is refused (a new cap needs a new
     campaign id). Honest limits: a step's cost is known only when it ends, so a campaign can overshoot its cap by the
     cost of the steps running when it is reached (as a per-run budget can); wall_s in the journal is what the backend
-    reported; reading the spend scans every member run's trace (linear in the campaign's steps)."""
+    reported; reading the spend scans every member run's trace (linear in the campaign's steps).
 
-    def __init__(self, store: EvidenceStore, campaign_id: str, limits: dict[str, float | None] | None = None):
+    Two time units (docs/campaign_wallclock.md):
+    - `wall_s` is SUMMED STEP TIME: the measured duration of each member run's steps, added up. Concurrent runs add
+      up; time between steps and outside any run is not counted; the elapsed time of a step killed mid-flight is lost
+      (its interrupted trace row carries only the journalled backend-reported wall_s).
+    - `elapsed_s` is CALENDAR TIME since the campaign was opened: `clock() - opened_at`, where `opened_at` is written
+      once into the campaign_open record. One clock per campaign: a crash, a new process, a resume or a fork re-reads
+      the same open time, so it can be neither reset nor charged twice. It fails closed: a campaign_open record
+      without a usable `opened_at` (written before this unit existed) cannot carry an elapsed_s cap (refused at
+      construction), and a clock earlier than the open time, or earlier than a time this object already read, raises
+      CampaignClockError (a BudgetExceeded, so the engine stops before the next step)."""
+
+    def __init__(self, store: EvidenceStore, campaign_id: str, limits: dict[str, float | None] | None = None,
+                 clock: Callable[[], float] = time.time):
         if not campaign_id.strip():
             raise CampaignError("a campaign needs an id")
-        self.store, self.id = store, campaign_id
+        self.store, self.id, self._clock = store, campaign_id, clock
+        self._last_now: float | None = None
         opened = store.records_where(CAMPAIGN_OPEN, "campaign_id", campaign_id)
-        if opened:
-            stored = opened[0]["limits"]
-            if limits is not None and dict(limits) != stored:
-                raise CampaignError(f"campaign {campaign_id!r} was opened with caps {stored}; refusing {limits} "
-                                    f"(caps are fixed for a campaign: open a new campaign id)")
-            self.limits: dict[str, float | None] = dict(stored)
-        else:
+        if not opened:
             if limits is None:
                 raise CampaignError(f"campaign {campaign_id!r} does not exist: give its caps to open it")
-            unknown = set(limits) - set(UNITS)
+            unknown = set(limits) - set(CAMPAIGN_UNITS)
             if unknown:
                 raise ValueError(f"unknown budget units: {unknown}")
-            self.limits = dict(limits)
-            store.append_record(CAMPAIGN_OPEN, {"campaign_id": campaign_id, "limits": self.limits})
+            opened_at = _timestamp(clock())
+            if opened_at is None:
+                raise CampaignError(f"campaign {campaign_id!r}: the clock gave no finite time to record as opened_at")
+            store.append_record(CAMPAIGN_OPEN, {"campaign_id": campaign_id, "limits": dict(limits),
+                                                "opened_at": opened_at})
+            # Two processes can both see no campaign_open and both append one. The FIRST record is the campaign for
+            # every reader, so re-read it and hold this object to it (its caps and its open time), not to our own.
+            opened = store.records_where(CAMPAIGN_OPEN, "campaign_id", campaign_id)
+        first = opened[0]
+        stored = first["limits"]
+        if limits is not None and dict(limits) != stored:
+            raise CampaignError(f"campaign {campaign_id!r} was opened with caps {stored}; refusing {limits} "
+                                f"(caps are fixed for a campaign: open a new campaign id)")
+        self.limits: dict[str, float | None] = dict(stored)
+        self.opened_at: float | None = _timestamp(first.get("opened_at"))
+        if self.limits.get(ELAPSED) is not None and self.opened_at is None:
+            raise CampaignError(f"campaign {campaign_id!r} has an {ELAPSED} cap but no usable recorded open time "
+                                f"(opened_at={first.get('opened_at')!r}): refusing to run without its clock")
+
+    def elapsed(self) -> float:
+        """Real seconds since the campaign was opened (from the persisted open time). Fails closed: CampaignError
+        without a recorded open time; CampaignClockError if the clock is non-finite, earlier than the open time, or
+        earlier than a time this object already read (a backwards jump)."""
+        if self.opened_at is None:
+            raise CampaignError(f"campaign {self.id!r} has no recorded open time (opened before {ELAPSED} existed)")
+        now = _timestamp(self._clock())
+        if now is None:
+            raise CampaignClockError(f"campaign {self.id} {ELAPSED}: the clock gave no finite time; refusing")
+        if now < self.opened_at:
+            raise CampaignClockError(f"campaign {self.id} {ELAPSED}: the clock ({now:.6f}) is earlier than the "
+                                     f"campaign's recorded open time ({self.opened_at:.6f}); refusing to continue "
+                                     f"rather than count a negative or reset elapsed time")
+        if self._last_now is not None and now < self._last_now:
+            raise CampaignClockError(f"campaign {self.id} {ELAPSED}: the clock went backwards ({now:.6f} after "
+                                     f"{self._last_now:.6f}); refusing to continue rather than undercount")
+        self._last_now = now
+        return now - self.opened_at
 
     def join(self, run_id: str) -> None:
         """Make a run a member (idempotent). The engine calls this before the run's first step."""
@@ -170,11 +230,19 @@ class Campaign:
 
     def remaining(self, unit: str) -> float | None:
         limit = self.limits.get(unit)
-        return None if limit is None else limit - _value(self.spent, unit)
+        if limit is None:
+            return None
+        return limit - (self.elapsed() if unit == ELAPSED else _value(self.spent, unit))
 
     def check(self) -> None:
         """Raise BudgetExceeded if any campaign cap is reached (the engine calls this before every step)."""
+        elapsed_cap = self.limits.get(ELAPSED)
+        if elapsed_cap is not None:
+            elapsed = self.elapsed()
+            if elapsed >= elapsed_cap:
+                raise BudgetExceeded(f"campaign {self.id} {ELAPSED}: {elapsed:.4g} s since the campaign opened "
+                                     f">= cap {elapsed_cap:.4g}")
         spent = self.spent
         for unit, limit in self.limits.items():
-            if limit is not None and _value(spent, unit) >= limit:
+            if unit != ELAPSED and limit is not None and _value(spent, unit) >= limit:
                 raise BudgetExceeded(f"campaign {self.id} {unit}: spent {_value(spent, unit):.4g} >= cap {limit:.4g}")

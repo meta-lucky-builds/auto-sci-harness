@@ -42,6 +42,11 @@ COVERED = ["evolve", "runtime", "kerneld/client.py", "kerneld/releases.py", "ker
 # and makes one logged read of them so the real K4 sees logged = reported evaluations. It never opens the real store
 # and never reads real held-out data; routing simulated labels through kerneld would add a process and protect nothing.
 SCRATCH_STORE_SITES = {"research/preflight.py": 1}
+# Store opens only (int17 merge, 2026-10-15; owner to confirm): assure/corpus.py (s3-assure, GOAL §16.6 honest corpus)
+# opens a SCRATCH COPY of a committed corpus item's store, unpacked into a temporary directory, to re-derive the
+# Kernel's verdict on it (through a ScopedKernel); it never opens the real store and makes no private read or ingest
+# of its own. Not in SCRATCH_STORE_SITES, because that list is also the expected private-read and ingest sites.
+SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1}
 
 _PRIVATE_ATTRS = ("_HostStore__", "_HostBlobs__", "_PrivateIndex__")
 _PRIVATE_NAMES = {"_grant", "_GRANT", "_Grant"}
@@ -195,7 +200,7 @@ def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites(
 
 
 def test_store_opens_outside_the_kernel_are_only_the_listed_old_path_sites():
-    assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES
+    assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES | SCRATCH_STORE_OPEN_ONLY
 
 
 def test_private_ingest_outside_the_kernel_is_only_the_listed_old_path_sites():
@@ -241,7 +246,8 @@ def test_canary_tokens_reach_only_the_listed_content_screens():
 
 def test_covered_host_modules_have_no_private_read_or_store_open():
     sites = {**_sites(_private_read), **_sites(_store_open)}
-    bad = [f for f in sites if f not in SCRATCH_STORE_SITES and any(f == c or f.startswith(c + "/") for c in COVERED)]
+    bad = [f for f in sites if f not in SCRATCH_STORE_SITES | SCRATCH_STORE_OPEN_ONLY
+           and any(f == c or f.startswith(c + "/") for c in COVERED)]
     assert not bad, bad
 
 

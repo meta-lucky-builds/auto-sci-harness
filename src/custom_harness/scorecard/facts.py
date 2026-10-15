@@ -30,6 +30,7 @@ from typing import Any
 
 import yaml
 
+from ..gateway.costs import run_cost_record
 from ..kernel.checklist import missing as checklist_missing
 from ..kernel.kernel import Kernel, KernelError
 from ..kerneld.scope import ScopedKernel
@@ -113,7 +114,9 @@ def _run(store: EvidenceStore, kernel: Kernel, run_id: str, ledger_certs: dict[s
     fact: dict[str, Any] = {"ref": run_ref(store, run_id), "run_id": run_id,
                             "cost": {"usd": cost.usd, "gpu_hours": cost.gpu_hours, "quota_units": cost.quota_units,
                                      "tokens": cost.prompt_tokens + cost.completion_tokens,
-                                     "estimated": cost.estimated}}
+                                     "estimated": cost.estimated},
+                            # priced through the gateway cost table: usd None unless every rate is real (axis G)
+                            "cost_record": run_cost_record(store, run_id)}
     state = _final_state(store, run_id)
     if state is None:
         fact["state"] = None
