@@ -106,6 +106,9 @@ class Kernel:
         self.config = config or KernelConfig()
         self.replayer = replayer
         self.clock = clock
+        # s4-station: the run this Kernel is BOUND to (set only by a run-bound subclass, studio/kill.RunGuardedKernel,
+        # from ModuleContext.run_id; never a call argument). Recorded on prereg and certificate entries when set
+        self.run_id: str | None = None
 
     # ------------------------------------------------------------------ pre-registration
     def approve_adapter(self, name: str, approver: str) -> Entry:
@@ -139,7 +142,8 @@ class Kernel:
         if short:  # releases made this claim cost more slots than remain: refused, never tested at a looser level
             raise KernelError(f"the alpha-account of target(s) {short} cannot pay this claim's slot charge (releases "
                               f"since it opened): register on fresh data")
-        entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms})
+        entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms,
+                                              **self._bound()})
         for a in sorted(accounts.values(), key=lambda a: a.seq):
             n = len(alpha.reservations(self.ledger, a)) + 1
             self.ledger.append("alpha_reserve", {"account": a.seq, "dataset_id": a.dataset_id, "claim_hash": h,
@@ -340,7 +344,8 @@ class Kernel:
             return cert
         blob = self.store.blobs.put_json(cert.model_dump(mode="json"))
         self.ledger.append("certificate", {"cert_hash": cert.cert_hash(), "claim_hash": ctx.claim_hash,
-                                           "label": label.value, "blob": blob, "resolution": resolution})
+                                           "label": label.value, "blob": blob, "resolution": resolution,
+                                           **self._bound()})
         return cert
 
     def _ablated_runs(self, evidence_ids: list[str] | tuple[str, ...]) -> list[str]:
@@ -356,6 +361,10 @@ class Kernel:
             except KeyError:
                 continue
         return out
+
+    def _bound(self) -> dict[str, str]:
+        """{"run_id": ...} for a run-bound Kernel, else {} (older entries keep their bytes and hashes)."""
+        return {} if self.run_id is None else {"run_id": str(self.run_id)}
 
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:

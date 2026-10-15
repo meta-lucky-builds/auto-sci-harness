@@ -163,6 +163,7 @@ def test_adapter_external_roots_are_compared_by_identity(monkeypatch):
     import json
     stdlib = Path(json.__file__).resolve().parents[1]
     monkeypatch.setattr(adapters, "_external_roots", lambda: (Path("\\\\?\\" + str(stdlib)),))
+    monkeypatch.setattr(adapters, "_is_external", adapters._is_external.__wrapped__)  # bypass the per-process cache
     assert adapters._source_file("json") is None
 
 
@@ -363,3 +364,33 @@ def test_k1_accepts_a_declared_power_on_equivalence_claims(world):
     assert Code.K1_POWER not in k1(world, c).codes
     assert Code.K1_POWER in k1(world, equivalence(world, 0.1, power=0.99)).codes
 
+
+
+# ================================================================== s4-station: run-bound prereg/certificate entries
+def test_a_run_bound_kernel_records_its_run_on_prereg_and_certificate_entries(tmp_path):
+    """Fails first: neither entry named a run, so a concurrent process writing to the same store could have its
+    certificates credited to another agent's turn (s4-station red team, HIGH). Unbound callers add no key (old entries
+    keep their bytes and hashes), and the run comes from the binding only: no Kernel method takes a run id."""
+    import inspect
+
+    from custom_harness.kernel import Kernel
+    from custom_harness.records import Run
+    from custom_harness.studio.kill import RunGuardedKernel
+    w = World(tmp_path / "w", seed=6, n_train=30, n_test=30)
+    try:
+        c = _good_claim(w)
+        w.kernel.preregister(c)
+        assert "run_id" not in w.kernel.ledger.entries("prereg")[-1].body
+        w.kernel.certify(c, [])
+        assert "run_id" not in w.kernel.ledger.entries("certificate")[-1].body
+        run = Run(harness_id="h", harness_hash="h", task_id="t", seed=0)
+        w.store.add_run(run)
+        bound = RunGuardedKernel(w.store, run_id=run.id)
+        c2 = _good_claim(w, seeds=(3, 4, 5))
+        assert bound.preregister(c2).body["run_id"] == run.id
+        bound.certify(c2, [])
+        assert bound.ledger.entries("certificate")[-1].body["run_id"] == run.id
+        for method in (Kernel.preregister, Kernel.certify, Kernel.record_certificate, Kernel.record_evaluation):
+            assert "run_id" not in inspect.signature(method).parameters
+    finally:
+        w.close()
