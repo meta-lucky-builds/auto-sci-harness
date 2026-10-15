@@ -603,7 +603,11 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         store.append_record("lineage" + sfx, {"parent": parent_hash, **r, **abl.marker()})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
                          n_survivors=len(survivors))
-    store.append_record("generation_stats" + sfx, {"parent": parent_hash, **counters, **abl.marker()})
+    # one generation_stats record per generation = the loop instance's record: it carries the loop label (GOAL §6.1,
+    # invariant 10) and the harness runs it spent (axis B, rollouts). Neither is in export._STATS_VIEW, so neither
+    # reaches the proposer (the label is a per-split gate outcome). An ablated generation writes `:ABLATED`.
+    store.append_record("generation_stats" + sfx, {"parent": parent_hash, **counters, "loop_label": loop_label,
+                                                   "harness_runs": evaluator.calls - calls_before, **abl.marker()})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
                             evaluator.calls - calls_before, fixed_k, loop_label, counters, branch)
 

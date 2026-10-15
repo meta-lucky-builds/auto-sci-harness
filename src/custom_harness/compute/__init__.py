@@ -18,8 +18,9 @@ from .backend import (
     unique_workspaces,
 )
 from .backends import DockerBackend, LocalProcessBackend, SSHBackend
+from .ssh import OpenSSHTransport, SSHTransport
 
 __all__ = ["CodeOrigin", "ComputeBackend", "DockerBackend", "IsolationClass", "IsolationProperties",
-           "IsolationRefused", "LiveTreeRefused", "LocalProcessBackend", "RemoteNotBuilt", "Revision", "RunRequest",
-           "RunResult", "SSHBackend", "find_approval", "fresh_dir", "materialise", "record_non_isolated_approval",
-           "unique_workspaces"]
+           "IsolationRefused", "LiveTreeRefused", "LocalProcessBackend", "OpenSSHTransport", "RemoteNotBuilt",
+           "Revision", "RunRequest", "RunResult", "SSHBackend", "SSHTransport", "find_approval", "fresh_dir",
+           "materialise", "record_non_isolated_approval", "unique_workspaces"]
