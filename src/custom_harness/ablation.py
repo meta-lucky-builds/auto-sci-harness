@@ -114,7 +114,8 @@ _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
            turns_off="control/islands.py Orchestrator.step: a stalled island on the harness_edit lever keeps its "
                      "budget weight (no stall_shrink) and its mutator mix apart from the prompt-only quota cap (no "
                      "diversification); decisions are logged under `orchestrator_decision:ABLATED`. Reachability: "
-                     "no src module constructs an Orchestrator yet, so only a System that builds one reaches it",
+                     "evolve/search.py evolve_islands (`chh evolve --islands`, opt-in) builds the Orchestrator; an "
+                     "ablation arm reaches the switch through evolve_islands(ablation=...)",
            test=_T_EVOLVE + "test_orchestrator_reallocation_switch"),
     Switch(name="novelty-gate", capability="harnessx",
            turns_off="evolve/loop.py evolve_generation: the novelty gate (rejected_signatures) is empty, so an edit "
@@ -128,8 +129,9 @@ _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
            test=_T_EVOLVE + "test_observation_pack_switch"),
     Switch(name="lever-choice", capability="sia",
            turns_off="control/islands.py Orchestrator.step: the `more_evaluation` lever is never chosen; a stalled "
-                     "island always takes the harness_edit lever (no extra seed). Reachability: no src module "
-                     "constructs an Orchestrator yet, so only a System that builds one reaches it",
+                     "island always takes the harness_edit lever (no extra seed). Reachability: evolve/search.py "
+                     "evolve_islands (`chh evolve --islands`, opt-in) builds the Orchestrator; an ablation arm "
+                     "reaches the switch through evolve_islands(ablation=...)",
            test=_T_EVOLVE + "test_lever_choice_switch"),
     Switch(name="voi-allocation", capability="mda",
            turns_off="evolve/loop.py evolve_generation: with race_allocator='voi', the race runs as the batch race "

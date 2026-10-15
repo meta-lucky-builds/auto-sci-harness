@@ -8,6 +8,20 @@ Suite file (YAML):
 `source` = the base dataset; loading refuses a suite where a source, or any example row, spans two splits.
 `family` is required and `domain` defaults to ml. Loading refuses a suite without a held-out family (gate tasks, no
 evolve task) and, once it spans >= 2 domains, without a held-out domain (leave-one-family/domain-out gate).
+
+Agent-visible output (orchestrator decision, owner-delegated, 2026-10-14): `out_dir` and the `log` lines are treated
+as agent-visible. A generation's outcome appears there ONLY as its released verdict bit (`accepted`) and a closed
+reason code (`decision_code`, `DECISION_CODES`), never as the loop's free-text decision (which can quote a gate
+mean or CI, e.g. selection.gate's 'no improvement on gate split (mean=-0.5)'). The free text stays in the host-only
+`harness_edit` record.
+
+Ablation (custom_harness/ablation.py): `evolve(..., ablation=...)` runs a multi-generation ABLATION ARM. The
+AblationSet can only be made by the scorecard runner's entry point (`scorecard.runner.ablation_set`); there is no CLI
+flag, environment variable or config default for it. The set reaches the Evaluator (every run marked ABLATED), every
+`evolve_generation` (never accepts; `:ABLATED` record kinds), the campaign ledger (`:ABLATED` kinds; resume only under
+the same set). An arm keeps no durable proposal log (the loop refuses one under an ablation), so a resumed arm
+re-asks its proposer for an interrupted generation. An arm makes no branches and builds no router (`branching` is
+refused).
 """
 
 from __future__ import annotations
@@ -20,6 +34,7 @@ from typing import Any
 
 import yaml
 
+from ..ablation import NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..runtime.spec import HarnessSpec
@@ -28,7 +43,7 @@ from .branches import BranchConfig
 from .durable import ProposalLog, durable_key
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .generations import AnnealSchedule, LedgerError, first_parent, last_parent, open_campaign
-from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
+from .loop import GATE_STAGES, Evaluator, EvolveConfig, GenerationResult, evolve_generation, proposer_calibration
 from .multiplicity import check_campaign, runs_per_task_bound
 from .reveal import TemporalReveal
 from .router import Router, RouteRefused, build_router
@@ -61,7 +76,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
            cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
            campaign_budget: Budget | None = None, branching: BranchConfig | None = None,
            campaign: str | None = None, anneal: AnnealSchedule | None = None,
-           reveals: Sequence[tuple[TemporalReveal, Path]] = ()) -> HarnessSpec:
+           reveals: Sequence[tuple[TemporalReveal, Path]] = (), ablation: AblationSet = NO_ABLATION) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
     claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py).
 
@@ -71,10 +86,18 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     (the Evaluator's durable unit outcomes, keyed by the campaign) and never asks the proposer again for a generation
     whose proposal was persisted. File names in `out_dir` and logged generation numbers are campaign-global."""
     cfg = cfg or EvolveConfig()
+    if not isinstance(ablation, AblationSet):
+        raise TypeError("ablation must be an AblationSet (custom_harness.ablation)")
+    if ablation and branching is not None:
+        raise ValueError("an ablation arm makes no branches (it never accepts): branching is refused")
+    abl = bool(ablation)
     # `campaign`/`anneal`: generation ledger (generations.py): declared or resumed here, before any run (fail closed);
     # each generation gets the annealed edit budget and a `generation_ledger` record (stall, budget, refs)
-    gen_ledger = open_campaign(store, campaign, anneal, cfg)
-    parent = _resume_parent(store, campaign, seed_spec) if campaign is not None else seed_spec
+    gen_ledger = open_campaign(store, campaign, anneal, cfg, ablation=ablation)
+    parent = _resume_parent(store, campaign, seed_spec, ablated=abl) if campaign is not None else seed_spec
+    # no durable proposal log in an arm (the loop refuses one: its record kind has no ABLATED form), so a resumed arm
+    # asks its proposer again for an interrupted generation (stated limit); its runs stay durable (Evaluator key)
+    proposal_campaign = None if abl else campaign
     working = [t for t in suite if t.split != "sealed"]
     check_reveals(reveals, suite, out_dir)  # L6.11: every seal outside every mount this campaign uses (fail closed)
     n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
@@ -84,7 +107,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     log(json.dumps({"multiplicity_bound": bound}))
     evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run,
                           infra_retries=cfg.infra_retries, campaign_budget=campaign_budget,
-                          durable_key=durable_key(campaign) if campaign is not None else None)
+                          durable_key=durable_key(campaign) if campaign is not None else None, ablation=ablation)
     for g in range(generations):
         # the campaign-global generation index (continued across resume); the local loop index without a campaign
         gi = gen_ledger.generation if gen_ledger is not None else g
@@ -93,8 +116,9 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
         t0 = time.time()
         try:
             res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg,
-                                    branching=branching,
-                                    proposals=ProposalLog(store, campaign, gi) if campaign is not None else None)
+                                    branching=branching, ablation=ablation,
+                                    proposals=ProposalLog(store, proposal_campaign, gi)
+                                    if proposal_campaign is not None else None)
         except BudgetExceeded as e:
             if gen_ledger is not None:  # ledgered with its stop reason (it does not consume the index)
                 gen_ledger.record_stopped(parent.spec_hash(), "budget_exceeded", str(e))
@@ -104,7 +128,9 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
             led = gen_ledger.record(res)
             log(json.dumps({"campaign": campaign, "ledger_generation": led["generation"], "budget": led["budget"],
                             "stalled": led["stall"]["stalled"]}))
-        summary = {"generation": gi, "accepted": res.accepted, "decision": res.decision,
+        # agent-visible (module docstring): the released accept bit and a closed reason code, never res.decision
+        summary = {"generation": gi, "accepted": res.accepted, "decision_code": decision_code(res),
+                   **ablation.marker(),
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,
                    "candidates": [{k: c.get(k) for k in ("status", "reason", "survived")} | (
@@ -123,10 +149,46 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     return parent
 
 
-def _resume_parent(store: EvidenceStore, campaign: str, seed_spec: HarnessSpec) -> HarnessSpec:
+# The closed reason codes of a generation's outcome in the agent-visible driver output (module docstring): accepted;
+# the released rejecting stage (loop.GATE_STAGES, itself a ledgered `count` release); inconclusive (too many units
+# lost to infrastructure: no verdict); not_gated (no candidate reached the gate); ablated (an ablation arm's
+# measurement: never accepted).
+DECISION_CODES: tuple[str, ...] = ("accepted", *(st for st in GATE_STAGES if st is not None), "inconclusive",
+                                   "not_gated", "ablated")
+_GATED = ("accepted", "rejected_gate", "infra_aborted", "ablated_not_accepted")
+
+
+def decision_code(res: GenerationResult) -> str:
+    """The closed reason code of a generation (DECISION_CODES), from its gated lineage record's status and released
+    stage. Fail closed (ValueError) on more than one gated record or a stage outside GATE_STAGES."""
+    gated = [c for c in res.candidates if c.get("status") in _GATED]
+    if len(gated) > 1:
+        raise ValueError("more than one gated candidate in one generation (fail closed)")
+    if not gated:
+        if res.accepted:
+            raise ValueError("an accepted generation without a gated candidate (fail closed)")
+        return "not_gated"
+    status = gated[0]["status"]
+    if (status == "accepted") != bool(res.accepted):
+        raise ValueError("accept bit and gated status disagree (fail closed)")
+    if status == "accepted":
+        return "accepted"
+    if status == "infra_aborted":
+        return "inconclusive"
+    if status == "ablated_not_accepted":
+        return "ablated"
+    stage = gated[0].get("rejected_on")
+    if stage not in GATE_STAGES or stage is None:
+        raise ValueError(f"rejected candidate with stage {stage!r} outside the released stages (fail closed)")
+    return str(stage)
+
+
+def _resume_parent(store: EvidenceStore, campaign: str, seed_spec: HarnessSpec, *,
+                   ablated: bool = False) -> HarnessSpec:
     """The parent a (resumed) campaign continues from: the seed spec for a new campaign, else the last completed
-    generation's new parent, loaded from the store's harness versions and checked against its hash (fail closed)."""
-    first, last = first_parent(store, campaign), last_parent(store, campaign)
+    generation's new parent, loaded from the store's harness versions and checked against its hash (fail closed).
+    `ablated`: an ablation arm's campaign (its `:ABLATED` ledger)."""
+    first, last = first_parent(store, campaign, ablated=ablated), last_parent(store, campaign, ablated=ablated)
     if first is None or last is None:
         return seed_spec
     if first != seed_spec.spec_hash():

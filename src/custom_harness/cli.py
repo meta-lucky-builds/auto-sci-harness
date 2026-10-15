@@ -197,6 +197,10 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .evolve.branches import BranchConfig
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
+    if a.islands is not None:
+        return cmd_evolve_islands(a, store)
+    if not a.proposer:
+        raise SystemExit("--proposer is required (or pass --islands ISLANDS_YAML, which names its proposers)")
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
     backends = {}
     for binding in a.role:
@@ -227,6 +231,51 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(f"outputs: {out}")
     print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
           f"{campaign_id})")
+    return 0
+
+
+def cmd_evolve_islands(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh evolve SPEC --suite S --islands ISLANDS.yaml` (GOAL §5 L7, explicit opt-in): evolve/search.py
+    evolve_islands with the deterministic orchestrator, the policy gate (a declared challenger is trialled, never set
+    without a passing trial) and, with `controller:`, the downgrade-only budget gate. Rounds come from the file
+    (`--generations` is refused), branching is not offered, no weights lever (no model training). Writes
+    islands.json (spec hashes, policy version, stop reason, trial counts: no gate value) and each island's final
+    spec into the output directory."""
+    import custom_harness.research  # noqa: F401
+
+    from .evolve.driver import load_suite
+    from .evolve.loop import EvolveConfig
+    from .evolve.search import evolve_islands, islands_summary, load_islands_config
+    if a.generations != 1 or a.branch_by or a.proposer:
+        raise SystemExit("refused: with --islands the rounds and proposers come from the islands file; --generations, "
+                         "--proposer and --branch-by do not apply")
+    icfg = load_islands_config(Path(a.islands))
+    spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
+    backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
+    proposers = {name: _backend(kind) for name, kind in sorted(icfg.proposers.items())}
+    controller = _backend(icfg.controller) if icfg.controller else None
+    if a.allow_same_family:
+        os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
+    run_tag = f"islands-{spec.id}-{int(time.time())}"
+    factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
+    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds,
+                       race_allocator=a.race_allocator)
+    from .budget import persistent_budget
+    limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
+    campaign_id = a.campaign_id or run_tag
+    budget = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
+    res = evolve_islands(spec, load_suite(Path(a.suite)), islands=list(icfg.islands), policy=icfg.policy,
+                         rounds=icfg.rounds, total_budget=icfg.total_budget, proposers=proposers,
+                         backends=backends, store=store, sandbox_factory=factory, cfg=cfg, campaign=campaign_id,
+                         controller=controller, challenger=icfg.challenger, trial=icfg.trial,
+                         campaign_budget=budget)
+    out = data_dir() / "evolve" / campaign_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "islands.json").write_text(json.dumps(islands_summary(res), indent=1, sort_keys=True), encoding="utf-8")
+    for iid, parent in sorted(res.parents.items()):
+        (out / f"spec_{iid}.yaml").write_text(yaml.safe_dump(parent.model_dump(mode="json"), sort_keys=False),
+                                              encoding="utf-8")
+    print(f"outputs: {out}")
     return 0
 
 
@@ -724,7 +773,7 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--role", action="append", default=[], help="role=backend for harness runs")
     ev.add_argument("--allow-same-family", action="store_true",
                    help="override invariant 5 (judge/replicator family); recorded as NOT MET")
-    ev.add_argument("--proposer", required=True, help="backend for the edit proposer")
+    ev.add_argument("--proposer", help="backend for the edit proposer (required unless --islands)")
     ev.add_argument("--generations", type=int, default=1)
     ev.add_argument("--seeds", type=int, nargs="+", default=[0])
     ev.add_argument("--n-edits", type=int, default=3)
@@ -743,6 +792,10 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--branch-by", choices=["family", "domain"],
                     help="L6.9: make branches of gate-rejected cluster winners and record the route table "
                          "(see `chh evolve branches|route SPEC`)")
+    ev.add_argument("--islands", metavar="ISLANDS_YAML",
+                    help="opt-in L7 campaign mode: islands under the deterministic orchestrator, its policy gate and "
+                         "the downgrade-only controller (evolve/search.py load_islands_config: rounds, budget, "
+                         "policy, proposers per island). No weights lever: no model training")
     er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
                                               "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
     er.add_argument("campaign")
