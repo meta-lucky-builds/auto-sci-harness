@@ -1,7 +1,9 @@
 """The multi-agent research mode: a deterministic orchestrator over research-loop agents (docs/multi_agent_mode.md).
 
 Cognition is decentralised (each agent runs its own research loop with its own model bindings); control is not, as
-in The Station's own code (code_review/station.md §3): one process schedules turns in a seeded order, one at a time.
+in The Station's own code (code_review/station.md §3): one process schedules turns in a seeded order, one at a time,
+holding an exclusive per-mode lock (a lock file next to the store, plus a post-append check of the log's chain, so
+two processes can never run the same turn).
 
 Per round r (0-based), agents take turns in the order sorted by sha256(mode|seed|order|r|agent). A turn:
   1. budget: the agent's turn caps = min(its cap left, the mode's cap left) per unit; on the primary unit, also at
@@ -9,28 +11,32 @@ Per round r (0-based), agents take turns in the order sorted by sha256(mode|seed
      cap through the gate moves pool share to the others: the ONLY reallocation path). No cap left = turn skipped;
      no mode pool left = the mode stops (`budget_stop`).
   2. archive: the agent's view is rendered by trusted code (archive.render_for: other agents' entries, quoted data,
-     ledgered releases); none in the isolation rounds, none in the `explore` lane, failures only in `revive`.
+     journaled and ledgered releases); none in the isolation rounds, none in the `explore` lane, failures only in
+     `revive`.
   3. run: the runner executes the turn (seed = sha256(mode|seed|seed|r|agent)); every run joins the agent's
-     `Campaign`, so spend is derived from the store and survives crashes.
-  4. harvest: the certificates of the turn's ledger window are published through the archive; the turn's stall
-     signal is {accepted: a NEW positive result was admitted, proposed: pre-registrations, gated: certificates}.
+     `Campaign`, so spend is derived from the store and survives crashes. The outcome (run id, status, publication
+     requests, the window end, the turn's runs) is logged (`turn_outcome`) before anything is published.
+  4. harvest: the certificates attributable to the turn are published through the archive and the result is logged
+     (`turn_published`) before `turn_end`; the stall signal is {accepted: a NEW positive result was admitted,
+     proposed: pre-registrations, gated: attributable certificates}. Claims registered but not certified in the
+     turn stay OPEN and are published later, against their turn, when the Kernel certifies them (`deferred`).
 After a round, each agent's signals go through THE stall rule (`evolve.generations.stall_evidence`, the rule of
 control/islands.py). A stalled agent (outside a cool-down of `stall_window` rounds since its last stall lane) gets
 the next stagnation lane (explore, revive, alternating) and its primary-unit cap is shrunk to spent + stall_shrink x
-(cap - spent) by a code-written proposal through `control.downgrade.DowngradeGate` (ledgered there; caps are rebuilt
-from its applied records, so a cap can only ever go down). An agent back to progress returns to the exploit lane;
-its cap is never raised again.
+(cap - spent) by a code-written proposal through `control.downgrade.DowngradeGate`. The proposal is logged
+(`lane_intent`) before it is submitted, and resubmitted after a crash only if the gate has no record of it; caps are
+the minimum over every APPLIED gate shrink of the agent's budget, so a cap can only ever go down.
 
 State: a hash-chained, append-only log in the store (records kind `station:<mode_id>`); every decision is folded
-from it, so `run()` after a crash continues where it stopped: an open turn resumes its run (Engine.resume) with the
-budget caps and archive context recorded when it started; a finished turn is never re-run. A broken chain refuses
-the mode (fail closed). Reopening with another config, spec, model bindings or ablation is refused.
+from it, so `run()` after a crash continues where it stopped. A broken chain refuses the mode (fail closed).
+Reopening with another config, spec, model bindings, exact-adapter set or ablation is refused.
 
 Labels (GOAL §6.1, invariant 10): every turn, every agent and the mode carry MECHANICAL or VALIDATED. VALIDATED only
 when every result that counted as progress (and so steered budget) is CERTIFIED-VALIDATED (K6 on external or future
 data) and there is at least one; exact (CERTIFIED-EXACT) and internal results are MECHANICAL.
-Independence (invariant 5): each agent's bindings go through policy.model_policy at open (a violation is refused
-unless `allow_same_family`, then recorded as "invariant 5 NOT MET" for that agent and for the mode).
+Independence (invariant 5): each agent's bindings go through the runner's policy.model_policy at open; a violation
+is refused unless the CONFIG allows it (`allow_same_family`), and then recorded as "invariant 5 NOT MET" for that
+agent and for the mode.
 """
 
 from __future__ import annotations
@@ -38,8 +44,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Sequence
+import os
+import socket
+import time
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -59,12 +70,14 @@ from .runner import AgentRunner, TurnOutcome, TurnRequest
 
 FORMAT = "chh-station/1"
 LOG_PREFIX = "station:"
+ABLATED_SUFFIX = "-ABLATED"  # upper case: the mode_id pattern forbids it, so no production id can collide
 DEFAULT_LANE = "exploit"
 STALL_LANES = ("explore", "revive")  # assigned in turn to a stalled agent (Station's stagnation lanes, reduced)
 ABLATION_SWITCH = "station_coordination"  # custom_harness/ablation.py, capabilities.yaml row the-station
 ISOLATION_ROUNDS = 1  # UNCALIBRATED (owner decision, GOAL §13.8): rounds an agent works before it sees the archive
 MAX_ARCHIVE_ENTRIES = 16  # UNCALIBRATED (owner decision, GOAL §13.8): entries rendered into one turn
 MAX_ARCHIVE_CHARS = 12_000  # UNCALIBRATED (owner decision, GOAL §13.8): under the template's 20k truncation
+MIN_SECRET = 6  # as memory/screen.py: shorter private values are not screened (too many false hits)
 _SUPPORTED_CLASSES = (EvidenceClass.DATA, EvidenceClass.COMPUTATIONAL)
 _RESUMABLE = (RunStatus.RUNNING, RunStatus.INFRA_FAILED, RunStatus.PAUSED)
 
@@ -75,6 +88,10 @@ class StationError(ValueError):
 
 class StationInfraError(RuntimeError):
     """The environment failed during a turn: the turn stays open and `run()` resumes it later (infra != policy)."""
+
+
+class StationLocked(StationError):
+    """Another process holds this mode's lock."""
 
 
 class _Strict(BaseModel):
@@ -181,22 +198,31 @@ class _Log:
         return [(r["type"], r["payload"]) for r in self.raw()]
 
     def append(self, typ: str, payload: dict[str, Any]) -> None:
+        """Append one record, then check it landed as record `seq` with nothing else appended (a compare-and-set
+        after the fact: a concurrent writer breaks the chain and both see it; the mode lock prevents it)."""
         raw = self.raw()
         seq, prev = len(raw) + 1, (raw[-1]["hash"] if raw else "genesis")
         payload = json.loads(json.dumps(payload, sort_keys=True, allow_nan=False))  # plain JSON, as stored
-        self.store.append_record(self.kind, {"seq": seq, "type": typ, "payload": payload, "prev": prev,
-                                             "hash": self._hash(seq, typ, payload, prev)})
+        h = self._hash(seq, typ, payload, prev)
+        self.store.append_record(self.kind, {"seq": seq, "type": typ, "payload": payload, "prev": prev, "hash": h})
+        after = self.raw()
+        if len(after) != seq or after[-1].get("hash") != h:
+            raise StationError(f"station log {self.kind!r}: a concurrent writer appended record {seq} (fail closed)")
 
 
 @dataclass
 class _Fold:
     open: dict[str, Any] | None = None
     started: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
+    outcomes: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
+    published: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
     ended: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
     skipped: set[tuple[int, str]] = field(default_factory=set)
     lanes: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     lane_rounds: set[tuple[int, str]] = field(default_factory=set)
-    released: set[tuple[str, str]] = field(default_factory=set)
+    lane_intents: dict[tuple[int, str], dict[str, Any]] = field(default_factory=dict)
+    released: set[tuple[str, str]] = field(default_factory=set)  # releases journaled `done`
+    deferred: set[str] = field(default_factory=set)  # certificates published (or refused) as deferred
     rounds_ended: set[int] = field(default_factory=set)
     stopped: dict[str, Any] | None = None
     closed: bool = False
@@ -208,11 +234,13 @@ class _Fold:
     def explores(self, agent: str) -> int:
         return sum(1 for e in self.lanes.get(agent, []) if e["lane"] == "explore")
 
-    def exposure(self, agent: str) -> set[str]:
-        return {t for (_, a), e in self.ended.items() if a == agent for t in e.get("exposure_added", [])}
+    def exposure(self, agent: str, before_round: int | None = None) -> set[str]:
+        return {t for (r, a), e in self.ended.items() if a == agent and (before_round is None or r < before_round)
+                for t in e.get("exposure_added", [])}
 
     def runs(self, agent: str) -> set[str]:
-        return {r for (_, a), e in self.ended.items() if a == agent for r in e.get("runs", [])}
+        """Runs owned by a turn of `agent` that has an outcome (finished or being harvested)."""
+        return {r for (_, a), e in self.outcomes.items() if a == agent for r in e.get("runs", [])}
 
     def signals(self, agent: str, upto: int) -> list[dict[str, Any]]:
         rounds = sorted(r for (r, a) in self.ended if a == agent and r <= upto)
@@ -222,18 +250,29 @@ class _Fold:
 def _fold(events: list[tuple[str, dict[str, Any]]]) -> _Fold:
     f = _Fold()
     for typ, p in events:
+        rnd = p.get("round")
+        key: tuple[int, str] = (rnd if isinstance(rnd, int) else -1, str(p.get("agent", "")))
         if typ == "open":
             f.open = f.open or p
         elif typ == "turn_start":
-            f.started[(p["round"], p["agent"])] = p
-            f.released |= {(str(e), str(t)) for e, t in p.get("released", [])}
+            f.started[key] = p
+        elif typ == "turn_outcome":
+            f.outcomes[key] = p
+        elif typ == "turn_published":
+            f.published[key] = p
         elif typ == "turn_end":
-            f.ended[(p["round"], p["agent"])] = p
+            f.ended[key] = p
         elif typ == "turn_skip":
-            f.skipped.add((p["round"], p["agent"]))
+            f.skipped.add(key)
+        elif typ == "release" and p.get("event") == "done":
+            f.released.add((str(p["entry"]), str(p["target"])))
+        elif typ == "lane_intent":
+            f.lane_intents[key] = p
         elif typ == "lane":
             f.lanes.setdefault(p["agent"], []).append(p)
-            f.lane_rounds.add((p["round"], p["agent"]))
+            f.lane_rounds.add(key)
+        elif typ == "deferred":
+            f.deferred.add(str(p["cert"]))
         elif typ == "round_end":
             f.rounds_ended.add(p["round"])
         elif typ == "budget_stop":
@@ -256,12 +295,47 @@ def loop_label(labels: Sequence[str]) -> str:
     return "VALIDATED" if labels and all(lb == Label.CERTIFIED_VALIDATED.value for lb in labels) else "MECHANICAL"
 
 
+def _pid_alive(pid: int) -> bool:
+    from ...runtime.engine import _pid_alive as alive
+    return bool(alive(pid))
+
+
+def run_secrets(store: Any, run_ids: Sequence[str]) -> list[str]:
+    """String values of the `_private*` keys in each run's latest checkpoint state (the run's own secrets, e.g. its
+    canary): what an archive entry or a rendered view must never contain. Unreadable checkpoints add nothing."""
+    out: set[str] = set()
+
+    def walk(v: Any) -> None:
+        if isinstance(v, str):
+            if len(v) >= MIN_SECRET:
+                out.add(v)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+        elif isinstance(v, list):
+            for x in v:
+                walk(x)
+
+    for rid in run_ids:
+        try:
+            steps = [s for s in store.trace(rid) if s.checkpoint_ref]
+            if not steps:
+                continue
+            state = store.blobs.get_json(steps[-1].checkpoint_ref).get("state") or {}
+        except (KeyError, OSError, ValueError, AttributeError):
+            continue
+        for k, v in state.items() if isinstance(state, dict) else ():
+            if str(k).startswith("_private"):
+                walk(v)
+    return sorted(out)
+
+
 class StationMode:
     """One multi-agent research mode over one evidence store. `runner` executes turns; `ablation` (an AblationSet,
     made only by the scorecard runner's entry point) must be the one the runner's Engine runs with. Any non-empty
-    ablation marks the mode: its log goes to `station:<mode_id>:ABLATED` (kept apart from production modes);
-    `station_coordination` switches the coordination capability off (no archive shown, nothing published, no
-    stagnation lanes): N independent research loops."""
+    ablation marks the mode: its log goes to `station:<mode_id>:ABLATED`, its archive, campaigns, budgets and
+    controller ids to `<mode_id>-ABLATED` (kept apart from production modes); `station_coordination` switches the
+    coordination capability off (no archive shown, nothing published, no stagnation lanes): N independent loops."""
 
     def __init__(self, store: Any, cfg: ModeConfig, runner: AgentRunner, *, spec_hash: str,
                  kernel: Kernel | None = None, releases: Releases | None = None,
@@ -270,12 +344,13 @@ class StationMode:
             raise StationError("ablation must be an AblationSet (custom_harness.ablation)")
         if getattr(runner, "ablation", NO_ABLATION) != ablation:
             raise StationError("the mode and its runner must run under one ablation set")
+        runner_hash = getattr(runner, "spec_hash", None)
+        if runner_hash is not None and str(runner_hash) != str(spec_hash):
+            raise StationError("spec_hash differs from the spec the runner runs")
         self.store, self.cfg, self.runner = store, cfg, runner
         self.spec_hash = str(spec_hash)
         self.kernel = kernel if kernel is not None else Kernel(store)
-        # an ablated mode is kept apart from a production mode of the same id: its own log, archive namespace,
-        # campaigns, budget names and controller ids (the schedule, seeded by the configured id, is the same)
-        self.mid = f"{cfg.mode_id}-ablated" if ablation else cfg.mode_id
+        self.mid = f"{cfg.mode_id}{ABLATED_SUFFIX}" if ablation else cfg.mode_id
         self.archive = StationArchive(self.kernel, self.mid, releases=releases)
         self.ablation = ablation
         self.ablated = ablation.off(ABLATION_SWITCH)
@@ -290,8 +365,46 @@ class StationMode:
     def budget_name(self, agent: str) -> str:
         return f"station:{self.mid}:{agent}"
 
-    def _controller_prefix(self) -> str:
-        return f"station:{self.mid}:r"
+    def _controller_id(self, r: int) -> str:
+        return f"station:{self.mid}:r{r}"
+
+    def lock_path(self) -> Path:
+        return Path(self.store.root) / f"station-{self.mid}.lock"
+
+    # ------------------------------------------------------------------ the exclusive per-mode lock
+    @contextmanager
+    def lock(self) -> Iterator[None]:
+        """An exclusive lock file (O_CREAT|O_EXCL) next to the store. A lock left by a dead process of THIS host is
+        taken over (its pid is not alive); a live one, or one from another host, refuses (StationLocked)."""
+        path = self.lock_path()
+        me = {"pid": os.getpid(), "host": socket.gethostname(), "at": time.time()}
+        for _ in range(2):
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    held = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    held = {}
+                if (held.get("host") == me["host"] and isinstance(held.get("pid"), int)
+                        and not _pid_alive(held["pid"])):
+                    path.unlink(missing_ok=True)  # a crashed holder on this host: take over
+                    continue
+                raise StationLocked(f"mode {self.mid!r} is locked by {held or 'an unreadable lock file'} "
+                                    f"({path}); stop that process first") from None
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(me))
+            break
+        else:
+            raise StationLocked(f"mode {self.mid!r}: could not take the lock {path}")
+        try:
+            yield
+        finally:
+            try:
+                if json.loads(path.read_text(encoding="utf-8")).get("pid") == me["pid"]:
+                    path.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
 
     # ------------------------------------------------------------------ open / reopen
     def exact_problems(self) -> dict[str, dict[str, Any] | None]:
@@ -313,6 +426,9 @@ class StationMode:
     def open(self) -> dict[str, Any]:
         policies = {a.id: dict(self.runner.model_policy(a.id)) for a in self.cfg.agents}  # PolicyError propagates
         not_met = sorted(a for a, p in policies.items() if p.get("invariant_5") != "met")
+        if not_met and not self.cfg.allow_same_family:  # the CONFIG decides, whatever the runner allowed
+            raise StationError(f"invariant 5 is not met for agents {not_met} and the config does not allow a "
+                               f"same-family override (allow_same_family: false)")
         payload = {"format": FORMAT, "mode_id": self.cfg.mode_id, "config": self.cfg.model_dump(mode="json"),
                    "config_hash": self.cfg.config_hash(), "spec_hash": self.spec_hash,
                    "exact": self.exact_problems(), "policies": policies,
@@ -343,23 +459,27 @@ class StationMode:
         return self.cfg.problems[(idx + f.explores(agent)) % len(self.cfg.problems)].id
 
     # ------------------------------------------------------------------ budgets (derived from the store)
+    def _opened(self, agent: str) -> bool:
+        return bool(self.store.records_where(CAMPAIGN_OPEN, "campaign_id", self.campaign_id(agent)))
+
+    def agent_runs(self, agent: str) -> list[str]:
+        return Campaign(self.store, self.campaign_id(agent)).members() if self._opened(agent) else []
+
     def agent_spent(self, agent: str) -> Cost:
         """Derived from the store (budget.Campaign). Before the mode is opened the campaign does not exist: nothing
         was spent (read-only: inspecting a mode never opens its campaigns)."""
-        if not self.store.records_where(CAMPAIGN_OPEN, "campaign_id", self.campaign_id(agent)):
+        if not self._opened(agent):
             return Cost()
         return Campaign(self.store, self.campaign_id(agent)).spent
 
     def agent_caps(self, agent: str) -> dict[str, float]:
-        """The agent's caps: the configured ones, lowered by every APPLIED shrink the downgrade gate recorded for its
-        budget under this mode's controller ids. Only ever lower (min)."""
+        """The agent's caps: the configured ones, lowered by EVERY applied shrink the downgrade gate recorded for its
+        budget name (any controller). Only ever lower (min)."""
         caps = {k: float(v) for k, v in self.cfg.budget.agent.items()}
         for rec in self.store.records_where(ACTION_KIND, "target_id", self.budget_name(agent)):
             new = rec.get("new_cap")
-            if (rec.get("action_type") == "shrink" and rec.get("outcome") == "applied"
-                    and str(rec.get("controller_id", "")).startswith(self._controller_prefix())
-                    and rec.get("unit") in caps and isinstance(new, (int, float)) and not isinstance(new, bool)
-                    and math.isfinite(new)):
+            if (rec.get("action_type") == "shrink" and rec.get("outcome") == "applied" and rec.get("unit") in caps
+                    and isinstance(new, (int, float)) and not isinstance(new, bool) and math.isfinite(new)):
                 caps[rec["unit"]] = min(caps[rec["unit"]], float(new))
         return caps
 
@@ -398,54 +518,68 @@ class StationMode:
                 return f"mode budget {unit}: spent {_value(mode_spent, unit):.6g} >= cap {cap:.6g}"
         return None
 
+    def mode_secrets(self, f: _Fold) -> list[str]:
+        """The caller's secrets plus every `_private*` value of every run of this mode so far."""
+        runs = sorted({r for e in f.outcomes.values() for r in e.get("runs", [])})
+        return sorted(set(self.secrets) | set(run_secrets(self.store, runs)))
+
     # ------------------------------------------------------------------ the main loop
     def run(self) -> dict[str, Any]:
-        """Open (or reopen) the mode and run every remaining round. Returns `status()`."""
-        self.open()
-        for r in range(self.cfg.rounds):
-            f = _fold(self.log.events())
-            if f.stopped is not None or f.closed:
-                break
-            if r in f.rounds_ended:
-                continue
-            stop = False
-            for agent in self.order(r):
+        """Open (or reopen) the mode under its exclusive lock and run every remaining round. Returns `status()`."""
+        with self.lock():
+            self.open()
+            for r in range(self.cfg.rounds):
                 f = _fold(self.log.events())
-                if (r, agent) in f.ended or (r, agent) in f.skipped:
+                if f.stopped is not None or f.closed:
+                    break
+                if r in f.rounds_ended:
                     continue
-                if (r, agent) not in f.started:
-                    why = self.mode_exhausted()
-                    if why is not None:
-                        self.log.append("budget_stop", {"round": r, "reason": why})
-                        stop = True
-                        break
-                self._turn(r, agent, f)
-            if stop:
-                break
-            self._lanes(r, _fold(self.log.events()))
-            self.log.append("round_end", {"round": r})
-        f = _fold(self.log.events())
-        if not f.closed and (f.stopped is not None or len(f.rounds_ended) == self.cfg.rounds):
-            self.log.append("close", {"rounds_done": len(f.rounds_ended)})
+                stop = False
+                for agent in self.order(r):
+                    f = _fold(self.log.events())
+                    if (r, agent) in f.ended or (r, agent) in f.skipped:
+                        continue
+                    if (r, agent) not in f.started:
+                        why = self.mode_exhausted()
+                        if why is not None:
+                            self.log.append("budget_stop", {"round": r, "reason": why})
+                            stop = True
+                            break
+                    self._turn(r, agent, f)
+                if stop:
+                    break
+                self._deferred(_fold(self.log.events()))
+                self._lanes(r, _fold(self.log.events()))
+                self.log.append("round_end", {"round": r})
+            f = _fold(self.log.events())
+            if not f.closed and (f.stopped is not None or len(f.rounds_ended) == self.cfg.rounds):
+                self._deferred(f)
+                self.log.append("close", {"rounds_done": len(f.rounds_ended)})
         return self.status()
 
     # ------------------------------------------------------------------ one turn
-    def _render(self, r: int, agent: str, lane: str, f: _Fold) -> tuple[str, dict[str, Any], list[list[str]]]:
+    def _journal(self, r: int, agent: str) -> Callable[[str, str, str, str], None]:
+        def journal(event: str, entry: str, target: str, alphabet: str) -> None:
+            self.log.append("release", {"round": r, "agent": agent, "event": event, "entry": entry,
+                                        "target": target, "alphabet": alphabet})
+        return journal
+
+    def _render(self, r: int, agent: str, lane: str, f: _Fold) -> tuple[str, dict[str, Any]]:
         empty: dict[str, Any] = {"shown": [], "redacted": [], "withheld": []}
         if self.ablated:
-            return (f"(the station archive is switched off for this run: ablation {ABLATION_SWITCH})", empty, [])
+            return (f"(the station archive is switched off for this run: ablation {ABLATION_SWITCH})", empty)
         if r < self.cfg.isolation_rounds:
             return (f"(isolation phase: no archive entries are shown before round {self.cfg.isolation_rounds})",
-                    empty, [])
+                    empty)
         if lane == "explore":
-            return ("(exploration lane: this turn works without the archive)", empty, [])
+            return ("(exploration lane: this turn works without the archive)", empty)
         kinds = (Kind.NEGATIVE,) if lane == "revive" else ARCHIVE_KINDS
-        released = set(f.released)
-        res = self.archive.render_for(agent, released=released, kinds=kinds, max_entries=self.cfg.max_archive_entries,
-                                      max_chars=self.cfg.max_archive_chars, secrets=self.secrets,
-                                      release_key=f"r{r}:{agent}")
+        res = self.archive.render_for(agent, released=set(f.released), kinds=kinds,
+                                      max_entries=self.cfg.max_archive_entries, max_chars=self.cfg.max_archive_chars,
+                                      secrets=self.mode_secrets(f), release_key=f"r{r}:{agent}",
+                                      journal=self._journal(r, agent))
         meta = {"shown": res.shown, "redacted": res.redacted, "withheld": [list(x) for x in res.withheld]}
-        return res.text, meta, [list(x) for x in res.released]
+        return res.text, meta
 
     def _request(self, st: dict[str, Any]) -> TurnRequest:
         problem = next(p for p in self.cfg.problems if p.id == st["problem"])
@@ -479,7 +613,11 @@ class StationMode:
         return out
 
     def _turn(self, r: int, agent: str, f: _Fold) -> None:
-        st = f.started.get((r, agent))
+        key = (r, agent)
+        if key in f.outcomes:  # the run finished before a crash: harvest (or finish harvesting) its outcome
+            self._finish(f.started[key], f.outcomes[key])
+            return
+        st = f.started.get(key)
         campaign = Campaign(self.store, self.campaign_id(agent))
         if st is None:
             alloc = self.allocation(agent)
@@ -487,12 +625,12 @@ class StationMode:
                 self.log.append("turn_skip", {"round": r, "agent": agent, "reason": "no budget left"})
                 return
             lane = f.lane(agent)
-            text, meta, released = self._render(r, agent, lane, f)
+            text, meta = self._render(r, agent, lane, f)
             st = {"round": r, "agent": agent, "problem": self.problem_for(agent, f), "lane": lane,
                   "seed": self.turn_seed(r, agent), "limits": alloc, "seq_before": self._ledger_seq(),
-                  "archive": {**meta, "ref": self.store.blobs.put(text.encode("utf-8"))}, "released": released}
+                  "archive": {**meta, "ref": self.store.blobs.put(text.encode("utf-8"))}}
             self.log.append("turn_start", st)
-            st = _fold(self.log.events()).started[(r, agent)]
+            st = _fold(self.log.events()).started[key]
             out = self._call(self.runner.start, self._request(st), st)
         else:
             new = [m for m in campaign.members() if m not in f.runs(agent)]
@@ -508,40 +646,84 @@ class StationMode:
                     out = TurnOutcome(run_id, status.value, "terminal before the mode resumed")
         if out.run_id:
             campaign.join(out.run_id)  # a runner that forgot to join still has its spend counted
-        self._finish(st, out, campaign)
-
-    def _finish(self, st: dict[str, Any], out: TurnOutcome, campaign: Campaign) -> None:
-        r, agent = st["round"], st["agent"]
         f = _fold(self.log.events())
-        seq_after = self._ledger_seq()
-        w = TurnWindow(self.mid, agent, r, st["problem"], int(st["seq_before"]), seq_after)
+        outcome = {"round": r, "agent": agent, "run_id": out.run_id, "status": out.status,
+                   "detail": out.detail[:200], "requests": [dict(x) for x in out.requests if isinstance(x, dict)],
+                   "seq_after": self._ledger_seq(),
+                   "runs": [m for m in campaign.members() if m not in f.runs(agent)]}
+        self.log.append("turn_outcome", outcome)
+        self._finish(st, _fold(self.log.events()).outcomes[key])
+
+    def _window(self, st: dict[str, Any], outcome: dict[str, Any], *, runs: Sequence[str] | None = None) -> TurnWindow:
+        return TurnWindow(self.mid, st["agent"], int(st["round"]), st["problem"], int(st["seq_before"]),
+                          int(outcome["seq_after"]), frozenset(runs if runs is not None else outcome["runs"]))
+
+    def _finish(self, st: dict[str, Any], outcome: dict[str, Any]) -> None:
+        r, agent = int(st["round"]), str(st["agent"])
+        key = (r, agent)
+        f = _fold(self.log.events())
+        w = self._window(st, outcome)
+        if key not in f.published:
+            opened = f.open or {}
+            exact = (opened.get("exact") or {}).get(st["problem"])
+            policy = (opened.get("policies") or {}).get(agent) or {}
+            secrets = self.mode_secrets(f)
+            pubs: list[Publication] = self.archive.publish_turn(
+                w, prior_exposure=sorted(f.exposure(agent, before_round=r)),
+                parents=list(st["archive"].get("shown", [])), exact=exact, requests=list(outcome.get("requests", [])),
+                author_policy=policy, secrets=secrets, ablated=self.ablated)
+            certs = self.archive.turn_certificates(w)
+            unattributed = [h for h in self.archive.window_certificates(w) if h not in certs]
+            targets: set[str] = set()
+            for h in certs:
+                try:
+                    targets |= {str(t) for t in self.kernel.certificate(h).claim.get("generalization_targets", [])}
+                except Exception:  # noqa: BLE001 - an unreadable certificate adds nothing (it was refused above)
+                    continue
+            prereg = sum(1 for e in self.kernel.ledger.entries("prereg") if w.contains(e.seq))
+            progress = [p for p in pubs if p.progress]
+            spent = Cost()
+            camp = Campaign(self.store, self.campaign_id(agent))
+            for run_id in outcome["runs"]:
+                spent = spent + camp.run_spent(run_id)
+            self.log.append("turn_published", {
+                "round": r, "agent": agent, "certs": certs, "unattributed": unattributed,
+                "open_preregs": self.archive.open_preregs(w, certs),
+                "publications": [p.record() for p in pubs],
+                "signal": {"accepted": bool(progress), "proposed": int(prereg), "gated": len(certs),
+                           "rejected_on": {}},
+                "exposure_added": sorted(self.archive.turn_exposure(w) | targets),
+                "spent": {u: _value(spent, u) for u in UNITS},
+                "loop_label": loop_label([str(p.label) for p in progress])})
+            f = _fold(self.log.events())
+        self.log.append("turn_end", {**outcome, **f.published[key]})
+
+    # ------------------------------------------------------------------ deferred certificates
+    def _deferred(self, f: _Fold) -> None:
+        """Publish certificates issued AFTER their turn for claims that turn pre-registered (future data, deferred
+        resolutions), against that turn: its author, parents and exposure frozen at the pre-registration. Each is
+        logged once (`deferred`), published or refused. They never feed a stall signal."""
+        if self.ablated:
+            return
         opened = f.open or {}
-        exact = (opened.get("exact") or {}).get(st["problem"])
-        policy = (opened.get("policies") or {}).get(agent) or {}
-        pubs: list[Publication] = self.archive.publish_turn(
-            w, prior_exposure=sorted(f.exposure(agent)), parents=list(st["archive"].get("shown", [])), exact=exact,
-            requests=list(out.requests), author_policy=policy, secrets=self.secrets, ablated=self.ablated)
-        certs = self.archive.turn_certificates(w)
-        targets: set[str] = set()
-        for h in certs:
-            try:
-                targets |= {str(t) for t in self.kernel.certificate(h).claim.get("generalization_targets", [])}
-            except Exception:  # noqa: BLE001 - an unreadable certificate adds nothing (it was refused above)
+        for key, end in sorted(f.ended.items()):
+            open_claims = set(end.get("open_preregs") or [])
+            if not open_claims:
                 continue
-        exposure_added = sorted(self.archive.turn_exposure(w) | targets)
-        prereg = sum(1 for e in self.kernel.ledger.entries("prereg") if w.contains(e.seq))
-        progress = [p for p in pubs if p.progress]
-        signal = {"accepted": bool(progress), "proposed": int(prereg), "gated": len(certs), "rejected_on": {}}
-        runs = [m for m in campaign.members() if m not in f.runs(agent)]
-        spent = Cost()
-        for run_id in runs:
-            spent = spent + campaign.run_spent(run_id)
-        self.log.append("turn_end", {
-            "round": r, "agent": agent, "run_id": out.run_id, "runs": runs, "status": out.status,
-            "detail": out.detail[:200], "seq_after": seq_after, "certs": certs,
-            "publications": [p.record() for p in pubs], "signal": signal, "exposure_added": exposure_added,
-            "spent": {u: _value(spent, u) for u in UNITS},
-            "loop_label": loop_label([str(p.label) for p in progress])})
+            r, agent = key
+            st = f.started[key]
+            for e in self.kernel.ledger.entries("certificate"):
+                h = e.body.get("cert_hash")
+                if (e.body.get("claim_hash") not in open_claims or not isinstance(h, str) or h in f.deferred
+                        or e.seq <= int(end["seq_after"])):
+                    continue
+                w = self._window(st, end, runs=self.agent_runs(agent))
+                pub = self.archive.publish_deferred(
+                    h, w, prior_exposure=sorted(f.exposure(agent, before_round=r)),
+                    parents=list(st["archive"].get("shown", [])), exact=(opened.get("exact") or {}).get(st["problem"]),
+                    author_policy=(opened.get("policies") or {}).get(agent) or {}, secrets=self.mode_secrets(f))
+                self.log.append("deferred", {"round": r, "agent": agent, "cert": h, "publication": pub.record()})
+                f = _fold(self.log.events())
 
     # ------------------------------------------------------------------ stagnation lanes
     def _lanes(self, r: int, f: _Fold) -> None:
@@ -549,28 +731,34 @@ class StationMode:
             return
         from ...evolve import generations  # THE stall rule (control/islands.py uses the same function)
         for a in (x.id for x in self.cfg.agents):
-            if (r, a) in f.lane_rounds:
+            key = (r, a)
+            if key in f.lane_rounds:
                 continue
-            sigs = f.signals(a, r)
-            if not sigs or (r, a) not in f.ended:
-                continue
-            ev = generations.stall_evidence(sigs, window=self.cfg.stall_window)
-            history = f.lanes.get(a, [])
-            stalls = [e for e in history if e["reason"] == "stalled"]
-            if ev["stalled"]:
-                if stalls and r - int(stalls[-1]["round"]) < self.cfg.stall_window:
-                    continue  # cool-down: the window must refill with new rounds before the next stall lane
-                lane = STALL_LANES[len(stalls) % len(STALL_LANES)]
-                gate = self._shrink(a, r)
-                self.log.append("lane", {"round": r, "agent": a, "lane": lane, "previous": f.lane(a),
-                                         "reason": "stalled", "stall": ev, "gate": gate})
-            elif f.lane(a) != DEFAULT_LANE and sigs[-1]["accepted"]:
-                self.log.append("lane", {"round": r, "agent": a, "lane": DEFAULT_LANE, "previous": f.lane(a),
-                                         "reason": "progress", "stall": ev, "gate": None})
+            intent = f.lane_intents.get(key)
+            if intent is None:
+                sigs = f.signals(a, r)
+                if not sigs or key not in f.ended:
+                    continue
+                ev = generations.stall_evidence(sigs, window=self.cfg.stall_window)
+                stalls = [e for e in f.lanes.get(a, []) if e["reason"] == "stalled"]
+                if ev["stalled"]:
+                    if stalls and r - int(stalls[-1]["round"]) < self.cfg.stall_window:
+                        continue  # cool-down: the window must refill with new rounds before the next stall lane
+                    intent = {"round": r, "agent": a, "lane": STALL_LANES[len(stalls) % len(STALL_LANES)],
+                              "previous": f.lane(a), "reason": "stalled", "stall": ev, "proposal": self._proposal(a)}
+                elif f.lane(a) != DEFAULT_LANE and sigs[-1]["accepted"]:
+                    intent = {"round": r, "agent": a, "lane": DEFAULT_LANE, "previous": f.lane(a),
+                              "reason": "progress", "stall": ev, "proposal": None}
+                else:
+                    continue
+                self.log.append("lane_intent", intent)
+                intent = _fold(self.log.events()).lane_intents[key]
+            gate = self._submit_shrink(r, intent["proposal"]) if intent["proposal"] else None
+            self.log.append("lane", {**intent, "gate": gate})
 
-    def _shrink(self, agent: str, r: int) -> dict[str, Any] | None:
-        """Shrink the agent's primary cap through the downgrade-only gate (a code-written proposal; idempotent on
-        resume: an identical proposal already decided under this round's controller id is not resubmitted)."""
+    def _proposal(self, agent: str) -> dict[str, Any] | None:
+        """The shrink of the agent's primary cap to spent + stall_shrink x (cap - spent), or None when nothing is
+        left to shrink. Computed ONCE and logged in the lane intent, so a resume submits exactly the same text."""
         u = self.cfg.budget.unit
         caps = self.agent_caps(agent)
         used = _value(self.agent_spent(agent), u)
@@ -578,23 +766,32 @@ class StationMode:
         new = used + self.cfg.stall_shrink * (old - used)
         if not (old - used > 0 and math.isfinite(new) and 0 <= new < old):
             return None
-        cid = f"{self._controller_prefix()}{r}"
         text = json.dumps({"actions": [{"type": "shrink", "target": self.budget_name(agent), "unit": u,
                                         "value": new}]}, sort_keys=True)
+        return {"text": text, "budget": self.budget_name(agent), "unit": u, "old_cap": old, "new_cap": new,
+                "caps": caps}
+
+    def _submit_shrink(self, r: int, prop: dict[str, Any]) -> dict[str, Any]:
+        """Submit the logged proposal through the downgrade-only gate unless the gate already decided it (same
+        controller id and proposal hash): idempotent across crashes."""
+        cid = self._controller_id(r)
+        text = str(prop["text"])
         sha = hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
         done = [rec for rec in self.store.records_where(ACTION_KIND, "controller_id", cid)
                 if rec.get("proposal_sha256") == sha]
         if done:
             applied = any(rec.get("outcome") == "applied" for rec in done)
         else:
-            gate = DowngradeGate(self.store, budgets={self.budget_name(agent): Budget(limits=dict(caps))},
+            caps = {k: float(v) for k, v in dict(prop["caps"]).items()}
+            gate = DowngradeGate(self.store, budgets={str(prop["budget"]): Budget(limits=dict(caps))},
                                  admissions=AdmissionRegister(), kill=_no_kill)
             applied = bool(gate.submit(cid, text).applied)
-        return {"controller_id": cid, "proposal_sha256": sha, "applied": applied, "unit": u, "old_cap": old,
-                "new_cap": new}
+        return {"controller_id": cid, "proposal_sha256": sha, "applied": applied, "unit": prop["unit"],
+                "old_cap": prop["old_cap"], "new_cap": prop["new_cap"]}
 
-    # ------------------------------------------------------------------ reports
+    # ------------------------------------------------------------------ reports (read-only)
     def status(self) -> dict[str, Any]:
+        """Read-only: writes nothing (no campaign is opened, no retraction applied, no read logged)."""
         f = _fold(self.log.events())
         opened = f.open or {}
         agents: dict[str, Any] = {}
@@ -613,17 +810,21 @@ class StationMode:
                 "turns": len(ends), "skipped": sum(1 for (_, b) in f.skipped if b == a.id),
                 "lane": f.lane(a.id), "lane_changes": len(f.lanes.get(a.id, [])),
                 "publications": codes, "progress": len(progress), "loop_label": loop_label(progress),
+                "open_preregs": sorted({c for e in ends for c in e.get("open_preregs", [])}),
                 "caps": caps, "spent": {u: _value(spent, u) for u in caps},
                 "invariant_5": ((opened.get("policies") or {}).get(a.id) or {}).get("invariant_5", "UNKNOWN")}
+        entries = self.archive.entries()
         return {"mode_id": self.cfg.mode_id, "format": FORMAT, "rounds_done": len(f.rounds_ended),
                 "rounds": self.cfg.rounds, "stopped": f.stopped, "closed": f.closed,
                 "loop_label": loop_label(all_progress), "invariant_5": opened.get("invariant_5", "UNKNOWN"),
                 "exact_problems": {k: v is not None for k, v in (opened.get("exact") or {}).items()},
                 "ablated": opened.get("ablated", []), "agents": agents,
-                "archive": {"entries": len(self.archive.entries()), "releases": len(f.released),
+                "archive": {"entries": len(entries),
+                            "retraction_pending": sum(e["retraction_pending"] for e in entries),
+                            "releases": len(f.released), "deferred": len(f.deferred),
                             "corroborations": self.archive.corroborations()},
                 "log_intact": not self.log.verify(), "archive_log_intact": not self.archive.store.verify_log()}
 
 
-__all__ = ["ABLATION_SWITCH", "AgentSpec", "BudgetSpec", "ModeConfig", "ProblemSpec", "PubCode", "StationError",
-           "StationInfraError", "StationMode", "loop_label"]
+__all__ = ["ABLATED_SUFFIX", "ABLATION_SWITCH", "AgentSpec", "BudgetSpec", "ModeConfig", "ProblemSpec", "PubCode",
+           "StationError", "StationInfraError", "StationLocked", "StationMode", "loop_label", "run_secrets"]
