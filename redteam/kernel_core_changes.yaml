@@ -126,3 +126,43 @@ changes:
     Recorded by the s4-int17 integrator agent, not typed by a human. The 7-day cooling-off was NOT observed. The owner
     should review together with the 8dc2497e records.
   recorded: '2026-10-14'
+- fingerprint: 59e42223d03c6099ca43c3da7a4f6bd98011699e74917a9807a05b4a6b278aad
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; recorded by the s3-domain builder agent, not typed by a human)
+  note: >-
+    Additive registration of a NEW domain adapter 'circuit' (computational class, metric circuit_value; code outside
+    the Kernel in custom_harness/adapters/circuit) in kernel/adapters.py: one import, one AdapterSpec and one REGISTRY
+    entry. No existing pass condition, check, adapter or adapter hash changes. The new adapter is UNAPPROVED and
+    unusable (K1 refuses) until a human runs `chh approve-adapter circuit` after its validation passes. Classified
+    tighten-only by the builder because nothing becomes certifiable without a new human approval; strictly it widens
+    the trusted base by a new checker, so the owner should confirm the classification or append a deviation record.
+  recorded: '2026-10-08'
+- fingerprint: b540544f897fe27d156b098f6543fbd5438d86a28a8650d3375858afe6430ab4
+  kind: tighten
+  approver: orchestrator (owner delegation of 2026-10-08; R2-2 decision of 2026-10-08/09)
+  note: >-
+    Integration record (branch int17, s4-int17 integrator agent; typed by the agent, not a human). The Kernel core
+    here is d9524887 (the w2-ablation refusal + Kernel 1.3 from s3-kernel, records above) plus the s3-domain
+    registration of the NEW 'circuit' adapter in kernel/adapters.py (59e42223, tighten), auto-merged with no conflict
+    and no Kernel edit by the integrator. After s3-kernel's core/adapter split the circuit adapter has no procedures
+    module (like lp); adapters.procedures_for then picks the ML procedures, as for lp (docs/kernel_core_adapter_split.md):
+    the circuit tests must be re-run on this core. Carries the non-tightening parts of d9524887, so the deviation record
+    that follows corrects its classification. Not test-verified (owner rule: no tests this round).
+  recorded: '2026-10-15'
+- fingerprint: b540544f897fe27d156b098f6543fbd5438d86a28a8650d3375858afe6430ab4
+  kind: deviation
+  corrects: b540544f897fe27d156b098f6543fbd5438d86a28a8650d3375858afe6430ab4
+  changes:
+  - carries the non-tightening Kernel 1.3 changes of 8dc2497e / d9524887 (alpha-account slot charging with K4 fixed at
+    alpha_T / S_T on account targets; core/adapter split into kernel/ml.py, bit-identity not yet proven; bounded-null
+    certificates through a plasmode K7; Kernel version 1.3)
+  - adds a new trusted checker (circuit adapter registration, unusable until a human approves it), which widens the
+    trusted base as the s3-domain record states
+  cooling_off_observed: false
+  basis: GOAL §16.4, §5/§11 M3 and M5 (domain adapters), §16.10, invariant 12; orchestrator decisions of 2026-10-08/09
+    under the owner's delegation; integration of already-recorded changes
+  approver: owner (delegated to orchestrator, 2026-10-08)
+  note: >-
+    Recorded by the s4-int17 integrator agent, not typed by a human. The 7-day cooling-off was NOT observed. The owner
+    should review together with the 8dc2497e, d9524887 and 59e42223 records.
+  recorded: '2026-10-15'
