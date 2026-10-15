@@ -316,7 +316,8 @@ class Engine:
         # fan-out parallelism, OPT-IN (`chh run|resume --map-workers N`; default 1 = sequential): only a map whose body
         # is an LLM node runs its branches' model calls on up to N worker threads (`_ParallelBranches`); every other
         # map, and every map with N = 1, runs its branches sequentially. Results are committed on this thread in item
-        # order, so ids, persisted records, values, labels and errors equal the sequential run's.
+        # order, so the committed branches' ids, records, values, labels and errors equal the sequential run's (on an
+        # error or budget stop, already-started later branches are also charged and listed: `_ParallelBranches`).
         if isinstance(map_workers, bool) or not isinstance(map_workers, int) or map_workers < 1:
             raise ValueError("map_workers must be an integer >= 1")
         self.map_workers = map_workers
@@ -924,8 +925,10 @@ class Engine:
         # 3. run the remaining branches in item order. Opt-in parallel (Engine(map_workers=N), N > 1, LLM body):
         # each branch is PREPARED here in item order (state copy, labels, prompt render and its releases), only its
         # model call runs on a worker thread, and every branch is COMMITTED here in item order (record, charge,
-        # label, value): the same ids, persisted records, values, labels and errors as the sequential path. Workers
-        # write nothing but their own write-ahead cost-journal rows (`_ParallelBranches`).
+        # label, value): the committed branches, ids, values, labels and errors equal the sequential path's. On an
+        # error or budget stop, up to N-1 branches already started past it are charged, persisted and listed under
+        # `discarded_branches` (the sequential path never started them). Workers write nothing but their own
+        # write-ahead cost-journal rows (`_ParallelBranches`).
         saved_ts = self._ts
         from ..kerneld.releases import attributed_reads
         if isinstance(body, ToolNode):
@@ -1422,11 +1425,15 @@ class _ParallelBranches:
     A branch whose render raised is executed at its commit by the sequential `Engine._attempt` instead (the same
     result, error or crash as the sequential path; releases its failed render already emitted stay emitted).
 
-    Stated limits: (1) budget: up to N-1 branches may already be running when the cap is reached; their spend is
-    charged (`drain`), so a parallel fan-out can overshoot a cap by at most N-1 branches (the sequential one by none),
-    with the same step error; (2) each branch's cost carries its own wall time, so a step's summed `wall_s` exceeds
-    its elapsed time; (3) the backend must be thread-safe, and outputs are equal across worker counts only when a
-    response depends on the request, not on the order of calls (a scripted list is order-dependent)."""
+    Stated limits: (1) on a budget OR error stop, up to N-1 branches may already be running past it; their spend is
+    charged and a finished one persisted (`drain`), listed under the step's `discarded_branches`, so a parallel
+    fan-out can overshoot a cap by at most N-1 branches (the sequential one by none), with the same step error;
+    (2) each branch's cost carries its own wall time, so a step's summed `wall_s` exceeds its elapsed time; (3) the
+    backend must be thread-safe, and outputs are equal across worker counts only when a response depends on the
+    request, not on the order of calls (a scripted list is order-dependent); (4) the release ledger rows are the
+    same set but may interleave differently (a later branch's render release can precede an earlier branch's retry
+    re-release); (5) the worker runs in a per-branch copy of the engine thread's contextvars, so a private read or
+    nested run made in-process during the call is attributed as on the sequential path."""
 
     def __init__(self, eng: Engine, node_id: str, node: MapNode, body: LLMNode, state: dict[str, Any],
                  items: list[Any], ids: list[str], run_id: str, index: int, items_taint: set[str],
@@ -1474,7 +1481,12 @@ class _ParallelBranches:
         if not bts.pending:  # a control decision released inside the branch is released for the run
             self.saved_ts.pending = []
         if messages is not None:
-            p["future"] = self.pool.submit(self._work, messages, archived, (self.run_id, self.index, bid, nonce))
+            # the worker runs in a COPY of this thread's context (one copy per branch: a Context cannot be entered
+            # by two threads at once): `_ACTIVE_RUN` links a run nested in the call, `_CAPTURE` (lists shared by
+            # reference) records a private read the call makes in-process, exactly as on the sequential path
+            run_ctx = contextvars.copy_context()
+            p["future"] = self.pool.submit(run_ctx.run, self._work, messages, archived,
+                                           (self.run_id, self.index, bid, nonce))
         self.prepared[k] = p
 
     def _fill(self, k: int, acc: Cost) -> None:

@@ -167,3 +167,22 @@ def test_an_ablated_islands_campaign_refuses_a_controller(tmp_path):
                        backends={}, store=store, sandbox_factory=lambda k: None, cfg=EvolveConfig(**CFG),
                        campaign="c", controller=MockBackend(["x"]), ablation=ablation_set({"lever-choice"}))
     store.close()
+
+
+def test_islands_mode_refuses_a_usd_cap_on_unpriced_backends(tmp_path, monkeypatch):
+    """Review finding: `cmd_evolve` refuses --max-usd for backends without a calibrated usd rate (invariant 9);
+    the islands mode must too (mock proposers report no real usd). Fail-first: before the fix the cap was accepted."""
+    import yaml
+
+    import custom_harness.evolve.driver as driver
+    import custom_harness.evolve.search as search
+    from custom_harness.cli import main
+    monkeypatch.setattr(search, "evolve_islands", lambda *a, **k: pytest.fail("must refuse before running"))
+    monkeypatch.setattr(driver, "load_suite", lambda p: [])
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(yaml.safe_dump(seed_spec().model_dump(mode="json")), encoding="utf-8")
+    isl = tmp_path / "islands.yaml"
+    isl.write_text(ISLANDS, encoding="utf-8")
+    with pytest.raises(SystemExit, match="max-usd"):
+        main(["evolve", str(spec), "--suite", str(tmp_path / "s.yaml"), "--dev-sandbox", "--islands", str(isl),
+              "--max-usd", "5"])

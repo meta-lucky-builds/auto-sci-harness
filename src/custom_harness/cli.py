@@ -47,7 +47,8 @@ def _backend(kind: str) -> Backend:
 
 
 MAP_WORKERS_HELP = ("opt-in: run the model calls of a map whose body is an LLM node on up to N threads (default 1 = "
-                    "sequential); results are committed in item order, so outputs equal the sequential run's "
+                    "sequential); results are committed in item order, so the committed outputs equal the sequential "
+                    "run's; on an error or budget stop up to N-1 started branches are also charged "
                     "(runtime/engine.py _ParallelBranches)")
 
 
@@ -294,6 +295,8 @@ def cmd_evolve_islands(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .budget import persistent_budget
     limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
     campaign_id = a.campaign_id or run_tag
+    if a.max_usd is not None:  # invariant 9: a usd cap an unpriced backend can never trigger is refused
+        _refuse_unpriced_usd_cap([*backends.values(), *proposers.values(), *([controller] if controller else [])])
     budget = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
     res = evolve_islands(spec, load_suite(Path(a.suite)), islands=list(icfg.islands), policy=icfg.policy,
                          rounds=icfg.rounds, total_budget=icfg.total_budget, proposers=proposers,

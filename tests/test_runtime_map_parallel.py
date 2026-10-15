@@ -275,3 +275,26 @@ def test_kill9_mid_parallel_map_then_resume_charges_every_call_once(tmp_path):
     # the finished-but-uncommitted calls of the killed process (x3, x4 when they finished) were recovered as lost
     assert 0 <= m["recovered_lost_calls"] <= 2
     store.close()
+
+
+# ------------------------------------------------------------------------------------------- run context in workers
+def test_a_parallel_branch_call_runs_in_the_run_context(tmp_path):
+    """Review finding (s4-wiring__review): ThreadPoolExecutor does not copy contextvars, so a worker saw no active run
+    and no read-capture lists; a private read or nested run made in-process during the call would have been
+    attributed differently from the sequential path (fail open). Each branch now runs in a copy of the engine
+    thread's context. Fail-first: before the fix the parallel run records None for every branch."""
+    from custom_harness.runtime import engine as E
+    seen: dict[int, list] = {1: [], 4: []}
+
+    def run(w):
+        def resp(req):
+            seen[w].append((E._ACTIVE_RUN.get(), len(E._CAPTURE.get())))
+            return req.messages[-1].content.upper()
+        store = EvidenceStore(tmp_path / f"ctx-{w}")
+        res = Engine(_spec(), backends={"executor": MockBackend(resp)}, store=store, map_workers=w).run(
+            "t", {"items": ITEMS})
+        store.close()
+        return res.run_id
+    rid1, rid4 = run(1), run(4)
+    assert seen[1] == [(rid1, 1)] * len(ITEMS)
+    assert seen[4] == [(rid4, 1)] * len(ITEMS)
