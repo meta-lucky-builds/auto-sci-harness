@@ -46,7 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ... import config
 from ...ablation import MARKER, NO_ABLATION, AblationSet
-from ...budget import UNITS, Budget, Campaign, _value
+from ...budget import CAMPAIGN_OPEN, UNITS, Budget, Campaign, _value
 from ...control.downgrade import ACTION_KIND, AdmissionRegister, DowngradeGate
 from ...errors import infra_cause
 from ...kernel import Kernel, Label
@@ -344,6 +344,10 @@ class StationMode:
 
     # ------------------------------------------------------------------ budgets (derived from the store)
     def agent_spent(self, agent: str) -> Cost:
+        """Derived from the store (budget.Campaign). Before the mode is opened the campaign does not exist: nothing
+        was spent (read-only: inspecting a mode never opens its campaigns)."""
+        if not self.store.records_where(CAMPAIGN_OPEN, "campaign_id", self.campaign_id(agent)):
+            return Cost()
         return Campaign(self.store, self.campaign_id(agent)).spent
 
     def agent_caps(self, agent: str) -> dict[str, float]:

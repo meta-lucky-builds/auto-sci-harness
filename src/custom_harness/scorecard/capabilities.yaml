@@ -211,7 +211,10 @@ capabilities:
   capability: Decentralised agents, archive coordination, exact evaluators, stagnation lanes
   home: L4 multi-agent mode, L3, L7
   ablation:
-    not_ablatable: 'decentralised agents and archive coordination: not built (no L4 multi-agent research mode exists; orchestration/ is the developer delegation driver of GOAL §15); stagnation lanes: separate lanes are not built, the nearest mechanism is the L7 stall rule (control/islands.py Orchestrator.step), switched by `orchestrator-reallocation` (row milo); exact evaluators are the verifier ladder and Kernel checks, integrity mechanisms (invariant 3): no switch'
+    switch: station_coordination
+    not_covered:
+      exact evaluators: 'on an exact problem the archive publishes only CERTIFIED-EXACT certificates of its metric (research/station/archive.py), and the exact checkers are the approved LP / circuit adapters called by the Kernel (K3): integrity mechanism (invariant 3), never switched off in production'
+      reachability: 'library level only: StationMode / EngineRunner take the AblationSet, but no scorecard System drives a station mode yet and the CLI never passes an ablation, so no ablation run exercises this switch yet'
 - id: autoopt
   source: AutoOPT
   capability: Lean + comparator, numerical certificates, statement fidelity

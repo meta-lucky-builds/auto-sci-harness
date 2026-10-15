@@ -186,6 +186,13 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
                      "order, none excluded. Library level only: nothing in a run calls weights/, so no ablation run "
                      "exercises this switch yet",
            test=_T + "test_reward_variance_selection_switch_selects_uniformly"),
+    Switch(name="station_coordination", capability="the-station",
+           turns_off="research/station/mode.py StationMode: no agent is shown the shared archive (its archive context "
+                     "is the switched-off marker), nothing is published to it (every certificate of a turn is "
+                     "recorded as code 'ablated') and no stagnation lane or stall shrink is applied: N independent "
+                     "research loops on the same schedule, seeds and budgets. Library level: no scorecard System "
+                     "drives a station mode yet, and the CLI never passes an ablation",
+           test="tests/test_station_mode.py::test_station_coordination_switch_runs_independent_agents"),
 )
 
 SWITCHES: Mapping[str, Switch] = _registry(*_CORE, *_EVOLVE, *_RESEARCH)
