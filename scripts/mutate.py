@@ -7,11 +7,12 @@
     python scripts/mutate.py --out DIR --budget-s 1500 --jobs 1   # one resumable slice of at most ~25 min
 
 Targets (GOAL §16.6): kernel/vault.py, kernel/ledger.py, and in kernel/checks.py the K2/K4/K6 code
-(k2_preregistered, k4_statistics, _criterion, k6_held_out, related_targets, shared_examples, is_external).
+(k2_preregistered, k4_statistics, k6_held_out, related_targets, shared_examples, is_external), and since the Kernel 1.3
+core/adapter split kernel/ml.py statistics, criterion (was checks._criterion) and plan_code_divergence.
 Since the §16 Kernel 1.2 work, K4 and K6 also decide through helpers and two new files; these are targets too
 (`GROWN`, reported apart so the original score stays comparable): registration, family, releases_on,
-registration_level, fixed_terms, fixed, target_level, plan_code_divergence in checks.py, and kernel/alpha.py and
-kernel/releases.py whole.
+registration_level, fixed_terms, fixed, target_level in checks.py, plan_code_divergence (now in ml.py), and
+kernel/alpha.py and kernel/releases.py whole.
 
 The test list is the hand list below UNION the gate's derived Kernel test list (`check.kernel_tests()`,
 tests/test_kernel_*.py): a Kernel test file that is missing from a hand list would silently leave the mutation map
@@ -50,14 +51,19 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 KDIR = "src/custom_harness/kernel"
-LEGACY_CHECKS = ("k2_preregistered", "k4_statistics", "_criterion", "k6_held_out", "related_targets",
+LEGACY_CHECKS = ("k2_preregistered", "k4_statistics", "k6_held_out", "related_targets",
                  "shared_examples", "is_external")
 GROWN_CHECKS = ("registration", "family", "releases_on", "registration_level", "fixed_terms", "fixed",
                 "target_level", "plan_code_divergence")
+# Kernel 1.3 core/adapter split (s3-kernel, docs/kernel_core_adapter_split.md): K4's statistics, `_criterion` (now
+# `criterion`) and plan_code_divergence moved verbatim from checks.py to the ML adapter's procedures, kernel/ml.py.
+# int17 merge: the targets follow the code (otherwise _ranges refuses the missing names and no mutant runs).
+ML_LEGACY = ("statistics", "criterion")
 TARGETS: dict[str, tuple[str, ...] | None] = {  # file -> function names (None = the whole file)
     f"{KDIR}/vault.py": None,
     f"{KDIR}/ledger.py": None,
-    f"{KDIR}/checks.py": (*LEGACY_CHECKS, *GROWN_CHECKS),
+    f"{KDIR}/checks.py": (*LEGACY_CHECKS, *(n for n in GROWN_CHECKS if n != "plan_code_divergence")),
+    f"{KDIR}/ml.py": (*ML_LEGACY, "plan_code_divergence"),
     f"{KDIR}/alpha.py": None,
     f"{KDIR}/releases.py": None,
 }
