@@ -51,6 +51,8 @@ from ..kernel.bundle import build_bundle
 from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
 from ..kerneld.client import KernelD, KernelDError, KernelDUnavailable, RunHandle
+from ..publication import blockers as publication_blockers
+from ..publication import render_loop_item
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..truth_layout import truth_file
@@ -416,7 +418,14 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                     "replica was checked on dev, then pre-registered at the same minimum effect"),
                      human_in_the_loop="none (fully automated run)",
                      novelty="not performed: the literature module does not exist yet (GOAL M5)")
+    # invariant 10 / VG Table 10: the loop label is a checklist item (the run's label: its MAIN certificate decides)
+    main_label = cert.label.value if not p else (state.get("certificate") or {}).get("label")
+    checklist["loop_label"] = loop_label({"certificate": {"label": main_label}})
     ok, blockers = publishable(cert, checklist)
+    # stricter than the Kernel's `missing` (a blank or non-string answer is no answer) plus the loop-label item
+    extra = [b for b in publication_blockers(checklist, is_loop=True) if b not in blockers]
+    if extra:
+        ok, blockers = False, [*blockers, *extra]
     if not p:  # GOAL L4.8 (deny-only): kept critic questions without an answer citing checked evidence block publishing
         from .critic_answers import critic_gate  # recomputed from the trace, never from run state
         critic_ok, why = critic_gate(ctx)
@@ -725,7 +734,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
         return {"replica_best": {"hypothesis_id": "replication", "dev_score": None, "dev_preds_ref": None,
                                  "code_ref": ctx.store.blobs.put(code.encode()), "error": f"not independent: {why}"},
                 "route": "report"}
-    _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "replica.py").write_bytes(code.encode("utf-8"))  # byte-identical to the code that runs (no CRLF)
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
@@ -748,8 +757,10 @@ _CERTIFIED = ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
 
 def headline(state: dict[str, Any]) -> bool:
     """GOAL L4.9: a headline result = certified AND an independent re-implementation certified at the same bar,
-    where independent includes invariant 5 (the replicator is not of the author's model family)."""
+    where independent includes invariant 5 (the replicator is not of the author's model family), and BOTH are
+    publishable (VG Table 10: a result with a publication blocker is never a headline)."""
     return ((state.get("certificate") or {}).get("label") in _CERTIFIED
+            and state.get("publishable") is True and state.get("replica_publishable") is True
             and (state.get("replica_certificate") or {}).get("label") in _CERTIFIED
             and (state.get("model_policy") or {}).get("invariant_5") == "met")
 
@@ -758,6 +769,17 @@ def loop_label(state: dict[str, Any]) -> str:
     """GOAL §6.1: VALIDATED only if the run's accepted claim was certified on external or future data
     (CERTIFIED-VALIDATED); a run that optimised and confirmed on internal data is MECHANICAL."""
     return "VALIDATED" if (state.get("certificate") or {}).get("label") == "CERTIFIED-VALIDATED" else "MECHANICAL"
+
+
+def _publication_line(state: dict[str, Any], p: str) -> str:
+    """VG Table 10: the report states whether it may be published, and every blocker, from the certify node's
+    `publishable` / `publish_blockers` (anything but an explicit True is NOT publishable: fail closed)."""
+    what = "Replication publication" if p else "Publication"
+    if state.get(f"{p}publishable") is True:
+        return f"**{what}: allowed** (checklist complete, loop label present, certified)"
+    raw = state.get(f"{p}publish_blockers")
+    why = "; ".join(_inline(b, 200) for b in raw) if isinstance(raw, list) and raw else "no publishable record"
+    return f"**{what}: BLOCKED (NOT PUBLISHABLE)**: {why}"
 
 
 def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
@@ -789,8 +811,9 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", "### Kernel checks", ""]
         for kid, res in cert.checks.items():
             lines.append(f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else ""))
-        lines += ["", render_checklist(state.get("checklist") or {}),
-                  f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
+        lines += ["", render_checklist(state.get("checklist") or {}).rstrip("\n"),
+                  render_loop_item(state.get("checklist")), "", _publication_line(state, ""),
+                  "", f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
         rep = state.get("replica_certificate")
         lines += ["## Independent replication", ""]
         if rep:
@@ -798,6 +821,7 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
             lines += [f"**{rcert.label.value}** · certificate `{rep['hash']}`", f"- Claim: {rcert.claim['statement']}"]
             lines += [f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else "")
                       for kid, res in rcert.checks.items() if res.status == "fail"]
+            lines += ["", _publication_line(state, "replica_")]
         elif state.get("replication_refused"):
             lines.append(f"Replication refused: {_inline(state['replication_refused'])}.")
         elif state.get("replica_best"):
@@ -851,8 +875,17 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
         rep = t.report()
         tree = {"tree_report": {"shape": rep["shape"], "selection": rep["selection"], "head": rep["head"]},
                 "tree_seq": t.seq}
+    figs: dict[str, Any] = {}
+    if params.get("figure", False):  # GOAL L2: a figure rendered by a script stored next to it, re-rendered by I6
+        from ..figures.report_figure import FIGURE_NAME, make_report_figure
+        root = data_dir() / "figures" / ctx.run_id
+        box = _sb(ctx).spawn(data_dir() / "sandboxes" / f"figure-make-{ctx.run_id}-{time.time_ns()}")
+        fig = make_report_figure(state, ctx.kernel(), ctx.store, box, root / FIGURE_NAME)
+        if fig is not None:
+            figs = {"figures": [*(state.get("figures") or []), fig]}
+            state = {**state, **figs}
     text = render_report(state, ctx)
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree}
+    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree, **figs}
 
 
 # ------------------------------------------------------------------ audit
@@ -912,7 +945,12 @@ def _figure_audit(state: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     from ..figures import audit_figures
     allowed = {str(e) for e in [*(state.get("evidence_ids") or []), *(state.get("replica_evidence_ids") or [])]}
     root = data_dir() / "sandboxes" / f"figure-audit-{ctx.run_id}-{time.time_ns()}"
-    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed)
+    certs = {str(c["hash"]) for c in (state.get("certificate"), state.get("replica_certificate"))
+             if isinstance(c, dict) and isinstance(c.get("hash"), str)}
+    kernel = ctx.kernel()
+    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed,
+                         certificate_of=lambda h: kernel.certificate(h).model_dump(mode="json"),
+                         allowed_certificates=certs)
 
 
 def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:

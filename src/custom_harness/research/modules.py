@@ -21,6 +21,7 @@ from ..kernel.execution import OUT_PATH
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..sandbox.base import Sandbox, WorkspaceEscape, check_mount, protect_path, safe_path
+from ..sandbox.snapshot import take_snapshot
 from ..truth_layout import legacy_truth_dir, truth_dir
 from ..verify import metrics as M
 from ..verify.leak import ESCAPE_MARKER, new_canary
@@ -239,7 +240,7 @@ def setup(state, params, ctx: ModuleContext):
     protect_path(legacy_truth_dir(task_dir))
     check_mount(_sb(ctx).workspace)
     _ws(ctx, "data").mkdir(parents=True, exist_ok=True)
-    for name in (task.train_file, task.test_features_file):
+    for name in (task.train_file, task.test_features_file, *task.aux_files):
         shutil.copy2(task_dir / "public" / name, _ws(ctx, f"data/{name}"))
     shutil.copy2(task_dir / task.baseline_file, _ws(ctx, "baseline.py"))
     # Dev estimate = k-fold cross-validation over the public training file (params: dev_folds, split_seed).
@@ -272,12 +273,21 @@ def setup(state, params, ctx: ModuleContext):
 
 @register("research.profile_data")
 def profile_data(state, params, ctx):
-    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it).
+    """Profile of the full public training file (aggregate statistics only; ideation is conditioned on it), plus the
+    key graph over the agent-visible DEV tables (training file + declared aux tables; never the held-out features or
+    labels), rendered for prompts as quoted data (research/keys.py).
     Ablation switch `data_profile_kway_rank` (custom_harness/ablation.py): no profile is computed; the prompts that
-    quote `profile` get only the statement that profiling is switched off."""
+    quote `profile` get only the statement that profiling is switched off. The key graph has no switch of its own and
+    is computed either way (int17 merge: the switch turns off exactly what its scorecard row names)."""
+    from . import keys as K
+    task = _task(state)
+    tables = {name: _ws(ctx, f"data/{name}") for name in (task.train_file, *task.aux_files)}
+    kg = K.key_graph(tables)
+    keys = {"key_graph": kg, "key_graph_quoted": K.quoted(kg)}
     if ablated(ctx, "data_profile_kway_rank"):
-        return {"profile": {"ablated": "data profiling is switched off in this ablation run: no profile computed"}}
-    return {"profile": profile(_ws(ctx, f"data/{_task(state).train_file}"), _task(state).target_column)}
+        return {"profile": {"ablated": "data profiling is switched off in this ablation run: no profile computed"},
+                **keys}
+    return {"profile": profile(_ws(ctx, f"data/{task.train_file}"), task.target_column), **keys}
 
 
 @register("research.baseline_dev")
@@ -334,6 +344,24 @@ TREE_SWITCH = "experiment_tree_repair_improve"
 HYPOTHESIS_DECISION = "which hypothesis to implement"
 IMPROVE_DECISION = "one refinement of the incumbent"
 ENSEMBLE_DECISION = "the pre-declared vote ensemble of distinct candidates"
+# Tree extras (GOAL L4.7; research/tree.py rules 6-8), each behind a spec flag, all default off:
+#   run.backtrack  -- every answering run freezes the run workspace snapshot into its node; a new option starts from
+#                     its round parent's exact snapshot (restored, verified byte-exactly, logged), and a dead or failed
+#                     branch is backtracked to its parent's snapshot, never left as the live workspace;
+#   run.curriculum -- the tree enforces tune -> creative -> ablation with the stage decided by code from the tree's
+#                     dev-racing evidence (stage_rule "evidence"; tune = literal values only, tune_match "literals");
+#   next.revive    -- an incumbent that is a dead-end (its round confirmed nobody, or another node) may still be
+#                     refined if the persistence rule P(improvement over its round parent) > theta holds (tree.revive).
+STAGE_INSTRUCTIONS = {
+    None: "",
+    "tune": "Stage: TUNE (decided by the harness from dev-racing evidence, not by you). Change ONLY hyperparameter "
+            "values (numeric, string or boolean literals). Keep every statement, call and name exactly as it is: the "
+            "experiment tree refuses any structural change in this stage.",
+    "creative": "Stage: CREATIVE (decided by the harness from dev-racing evidence, not by you). Make ONE structural "
+                "change: a different model, new features, or a different handling of the data.",
+    "ablation": "Stage: ABLATION (decided by the harness from dev-racing evidence, not by you). Remove or simplify "
+                "ONE component of the current best script, so its contribution is measured.",
+}
 
 
 def _tree_store(ctx: ModuleContext) -> Any:
@@ -353,23 +381,41 @@ def _tree(state: dict[str, Any], ctx: ModuleContext, *, write: bool = True) -> T
 
 
 def _ensure_tree(state: dict[str, Any], ctx: ModuleContext, params: dict[str, Any],
-                 labels: list[str]) -> T.ExperimentTree:
+                 labels: list[str], root_snapshot: str | None = None) -> T.ExperimentTree:
     t = _tree(state, ctx)
     if t is not None:
         return t
     task = _task(state)
     contract = dev_contract(state, ctx)
     base = _baseline_code(state, ctx)
+    cur = bool(params.get("curriculum", False))
     t = T.ExperimentTree.create(_tree_store(ctx), f"{ctx.run_id}-dev", contract, root_code=base,
                                 root_config={"baseline": state["datasets"]["baseline"]}, metric=task.metric,
                                 higher_is_better=task.higher_is_better, dev_labels=labels,
-                                max_repairs=int(params.get("max_fixes", T.MAX_REPAIRS)))
-    # the root is answered by the baseline's dev run, under the contract that run reported
+                                max_repairs=int(params.get("max_fixes", T.MAX_REPAIRS)), curriculum=cur,
+                                stage_rule="evidence" if cur else "declared", tune_match="literals" if cur else "code")
+    # the root is answered by the baseline's dev run, under the contract that run reported; with backtracking its
+    # frozen workspace is the run workspace before any candidate was written into it
     base_contract = state.get("baseline_dev_contract")
     t.record("root", T.RunOutcome(T.RunContract.from_json(base_contract) if base_contract else contract,
                                   T.code_hash(base), 0, "ok", state["baseline_dev"],
-                                  ctx.store.blobs.get_json(state["baseline_dev_preds_ref"])))
+                                  ctx.store.blobs.get_json(state["baseline_dev_preds_ref"]), snapshot=root_snapshot))
     return t
+
+
+def _stage(t: T.ExperimentTree, parent: str) -> str | None:
+    """The stage of the next round from `parent`: decided by the tree's code from its log (curriculum trees only)."""
+    return t.next_stage(parent) if t.curriculum else None
+
+
+def _backtrack_restore(t: T.ExperimentTree | None, parent: str, ctx: ModuleContext) -> str | None:
+    """Restore `parent`'s frozen workspace into the run workspace (sandbox work; logged later by `log_checkout`).
+    Fails closed when backtracking is on but the parent has no frozen snapshot."""
+    if t is None:
+        return None
+    if t.nodes[parent].snapshot is None:
+        raise RuntimeError(f"backtracking is on but tree node {parent} has no frozen workspace snapshot")
+    return t.restore(parent, _sb(ctx).workspace)
 
 
 def run_outcome(info: dict[str, Any], scored: bool) -> str:
@@ -410,10 +456,13 @@ def _tree_state(t: T.ExperimentTree | None) -> dict[str, Any]:
 
 
 def promote_incumbent(state: dict[str, Any], ctx: ModuleContext, t: T.ExperimentTree,
-                      best: dict[str, Any]) -> tuple[bool, str]:
+                      best: dict[str, Any], *, revive: bool = False) -> tuple[bool, str]:
     """May a new (improve) round descend from the incumbent? Only if the tree confirms it as its round's winner:
     a fresh-seed re-measure, then dev racing on the answer AND the re-measure against the round's parent and every
-    answered rival (tree.confirm). Provisional siblings are abandoned first (the round is being decided)."""
+    answered rival (tree.confirm). Provisional siblings are abandoned first (the round is being decided).
+    With `revive` (spec flag next.revive), an incumbent that is NOT its round's confirmed winner may still be a branch
+    point if the tree revives it: P(improvement over its round parent) > theta on its answer and every fresh
+    re-measure (tree rule 7; theta UNCALIBRATED). A refused revival is logged by the tree."""
     node = best.get("tree_node")
     if not node or node not in t.nodes:
         return False, "the incumbent has no experiment-tree node"
@@ -422,18 +471,32 @@ def promote_incumbent(state: dict[str, Any], ctx: ModuleContext, t: T.Experiment
         return False, "the incumbent is the tree root"
     if rnd.winner == node:
         return True, f"{node} is the confirmed winner of {rnd.id}"
-    if rnd.winner is not None:
+    if t.nodes[node].revived:
+        return True, f"{node} is a revived dead-end"
+    if rnd.winner is not None and not revive:
         return False, f"{rnd.id} was decided for {rnd.winner}, not the incumbent {node}"
     seed = _fresh_seed(t, node)
     run = _remeasure(state, ctx, ctx.store.blobs.get(best["code_ref"]), f"remeasure-{node}", seed)
-    for o in rnd.options:
-        _close(t, o, "round closed: its winner is being confirmed")
+    labels = _dev_labels(state, ctx)
+    if rnd.winner is None:
+        for o in rnd.options:
+            _close(t, o, "round closed: its winner is being confirmed")
     try:
         t.record(node, run, purpose="remeasure")
-        t.confirm(rnd.id, node, _dev_labels(state, ctx))
+        if rnd.winner is None:
+            t.confirm(rnd.id, node, labels)
+            return True, f"{node} confirmed as the winner of {rnd.id} (fresh-seed re-measure, seed {seed})"
+        why = f"{rnd.id} was decided for {rnd.winner}, not the incumbent {node}"
     except T.TreeRefusal as e:
-        return False, str(e)
-    return True, f"{node} confirmed as the winner of {rnd.id} (fresh-seed re-measure, seed {seed})"
+        why = str(e)
+        if not revive or e.code is not T.Code.PROMOTION_REFUSED:
+            return False, why
+    try:
+        out = t.revive(node, labels)
+    except T.TreeRefusal as e:
+        return False, f"{why}; revival refused: {e}"
+    return True, (f"{node} revived (persistence rule): P(improvement over {out['reference']}) = "
+                  f"{out['p_improvement']:.4f} > theta = {out['theta']} (UNCALIBRATED)")
 
 
 @register("research.next_hypothesis")
@@ -476,7 +539,7 @@ def next_hypothesis(state, params, ctx):
             ok, why = False, "no experiment tree (no candidate ran)"
         else:
             _require_isolation(ctx)
-            ok, why = promote_incumbent(state, ctx, t, best)
+            ok, why = promote_incumbent(state, ctx, t, best, revive=bool(params.get("revive", False)))
             updates.update(_tree_state(t))
         if not ok:  # promotion needs a fresh re-measure and dev racing (GOAL L4.7): no round descends otherwise
             can_improve = False
@@ -489,6 +552,11 @@ def next_hypothesis(state, params, ctx):
         k = state.get("n_improves", 0) + 1
         current = {"id": f"improve-{k}", "idea": "refine the current best solution", "parent": best["hypothesis_id"],
                    "root": best.get("root_hypothesis") or best["hypothesis_id"], "tree_parent": best["tree_node"]}
+        assert t is not None  # can_improve after promotion implies a tree
+        stage = _stage(t, best["tree_node"])  # code-decided from the tree's log; the model only reads it
+        if stage is not None:
+            current["stage"] = stage
+        updates["improve_stage"] = STAGE_INSTRUCTIONS[stage]
         updates["best_code"] = ctx.store.blobs.get(best["code_ref"]).decode("utf-8", errors="replace")
         route = "improve"
     else:
@@ -652,7 +720,23 @@ def run_candidate(state, params, ctx):
     _require_isolation(ctx)
     task = _task(state)
     code = (state.get("impl") or {}).get("code", "")
-    _ws(ctx, "solution.py").write_text(code, encoding="utf-8")  # kept in the run workspace for the record/audit
+    hyp = state.get("current") or {}
+    is_improve = str(hyp.get("id", "")).startswith("improve-")
+    # exact backtracking (spec flag run.backtrack; sandbox work, logged with the tree commits below): the first
+    # candidate freezes the pristine workspace as the root's; a NEW option starts from its round parent's frozen
+    # workspace, restored and verified byte-exactly, never from whatever the previous (possibly dead) branch left
+    backtrack = bool(params.get("backtrack", False))
+    branch_parent = str(hyp.get("tree_parent")) if is_improve else "root"
+    root_snapshot, restored = None, None
+    if backtrack:
+        t0 = _tree(state, ctx)
+        if t0 is None:
+            root_snapshot = take_snapshot(_sb(ctx).workspace, ctx.store.blobs)
+        elif state.get("tree_node") is None:
+            restored = _backtrack_restore(t0, branch_parent, ctx)
+    # kept in the run workspace for the record/audit, byte-identical to the code that runs (write_text would turn
+    # LF into CRLF on Windows, so the frozen workspace would not hold the node's code)
+    _ws(ctx, "solution.py").write_bytes(code.encode("utf-8"))
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), f"attempt{state.get('n_attempts', 0) + 1}")
     s = _score(task, labels, preds)
@@ -661,29 +745,33 @@ def run_candidate(state, params, ctx):
         error = info["stderr_tail"] or "no valid predictions produced"
         if preds is not None:
             error = f"predictions could not be scored (expected {len(labels)} rows, got {len(preds)})"
-    hyp = state.get("current") or {}
     n_attempts = state.get("n_attempts", 0) + 1
     best = state.get("best")
-    is_improve = str(hyp.get("id", "")).startswith("improve-")
     # an improvement that wins dev racing on its run is re-measured with a fresh seed (sandbox work before any
     # tree commit); one that does not cannot be promoted, so no re-measure is spent on it
     remeasure = None
     if is_improve and s is not None and best is not None and _dev_better(
             task, labels, preds, ctx.store.blobs.get_json(best["dev_preds_ref"])):
         remeasure = _remeasure(state, ctx, code.encode("utf-8"), f"remeasure{n_attempts}", 1)
+    # the workspace this run leaves (solution.py = this node's code), frozen into the node by its answer
+    after = take_snapshot(_sb(ctx).workspace, ctx.store.blobs) if backtrack else None
 
-    t = _ensure_tree(state, ctx, params, labels)
+    t = _ensure_tree(state, ctx, params, labels, root_snapshot)
     node, refused, accepted = state.get("tree_node"), None, False
     try:
+        if restored is not None:
+            t.log_checkout(branch_parent)  # the backtrack done above, on the record
         if node is None:
             if is_improve:
-                rnd = t.open_round(hyp["tree_parent"], IMPROVE_DECISION)
+                # a curriculum tree checks the stage against its own evidence (CURRICULUM_ORDER otherwise)
+                rnd = t.open_round(hyp["tree_parent"], IMPROVE_DECISION,
+                                   stage=hyp.get("stage") if t.curriculum else None)
                 node = t.add_option(rnd, IMPROVE_DECISION, code, {"hypothesis": hyp.get("id")})
             else:
                 rnd = state.get("tree_round")
                 r = t.rounds.get(str(rnd))
                 if r is None or r.winner is not None or len(r.options) >= T.ROUND_MAX_OPTIONS:
-                    rnd = t.open_round("root", HYPOTHESIS_DECISION)
+                    rnd = t.open_round("root", HYPOTHESIS_DECISION, stage=_stage(t, "root"))
                 node = t.add_option(rnd, HYPOTHESIS_DECISION, code, {"hypothesis": hyp.get("id")})
                 state = {**state, "tree_round": rnd}
         else:
@@ -693,7 +781,7 @@ def run_candidate(state, params, ctx):
                 t.edit(node, code, dict(n.config), repair_of=last.idx)
             # unchanged code after a failure is NOT edited: the tree refuses the re-run (REPAIR_UNLEDGERED)
         t.record(node, T.RunOutcome(info["contract"], T.code_hash(code), 0, run_outcome(info, s is not None), s,
-                                    preds if s is not None else None))
+                                    preds if s is not None else None, snapshot=after))
         if remeasure is not None:
             t.record(node, remeasure, purpose="remeasure")
             t.confirm(str(t.nodes[node].round), node, labels)
@@ -750,6 +838,10 @@ def run_candidate(state, params, ctx):
         route = "give_up"
     if route != "fix":
         _close(t, node, "no repair: the loop moved on")
+        if backtrack and (best is None or best.get("tree_node") != node or node is None):
+            # a dead or failed branch: back to its parent's exact workspace (restored, verified, logged)
+            parent = t.nodes[node].parent if node in t.nodes else branch_parent
+            t.checkout(str(parent), _sb(ctx).workspace)
     fixes = t.nodes[node].repairs if node in t.nodes else 0
     return {"dev_score": s, "run_error": error, **({"run_log": run_log} if log_chars else {}),
             "attempts": attempts, "n_attempts": n_attempts, **selection,
@@ -824,6 +916,12 @@ def ensemble(state, params, ctx):
     sign = 1.0 if task.higher_is_better else -1.0
     others = sorted((a for a in _selectable(attempts) if a["n"] != best["n"]),
                     key=lambda a: (-sign * a["dev_score"], a["n"]))
+    if params.get("members") == "diversity":  # GOAL §8.11: members only from the error-decorrelated set
+        div = state.get("diversity")
+        if not (isinstance(div, dict) and div.get("enabled") and isinstance(div.get("kept"), list)):
+            return {"ensemble": {**rec, "reason": "members: diversity, but no diversity record (fail closed)"}}
+        rec["diversity_excluded"] = [a["n"] for a in others if a["n"] not in div["kept"]]
+        others = [a for a in others if a["n"] in div["kept"]]
     members = distinct_members([best, *others], ctx, ENSEMBLE_SIZE)
     rec["members"] = [a["n"] for a in members]
     if len(members) < ENSEMBLE_SIZE or members[0] is not best:
@@ -848,7 +946,7 @@ def ensemble(state, params, ctx):
     t = _tree(state, ctx)
     if t is None:
         return {"ensemble": {**rec, "reason": "no experiment tree (no candidate ran)"}}
-    rnd = t.open_round("root", ENSEMBLE_DECISION)
+    rnd = t.open_round("root", ENSEMBLE_DECISION, stage=_stage(t, "root"))
     node = t.add_option(rnd, ENSEMBLE_DECISION, code, {"members": rec["members"]})
     try:
         t.record(node, T.RunOutcome(info["contract"], T.code_hash(code), 0, "ok", s, voted))

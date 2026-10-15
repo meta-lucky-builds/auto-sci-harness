@@ -88,6 +88,10 @@ RESERVED_OUTPUT_KEYS = frozenset({"task", "datasets", "dev_folds", "dev_scheme",
                                   # critic-answer check and recall (research/critic_answers.py, research/recall.py;
                                   # tests/test_evolve_hardening.py checks these keys are really written)
                                   "critic_answers", "critic_evidence", "recalled", "recall_log",
+                                  # hypothesis front (research/front.py): what admission enforces, its record, the
+                                  # ranked problems, the run's literature pool and the diversity record
+                                  "hypothesis_front", "hypothesis_admission", "problems", "literature_pool",
+                                  "diversity",
                                   # read by trusted code (claims._hypotheses idea text in reports, memory_wiring's
                                   # skill writer; research.recall_memory's quoted context): s3-verifiers review M1
                                   "hypotheses", "memory"})
@@ -107,11 +111,15 @@ RESERVED_WRITING_MODULES = frozenset({
     "research.replica_dev", "research.report", "research.audit",
     # the critic-answer check and recall write reserved keys (ids checked against the registry by a test)
     "research.critic_evidence", "research.check_critic_answers", "research.recall",
+    # hypothesis front (research/front.py)
+    "research.formulate", "research.hypothesis_front", "research.admit_rank", "research.diversity_select",
     # writes the reserved `memory` key (s3-verifiers review M1)
     "research.recall_memory"})
 # Critic-chain nodes whose DEFINITION is human-only (their wiring stays evolvable): an edit could otherwise switch the
 # critic off by a parameter (socratic `max_questions` 0) or change what checks the answers. Removing one is refused too.
-PINNED_NODES = ("socratic", "critic_evidence", "check_answers")
+# The hypothesis-front nodes of research_v2 (research/front.py) are pinned for the same reason: an edit could switch
+# the quotas or the Formulator off, loosen a cap, or opt in to the (call-costing) tournament by a parameter.
+PINNED_NODES = ("socratic", "critic_evidence", "check_answers", "formulate", "front", "rank")
 # protected nodes the evolvable loop legitimately routes to (when to claim; when to give up and report)
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
