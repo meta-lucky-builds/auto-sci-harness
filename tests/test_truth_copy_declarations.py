@@ -1,12 +1,13 @@
 """Truth-copy declarations reach the Kernel in production (s4-integrity item 2; GOAL §16.5.4, invariant 18).
 
 The suite exporter (research.suite.write_task) records every public column that carries the held-out labels in the
-task's truth dir (`truth_copies.json`), and task registration (research.claims.register_task) turns each record into
+task's truth dir (`truth_copies.json`), and the trusted ingest
+(research.truth_copies.declare_task_truth_copies, called from kerneld's ingest) turns each record into
 Kernel.declare_truth_copy, so K3's non-interference replay runs on records given that file.
 
 Fail-first reasoning (NOT run: owner rule): at 82719e1 nothing in production called declare_truth_copy (s3-kernel's
 docs: "nobody in production declares copies yet"), write_task wrote no declaration, and
-claims.declare_truth_copies did not exist (ImportError).
+research.truth_copies did not exist (ImportError).
 """
 
 from __future__ import annotations
@@ -47,30 +48,7 @@ def test_detector_regression_and_small_sets() -> None:
     assert S.truth_copy_columns(["x", "y"], rows[:5], [r[0] for r in rows[:5]], "rmse") == []
 
 
-def test_register_task_declares_each_copy_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from custom_harness.kernel import Kernel
-    from custom_harness.research.claims import TRUTH_COPY_DECLARER, register_task
-    from custom_harness.store import EvidenceStore
-
-    monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
-    d = S.write_task(_spec(), tmp_path / "suite")
-    (d / "task.yaml").write_text("id: leaky\ntitle: t\ndescription: d\nmetric: accuracy\ntarget_column: label\n",
-                                 encoding="utf-8")
-    store = EvidenceStore(tmp_path / "store")
-
-    class Ctx:
-        def kernel(self) -> Kernel:
-            return Kernel(store)
-
-    task = load_task(d)
-    ids = register_task(Ctx(), task, d)  # type: ignore[arg-type]
-    register_task(Ctx(), task, d)  # type: ignore[arg-type]  # re-registration adds no second declaration
-    entries = Kernel(store).ledger.entries("truth_copy")
-    assert [(e.body["target"], e.body["dataset_id"], e.body["file"], e.body["column"], e.body["declarer"])
-            for e in entries] == [(ids["test"], ids["test"], "test_X.csv", "leak", TRUTH_COPY_DECLARER)]
-
-
-def test_malformed_or_foreign_declaration_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from custom_harness.kernel import Kernel
     from custom_harness.research.claims import register_task
     from custom_harness.store import EvidenceStore
@@ -85,7 +63,27 @@ def test_malformed_or_foreign_declaration_fails_closed(tmp_path: Path, monkeypat
         def kernel(self) -> Kernel:
             return Kernel(store)
 
+    task = load_task(d)
+    ids = register_task(Ctx(), task, d)  # type: ignore[arg-type]
+    return Kernel(store), task, d, ids
+
+
+def test_ingest_declares_each_copy_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_harness.research.truth_copies import TRUTH_COPY_DECLARER, declare_task_truth_copies
+
+    kernel, task, d, ids = _registered(tmp_path, monkeypatch)
+    declare_task_truth_copies(kernel, task, d, ids)
+    declare_task_truth_copies(kernel, task, d, ids)  # re-registration adds no second declaration
+    entries = kernel.ledger.entries("truth_copy")
+    assert [(e.body["target"], e.body["dataset_id"], e.body["file"], e.body["column"], e.body["declarer"])
+            for e in entries] == [(ids["test"], ids["test"], "test_X.csv", "leak", TRUTH_COPY_DECLARER)]
+
+
+def test_malformed_or_foreign_record_fails_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_harness.research.truth_copies import TruthCopyRecordError, declare_task_truth_copies
+
+    kernel, task, d, ids = _registered(tmp_path, monkeypatch)
     for bad in ("not json", json.dumps([{"file": "other.csv", "column": "leak"}])):
         (d / "private" / "truth_copies.json").write_text(bad, encoding="utf-8")
-        with pytest.raises(ValueError):
-            register_task(Ctx(), load_task(d), d)  # type: ignore[arg-type]
+        with pytest.raises(TruthCopyRecordError):
+            declare_task_truth_copies(kernel, task, d, ids)

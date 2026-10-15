@@ -225,7 +225,7 @@ def write_task(spec: TaskSpecFiles, root: Path, canary: str | None = None) -> Pa
     (truth / "test_y.csv").write_bytes(_csv([[spec.target], *[[r[ti]] for r in test]]))
     detected = truth_copy_columns(feat, [list(x(r)) for r in test], [r[ti] for r in test], spec.metric)
     copies = sorted(set(spec.truth_copies) | {("test_X.csv", c) for c in detected})
-    if copies:  # the exporter's declaration (truth dir only); research.claims.register_task declares it to the Kernel
+    if copies:  # the exporter's declaration (truth dir only); research.truth_copies declares it at ingest
         (truth / "truth_copies.json").write_text(json.dumps([{"file": f, "column": c} for f, c in copies]) + "\n",
                                                  encoding="utf-8")
     (truth / "canary.txt").write_text((canary or "CHH-CANARY-" + secrets.token_hex(16)) + "\n", encoding="utf-8")

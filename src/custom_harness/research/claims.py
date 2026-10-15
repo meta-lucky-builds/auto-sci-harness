@@ -20,7 +20,6 @@ import ast
 import csv
 import hashlib
 import io
-import json
 import statistics
 import time
 import tokenize
@@ -93,8 +92,7 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
     TaskSpec.dataset_ids). The labels are read from disk here, once, to register them; afterwards only through the
     vault. A task whose canary differs from the canary registered for the same data is refused: its own canary
     would never be scanned for (tasks sharing data must share the canary)."""
-    kernel = ctx.kernel()
-    vault = kernel.vault
+    vault = ctx.kernel().vault
     train = (task_dir / "public" / task.train_file).read_bytes()
     test_x = (task_dir / "public" / task.test_features_file).read_bytes()
     test_y = truth_file(task_dir, task.test_labels_file).read_bytes()  # outside agent-readable roots (truth_layout)
@@ -113,38 +111,7 @@ def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[st
         raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same held-out data "
                          f"({ids['test']}); tasks sharing data must share the canary")
     vault.register_artifact(ids["baseline"], baseline, "baseline")
-    declare_truth_copies(kernel, task, task_dir, ids)
     return ids
-
-
-TRUTH_COPIES_FILE = "truth_copies.json"  # in the task's truth dir: written by the suite exporter (suite.write_task)
-TRUTH_COPY_DECLARER = "research.register_task (exporter record truth_copies.json)"
-
-
-def declare_truth_copies(kernel: Kernel, task: TaskSpec, task_dir: Path, ids: dict[str, str]) -> list[Any]:
-    """§16.5.4 (invariant 18): turn the exporter's record of agent-reachable truth copies (`truth_copies.json` in the
-    task's truth dir: [{"file", "column"}], never in an agent-readable file) into Kernel declarations, so K3's
-    non-interference replay runs on every record given such a file. A missing record means the exporter found none.
-    A malformed record or an unknown file fails closed (ValueError: the run does not start). An identical earlier
-    declaration is not repeated (a duplicate would perturb one column twice)."""
-    p = truth_file(task_dir, TRUTH_COPIES_FILE)
-    if not p.exists():
-        return []
-    try:
-        decls = json.loads(p.read_text(encoding="utf-8"))
-        pairs = [(str(d["file"]), str(d["column"])) for d in decls]
-    except (ValueError, KeyError, TypeError) as e:
-        raise ValueError(f"task {task.id}: malformed {TRUTH_COPIES_FILE} ({type(e).__name__})") from None
-    by_file = {task.train_file: ids["train"], task.test_features_file: ids["test"]}
-    out = []
-    for file, column in pairs:
-        if file not in by_file:
-            raise ValueError(f"task {task.id}: {TRUTH_COPIES_FILE} names {file!r}, not a public file of the task")
-        body = {"target": ids["test"], "dataset_id": by_file[file], "file": file, "column": column}
-        old = [e for e in kernel.ledger.entries("truth_copy") if {k: e.body.get(k) for k in body} == body]
-        out.append(old[0] if old else kernel.declare_truth_copy(ids["test"], by_file[file], file, column,
-                                                                TRUTH_COPY_DECLARER))
-    return out
 
 
 # ------------------------------------------------------------------ claim (pre-registration)
