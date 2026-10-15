@@ -727,6 +727,9 @@ def cmd_verify_registry(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .gateway.registry import load_registry, verify_registry
     reg = load_registry(Path(a.override) if a.override else None)
     today = dt.date.fromisoformat(a.today) if a.today else dt.date.today()
+    if a.release:  # only LEDGERED human sign-offs of each entry's current hash count (`chh sign-off-provider`)
+        from .human.providers import with_ledgered_signoffs
+        reg = with_ledgered_signoffs(reg, store)
     problems = verify_registry(reg, release=a.release, today=today)
     print(json.dumps({"entries": sorted(reg), "release": a.release, "today": today.isoformat(),
                       "problems": problems, "ok": not problems}, indent=1))
