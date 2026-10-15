@@ -355,3 +355,67 @@ def test_returned_measurements_token_binds_the_claim(tmp_path):
             assert ei.value.code == "bad_request"
     finally:
         s.close()
+
+
+# ----------------------------------------------------------------------------------- 6. ingest idempotent + atomic
+def test_the_same_ingest_twice_appends_one_record(tmp_path, rings):
+    """Reviewer finding 14: the same (kind, subject, claim, input sha) returns the recorded result, nothing new."""
+    from custom_harness.research.task import load_task
+    s = open_host_store(tmp_path / "store")
+    try:
+        task = load_task(rings)
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-idem")
+            first = run.ingest_research_task(task.id, rings)
+            second = run.ingest_research_task(task.id, rings)
+            assert first == second
+            assert len(s.records("kerneld_ingest")) == 1
+            assert s.records("kerneld_ingest")[0]["result"] == {"ids": first}
+    finally:
+        s.close()
+
+
+def test_a_conflict_is_found_before_anything_is_registered(tmp_path, rings):
+    """Atomicity: a content conflict on the SECOND registration (an existing id with other bytes) is pre-checked,
+    so neither dataset is registered and no completion record is published."""
+    from custom_harness.research.task import load_task
+    from custom_harness.store import EvidenceStore
+    task = load_task(rings)
+    probe = open_host_store(tmp_path / "probe")
+    try:
+        with KernelD(probe.root) as kd:
+            ids = kd.open_run("run-probe").ingest_research_task(task.id, rings)
+    finally:
+        probe.close()
+    raw = EvidenceStore(tmp_path / "store")  # the Kernel side: a conflicting earlier registration of the TEST id
+    Vault(raw).register_dataset(ids["test"], DatasetRole.DEV, public={"other.csv": b"x\n1\n"}, private={})
+    raw.close()
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            with pytest.raises(KernelDError) as ei:
+                kd.open_run("run-conflict").ingest_research_task(task.id, rings)
+            assert ei.value.code == "ingest_refused"
+        assert ids["train"] not in Vault(s).datasets()  # the first registration was never written
+        assert s.records("kerneld_ingest") == []
+    finally:
+        s.close()
+
+
+def test_truth_query_answers_without_truth_bytes(tmp_path, rings):
+    from custom_harness.kerneld.client import truth_query
+    from custom_harness.research.task import load_task
+    task = load_task(rings)
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            ids = kd.open_run("run-q").ingest_research_task(task.id, rings)
+    finally:
+        s.close()
+    got = truth_query("target_id", store_root=tmp_path / "store", task_dir=str(rings))
+    assert got == {"target": ids["test"]}
+    hashes = truth_query("truth_hashes", store_root=tmp_path / "store", task_dir=str(rings))["hashes"]
+    assert "test_y.csv" in hashes and all(len(h) == 64 for h in hashes.values())
+    with pytest.raises(KernelDError) as ei:
+        truth_query("nope", store_root=tmp_path / "store", task_dir=str(rings))
+    assert ei.value.code == "bad_request"

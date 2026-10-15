@@ -28,7 +28,8 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "custom_harness"
 
-PRIVILEGED = {"kerneld/server.py", "kerneld/ingest.py", "kerneld/hoststore.py", "kerneld/scope.py"}
+PRIVILEGED = {"kerneld/server.py", "kerneld/ingest.py", "kerneld/hoststore.py", "kerneld/scope.py",
+              "kerneld/truth.py"}
 # every old-path list is empty since 2026-10-14 (s4-kerneld): a non-empty one is a regression
 OLD_PATH_PRIVATE_READS: dict[str, int] = {}
 OLD_PATH_STORE_OPENS: dict[str, int] = {}
@@ -170,6 +171,25 @@ def _screening_call(node: ast.AST) -> bool:
     return _call_name(node) == "screening_canaries"
 
 
+# Host reads of TASK TRUTH from disk (truth_layout.truth_file / truth_files; s4-kerneld-review finding 3). Moved
+# behind kerneld (kerneld/truth.py, op truth_query) on 2026-10-15: evolve/export.py (leak fingerprints),
+# evolve/multiplicity.held_out_target_id, research/rebuild.py. NO truth read may appear under these paths:
+TRUTH_READ_FREE = ["evolve", "research/rebuild.py"]
+# Remaining host truth reads, each with its reason (old path, listed; shrink as they move):
+OLD_PATH_TRUTH_READS = {
+    "research/suite.py": 2,  # the suite BUILDER re-derives a minted task from its own mint record (verify_mint)
+    "research/task.py": 1,  # load_task: an existence check of the label file, no bytes read
+    "research/truth_copies.py": 1,  # read_truth_copies: called by kerneld's ingest (and by tests) only
+    "salts/generate.py": 1,  # the salt generator hashes the truth it just wrote (builder)
+    "store/run_bundle.py": 1,  # task_file_hashes: a run bundle records truth HASHES of the task it ran
+    "kerneld/campaign.py": 1,  # fake_labels: the campaign-replay tool writes FAKE truth for a copy of a task
+}
+
+
+def _truth_read(node: ast.AST) -> bool:
+    return _call_name(node) in ("truth_file", "truth_files")
+
+
 def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites():
     assert _sites(_private_read) == OLD_PATH_PRIVATE_READS | SCRATCH_STORE_SITES
 
@@ -209,6 +229,12 @@ def test_no_aliased_guarded_class_and_no_introspection_bypass():
     assert _sites(_alias_or_introspection) == {}
 
 
+def test_host_truth_reads_are_only_the_listed_sites_and_none_in_the_moved_paths():
+    sites = _sites(_truth_read)
+    assert not [f for f in sites if any(f == c or f.startswith(c + "/") for c in TRUTH_READ_FREE)], sites
+    assert sites == OLD_PATH_TRUTH_READS
+
+
 def test_canary_tokens_reach_only_the_listed_content_screens():
     assert _sites(_screening_call) == SCREENING_CALLERS
 
@@ -231,6 +257,7 @@ def test_privileged_modules_exist_and_the_ratchet_is_not_vacuous():
     assert _sites(_bare_kernel, priv).get("kerneld/scope.py")
     assert _sites(_direct_bundle, priv).get("kerneld/scope.py") == 1
     assert _sites(_grant_machinery, priv).get("kerneld/scope.py")
+    assert _sites(_truth_read, priv).get("kerneld/truth.py") and _sites(_truth_read, priv).get("kerneld/ingest.py")
 
 
 def test_detectors_catch_planted_bypasses(tmp_path):
@@ -246,6 +273,7 @@ def test_detectors_catch_planted_bypasses(tmp_path):
         _grant_machinery: "from custom_harness.kerneld.hoststore import _grant",
         _raw_blob_access: "BlobStore.get(store.blobs, digest)",
         _alias_or_introspection: "data = super(HostBlobs, store.blobs).get(digest)",
+        _truth_read: "labels = truth_file(task_dir, 'test_y.csv').read_bytes()",
     }
     more = ["from custom_harness.kernel import Kernel as K", "inner = vars(hs)", "f = hs.close.__self__",
             "p = store.blobs._path(d)"]

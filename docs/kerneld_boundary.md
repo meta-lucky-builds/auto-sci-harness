@@ -93,15 +93,25 @@ Fixed (built, not test-verified):
 6. Ingest: truth through `truth_layout` (refusal = `truth_layout` code); canary read via the no-symlink reader;
    `openml_split` only for one of the claim's targets; `returned_measurements` binds the claim at token issue;
    research tasks declare their truth copies (`research/truth_copies.declare_task_truth_copies`, K3).
+7. (2026-10-15, finding 3) Host truth reads moved behind a kerneld op `truth_query` (kerneld/truth.py: `target_id`,
+   `truth_hashes`, `label_agreement`, `export_scan`; ids, hashes, counts or location strings only; each query is a
+   `kerneld_truth_query` record): evolve/export.py's truth fingerprints, evolve/multiplicity.held_out_target_id,
+   research/rebuild.py (task digest, PRNG-regression scoring). Ratchet: no `truth_file`/`truth_files` call under
+   evolve/ or research/rebuild.py; the remaining host truth reads are listed with reasons (suite builder, task
+   existence check, truth-copy reader used by kerneld, salt generator, run-bundle truth hashes, campaign fake labels).
+8. (finding 14) Ingest is idempotent and pre-checked: a completed ingest publishes ONE `kerneld_ingest` record, keyed by
+   (kind, subject, claim, input sha), LAST; the same ingest again returns that result and appends nothing. Every
+   Vault refusal (content/role conflict, laundering, canary mismatch, malformed truth-copy record) is checked
+   before the first write, so a refusal leaves nothing registered. Inputs are read fully into memory first (the
+   snapshot that is registered). A crash between registrations leaves idempotent registrations that the retried
+   ingest re-finds and completes; only then is the record published.
 Stated limits (not fixed):
+- `truth_hashes` and `label_agreement` answer facts about truth (hashes; a guess's agreement count) to the caller:
+  trusted tools only, not rate-limited.
 - The ledger carries sha256 of every private file (`register_dataset` bodies are readable through the HostStore): for
   low-entropy labels the host can confirm a guessed label file offline, without the leak-scan budget. Fix needs
   private blobs keyed by an HMAC only kerneld holds (a vault change: kernel/).
-- Host code still reads task truth from disk outside kerneld where s4-integrity's layout routes it (evolve/export.py
-  leak fingerprints, evolve/multiplicity.held_out_target_id, research/rebuild.py): trusted host code, not behind
-  kerneld; a kerneld op returning ids/findings only is the next step.
 - The audit host holds the pinned raw ARFF, so `openml_split` hides nothing from host code in substance.
 - K9: a non-target private file used as code/input now fails as CHECK_RAISED instead of its coded K9 reason (the
   refusal is fail-closed; better coding needs a kernel/ change).
-- Ingest is not atomic (a failure after the train registration leaves it registered; the token is spent) and each
-  idempotent re-ingest appends another `kerneld_ingest` record.
+- The private-digest offline oracle (above) needs a Vault change: handed to s4-kernel (kernel/ not touched here).

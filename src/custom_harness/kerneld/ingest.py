@@ -163,11 +163,11 @@ def _research_task(vault: Vault, run_id: str, task_id: str, root: Path) -> dict[
         read_truth_copies(task, root)
     except TruthCopyRecordError:  # a ValueError: malformed record or a file the task does not have
         raise IngestRefused("ingest_refused") from None
-    if ids["test"] in vault.datasets() and vault.canary(ids["test"]) != canary:  # shared data share the canary
-        raise IngestRefused("canary_mismatch")
     _precheck(vault, [(ids["train"], DatasetRole.DEV, {task.train_file: train}, {}),
                       (ids["test"], DatasetRole.TEST, {task.test_features_file: test_x},
                        {task.test_labels_file: test_y})])
+    if ids["test"] in vault.datasets() and vault.canary(ids["test"]) != canary:  # shared data share the canary
+        raise IngestRefused("canary_mismatch")
     known_art = vault.artifacts().get(ids["baseline"])
     if known_art is not None and known_art.hash != hashlib.sha256(baseline).hexdigest():
         raise IngestRefused("ingest_refused")
