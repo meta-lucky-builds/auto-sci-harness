@@ -298,3 +298,35 @@ def test_a_parallel_branch_call_runs_in_the_run_context(tmp_path):
     rid1, rid4 = run(1), run(4)
     assert seen[1] == [(rid1, 1)] * len(ITEMS)
     assert seen[4] == [(rid4, 1)] * len(ITEMS)
+
+
+class _BadJsonThenDown(Backend):
+    """Call 1: invalid JSON (spent, journalled); call 2 (the contract retry): a non-transient provider failure."""
+    name, provider, mode, training_on_outputs = "flaky2", "mock", AccessMode.MOCK, "allowed"
+
+    def __init__(self):
+        self.n = 0
+
+    def complete(self, req: ChatRequest) -> ChatResponse:
+        self.n += 1
+        if self.n == 1:
+            return ChatResponse(text="not json", cost=Cost(prompt_tokens=3, completion_tokens=2),
+                                provenance=self.provenance("m"))
+        from custom_harness.gateway import BackendError
+        raise BackendError("provider down", transient=False)
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_a_contract_retry_call_spent_before_a_provider_failure_is_charged(tmp_path, workers):
+    """Generalised from the review (pre-existing on both paths): `_call_llm` dropped the cost of an earlier
+    contract-retry call when a later call of the same attempt raised; its nonce was still marked charged, so no
+    resume recovered it. Fail-first: before the fix the step cost was 0 while the journal held 5 tokens."""
+    body = LLMNode(prompt="say {{item}}", output_key="said", output_schema={"type": "object"}, retries=1)
+    store = EvidenceStore(tmp_path / f"partial-{workers}")
+    res = Engine(_spec(body), backends={"executor": _BadJsonThenDown()}, store=store, map_workers=workers,
+                 retry=RetryPolicy(max_attempts=1)).run("t", {"items": ["i0"]})
+    [row] = store.trace(res.run_id)
+    journal = sum((Cost.model_validate(j["cost"]) for j in store.records_where("cost_journal", "run_id",
+                                                                              res.run_id)), Cost())
+    assert _tokens(journal) == 5 and _tokens(row.cost) == 5
+    store.close()

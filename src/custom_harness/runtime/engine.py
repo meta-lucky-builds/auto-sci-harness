@@ -1113,7 +1113,9 @@ class Engine:
                         failed + _walled(e.cost, time.monotonic() - t0), None, f"ContractError: {e}", None)
             except (ModuleError, BackendError, InfraError, KeyError, ValueError, OSError) as e:
                 elapsed = time.monotonic() - t0
-                partial = e.cost if isinstance(e, ModuleError) else Cost()
+                # a ModuleError carries the module's spend; an LLM node's earlier contract-retry calls ride on the
+                # exception as `chh_partial_cost` (`_call_llm`): spent and journalled, so charged, never dropped
+                partial = e.cost if isinstance(e, ModuleError) else getattr(e, "chh_partial_cost", Cost())
                 detail: dict[str, Any] = {"llm_calls": e.llm_calls} if isinstance(e, ModuleError) else {}
                 cause = infra_cause(e)
                 if cause is not None and is_transient(e) and attempt < self.retry.max_attempts:
@@ -1367,8 +1369,13 @@ def _call_llm(node: LLMNode, backend: Any, messages: list[Message], archived: li
     total = Cost()
     attempts: list[str] = []
     for _ in range(node.retries + 1):
-        resp = backend.complete(ChatRequest(messages=messages, json_schema=node.output_schema,
-                                            temperature=node.temperature, max_tokens=node.max_tokens))
+        try:
+            resp = backend.complete(ChatRequest(messages=messages, json_schema=node.output_schema,
+                                                temperature=node.temperature, max_tokens=node.max_tokens))
+        except Exception as e:
+            if total != Cost():  # an earlier contract-retry call of this attempt was spent: keep its cost
+                e.chh_partial_cost = total  # type: ignore[attr-defined]
+            raise
         total = total + resp.cost
         if node.output_schema is None:
             return ({"value": resp.text, "attempts": attempts + [resp.text], "messages": _dump(messages),

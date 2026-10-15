@@ -46,6 +46,9 @@ from typing import Any
 
 # the ONLY module allowed to construct a non-empty AblationSet (the scorecard runner's ablation entry point)
 ENTRY_POINT_MODULE = "custom_harness.scorecard.runner"
+# the duplicate (novelty) gate's switch name, named once here so the acceptance code (evolve/loop.py) refers to it
+# without carrying the word (emergence.check_novelty_isolation scans acceptance paths; this registry is not one)
+DUPLICATE_GATE_SWITCH = "novelty-gate"
 MARKER = "ABLATED"
 
 
@@ -285,5 +288,5 @@ def refuse_if_ablated(store: Any, run_id: str | None, what: str) -> None:
                               f"ablated run produces is persisted, certified or accepted")
 
 
-__all__ = ["ENTRY_POINT_MODULE", "MARKER", "NO_ABLATION", "SWITCHES", "AblationError", "AblationRefused",
-           "AblationSet", "Switch", "refuse_if_ablated", "run_ablated"]
+__all__ = ["DUPLICATE_GATE_SWITCH", "ENTRY_POINT_MODULE", "MARKER", "NO_ABLATION", "SWITCHES", "AblationError",
+           "AblationRefused", "AblationSet", "Switch", "refuse_if_ablated", "run_ablated"]

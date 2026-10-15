@@ -153,6 +153,30 @@ def test_the_configuration_cannot_rot_silently(tree):
     assert "verify/stats.py is in both ACCEPTANCE_PATHS and BUDGET_PATHS" in problems
 
 
+SWITCH_ENTRIES = [("ablation.py", "novelty"), ("ablation.py", "rejected_novelty"),
+                  ("ablation.py", "test_novelty_gate_switch"), ("audit/checklist.py", "novelty")]
+
+
+def test_the_acceptance_loop_carries_no_novelty_switch_token():
+    # evolve/loop.py (an acceptance path) names the duplicate gate's switch through ablation.DUPLICATE_GATE_SWITCH:
+    # no allowlist entry for the bare token there, so a new `novelty` identifier in the loop is still flagged
+    assert ("evolve/loop.py", "novelty") not in ALLOWLIST
+
+
+@pytest.mark.parametrize(("rel", "tok"), SWITCH_ENTRIES)
+def test_switch_name_allowlist_entries_are_pinned_and_narrow(tree, rel, tok):
+    # fails before the entries exist (KeyError); each is a not-a-score, non-budget entry with a stated reason
+    cat, reason = ALLOWLIST[(rel, tok)]
+    assert cat == "not-a-score" and len(reason) > 20
+    # dropping exactly this entry makes exactly this (file, token) flagged again: the entry is load-bearing, not slack
+    allow = {k: v for k, v in ALLOWLIST.items() if k != (rel, tok)}
+    problems = check_novelty_isolation(tree, allowlist=allow)
+    assert problems and all(f"{rel}:" in p and repr(tok) in p for p in problems), problems
+    # and it exempts only that token: a planted score in the same file is still flagged
+    _append(tree / "custom_harness" / rel, "def _plant():\n    novelty_score = 0.0\n    return novelty_score")
+    assert any(p.startswith(f"{rel}:") and "'novelty_score'" in p for p in check_novelty_isolation(tree))
+
+
 def test_no_package_or_an_unparsable_file_fails_closed(tree, tmp_path):
     assert check_novelty_isolation(tmp_path / "nowhere") != []
     _append(tree / "custom_harness" / "evolve" / "selection.py", "def broken(:")

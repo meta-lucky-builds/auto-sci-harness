@@ -89,11 +89,23 @@ ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
                        "(edit-type quota); no score: islands decide budget shares and adopt a policy change only on a "
                        "passing trial decision; no edit accept/reject "
                        "(reviewed at the g-router merge, 2026-10-08)"),
+    ("ablation.py", "novelty"): (
+        "not-a-score", "name of the `novelty-gate` ablation switch and the registry text describing it; a switch "
+                       "name is referenced by tests and campaigns and cannot be renamed; registry text, not a scorer"),
+    ("ablation.py", "rejected_novelty"): (
+        "not-a-score", "the duplicate gate's lineage status quoted in the `novelty-gate` switch description; text "
+                       "only, nothing is compared or scored"),
+    ("ablation.py", "test_novelty_gate_switch"): (
+        "not-a-score", "pytest node name registered as the `novelty-gate` switch's test (tests/"
+                       "test_ablation_switches_evolve.py); a string looked up by name, not a scorer"),
+    ("audit/checklist.py", "novelty"): (
+        "not-a-score", "keyword argument `novelty` of kernel.checklist.fill (name fixed there), passed the text "
+                       "'not applicable: a Claim Audit ... makes no new claim'; copied verbatim, never scored"),
     # this checker names the tokens it looks for (its regex, this allowlist's keys, its messages); it reads source
     # files and decides nothing about any claim, edit, task or entry. A NEW token here is still flagged.
     **{("emergence.py", tok): ("not-a-score", "the checker's own pattern, allowlist keys and problem messages")
        for tok in ("check_novelty_isolation", "novel", "interesting", "novelty", "interestingness",
-                   "novelty_verification", "rejected_novelty")},
+                   "novelty_verification", "rejected_novelty", "test_novelty_gate_switch")},
 }
 
 
