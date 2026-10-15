@@ -124,7 +124,9 @@ PINNED_NODES = ("socratic", "critic_evidence", "check_answers", "formulate", "fr
 OPEN_PROTECTED_TARGETS = ("claim", "report")
 
 
-HUMAN_ONLY_MODULE_PREFIXES = ("physical.",)  # the physical-claim path (GOAL §4.7): screen, prereg, data checks
+HUMAN_ONLY_MODULE_PREFIXES = ("physical.",  # the physical-claim path (GOAL §4.7): screen, prereg, data checks
+                              # verifier synthesis looks at sealed suite halves (invariant 20): human-only node
+                              "research.synthesize_verifier")
 
 # Invariant 5 (policy.FAMILY_SEPARATION) is checked on role -> backend bindings, so WHICH node runs under which role
 # is part of the policy, not an evolution surface (R2-1): an edit may not change the role of an existing LLM node,
