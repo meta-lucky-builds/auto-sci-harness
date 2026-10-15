@@ -13,13 +13,15 @@ import httpx
 
 from ..records import AccessMode, Cost
 from .base import Backend, BackendError, ChatRequest, ChatResponse, redact, request_fault, to_strict_schema
+from .pacing import HostPacer, host_of, shared_pacer
 
 
 class OpenAICompatBackend(Backend):
     def __init__(self, *, name: str, base_url: str, model: str, mode: AccessMode,
                  api_key_env: str | None = None, provider: str = "openai",
                  usd_per_mtok_in: float = 0.0, usd_per_mtok_out: float = 0.0,
-                 training_on_outputs: str = "unknown", timeout_s: float = 600):
+                 training_on_outputs: str = "unknown", timeout_s: float = 600,
+                 pacer: HostPacer | None = None, transport: httpx.BaseTransport | None = None):
         if mode not in (AccessMode.API_KEY, AccessMode.OPEN_WEIGHTS):
             raise ValueError("OpenAICompatBackend serves api or ow mode only")
         self.name, self.provider, self.mode = name, provider, mode
@@ -31,7 +33,11 @@ class OpenAICompatBackend(Backend):
         if api_key_env and not key:
             raise BackendError(f"environment variable {api_key_env} is not set")
         self._headers = {"Authorization": f"Bearer {key}"} if key else {}
-        self._client = httpx.Client(timeout=timeout_s)
+        # per-host pacing (GOAL L0): every request to this base URL's host takes a slot first
+        self.host = host_of(self.base_url)
+        self._pacer = pacer if pacer is not None else shared_pacer()
+        self.paced_wait_s = 0.0
+        self._client = httpx.Client(timeout=timeout_s, transport=transport)
 
     def complete(self, req: ChatRequest) -> ChatResponse:
         model = req.model or self.model
@@ -44,6 +50,7 @@ class OpenAICompatBackend(Backend):
             body["response_format"] = {"type": "json_schema",
                                        "json_schema": {"name": "output", "strict": True,
                                                        "schema": to_strict_schema(req.json_schema)}}
+        self.paced_wait_s += self._pacer.acquire(self.host)  # pacing wait is not part of the call's measured wall
         t0 = time.time()
         try:
             r = self._client.post(f"{self.base_url}/chat/completions", json=body, headers=self._headers)

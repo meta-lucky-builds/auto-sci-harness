@@ -30,6 +30,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
+from ..adapters.circuit import validation as circuit_validation
 from ..verify import leak, lean_validation, transductive
 from ..verify import metrics as M
 from ..verify.stats import mean_t_interval, paired_example_interval
@@ -215,9 +216,17 @@ LEAN = AdapterSpec(
     modules=("custom_harness.kernel.formal", "custom_harness.verify.lean_validation", "custom_harness.sandbox.lean"),
     metrics=frozenset({"lean_theorem"}), exact_module="custom_harness.kernel.formal")
 
+# Linear DC circuits (computational class, T1; M5 engineering, docs/adapters_circuit.md): exact MNA certificates,
+# the checker, its validation evidence and the solver that builds its golden witnesses are ONE adapter.
+CIRCUIT = AdapterSpec(
+    name="circuit", version="1", classes=frozenset({EvidenceClass.COMPUTATIONAL}),
+    modules=("custom_harness.adapters", "custom_harness.adapters.circuit", "custom_harness.adapters.circuit.check",
+             "custom_harness.adapters.circuit.validation", "custom_harness.adapters.circuit.solver"),
+    metrics=frozenset({"circuit_value"}), exact_module="custom_harness.adapters.circuit.check")
+
 REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
     "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS), "sim": (SIM, sim.SIM_CHECKS),
-    "lean": (LEAN, lean_validation.LEAN_CHECKS)}
+    "lean": (LEAN, lean_validation.LEAN_CHECKS), "circuit": (CIRCUIT, circuit_validation.CIRCUIT_CHECKS)}
 
 
 def procedures_for(evidence_class: EvidenceClass, metric: str) -> str:

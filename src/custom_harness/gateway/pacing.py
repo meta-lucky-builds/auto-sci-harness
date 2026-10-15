@@ -3,7 +3,11 @@
 A HostPacer enforces a minimum interval between the STARTS of calls to one host (scheme-less `host[:port]`), across
 every backend and thread that shares the pacer. Slots are reserved under a lock, so N concurrent callers to one host
 start at least `interval` apart; different hosts never wait for each other. PacedBackend wraps any Backend with a
-pacer and a host key. Pacing is politeness and rate-limit avoidance only: it never changes what a call returns or
+pacer and a host key. The network backends (codex_cli.CodexCLIBackend, openai_compat.OpenAICompatBackend) pace
+themselves: each acquires a slot from `shared_pacer()` (or the pacer they are given) immediately before EVERY call it
+makes, including a schema-fallback re-call and every retry the engine makes, so no call path skips pacing
+(tests/test_gateway_wiring.py also checks statically that every Backend subclass that can reach the network paces).
+Pacing is politeness and rate-limit avoidance only: it never changes what a call returns or
 costs (waiting time is not charged to the step's model cost; the engine measures wall time itself).
 """
 
@@ -59,6 +63,20 @@ class HostPacer:
         if wait > 0:
             self._sleep(wait)
         return wait
+
+
+_SHARED: HostPacer | None = None
+_SHARED_LOCK = threading.Lock()
+
+
+def shared_pacer() -> HostPacer:
+    """The process-wide pacer every network backend uses unless it is given its own (codex_cli, openai_compat). One
+    instance per process, so every backend and thread calling one host shares that host's slots."""
+    global _SHARED
+    with _SHARED_LOCK:
+        if _SHARED is None:
+            _SHARED = HostPacer()
+        return _SHARED
 
 
 class PacedBackend(Backend):

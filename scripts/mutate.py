@@ -4,9 +4,24 @@
     python scripts/mutate.py --list           # the mutants that would run
     python scripts/mutate.py --jobs 2         # 2. run every mutant on the tests that cover its line
     python scripts/mutate.py --report         # score from the last run, with redteam/equivalent.yaml applied
+    python scripts/mutate.py --out DIR --budget-s 1500 --jobs 1   # one resumable slice of at most ~25 min
 
 Targets (GOAL §16.6): kernel/vault.py, kernel/ledger.py, and in kernel/checks.py the K2/K4/K6 code
-(k2_preregistered, k4_statistics, _criterion, k6_held_out, related_targets, shared_examples, is_external).
+(k2_preregistered, k4_statistics, k6_held_out, related_targets, shared_examples, is_external), and since the Kernel 1.3
+core/adapter split kernel/ml.py statistics, criterion (was checks._criterion) and plan_code_divergence.
+Since the §16 Kernel 1.2 work, K4 and K6 also decide through helpers and two new files; these are targets too
+(`GROWN`, reported apart so the original score stays comparable): registration, family, releases_on,
+registration_level, fixed_terms, fixed, target_level in checks.py, plan_code_divergence (now in ml.py), and
+kernel/alpha.py and kernel/releases.py whole.
+
+The test list is the hand list below UNION the gate's derived Kernel test list (`check.kernel_tests()`,
+tests/test_kernel_*.py): a Kernel test file that is missing from a hand list would silently leave the mutation map
+(the same lesson as the gate's derived list, GOAL §16.6).
+
+Slicing (s3-assure, 2026-10-08): `--out` keeps the map and the results outside the checkout so slices run from any
+snapshot of the same Kernel code; `--budget-s` stops starting new mutants after that many seconds (a running
+mutant finishes), and the next slice resumes from results.jsonl. The map records the hash of the target files and
+refuses to run against other Kernel code.
 
 Operators: comparison swaps (< <=, > >=, == !=, in / not in, is / is not), and/or swap, `not` removal, integer
 constant +1, True/False swap, + / - swap, deletion of a statement that appends a reason / continues / raises
@@ -20,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
 import shutil
@@ -35,17 +51,41 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 KDIR = "src/custom_harness/kernel"
+LEGACY_CHECKS = ("k2_preregistered", "k4_statistics", "k6_held_out", "related_targets",
+                 "shared_examples", "is_external")
+GROWN_CHECKS = ("registration", "family", "releases_on", "registration_level", "fixed_terms", "fixed",
+                "target_level", "plan_code_divergence")
+# Kernel 1.3 core/adapter split (s3-kernel, docs/kernel_core_adapter_split.md): K4's statistics, `_criterion` (now
+# `criterion`) and plan_code_divergence moved verbatim from checks.py to the ML adapter's procedures, kernel/ml.py.
+# int17 merge: the targets follow the code (otherwise _ranges refuses the missing names and no mutant runs).
+ML_LEGACY = ("statistics", "criterion")
 TARGETS: dict[str, tuple[str, ...] | None] = {  # file -> function names (None = the whole file)
     f"{KDIR}/vault.py": None,
     f"{KDIR}/ledger.py": None,
-    f"{KDIR}/checks.py": ("k2_preregistered", "k4_statistics", "_criterion", "k6_held_out", "related_targets",
-                          "shared_examples", "is_external"),
+    f"{KDIR}/checks.py": (*LEGACY_CHECKS, *(n for n in GROWN_CHECKS if n != "plan_code_divergence")),
+    f"{KDIR}/ml.py": (*ML_LEGACY, "plan_code_divergence"),
+    f"{KDIR}/alpha.py": None,
+    f"{KDIR}/releases.py": None,
 }
-TESTS = ["tests/spec/test_spec_mutants.py", "tests/test_kernel_units.py",
+GROWN_FILES = (f"{KDIR}/alpha.py", f"{KDIR}/releases.py")
+HAND_TESTS = ["tests/spec/test_spec_mutants.py", "tests/test_kernel_units.py",
          "tests/test_kernel_bundle.py", "tests/test_kernel_suite.py",
          "tests/test_kernel_exploits.py", "tests/test_kernel_integrity.py", "tests/test_kernel_sim.py",
          "tests/test_kernel_formal.py", "tests/test_kernel_quality.py", "tests/test_review_kernel.py",
          "tests/test_redteam_kernel.py", "tests/spec/test_spec_kernel.py", "tests/spec/test_spec_gate.py"]
+
+
+def derived_tests(root: Path = ROOT) -> list[str]:
+    """HAND_TESTS plus every Kernel test file the gate derives (check.kernel_tests), sorted, without duplicates."""
+    sys.path.insert(0, str(root / "scripts"))
+    try:
+        from check import kernel_tests
+    finally:
+        sys.path.pop(0)
+    return sorted(set(HAND_TESTS) | set(kernel_tests(root)))
+
+
+TESTS = derived_tests()
 OUT = ROOT / ".mutation"
 EQUIV = ROOT / "redteam" / "equivalent.yaml"
 _CMP_SWAP = {ast.Lt: ast.LtE, ast.LtE: ast.Lt, ast.Gt: ast.GtE, ast.GtE: ast.Gt, ast.Eq: ast.NotEq,
@@ -61,19 +101,20 @@ class Mutant:
     end_col: int
     op: str
     replacement: str
+    grown: bool = False  # a target added after the 2026-10-07 baseline (GROWN_CHECKS / GROWN_FILES)
 
     @property
     def id(self) -> str:
         return f"{self.file}:{self.line}:{self.col}:{self.op}"
 
 
-def _ranges(tree: ast.Module, names: tuple[str, ...] | None) -> list[tuple[int, int]]:
+def _ranges(tree: ast.Module, names: tuple[str, ...] | None) -> list[tuple[int, int, str]]:
     if names is None:
-        return [(1, 10**9)]
+        return [(1, 10**9, "")]
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name in names:
-            out.append((node.lineno, node.end_lineno or node.lineno))
+            out.append((node.lineno, node.end_lineno or node.lineno, node.name))
     missing = set(names) - {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     if missing:
         raise SystemExit(f"mutate: target functions not found: {sorted(missing)}")
@@ -99,12 +140,16 @@ def mutants_of(rel: str, names: tuple[str, ...] | None) -> list[Mutant]:
 
     def add(node: ast.AST, op: str, new: ast.AST | str) -> None:
         text = new if isinstance(new, str) else ast.unparse(new)
+        line = node.lineno  # type: ignore[attr-defined]
+        func = next((f for a, b, f in ranges if a <= line <= b), "")
+        grown = rel in GROWN_FILES or func in GROWN_CHECKS
         out.append(Mutant(rel, node.lineno, node.col_offset, node.end_lineno or node.lineno,  # type: ignore[attr-defined]
-                          node.end_col_offset or 0, op, f"({text})" if not isinstance(new, str) else text))  # type: ignore[attr-defined]
+                          node.end_col_offset or 0, op, f"({text})" if not isinstance(new, str) else text,  # type: ignore[attr-defined]
+                          grown))
 
     for node in ast.walk(tree):
         line = getattr(node, "lineno", None)
-        if line is None or not any(a <= line <= b for a, b in ranges):
+        if line is None or not any(a <= line <= b for a, b, _ in ranges):
             continue
         if isinstance(node, ast.Compare):
             for i, o in enumerate(node.ops):
@@ -152,8 +197,16 @@ def apply(src: str, m: Mutant) -> str:
 
 
 # ------------------------------------------------------------------ coverage map
+def code_hash(root: Path = ROOT) -> str:
+    """sha256 over the target files' bytes: a map or a result set belongs to exactly this Kernel code."""
+    h = hashlib.sha256()
+    for rel in sorted(TARGETS):
+        h.update(rel.encode() + b"\0" + (root / rel).read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 def build_map(python: str) -> None:
-    OUT.mkdir(exist_ok=True)
+    OUT.mkdir(parents=True, exist_ok=True)
     data = OUT / "cov.sqlite"
     env = {**os.environ, "COVERAGE_FILE": str(data), "CHH_SPEC_EXAMPLES": "10"}
     t0 = time.time()
@@ -175,8 +228,8 @@ def build_map(python: str) -> None:
     import xml.etree.ElementTree as ET
     dur = {f"{c.get('classname', '').replace('.', '/')}.py::{c.get('name')}": float(c.get("time", 0))
            for c in ET.parse(OUT / "durations.xml").getroot().iter("testcase")}
-    (OUT / "map.json").write_text(json.dumps({"lines": out, "durations": dur, "secs": time.time() - t0}),
-                                  encoding="utf-8")
+    (OUT / "map.json").write_text(json.dumps({"lines": out, "durations": dur, "secs": time.time() - t0,
+                                              "code_hash": code_hash(), "tests": TESTS}), encoding="utf-8")
     print(f"mutate: coverage map built in {time.time() - t0:.0f}s", flush=True)
 
 
@@ -225,12 +278,18 @@ def run_mutant(m: Mutant, tests: list[str], python: str) -> dict:
 
 
 def report() -> int:
+    current = {m.id: m for m in all_mutants()}
     latest: dict[str, dict] = {}  # a re-run (--only) supersedes the earlier result of the same mutant
     for x in (OUT / "results.jsonl").read_text(encoding="utf-8").splitlines():
         if x.strip():
             r = json.loads(x)
-            latest[r["id"]] = r
+            if r["id"] in current:  # a result for a mutant that no longer exists (other code) never counts
+                latest[r["id"]] = {**r, "grown": current[r["id"]].grown}
     res = list(latest.values())
+    missing = len(current) - len(res)
+    if missing:
+        print(f"mutate: INCOMPLETE: {missing} of {len(current)} mutants have no result yet (score below is partial)",
+              flush=True)
     eq = (yaml.safe_load(EQUIV.read_text(encoding="utf-8")) or {}).get("equivalent", []) if EQUIV.exists() else []
     eq_ids = {e["id"] for e in eq if str(e.get("reason", "")).strip()}
     valid = [r for r in res if r["verdict"] != "INVALID"]
@@ -248,10 +307,16 @@ def report() -> int:
           f"({len(eqs) / max(1, len(valid)):.1%}), alive {len(alive)}", flush=True)
     for f, (k, n) in by_file.items():
         print(f"  {f}: {k}/{n} = {k / max(1, n):.1%}", flush=True)
+    for name, grown in (("original targets (2026-10-07 set)", False),
+                        ("grown targets (K4/K6 helpers, alpha.py, releases.py)", True)):
+        part = [r for r in valid if bool(r.get("grown")) == grown]
+        k = sum(r["verdict"] == "KILLED" for r in part)
+        n = sum(r["id"] not in eq_ids or r["verdict"] == "KILLED" for r in part)
+        print(f"  {name}: {k}/{n} = {k / max(1, n):.1%}", flush=True)
     print(f"mutation score = {score:.1%} (GOAL §16.6 target >= 90%, equivalents <= 10%)", flush=True)
     for r in alive:
         print(f"  ALIVE {r['verdict']:8s} {r['id']}  -> {r['replacement'][:70]}", flush=True)
-    return 0 if score >= 0.9 and len(eqs) <= 0.1 * max(1, len(valid)) else 1
+    return 0 if score >= 0.9 and len(eqs) <= 0.1 * max(1, len(valid)) and not missing else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,7 +328,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--only", nargs="*", help="mutant ids (re-run these, appending to results)")
     ap.add_argument("--tests", nargs="*", help="with --only: run these extra tests too (e.g. a test written to "
                     "kill a survivor, not yet in the coverage map)")
+    ap.add_argument("--out", help="map and results directory (default: <checkout>/.mutation)")
+    ap.add_argument("--budget-s", type=float, default=None, help="start no new mutant after this many seconds")
     a = ap.parse_args(argv)
+    global OUT
+    if a.out:
+        OUT = Path(a.out).resolve()
     if a.map:
         build_map(sys.executable)
         return 0
@@ -276,6 +346,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(ms)} mutants", flush=True)
         return 0
     mp = json.loads((OUT / "map.json").read_text(encoding="utf-8"))
+    if mp.get("code_hash") != code_hash():
+        print(f"mutate: the coverage map in {OUT} was built for other Kernel code (code_hash "
+              f"{str(mp.get('code_hash'))[:12]} != {code_hash()[:12]}): rebuild it with --map", flush=True)
+        return 1
     done = set()
     results = OUT / "results.jsonl"
     if a.only:
@@ -289,14 +363,24 @@ def main(argv: list[str] | None = None) -> int:
             if k:
                 KILLS[k] = KILLS.get(k, 0) + 1
     print(f"mutate: {len(todo)} mutants to run ({len(done)} already done)", flush=True)
+    t_start = time.time()
+    extra = list(a.tests or [])
+
+    def one(m: Mutant) -> dict | None:
+        if a.budget_s is not None and time.time() - t_start > a.budget_s:
+            return None  # budget spent: the next slice resumes here
+        return run_mutant(m, extra + _covering(mp, m), sys.executable)
+
     with ThreadPoolExecutor(max_workers=max(1, a.jobs)) as pool, results.open("a", encoding="utf-8") as f:
-        extra = list(a.tests or [])
-        for r in pool.map(lambda m: run_mutant(m, extra + _covering(mp, m), sys.executable), todo):
+        for r in pool.map(one, todo):
+            if r is None:
+                continue
             if r.get("killer"):
                 KILLS[r["killer"]] = KILLS.get(r["killer"], 0) + 1
             f.write(json.dumps(r) + "\n")
             f.flush()
             print(f"{r['verdict']:9s} {r['id']} ({r.get('secs', 0)}s)", flush=True)
+    print(f"mutate: slice ended after {time.time() - t_start:.0f}s", flush=True)
     return report()
 
 

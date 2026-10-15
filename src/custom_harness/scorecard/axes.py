@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..gateway.costs import combine_usd
 from . import config as C
 from .refs import sha
 from .registry import AXES, ScorecardError
@@ -86,18 +87,18 @@ def axis_g(facts: dict[str, Any]) -> dict[str, Any]:
     if not runs:
         return {"status": "not measured", "total_cost": _unmeasured("no runs in this store")}
     run_refs = [r["ref"] for r in runs]
-    # USD unknown (a subscription, open-weights or unpriced call: facts record usd None) is shown as "unknown",
-    # never summed as 0 (s3-report finding; scorecard/local_axes.py does the same)
-    usd_unknown = sorted(r["ref"] for r in runs if r["cost"].get("usd") is None)
-    total: dict[str, Any] = {u: sum(float(r["cost"][u]) for r in runs) for u in ("gpu_hours", "quota_units", "tokens")}
-    total["usd"] = "unknown" if usd_unknown else sum(float(r["cost"]["usd"]) for r in runs)
+    total: dict[str, float | None] = {u: sum(float(r["cost"][u]) for r in runs)
+                                      for u in ("gpu_hours", "quota_units", "tokens")}
+    # usd only from the cost table (gateway/costs.py), never the backends' own usd: a run the table cannot price makes
+    # the total unknown, a placeholder rate makes it UNCALIBRATED; neither is ever shown as a number (missing != 0)
+    usd, usd_status = combine_usd([r.get("cost_record") or {} for r in runs])
+    total["usd"] = usd
     estimated = any(r["cost"]["estimated"] for r in runs)
-    out["total_cost"] = _metric(total, run_refs, estimated=estimated, runs=len(runs), runs_usd_unknown=usd_unknown)
+    out["total_cost"] = _metric(total, run_refs, estimated=estimated, runs=len(runs), usd_status=usd_status)
     if certs:
-        out["cost_per_certified_claim"] = _metric(
-            {u: (v / len(certs) if isinstance(v, (int, float)) else v) for u, v in total.items()},
-            run_refs + [c["ref"] for c in certs], certified_claims=len(certs), estimated=estimated,
-            runs_usd_unknown=usd_unknown)
+        out["cost_per_certified_claim"] = _metric({u: None if v is None else v / len(certs) for u, v in total.items()},
+                                                  run_refs + [c["ref"] for c in certs], certified_claims=len(certs),
+                                                  estimated=estimated, usd_status=usd_status)
     else:
         out["cost_per_certified_claim"] = _unmeasured("0 Kernel-certified claims: cost per certified claim is "
                                                       "undefined (all spend bought no certified claim)")

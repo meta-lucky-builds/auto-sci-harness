@@ -30,6 +30,7 @@ from typing import Any
 
 import yaml
 
+from ..gateway.costs import run_cost_record
 from ..kernel.checklist import missing as checklist_missing
 from ..kernel.kernel import Kernel, KernelError
 from ..records import Claim as StoreClaim
@@ -108,15 +109,13 @@ def _final_state(store: EvidenceStore, run_id: str) -> dict[str, Any] | None:
 
 def _run(store: EvidenceStore, kernel: Kernel, run_id: str, ledger_certs: dict[str, dict[str, Any]]
          ) -> dict[str, Any]:
-    from .local_axes import usd_unknown_calls
-
     cost = store.run_cost(run_id)
-    unknown = usd_unknown_calls(store, run_id)  # subscription, open-weights or unpriced calls record usd 0.0
     fact: dict[str, Any] = {"ref": run_ref(store, run_id), "run_id": run_id,
-                            "cost": {"usd": None if unknown else cost.usd, "usd_unknown_calls": unknown,
-                                     "gpu_hours": cost.gpu_hours, "quota_units": cost.quota_units,
+                            "cost": {"usd": cost.usd, "gpu_hours": cost.gpu_hours, "quota_units": cost.quota_units,
                                      "tokens": cost.prompt_tokens + cost.completion_tokens,
-                                     "estimated": cost.estimated}}
+                                     "estimated": cost.estimated},
+                            # priced through the gateway cost table: usd None unless every rate is real (axis G)
+                            "cost_record": run_cost_record(store, run_id)}
     state = _final_state(store, run_id)
     if state is None:
         fact["state"] = None

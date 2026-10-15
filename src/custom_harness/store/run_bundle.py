@@ -1,7 +1,9 @@
 """Per-run Reproducibility Bundle (GOAL §1.3, invariant 9: every run, whatever its outcome).
 
 A zip with manifest.json + blobs/<sha256>: the run record and final status, the exact harness spec, the initial
-inputs and seed, the full trace (already scrubbed of private values), the cost record, the sandbox environment,
+inputs and seed, the full trace (already scrubbed of private values), the cost record (`cost`: the units as recorded;
+`cost_record`: priced through the gateway cost table, its usd None and marked unknown or UNCALIBRATED unless every rate
+that applied is a real, sourced one), the sandbox environment,
 the final workspace snapshot (all code the run produced) and the hashes of the task's files. It never contains
 private bytes: task label files appear only as hashes, and any blob identical to a private task file is refused.
 `chh rerun BUNDLE` re-runs it with one command after checking that the task files still match the recorded hashes.
@@ -36,6 +38,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .. import config
+from ..gateway.costs import run_cost_record
 from .blobs import BlobStore
 from .evidence import EvidenceStore
 
@@ -166,7 +169,9 @@ def build_run_bundle(store: EvidenceStore, run_id: str, out_path: Path, *, envir
         "format": FORMAT, "run": run.model_dump(mode="json"), "status": status.value, "detail": detail,
         "spec": store.harness_spec(run.harness_hash), "inputs": inputs, "seed": run.seed,
         "trace": [s.model_dump(mode="json") for s in store.trace(run_id)],
-        "cost": store.run_cost(run_id).model_dump(mode="json"), "environment": environment or {},
+        "cost": store.run_cost(run_id).model_dump(mode="json"),
+        # priced through the gateway cost table: usd None (unknown / UNCALIBRATED) unless every rate is real
+        "cost_record": run_cost_record(store, run_id), "environment": environment or {},
         "task_dir": task_dir, "task_files": task_files, "workspace_snapshot": snapshot,
         "refused_private_blobs": refused, "blobs": sorted(blobs), "artifacts": artifacts}
     if run.ablated:  # custom_harness/ablation.py: an ablated run's bundle says so at the top level (absent otherwise)

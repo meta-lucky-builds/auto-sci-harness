@@ -109,13 +109,6 @@ def _priced(c: dict[str, Any]) -> bool:
     return c["mode"] == "api" and c["usd"] > 0 and c["step_real_calls"] == 1
 
 
-def usd_unknown_calls(store: EvidenceStore, run_id: str) -> int:
-    """Real (not mock, not replayed) model calls of the run whose USD is unknown (see _priced). Shared with the
-    benchmark scorecard (scorecard/facts.py, axis G), so both read unknown USD the same way."""
-    calls, _total = _modes(store, run_id)
-    return sum(1 for c in calls if c["mode"] != "mock" and not c["replayed"] and not _priced(c))
-
-
 def _run_fact(store: EvidenceStore, run_id: str, bundles: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     calls, cost = _modes(store, run_id)
     real = [c for c in calls if c["mode"] != "mock" and not c["replayed"]]
