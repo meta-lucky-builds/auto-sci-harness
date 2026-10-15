@@ -55,6 +55,11 @@ ACCEPTANCE_PATHS: tuple[str, ...] = (
     "gateway/role_exam.py",      # admits a second model family to a judging role
     "tiers.py",                  # verifier tiers and the tier policy that gates autonomy
     "policy.py",                 # human-owned run policy: model-family separation for judging roles
+    "evolve/branches.py",        # L6.9: records a branch only on released cluster bits and a passing LOFO/LODO bit
+    "evolve/router.py",          # L6.9: serves only a LOFO-checked route table; the one-shot sealed finalize_routed
+    "evolve/search.py",          # L7: carries each island's accepted harness across rounds (like driver.py)
+    "control/islands.py",        # L7: set_policy adopts an orchestrator policy only on a passing trial decision
+    "control/policy_gate.py",    # L7: accepts or refuses an orchestrator policy change (exact sign test)
 )
 
 # Modules that allocate budget by a novelty / interestingness signal. None exists yet (GOAL §16.10's allocator is
@@ -81,7 +86,8 @@ ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
         "not-a-score", "name of the duplicate-gate counter in the proposer-visible generation_stats whitelist"),
     ("control/islands.py", "rejected_novelty"): (
         "not-a-score", "the duplicate gate's lineage status, matched only to collect the EDIT TYPES an island tried "
-                       "(edit-type quota); no score, and islands decide budget shares, never accept/reject "
+                       "(edit-type quota); no score: islands decide budget shares and adopt a policy change only on a "
+                       "passing trial decision; no edit accept/reject "
                        "(reviewed at the g-router merge, 2026-10-08)"),
     # this checker names the tokens it looks for (its regex, this allowlist's keys, its messages); it reads source
     # files and decides nothing about any claim, edit, task or entry. A NEW token here is still flagged.

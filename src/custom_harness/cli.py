@@ -8,6 +8,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -203,6 +204,7 @@ def cmd_approve(a: argparse.Namespace, store: EvidenceStore) -> int:
 def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     import custom_harness.research  # noqa: F401
 
+    from .evolve.branches import BranchConfig
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
@@ -227,7 +229,8 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     out = data_dir() / "evolve" / campaign_id
     evolve(spec, load_suite(Path(a.suite)), generations=a.generations, backends=backends, proposer=proposer,
            store=store, sandbox_factory=factory, cfg=cfg, out_dir=out, campaign_budget=campaign,
-           campaign=campaign_id)
+           campaign=campaign_id,
+           branching=BranchConfig(cluster_key=a.branch_by) if a.branch_by else None)
     print(f"outputs: {out}")
     print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
           f"{campaign_id})")
@@ -313,12 +316,49 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     except BundleError as e:  # refused (unsupported format, over a read cap): fail closed with the reason
         print(json.dumps({"reproduced": False, "refused": str(e)}, indent=1))
         return 1
-    print(json.dumps({"reproduced": report.reproduced, "bundle_hash": report.bundle_hash,
+    headline = _headline(report.certificate)
+    # GOAL §2.4: every headline number must reproduce, not only the label and the check statuses
+    original, problems = _original_headline(Path(a.bundle)), list(report.problems)
+    if headline is not None and (original is None or original["targets"] != headline["targets"]):
+        problems.append(f"headline numbers differ from the bundled certificate: originally "
+                        f"{original['targets'] if original else 'unreadable'}, now {headline['targets']}")
+    ok = report.reproduced and len(problems) == len(report.problems)
+    print(json.dumps({"reproduced": ok, "bundle_hash": report.bundle_hash,
                       "original_label": report.original_label, "reproduced_label": report.reproduced_label,
                       "ledger_check": report.ledger_check, "ledger_head": report.ledger_head,
-                      "problems": report.problems, "missing_artifacts": report.missing_artifacts,
-                      "artifacts": arts.to_json()}, indent=1))
-    return 0 if report.reproduced else 1
+                      "problems": problems, "missing_artifacts": report.missing_artifacts,
+                      "artifacts": arts.to_json(), "headline": headline, "original_headline": original}, indent=1))
+    return 0 if ok else 1
+
+
+def _original_headline(path: Path) -> dict[str, Any] | None:
+    """The headline numbers of the ORIGINAL certificate as bundled (read under the bundle caps), or None."""
+    import zipfile
+
+    from .kernel import Certificate
+    from .store.run_bundle import BoundedZip, RunBundleError
+    try:
+        with zipfile.ZipFile(path) as z:
+            r = BoundedZip(z)
+            man = json.loads(r.read("manifest.json"))
+            row = next(x for x in man["ledger"] if x[1] == "certificate"
+                       and json.loads(x[2]).get("cert_hash") == man["cert_hash"])
+            cert = Certificate.model_validate(json.loads(r.read(f"blobs/{json.loads(row[2])['blob']}")))
+    except (OSError, ValueError, KeyError, IndexError, StopIteration, TypeError, zipfile.BadZipFile,
+            RunBundleError):
+        return None
+    return _headline(cert)
+
+
+def _headline(cert: Any) -> dict[str, Any] | None:
+    """The headline numbers of the RE-DERIVED certificate (GOAL §2.4): label, tier and, per held-out target, the
+    effect estimate and its interval, as the reproducing machine computed them (None without a certificate)."""
+    if cert is None:
+        return None
+    targets = (cert.resolution or {}).get("targets") or {}
+    return {"label": cert.label.value, "tier": cert.tier,
+            "targets": {t: {k: v.get(k) for k in ("estimate", "lo", "hi")} for t, v in sorted(targets.items())
+                        if isinstance(v, dict)}}
 
 
 def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
@@ -705,6 +745,10 @@ def main(argv: list[str] | None = None) -> int:
         return delegate_main(args[1:])
     if args[:2] == ["evolve", "report"]:  # `chh evolve report CAMPAIGN` (a spec file named "report": ./report)
         args = ["evolve-report", *args[2:]]
+    from .evolve import cli as evolve_cli
+    # read-only L6.9 views (`chh evolve branches|route ...`, own parser); they use the ONE store open below (int17
+    # merge: the kerneld boundary ratchet lists a single EvidenceStore construction in cli.py)
+    views = args[:1] == ["evolve"] and len(args) > 1 and args[1] in evolve_cli.SUBCOMMANDS
     p = argparse.ArgumentParser(prog="chh")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("delegate", add_help=False, help="delegation driver: `chh delegate <command> ...` (see "
@@ -738,6 +782,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--max-tokens", type=float)
     ev.add_argument("--max-quota", type=float, help="subscription quota units (one per BYOS call)")
     ev.add_argument("--max-wall-s", type=float)
+    ev.add_argument("--branch-by", choices=["family", "domain"],
+                    help="L6.9: make branches of gate-rejected cluster winners and record the route table "
+                         "(see `chh evolve branches|route SPEC`)")
     er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
                                               "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
     er.add_argument("campaign")
@@ -862,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
     scorecard_cli.add_parsers(sub)
     timesplit_cli.add_parsers(sub)
     studio_cli.add_parsers(sub)
-    a = p.parse_args(args)
+    a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
         if os.environ.get(TEST_MODE_ENV) != "1":
@@ -870,6 +917,8 @@ def main(argv: list[str] | None = None) -> int:
                              f"{TEST_MODE_ENV}=1 (trusted test code only). Use --docker.")
     store = open_host_store(data_dir() / "store")  # GOAL §16.5.2: private data only through kerneld
     try:
+        if a is None:
+            return evolve_cli.main(args[1:], store)
         return {"run": cmd_run, "resume": cmd_resume, "approve": cmd_approve, "return-data": cmd_return_data,
                 "rerun": cmd_rerun,
                 "approve-adapter": cmd_approve_adapter, "approve-role": cmd_approve_role, "alpha": cmd_alpha,

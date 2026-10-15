@@ -7,7 +7,9 @@ A figure is a directory:
     figure.json  {"format": "chh-figure/1", "refs": {ref_id: {"evidence": id, "pointer": "/json/pointer"}},
                   "script_sha256", "svg_sha256", "renderer_sha256"}
 A ref names an Evidence record of the store and a JSON pointer into its payload (e.g. an ExecRecord's "/score"),
-never a raw blob: a blob anyone can write is not evidence. The harness resolves the refs and gives the script only
+or a Kernel ledger certificate the auditor allows plus a pointer into it (e.g. "/resolution/targets/<t>/lo", the
+held-out effect interval); never a raw blob: a blob anyone can write is not evidence. The harness resolves the
+refs and gives the script only
 `inputs.json` (ref id -> value) plus the renderer (`chh_svg.py` = figures/svg.py).
 
 `audit_figure` fails a figure (fail closed) unless ALL of these hold:
@@ -32,6 +34,7 @@ import re
 import shutil
 import unicodedata
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -86,27 +89,45 @@ def _pointer(doc: Any, pointer: str) -> Any:
     return doc
 
 
-def resolve_refs(refs: Any, store: Any, allowed_evidence: set[str] | None) -> dict[str, float]:
-    """ref id -> value, read from Evidence payloads in the store (fail closed on anything else)."""
+Certificates = Callable[[str], Any]  # certificate hash -> the Kernel ledger certificate as JSON (raises if unknown)
+
+
+def resolve_refs(refs: Any, store: Any, allowed_evidence: set[str] | None, *,
+                 certificate_of: Certificates | None = None,
+                 allowed_certificates: set[str] | None = None) -> dict[str, float]:
+    """ref id -> value, read from Evidence payloads in the store, or (a {certificate, pointer} ref) from a Kernel
+    ledger certificate the caller allows (`allowed_certificates`, resolved by `certificate_of`). Fail closed on
+    anything else: a certificate ref with no resolver or outside the allowed set is refused."""
     if not isinstance(refs, dict) or not refs:
         raise FigureError("figure.json must name at least one ref")
     out: dict[str, float] = {}
     for rid, ref in refs.items():
         if not isinstance(rid, str) or not _REF_ID.match(rid):
             raise FigureError(f"bad ref id {rid!r}")
-        if not isinstance(ref, dict) or set(ref) != {"evidence", "pointer"}:
-            raise FigureError(f"ref {rid}: must be exactly {{evidence, pointer}}")
-        eid = ref["evidence"]
-        if allowed_evidence is not None and eid not in allowed_evidence:
-            raise FigureError(f"ref {rid}: evidence {eid!r} is not among the evidence this figure may plot")
-        try:
-            ev = store.get_evidence(eid)
-            doc = store.blobs.get_json(ev.payload_ref)
-        except (KeyError, OSError, ValueError) as e:
-            raise FigureError(f"ref {rid}: evidence {eid!r} does not resolve ({type(e).__name__})") from e
+        if isinstance(ref, dict) and set(ref) == {"certificate", "pointer"}:
+            ch = ref["certificate"]
+            if certificate_of is None or allowed_certificates is None or ch not in allowed_certificates:
+                raise FigureError(f"ref {rid}: certificate {ch!r} is not among the certificates this figure may plot")
+            try:
+                doc = certificate_of(str(ch))
+            except Exception as e:  # any failure to resolve fails the ref closed
+                raise FigureError(f"ref {rid}: certificate {ch!r} does not resolve ({type(e).__name__})") from e
+            src = f"certificate {ch}"
+        elif isinstance(ref, dict) and set(ref) == {"evidence", "pointer"}:
+            eid = ref["evidence"]
+            if allowed_evidence is not None and eid not in allowed_evidence:
+                raise FigureError(f"ref {rid}: evidence {eid!r} is not among the evidence this figure may plot")
+            try:
+                ev = store.get_evidence(eid)
+                doc = store.blobs.get_json(ev.payload_ref)
+            except (KeyError, OSError, ValueError) as e:
+                raise FigureError(f"ref {rid}: evidence {eid!r} does not resolve ({type(e).__name__})") from e
+            src = str(eid)
+        else:
+            raise FigureError(f"ref {rid}: must be exactly {{evidence, pointer}} or {{certificate, pointer}}")
         v = _pointer(doc, str(ref["pointer"]))
         if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v):
-            raise FigureError(f"ref {rid}: {eid}{ref['pointer']} is not a finite number")
+            raise FigureError(f"ref {rid}: {src}{ref['pointer']} is not a finite number")
         out[rid] = float(v)
     return out
 
@@ -143,7 +164,7 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
     if root.tag != NS + "svg" or any(not str(el.tag).startswith(NS) for el in root.iter()):
         return ["every element of a figure must be in the SVG namespace, under one <svg> root"]
     kind = root.get("data-chh-figure")
-    if kind not in ("bar", "line"):
+    if kind not in ("bar", "line", "interval"):
         return [f"unknown figure kind {kind!r}"]
     els = list(root.iter())
     marks = [e for e in els if e.tag.removeprefix(NS) in ("rect", "circle")]
@@ -151,6 +172,16 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
         return ["the figure plots no marks"]
     want = "rect" if kind == "bar" else "circle"
     plotted: list[float] = []
+    if kind == "interval":  # interval segments are marks too: each bound to one ref, its data-v the artifact's value
+        for seg in (e for e in els if e.tag.removeprefix(NS) == "line" and e.get("class") == "ci"):
+            rid = seg.get("data-ref")
+            if rid not in values:
+                problems.append(f"an interval segment is not bound to a resolved ref (data-ref={rid!r})")
+            elif seg.get("data-v") != S.data_v(values[rid]):
+                problems.append(f"segment {rid}: data-v {seg.get('data-v')!r}, the artifact says "
+                                f"{S.data_v(values[rid])}")
+            else:
+                plotted.append(values[rid])
     for m in marks:
         rid = m.get("data-ref")
         if m.tag.removeprefix(NS) != want or m.get("class") != "mark":
@@ -169,6 +200,11 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
             g = S.bar_geometry(len(marks), i, lo, hi, values[m.get("data-ref", "")])
             if {k: m.get(k) for k in g} != g:
                 problems.append(f"bar {m.get('data-ref')}: geometry does not match its value")
+    elif kind == "interval":
+        for i, c in enumerate(marks):
+            g = S.point_geometry(len(marks), i, lo, hi, values[c.get("data-ref", "")])
+            if {k: c.get(k) for k in g} != g:
+                problems.append(f"point {c.get('data-ref')}: geometry does not match its value")
     else:
         series = [e for e in els if e.tag.removeprefix(NS) == "g" and e.get("class") == "series"]
         n = max((len([c for c in s if c.tag.removeprefix(NS) == "circle"]) for s in series), default=0)
@@ -195,7 +231,7 @@ def check_svg(data: bytes, values: dict[str, float]) -> list[str]:
         problems.append("axis ticks are not where the values put them")
     for node in els:
         tag, cls = node.tag.removeprefix(NS), node.get("class")
-        if tag == "line" and cls not in ("axis", "tick"):
+        if tag == "line" and cls not in ("axis", "tick") and not (kind == "interval" and cls == "ci"):
             problems.append(f"<line class={cls!r}> is not allowed")
         if tag == "text" and cls == "value":
             rid = node.get("data-ref")
@@ -225,6 +261,8 @@ def _canonical(root: ET.Element, kind: str, text: str, values: dict[str, float])
             refs = [e.get("data-ref", "") for e in root.iter(NS + "rect")]
             expect = S.bar_chart(values, list(zip(texts("category"), refs, strict=True)), title=title,
                                  y_label=y_label)
+        elif kind == "interval":
+            return _canonical_interval(root, text, values, texts("category"), title, y_label)
         else:
             series = [(g.get("data-series", ""), [c.get("data-ref", "") for c in g.iter(NS + "circle")])
                       for g in root.iter(NS + "g") if g.get("class") == "series"]
@@ -235,6 +273,43 @@ def _canonical(root: ET.Element, kind: str, text: str, values: dict[str, float])
         return ["the figure is not the trusted renderer's output for its own data and labels (placement, styling, "
                 "viewport or extra elements changed)"]
     return []
+
+
+def _canonical_interval(root: ET.Element, text: str, values: dict[str, float], cats: list[str], title: str,
+                        y_label: str) -> list[str]:
+    """`_canonical` for interval charts: items are read back in document order (segments, then their point); an item
+    with one segment is tried as a lower and as an upper bound (they render alike)."""
+    items: list[list[tuple[str, str, str | None, str | None]]] = [[]]
+    pending: list[str] = []
+    n = 0
+    for el in root.iter():
+        tag = el.tag.removeprefix(NS)
+        if tag == "line" and el.get("class") == "ci":
+            pending.append(el.get("data-ref", ""))
+        elif tag == "circle":
+            if n >= len(cats) or len(pending) > 2:
+                return ["the figure cannot be rebuilt by the trusted renderer from its own data (items)"]
+            cat, est = cats[n], el.get("data-ref", "")
+            opts: list[tuple[str, str, str | None, str | None]]
+            if len(pending) == 2:
+                opts = [(cat, est, pending[0], pending[1])]
+            elif len(pending) == 1:
+                opts = [(cat, est, pending[0], None), (cat, est, None, pending[0])]
+            else:
+                opts = [(cat, est, None, None)]
+            items = [[*prefix, o] for prefix in items for o in opts]
+            if len(items) > 64:  # bounded work: a figure with that many one-sided items is refused, not searched
+                return ["the figure has too many one-sided interval items to rebuild"]
+            pending, n = [], n + 1
+    if pending or n != len(cats):
+        return ["the figure cannot be rebuilt by the trusted renderer from its own data (items)"]
+    try:
+        if any(S.interval_chart(values, it, title=title, y_label=y_label) == text for it in items):
+            return []
+    except (KeyError, TypeError, ValueError) as e:
+        return [f"the figure cannot be rebuilt by the trusted renderer from its own data: {e}"]
+    return ["the figure is not the trusted renderer's output for its own data and labels (placement, styling, "
+            "viewport or extra elements changed)"]
 
 
 # ------------------------------------------------------------------ F4 re-render
@@ -267,11 +342,13 @@ def _read(path: Path) -> bytes:
 
 
 def make_figure(fig_dir: Path, script: str, refs: dict[str, dict[str, str]], store: Any, sandbox: Sandbox,
-                allowed_evidence: set[str] | None = None) -> str:
+                allowed_evidence: set[str] | None = None, *, certificate_of: Certificates | None = None,
+                allowed_certificates: set[str] | None = None) -> str:
     """Render a figure (script in the sandbox), refuse it unless it passes F3, write the three files; return the
     sha256 of figure.json (record it: the audit compares it)."""
     fig_dir = Path(fig_dir)
-    values = resolve_refs(refs, store, allowed_evidence)
+    values = resolve_refs(refs, store, allowed_evidence, certificate_of=certificate_of,
+                          allowed_certificates=allowed_certificates)
     data = run_script(script.encode(), inputs_json(refs, values), sandbox)
     problems = check_svg(data, values)
     if problems:
@@ -287,7 +364,8 @@ def make_figure(fig_dir: Path, script: str, refs: dict[str, dict[str, str]], sto
 
 
 def audit_figure(fig_dir: Path, store: Any, sandbox: Sandbox, *, allowed_evidence: set[str] | None = None,
-                 meta_sha256: str | None = None) -> FigureAudit:
+                 meta_sha256: str | None = None, certificate_of: Certificates | None = None,
+                 allowed_certificates: set[str] | None = None) -> FigureAudit:
     """F1-F4 (module docstring). Never raises for a bad figure: problems are returned, ok=False (fail closed)."""
     fig_dir = Path(fig_dir)
     try:
@@ -306,7 +384,8 @@ def audit_figure(fig_dir: Path, store: Any, sandbox: Sandbox, *, allowed_evidenc
     if _sha(data) != meta.get("svg_sha256"):
         problems.append("F1 figure.svg differs from the output recorded in figure.json")
     try:
-        values = resolve_refs(meta.get("refs"), store, allowed_evidence)
+        values = resolve_refs(meta.get("refs"), store, allowed_evidence, certificate_of=certificate_of,
+                              allowed_certificates=allowed_certificates)
     except FigureError as e:
         return FigureAudit(False, [*problems, f"F2 {e}"])
     problems += [f"F3 {p}" for p in check_svg(data, values)]
@@ -320,7 +399,9 @@ def audit_figure(fig_dir: Path, store: Any, sandbox: Sandbox, *, allowed_evidenc
     return FigureAudit(not problems, problems, values)
 
 
-def audit_figures(entries: Any, store: Any, sandbox_for: Any, allowed_evidence: set[str] | None) -> dict[str, Any]:
+def audit_figures(entries: Any, store: Any, sandbox_for: Any, allowed_evidence: set[str] | None, *,
+                  certificate_of: Certificates | None = None,
+                  allowed_certificates: set[str] | None = None) -> dict[str, Any]:
     """Audit I6 over a run's `figures` state: [{"dir", "meta_sha256"}]. "n/a" without figures; anything malformed
     fails closed. `sandbox_for(i)` returns a fresh sandbox for figure i."""
     if entries is None or entries == []:
@@ -333,6 +414,7 @@ def audit_figures(entries: Any, store: Any, sandbox_for: Any, allowed_evidence: 
             problems.append(f"I6: figure {i} is malformed (needs dir and meta_sha256)")
             continue
         res = audit_figure(Path(f["dir"]), store, sandbox_for(i), allowed_evidence=allowed_evidence,
-                           meta_sha256=f["meta_sha256"])
+                           meta_sha256=f["meta_sha256"], certificate_of=certificate_of,
+                           allowed_certificates=allowed_certificates)
         problems += [f"I6 figure {f['dir']}: {p}" for p in res.problems]
     return {"I6": not problems, "problems": problems}

@@ -41,8 +41,10 @@ def test_nothing_is_visible_before_a_watermark_and_after_it_only_dated_labels_at
     r = _stream(store, tmp_path)
     assert r.visible() == []  # no watermark: nothing
     r.advance("2026-09-15T09:00:00+00:00")
-    assert _ids(r.visible()) == ["old", "tz"]  # edge-day ends at 23:59:59 UTC, after the watermark
-    r.advance("2026-09-16")
+    assert _ids(r.visible()) == ["old", "tz"]  # edge-day has not ended anywhere on earth yet
+    r.advance("2026-09-16")  # 2026-09-15 has ended in UTC but not yet in UTC-12 (ends 2026-09-16T12:00Z)
+    assert _ids(r.visible()) == ["old", "tz"]
+    r.advance("2026-09-16T12:00:00+00:00")
     assert _ids(r.visible()) == ["edge-day", "old", "tz"]
     r.advance("2026-10-08")  # the latest watermark the clock allows
     vis = r.visible()

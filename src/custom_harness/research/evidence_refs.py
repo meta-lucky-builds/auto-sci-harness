@@ -119,7 +119,10 @@ def run_private_reads(store: Any, trace: Sequence[TraceStep], run_id: str) -> li
 # list (stated limit): a new relay module must be added here.
 RELAY_MODULES = frozenset({"research.socratic_filter", "research.critic_evidence", "research.check_critic_answers",
                            "research.recall", "research.recall_memory", "research.next_hypothesis",
-                           "research.unpack_solutions", "research.tournament"})
+                           "research.unpack_solutions", "research.tournament",
+                           # the ranking/front modules relay hypotheses (model text) and literature quotes
+                           "research.execution_rank", "research.admit_rank", "research.hypothesis_front",
+                           "research.formulate"})
 
 
 def _has_private_keys(obj: Any) -> bool:
