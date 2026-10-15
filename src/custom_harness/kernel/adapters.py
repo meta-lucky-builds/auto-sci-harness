@@ -128,7 +128,7 @@ def covered_modules(spec: AdapterSpec) -> dict[str, Path]:
 
 
 Stamps = tuple[tuple[Path, int, int, int], ...]
-_HASHES: dict[tuple[AdapterSpec, tuple[str, ...]], tuple[Stamps, str]] = {}
+_CLOSURES: dict[tuple[AdapterSpec, tuple[str, ...]], tuple[Stamps, dict[str, Path]]] = {}
 
 
 def _stamps(paths: Iterable[Path]) -> Stamps:
@@ -136,18 +136,19 @@ def _stamps(paths: Iterable[Path]) -> Stamps:
 
 
 def adapter_hash(spec: AdapterSpec) -> str:
-    """Cached per process by (spec, sys.path); recomputed when a covered file's (mtime_ns, size, inode) changed, cached
-    only if no edit raced the computation. Residual and measurement: docs/kernel_s4.md, item 9."""
+    """The import closure (the slow part) is cached per process by (spec, sys.path) and walked again when a covered
+    file's (mtime_ns, size, inode) changed or an edit raced the walk; the file BYTES are hashed on every call (RT-S4-8:
+    an edit that restores size and mtime is still seen). Residual and measurement: docs/kernel_s4.md, item 9."""
     key = (spec, tuple(sys.path))
-    hit = _HASHES.get(key)
-    with contextlib.suppress(OSError):  # a covered file gone: recompute (fails closed there)
+    hit = _CLOSURES.get(key)
+    with contextlib.suppress(OSError):  # a covered file gone: walk again (fails closed there)
         if hit is not None and _stamps(p for p, *_ in hit[0]) == hit[0]:
-            return hit[1]
+            return _adapter_hash(spec, hit[1])
     covered = covered_modules(spec)
-    stamps, h = _stamps(covered.values()), _adapter_hash(spec, covered)
+    stamps = _stamps(covered.values())
     if covered_modules(spec) == covered and _stamps(covered.values()) == stamps:
-        _HASHES[key] = (stamps, h)
-    return h
+        _CLOSURES[key] = (stamps, covered)
+    return _adapter_hash(spec, covered)
 
 
 def _adapter_hash(spec: AdapterSpec, covered: dict[str, Path]) -> str:

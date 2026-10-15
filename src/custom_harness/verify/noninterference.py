@@ -146,7 +146,7 @@ def world_files(files: dict[str, bytes], copies: list[TruthCopy], world: World, 
     for c in copies:
         vals = read_column(files[c.name], c.column)
         new = (flip_values if world is World.FLIPPED else constant_values)(vals, regression=regression)
-        out[c.name] = replace_column(files[c.name], c.column, new)
+        out[c.name] = replace_column(out[c.name], c.column, new)  # RT-S4-1: every column, not the last
     return out
 
 

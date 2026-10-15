@@ -42,8 +42,9 @@ def reservations(ledger: Ledger, account: Account) -> list[Entry]:
 
 
 def charged(ledger: Ledger, account: Account) -> int:
-    """Slots the account has paid (a reservation recorded before charges existed counts 1)."""
-    return sum(int(e.body.get("charge", 1)) for e in reservations(ledger, account))
+    """Slots the account has paid (a reservation recorded before charges existed counts 1; RT-S4-3: every reservation
+    costs at least 1, so a 0 or negative charge written around preregister cannot hide an overdraft)."""
+    return sum(max(1, int(e.body.get("charge", 1))) for e in reservations(ledger, account))
 
 
 def retired(ledger: Ledger, account: Account) -> bool:

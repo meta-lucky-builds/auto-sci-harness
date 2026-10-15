@@ -219,7 +219,8 @@ class Kernel:
             raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
         body = {"target": target, "dataset_id": dataset_id, "file": file, "column": column}
         old = [e for e in self.ledger.entries("truth_copy") if {k: e.body.get(k) for k in body} == body]
-        return old[0] if old else self.ledger.append("truth_copy", {**body, "declarer": declarer})
+        return old[0] if old else self.ledger.append("truth_copy", {**body, "blob": rec.files[file].blob,
+                                                                    "declarer": declarer})
 
     def record_noise_floor(self, floor: Any) -> str:
         """Store a NoiseFloor as a chh-noise-floor/1 record: its hash is what a claim cites (K1 re-checks it)."""

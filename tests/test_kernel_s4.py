@@ -394,3 +394,55 @@ def test_a_run_bound_kernel_records_its_run_on_prereg_and_certificate_entries(tm
             assert "run_id" not in inspect.signature(method).parameters
     finally:
         w.close()
+
+
+# ================================================================== s4-kerneld #7: keyed digests of private files
+def test_the_ledger_names_private_files_by_a_keyed_digest_only(tmp_path):
+    """Fails first: the register_dataset entry carried the plain sha256 of every private file, so anyone reading the
+    ledger could confirm a guessed (low-entropy) label file offline by hashing guesses."""
+    import hashlib
+
+    from custom_harness.kernel.vault import KEYED
+    w = World(tmp_path / "w", seed=8, n_train=30, n_test=30)
+    try:
+        labels = b"label\n0\n1\n1\n0\n"
+        w.vault.register_dataset("small", DatasetRole.TEST, public={"x.csv": b"x\n1\n2\n3\n4\n"},
+                                 private={"y.csv": labels})
+        body = next(e.body for e in w.kernel.ledger.entries("register_dataset") if e.body["dataset_id"] == "small")
+        plain = hashlib.sha256(labels).hexdigest()
+        assert plain not in str(body) and body["files"]["y.csv"]["blob"].startswith(KEYED)
+        assert w.vault.dataset("small").files["y.csv"].blob == plain  # the Vault resolves it internally
+        again = w.vault.register_dataset("small", DatasetRole.TEST, public={"x.csv": b"x\n1\n2\n3\n4\n"},
+                                         private={"y.csv": labels})  # idempotent: the same keyed record
+        assert again.hash == body["hash"]
+        assert str(Path(w.store.root) / "private" / "vault.key") not in str(body)
+    finally:
+        w.close()
+
+
+def test_a_private_file_registered_before_keyed_digests_still_resolves(tmp_path):
+    """Old entries keep verifying: a register_dataset body with a plain sha256 (as before s4) is read as before."""
+    from custom_harness.kernel.vault import DatasetRecord, FileRef, dataset_hash
+    w = World(tmp_path / "w", seed=9, n_train=30, n_test=30)
+    try:
+        blob = w.store.blobs.put(b"label\n1\n0\n")
+        files = {"y.csv": FileRef(blob=blob, private=True)}
+        rec = DatasetRecord(dataset_id="legacy", role=DatasetRole.TEST, files=files, hash=dataset_hash(files))
+        w.kernel.ledger.append("register_dataset", rec.model_dump(mode="json", exclude={"seq"}))
+        assert w.vault.dataset("legacy").files["y.csv"].blob == blob
+        w.vault.register_dataset("legacy", DatasetRole.TEST, public={}, private={"y.csv": b"label\n1\n0\n"})  # same
+    finally:
+        w.close()
+
+
+# ================================================================== s4-kerneld #15: private bytes as code
+def test_a_private_file_of_another_dataset_used_as_code_is_a_coded_k9_finding(world):
+    """Fails first: K9 only knew the TARGETS' private files; a non-target's private bytes given as code were not a
+    K9 finding (and the reviewer saw such a case fail as a raised check, CHECK_RAISED, not with a closed code)."""
+    labels = "label\n" + "\n".join(world.labels["test2"]) + "\n"
+    stolen = world.artifact("stolen_labels", code=labels)
+    claim = world.claim(stolen, world.artifact("baseline", "baseline"), n_boot=1000, seeds=(11, 12, 13))
+    cx = K.Context(claim=claim, claim_hash=claim.claim_hash(), store=world.store, vault=world.vault,
+                   ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
+    res = K.k9_leaks(cx)
+    assert Code.K9_PRIVATE_CODE in res.codes and Code.CHECK_RAISED not in res.codes

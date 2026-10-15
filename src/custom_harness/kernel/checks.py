@@ -6,12 +6,9 @@ exception inside a check is a failure of that check, never a pass (see kernel.Ke
 
 from __future__ import annotations
 
-import ast
-import contextlib
 import csv
 import hashlib
 import importlib
-import importlib.util
 import io
 import json
 import math
@@ -28,6 +25,7 @@ from ..records import EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..verify import leak
 from ..verify import noninterference as ni
+from ..verify.leak import reader_texts
 from . import adapters, alpha, predictions, simulated
 from .certificate import CHECK_IDS, Certificate, CheckResult
 from .claim import (
@@ -36,7 +34,6 @@ from .claim import (
     Claim,
     ClaimKind,
     EvidenceClass,
-    canonical_json,
     exact_value,
     strict_json,
 )
@@ -560,13 +557,14 @@ def k3_reproduced(ctx: Context) -> CheckResult:
     return _result(reasons, obs)
 
 
-def truth_copies(ledger: Ledger, target: str) -> dict[tuple[str, str], list[str]]:
-    """§16.5.4: the declared agent-reachable copies of `target`'s truth: (dataset id, public file) -> label columns."""
-    out: dict[tuple[str, str], list[str]] = {}
+def truth_copies(ledger: Ledger, vault: Vault, target: str) -> dict[str, list[str]]:
+    """§16.5.4: the declared agent-reachable copies of `target`'s truth: file BYTES (blob) -> label columns (RT-S4-2:
+    the same bytes under another dataset id or file name are the same copy; a legacy entry names no blob)."""
+    out: dict[str, list[str]] = {}
     for e in ledger.entries("truth_copy"):
         if e.body.get("target") == target:
-            key = (str(e.body.get("dataset_id")), str(e.body.get("file")))
-            out.setdefault(key, []).append(str(e.body.get("column")))
+            blob = e.body.get("blob") or vault.dataset(str(e.body.get("dataset_id"))).files[str(e.body["file"])].blob
+            out.setdefault(str(blob), []).append(str(e.body.get("column")))
     return out
 
 
@@ -574,9 +572,9 @@ def _noninterference(ctx: Context, eid: str, rec: ExecRecord, obs: list[str]) ->
     """§16.5.4 (invariant 18), a required K3 sub-check when the record's inputs hold a declared copy of its target's
     truth: re-run with every declared copy flipped, then constant, and compare DECISIONS with the stored production
     output (McNemar fallback for nondeterministic programs). Any irregularity fails closed."""
-    declared = truth_copies(ctx.ledger, rec.target)
+    declared = truth_copies(ctx.ledger, ctx.vault, rec.target)  # each column once: flipping twice restores it
     copies = [ni.TruthCopy(role, col) for role, ref in sorted(rec.inputs.items())
-              for col in declared.get((ref.dataset_id, ref.file), [])]
+              for col in dict.fromkeys(declared.get(ref.blob, []))]
     if not copies:
         return []
     where = f"non-interference of {rec.arm} seed {rec.seed} on {rec.target}"
@@ -832,9 +830,11 @@ def k9_leaks(ctx: Context) -> CheckResult:
             windows += leak.label_windows(ctx.label_values(target))
             label_lists.append(ctx.label_values(target))
     runs = [leak.label_runs(*label_lists)]  # any long, informative run of labels, at any offset (not only the first)
+    # s4-kerneld #15: a private file of ANY dataset given as code or input is a coded finding, not a crash
+    private = {f.blob: f"{d}/{n}" for d, rec in datasets.items() for n, f in rec.files.items() if f.private}
     for role, ref in (("subject", ctx.claim.subject), ("comparator", ctx.claim.comparator)):
-        if ref.hash in private_blobs:
-            reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} code IS a private file ({private_blobs[ref.hash]})"))
+        if ref.hash in private:
+            reasons.append(R(Code.K9_PRIVATE_CODE, f"{role} code IS a private file ({private[ref.hash]})"))
         try:
             texts = reader_texts(ctx.store.blobs.get(ref.hash), source=True)  # decoded literals too (s4-kernel)
         except OSError:
@@ -843,6 +843,8 @@ def k9_leaks(ctx: Context) -> CheckResult:
     # program inputs: hidden labels must not reach a program even as a renamed or re-headed copy (records here
     # passed K0, so every input blob resolves; a read error would fail this check via certify, never pass it)
     for blob in sorted({ref.blob for _, r in ctx.records for ref in r.inputs.values()}):
+        if blob in private:
+            reasons.append(R(Code.K9_PRIVATE_CODE, f"program input {blob[:12]} IS a private file ({private[blob]})"))
         data = ctx.store.blobs.get(blob)
         reasons += coded(Code.K9_LEAK, _scan(reader_texts(data), f"program input {blob[:12]}", canaries, windows,
                                              runs))
@@ -1032,21 +1034,6 @@ def k8_exact(ctx: Context) -> CheckResult:
     if isinstance(got, list):
         return _result(got)
     return _result(coded(Code.K8_ADAPTER_BOUNDS, list(got[0].bounds(*got[1:]))))
-
-
-def reader_texts(data: bytes, *, source: bool = False) -> list[str]:
-    """What a reader of the bytes sees (UTF-8, NULs dropped, parsed JSON, and for Python `source` the decoded source
-    and its literals in source order, joined by newlines and directly): docs/kernel_s4.md, item 1."""
-    texts = [data.decode("utf-8", errors="ignore"), data.replace(b"\0", b"").decode("utf-8", errors="ignore")]
-    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding
-        texts.append(canonical_json(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv])).decode())
-    with contextlib.suppress(ValueError, SyntaxError, RecursionError, LookupError, MemoryError):  # not Python
-        nodes = ast.walk(ast.parse(data)) if source else iter(())
-        consts = sorted((n.lineno, n.col_offset, n.value if isinstance(n.value, str) else n.value.decode(
-            "utf-8", "ignore")) for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str | bytes))
-        lits = [v.replace("\0", "") for *_, v in consts]
-        texts += [importlib.util.decode_source(data), "\n".join(lits), "".join(lits)] if source else []
-    return list(dict.fromkeys(texts))
 
 
 def _scan(texts: list[str], where: str, canaries: list[str], windows: list[str], runs: Any = None) -> list[str]:
