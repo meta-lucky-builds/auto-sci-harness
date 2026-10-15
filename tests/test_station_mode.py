@@ -500,6 +500,37 @@ def test_crash_mid_turn_resumes_the_same_run_and_never_reruns_a_turn(sw):
     assert codes(m2, (0, first)) == [PubCode.PUBLISHED.value]
 
 
+def test_crash_between_publication_and_turn_end_re_harvests_the_same_outcome(sw, monkeypatch):
+    """The process dies after the archive admitted the turn's entry but before `turn_end` was logged. The rerun
+    finds the run terminal, re-harvests the window and reports the SAME entry as published, with the same progress
+    signal (no duplicate entry, no lost progress). FAILS WITHOUT the re-harvest branch of archive._submit (it would
+    report `duplicate` and the stall signal would lose the accept) or the own-turn exclusion in _subjects."""
+    runner = ScriptRunner(sw, {(0, "a1"): lambda s, r: [s.lp()]})
+    c = cfg(problems=(LP_PROB,))
+    m = mode(sw, c, runner)
+    first = m.order(0)[0]
+    runner.script = {(0, first): lambda s, r: [s.lp()]}
+    real = m.log.append
+    died = {"done": False}
+
+    def dying(typ: str, payload: dict[str, Any]) -> None:
+        if typ == "turn_end" and not died["done"]:
+            died["done"] = True
+            raise KeyboardInterrupt
+        real(typ, payload)
+
+    monkeypatch.setattr(m.log, "append", dying)
+    with pytest.raises(KeyboardInterrupt):
+        m.run()
+    assert len(m.archive.entries()) == 1
+    m2 = mode(sw, c, runner)
+    m2.run()
+    assert codes(m2, (0, first)) == [PubCode.PUBLISHED.value]
+    assert ends(m2)[(0, first)]["signal"]["accepted"] is True
+    assert len(m2.archive.entries()) == 1
+    assert [x[0] for x in runner.calls if x[1] == 0 and x[2] == first] == ["start"]  # never re-run
+
+
 def test_orchestration_is_deterministic_given_seeds(sw, tmp_path):
     """Same config and seeds in two fresh stores -> the same schedule (order, problems, seeds, lanes, caps).
     FAILS WITHOUT seeded ordering/seeds (e.g. Python's hash randomisation or wall-clock in the schedule)."""

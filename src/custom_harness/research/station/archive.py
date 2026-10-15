@@ -254,9 +254,11 @@ class StationArchive:
     def _writer(self, w: TurnWindow) -> str:
         return f"station:{self.mode_id}:agent:{w.agent}"
 
-    def _subjects(self) -> set[tuple[str, str]]:
+    def _subjects(self, w: TurnWindow) -> set[tuple[str, str]]:
         """(metric, subject hash) of every READABLE POSITIVE entry: the stall signal's novelty (a result already in
-        the archive is no progress; one whose entry was rejected or revoked may be published again as new)."""
+        the archive is no progress; one whose entry was rejected or revoked may be published again as new). Entries
+        of THIS turn (same author and round) are left out, so re-harvesting a turn after a crash between its
+        publication and its `turn_end` record gives the same signal."""
         out = set()
         for rec in self.store.log():
             if rec["type"] != "propose":
@@ -264,8 +266,12 @@ class StationArchive:
             p = rec["entry"]["proposal"]
             d = p.get("data")
             claim = d.get("claim") if isinstance(d, dict) else None
-            if (p.get("kind") == Kind.POSITIVE.value and isinstance(claim, dict)
-                    and self.store.status(rec["entry_id"]) in READABLE):
+            if not (p.get("kind") == Kind.POSITIVE.value and isinstance(claim, dict)):
+                continue
+            assert isinstance(d, dict)
+            if d.get("author") == w.agent and d.get("round") == w.round:
+                continue
+            if self.store.status(rec["entry_id"]) in READABLE:
                 out.add((str(claim.get("metric", "")), str(claim.get("subject", ""))))
         return out
 
@@ -283,7 +289,7 @@ class StationArchive:
         prior = sorted(set(prior_exposure))
         parent_ids = tuple(dict.fromkeys(p for p in parents if isinstance(p, str)))[:MAX_PARENTS]
         values = heldout_values(self.kernel)
-        seen_subjects = self._subjects()
+        seen_subjects = self._subjects(w)
         policy = dict(author_policy or {})
         out: list[Publication] = []
         for h in certs:
@@ -389,9 +395,18 @@ class StationArchive:
         except (KeyError, TypeError):
             existed = False
         if existed:
-            return Publication(h, kind.value, PubCode.DUPLICATE, eid, label=label)
+            # the same content (it names this author, round and certificate) is only proposed again when this turn
+            # is re-harvested after a crash: report the earlier outcome; a quarantined one (the gate could not run)
+            # goes through the gate now
+            status = self.store.status(eid)
+            if status in READABLE:
+                return Publication(h, kind.value, PubCode.PUBLISHED, eid, ("re-harvested",), label=label)
+            if status != Status.QUARANTINED:
+                return Publication(h, kind.value, PubCode.DUPLICATE, eid, (f"earlier outcome {status.value}",),
+                                   label=label)
         try:
-            res = self.store.submit(prop, writer=self._writer(w), secrets=secrets)
+            res = (self.store.admit(eid, secrets=secrets) if existed
+                   else self.store.submit(prop, writer=self._writer(w), secrets=secrets))
         except MemoryRefused as e:
             cats = str(e).split(":", 1)[-1].split(";")
             return Publication(h, kind.value, PubCode.SCREEN_REFUSED, None,
