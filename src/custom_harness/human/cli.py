@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ..store import EvidenceStore
-from .guard import HumanActionRefused, check_human_name, require_tty
+from .guard import HumanActionRefused, check_human_name, inside_run_step, require_tty
 
 CONFIRM_CHARS = 12
 
@@ -157,14 +157,17 @@ _LEGACY_ACTOR_ATTRS: dict[str, tuple[str, ...]] = {
     "approve": ("approver",), "approve-adapter": ("approver",), "approve-role": ("approver",),
     "alpha": ("approver",), "approve-statement": ("approver",), "finalize": ("approver",), "kill": ("by",),
     "tier-policy": ("by",), "salts-reveal": ("by",), "memory": ("by",), "feature-rulings-migrate": ("by",),
-    "rule-feature": ("approver",), "audit": ("approver", "recorded_by"),
+    "rule-feature": ("approver",), "audit": ("approver", "recorded_by"), "return-data": (),
 }
 
 
 def check_legacy_actor(a: argparse.Namespace, store: EvidenceStore) -> None:
     """Agent-name refusal for the older human commands, and the optional hash bindings (SystemExit on refusal)."""
     try:
-        for attr in _LEGACY_ACTOR_ATTRS.get(str(getattr(a, "cmd", "")), ()):
+        cmd = str(getattr(a, "cmd", ""))
+        if (cmd in _LEGACY_ACTOR_ATTRS or cmd in COMMANDS) and inside_run_step():
+            raise HumanActionRefused(f"`chh {cmd}` is a human action and cannot run from inside a run step")
+        for attr in _LEGACY_ACTOR_ATTRS.get(cmd, ()):
             name = getattr(a, attr, None)
             if isinstance(name, str) and name.strip():
                 check_human_name(name, what=f"--{attr.replace('_', '-')}")
