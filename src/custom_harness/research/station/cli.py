@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ import yaml
 from pydantic import ValidationError
 
 from ...config import data_dir
+from ...kernel import Kernel, SandboxReplayer
 from ...policy import PolicyError
 from ...runtime import HarnessSpec
 from ...store import EvidenceStore
@@ -62,8 +64,7 @@ def load(config: Path) -> tuple[ModeConfig, HarnessSpec]:
     return ModeConfig.model_validate(doc["mode"]), spec
 
 
-def _runner(cfg: ModeConfig, spec: HarnessSpec, store: EvidenceStore, a: Any) -> EngineRunner:
-    from ...cli import _backend  # local import: the root CLI imports this module
+def _factory(a: Any) -> Any:
     from ...sandbox import LocalSandbox, Sandbox
 
     def factory(ws: Path) -> Sandbox:
@@ -73,17 +74,32 @@ def _runner(cfg: ModeConfig, spec: HarnessSpec, store: EvidenceStore, a: Any) ->
         if getattr(a, "dev_sandbox", False):  # the root CLI refuses this flag outside the test mode
             return LocalSandbox(ws, i_understand_no_isolation=True)
         raise StationError("agent code runs only in a sandbox: pass --docker")
+    return factory
 
+
+def _runner(cfg: ModeConfig, spec: HarnessSpec, store: EvidenceStore, a: Any) -> EngineRunner:
+    from ...cli import _backend  # local import: the root CLI imports this module
     backends = {ag.id: {role: _backend(kind) for role, kind in sorted(ag.roles.items())} for ag in cfg.agents}
-    return EngineRunner(store, spec, backends, sandbox_factory=factory, workdir=data_dir() / "station",
+    return EngineRunner(store, spec, backends, sandbox_factory=_factory(a), workdir=data_dir() / "station",
                         allow_same_family=cfg.allow_same_family)
+
+
+def _kernel(store: EvidenceStore, a: Any) -> Kernel:
+    """The archive's gate re-derives every certificate (Kernel.verify), which re-executes data claims (K3): with a
+    sandbox chosen the Kernel gets a sandbox replayer, as research.certify's does. Without one (status, archive,
+    verify, revoke) it has none: those commands re-derive nothing."""
+    if not (getattr(a, "docker", False) or getattr(a, "dev_sandbox", False)):
+        return Kernel(store)
+    factory = _factory(a)
+    root = data_dir() / "station" / "replay"
+    return Kernel(store, replayer=SandboxReplayer(lambda key: factory(root / f"{key}-{uuid.uuid4().hex[:8]}")))
 
 
 def cmd_research(a: Any, store: EvidenceStore) -> int:
     try:
         cfg, spec = load(a.config)
         runner = _runner(cfg, spec, store, a)
-        mode = StationMode(store, cfg, runner, spec_hash=runner.spec_hash)
+        mode = StationMode(store, cfg, runner, spec_hash=runner.spec_hash, kernel=_kernel(store, a))
         if a.multi_cmd == "run":
             if not (getattr(a, "docker", False) or getattr(a, "dev_sandbox", False)):
                 raise StationError("agent code runs only in a sandbox: pass --docker")
