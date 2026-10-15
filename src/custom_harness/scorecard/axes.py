@@ -86,13 +86,18 @@ def axis_g(facts: dict[str, Any]) -> dict[str, Any]:
     if not runs:
         return {"status": "not measured", "total_cost": _unmeasured("no runs in this store")}
     run_refs = [r["ref"] for r in runs]
-    total = {u: sum(float(r["cost"][u]) for r in runs) for u in ("usd", "gpu_hours", "quota_units", "tokens")}
+    # USD unknown (a subscription, open-weights or unpriced call: facts record usd None) is shown as "unknown",
+    # never summed as 0 (s3-report finding; scorecard/local_axes.py does the same)
+    usd_unknown = sorted(r["ref"] for r in runs if r["cost"].get("usd") is None)
+    total: dict[str, Any] = {u: sum(float(r["cost"][u]) for r in runs) for u in ("gpu_hours", "quota_units", "tokens")}
+    total["usd"] = "unknown" if usd_unknown else sum(float(r["cost"]["usd"]) for r in runs)
     estimated = any(r["cost"]["estimated"] for r in runs)
-    out["total_cost"] = _metric(total, run_refs, estimated=estimated, runs=len(runs))
+    out["total_cost"] = _metric(total, run_refs, estimated=estimated, runs=len(runs), runs_usd_unknown=usd_unknown)
     if certs:
-        out["cost_per_certified_claim"] = _metric({u: v / len(certs) for u, v in total.items()},
-                                                  run_refs + [c["ref"] for c in certs], certified_claims=len(certs),
-                                                  estimated=estimated)
+        out["cost_per_certified_claim"] = _metric(
+            {u: (v / len(certs) if isinstance(v, (int, float)) else v) for u, v in total.items()},
+            run_refs + [c["ref"] for c in certs], certified_claims=len(certs), estimated=estimated,
+            runs_usd_unknown=usd_unknown)
     else:
         out["cost_per_certified_claim"] = _unmeasured("0 Kernel-certified claims: cost per certified claim is "
                                                       "undefined (all spend bought no certified claim)")
