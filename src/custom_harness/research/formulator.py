@@ -39,9 +39,16 @@ How it works (every step is deterministic code; no model call):
    file whose bytes equal a file of a held-out dataset (relabelled held-out data), BEFORE fetching any bytes. It reads
    only public dev files (`read_public`); it has no code path that reads a private file.
 
-Not built (honest): literature-mined problems and failed replications (GOAL L4.1 lists them) need the literature
-graph; no offline fixtures of open problems exist in this repository, so this module mines data anomalies only.
-Not wired into the research loop yet (no `research.formulate` node): see the mailbox post for the hooks it needs.
+5. **Literature-mined problems** (`mine_literature`): anomalies, open problems and failed replications stated in
+   the stored abstracts of papers THIS run retrieved (retrieval-log provenance; offline from a frozen, dated
+   snapshot, never the network), by a declared cue lexicon (lexical, no model). Each is a `ProblemProposal` with NO
+   tier field; `rank_problems` ranks every candidate (data scan + literature) by the same priority, computing every
+   tier from the adapter registry (`best_available_tier_for`, K1's `resolve`), so a problem nothing approved can
+   verify ranks at priority 0, below every verifiable one.
+
+Wired into research_v2 as the optional first stage `research.formulate` (research/front.py), off by default (spec
+flag `enabled`); it makes no model call. Limits (stated): the lexicon finds what papers SAY, not whether it is true;
+the knowledge "graph" is the retrieved record set of one run, not a citation graph.
 """
 
 from __future__ import annotations
@@ -52,7 +59,9 @@ import io
 import json
 import math
 import random
+import re
 import statistics
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations, pairwise
 from typing import Any, Literal
@@ -415,24 +424,160 @@ def formulate(grammar: CellGrammar, header: list[str], rows: list[list[str]], *,
                              dev_dataset_id=dev_dataset_id, grammar_seq=grammar_seq)
 
 
-# ---------------------------------------------------------------- vault entry point
+# ---------------------------------------------------------------- verifier tier (from the adapter registry only)
+#: The strongest tier a claim of each evidence class can reach WHEN a human-approved adapter serves it (GOAL §4.7).
+#: Simulated claims hold "T1/T2 within the simulator": the weaker one is used (conservative). A class with no
+#: approved adapter gets T6 whatever this table says: the tier is never read from a model or a proposal.
+CLASS_TIER: dict[str, Tier] = {"formal": Tier.T0_FORMAL, "computational": Tier.T1_EXECUTABLE,
+                               "data": Tier.T2_STATISTICAL, "simulated": Tier.T2_STATISTICAL,
+                               "physical": Tier.T3_PHYSICAL}
+
+
+def best_available_tier_for(ledger: Any, evidence_class: str, metric: str | None = None) -> Tier:
+    """The class's tier if a human-approved adapter serves (class, metric) NOW (K1's own `adapters.resolve`), else
+    T6. With metric None, any metric a registered adapter of that class declares will do."""
+    from ..kernel import EvidenceClass
+    from ..kernel.adapters import REGISTRY, resolve
+    cls = EvidenceClass(evidence_class)
+    metrics = [metric] if metric is not None else sorted(
+        {m for spec, _ in REGISTRY.values() if cls in spec.classes for m in spec.metrics})
+    for m in metrics:
+        adapter, _ = resolve(ledger, cls, m)
+        if adapter is not None:
+            return CLASS_TIER[cls.value]
+    return Tier.T6_NONE
+
+
 def best_available_tier(ledger: Any, metric: str) -> Tier:
     """T2 if a human-approved adapter serves data claims on `metric` now (K1's resolve), else T6."""
-    from ..kernel import EvidenceClass
-    from ..kernel.adapters import resolve
-    adapter, _ = resolve(ledger, EvidenceClass.DATA, metric)
-    return Tier.T2_STATISTICAL if adapter is not None else Tier.T6_NONE
+    return best_available_tier_for(ledger, "data", metric)
 
 
-def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellGrammar, *,
-                         metric: str | None = None, baseline_predictions: list[str] | None = None,
-                         n_confirm: int | None = None, config: L4Config = DEFAULTS) -> FormulationResult:
-    """Scan one PUBLIC file of a DEV dataset in the vault. Refused, before any byte is fetched: a dataset whose role
-    is not dev; a private file; a file whose bytes equal any file of a held-out dataset. The grammar is committed to
-    the ledger first (`register_artifact`, kind `formulator-grammar`), so the record shows it preceded the scan."""
+# ---------------------------------------------------------------- literature-mined problems (no model, no network)
+#: Declared cue lexicon (UNCALIBRATED, owner decision GOAL §13.8). A sentence of a retrieved paper's stored abstract
+#: that contains a cue (case-insensitive substring) is mined VERBATIM as a problem of that kind. Mining is lexical:
+#: it finds what papers SAY is open, anomalous or unreplicated; it does not judge whether they are right.
+LIT_CUES: dict[str, tuple[str, ...]] = {
+    "failed_replication": ("failed to replicate", "fail to replicate", "could not reproduce", "could not be reproduced",
+                           "did not replicate", "does not replicate", "failed replication", "not reproducible"),
+    "anomaly": ("unexpected", "surprising", "anomal", "contrary to", "unexplained", "paradox"),
+    "open_problem": ("remains open", "open problem", "open question", "remains unclear", "remains unknown",
+                     "it is unclear", "is not known"),
+}
+#: value in [0, 1] per kind (UNCALIBRATED, owner decision GOAL §13.8): a failed replication is the most valuable
+#: (a published effect may be wrong), then an anomaly, then a stated open problem.
+LIT_VALUE: dict[str, float] = {"failed_replication": 1.0, "anomaly": 0.8, "open_problem": 0.6}
+#: evidence class of a mined problem, from declared cue words (first match in this order; default "data").
+LIT_CLASS_CUES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("formal", ("theorem", "proof", "conjecture", "lemma")),
+    ("computational", ("linear program", "integer program", "optimal solution", "exact solver")),
+    ("physical", ("wet lab", "in vivo", "in vitro", "assay", "bench test")),
+    ("simulated", ("simulation", "simulator", "simulated")),
+)
+#: feasibility in [0, 1] (UNCALIBRATED, owner decision GOAL §13.8): the research loop executes DATA experiments; a
+#: problem of another class needs a different loop, so it ranks lower even when its class is verifiable.
+LIT_FEASIBILITY: dict[str, float] = {"data": 1.0, "formal": 0.25, "computational": 0.25, "simulated": 0.25,
+                                     "physical": 0.25}
+
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+class ProblemProposal(_Frozen):
+    """A candidate problem from any source OTHER than the dev scan (literature mining today). It has NO tier field
+    (extra fields are refused): its tier is computed from the adapter registry by `rank_problems`, never supplied."""
+
+    id: str
+    source: Literal["literature"]
+    kind: Literal["failed_replication", "anomaly", "open_problem"]
+    description: str
+    evidence_class: Literal["formal", "computational", "data", "simulated", "physical"]
+    metric: str | None = None
+    value: float = Field(ge=0, le=1)
+    feasibility: float = Field(ge=0, le=1)
+    cites: tuple[str, ...] = ()  # retrieval-log ids of the paper(s) the problem was mined from
+    quote: str | None = None  # the verbatim sentence
+
+
+class RankedProblem(_Frozen):
+    id: str
+    source: Literal["data", "literature"]
+    kind: str
+    description: str
+    evidence_class: str
+    tier: int
+    tier_weight: float
+    value: float
+    feasibility: float
+    priority: float
+    cites: tuple[str, ...] = ()
+    status: Literal["hypothesis"] = "hypothesis"
+
+
+def _class_of(sentence: str) -> str:
+    low = sentence.lower()
+    return next((cls for cls, cues in LIT_CLASS_CUES if any(c in low for c in cues)), "data")
+
+
+def mine_literature(records: Sequence[Mapping[str, Any]], retrieved_ids: Collection[str]) -> list[ProblemProposal]:
+    """Problems stated in the stored abstracts of RETRIEVED papers (a record none of whose ids is in this run's
+    retrieval log is skipped: provenance, GOAL L4.3). Records are {ids, title, abstract}. Deterministic: the output
+    depends only on the records' content (sorted by id), not on their order."""
+    out: dict[str, ProblemProposal] = {}
+    for rec in records:
+        ids = tuple(sorted(i for i in rec.get("ids") or () if i in retrieved_ids))
+        text = rec.get("abstract")
+        if not ids or not isinstance(text, str):
+            continue
+        for sent in (s.strip() for s in _SENTENCE.split(text)):
+            low = sent.lower()
+            kind = next((k for k, cues in LIT_CUES.items() if any(c in low for c in cues)), None)
+            if kind is None:
+                continue
+            cls = _class_of(sent)
+            pid = "lp-" + hashlib.sha256(f"{ids}|{kind}|{sent}".encode()).hexdigest()[:12]
+            out[pid] = ProblemProposal(
+                id=pid, source="literature", kind=kind,  # type: ignore[arg-type]
+                description=f"{kind.replace('_', ' ')} stated in {ids[0]} ({rec.get('title') or 'untitled'}): "
+                            f"\"{sent}\"",
+                evidence_class=cls,  # type: ignore[arg-type]
+                value=LIT_VALUE[kind], feasibility=LIT_FEASIBILITY[cls], cites=ids, quote=sent)
+    return [out[k] for k in sorted(out)]
+
+
+def rank_problems(ledger: Any, proposals: Sequence[ProblemProposal], data_candidates: Sequence[CandidateProblem],
+                  *, data_metric: str | None = None, config: L4Config = DEFAULTS) -> list[RankedProblem]:
+    """One ranking of every candidate problem by priority = tier_weight(best AVAILABLE verifier tier) x value x
+    feasibility, then id (deterministic; the input order does not matter). Every tier is computed here from the
+    adapter registry: data-scan candidates are re-resolved for (data, `data_metric`), proposals for their class (and
+    metric). A problem no approved adapter can verify gets T6, weight 0, priority 0: it is listed (the gap is
+    visible) and ranks below every verifiable problem with a positive value and feasibility."""
+    out: list[RankedProblem] = []
+    for p in proposals:
+        p = ProblemProposal.model_validate(p.model_dump())  # re-validate (model_copy skips validation)
+        tier = best_available_tier_for(ledger, p.evidence_class, p.metric)
+        tw = config.tier_weights[int(tier)]
+        out.append(RankedProblem(id=p.id, source=p.source, kind=p.kind, description=p.description,
+                                 evidence_class=p.evidence_class, tier=int(tier), tier_weight=tw, value=p.value,
+                                 feasibility=p.feasibility, priority=tw * p.value * p.feasibility, cites=p.cites))
+    data_tier = (best_available_tier_for(ledger, "data", data_metric) if data_metric is not None
+                 else Tier.T6_NONE)
+    for c in data_candidates:
+        tw = config.tier_weights[int(data_tier)]
+        out.append(RankedProblem(id=c.id, source="data", kind=c.kind, description=c.description,
+                                 evidence_class="data", tier=int(data_tier), tier_weight=tw, value=c.value,
+                                 feasibility=c.feasibility, priority=tw * c.value * c.feasibility))
+    out.sort(key=lambda r: (-r.priority, r.tier, r.id))
+    return out
+
+
+# ---------------------------------------------------------------- vault entry point
+
+
+def check_dev_public(vault: Any, dataset_id: str, file: str) -> None:
+    """The Formulator's read guards (no byte is fetched): the dataset's role is dev, the file is public, and its
+    bytes equal no held-out file (relabelled held-out data). Raises FormulatorError."""
     from ..kernel import DatasetRole
     from ..kernel.vault import HELD_OUT_ROLES
-    vault = kernel.vault
     rec = vault.dataset(dataset_id)
     if rec.role != DatasetRole.DEV:
         raise FormulatorError(f"{dataset_id!r} has role {rec.role.value!r}: the Formulator scans dev data only")
@@ -444,6 +589,16 @@ def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellG
     held_blobs = {f.blob for d in vault.datasets().values() if d.role in HELD_OUT_ROLES for f in d.files.values()}
     if ref.blob in held_blobs:
         raise FormulatorError(f"{dataset_id}/{file} has the same bytes as a held-out file: refused")
+
+
+def formulate_from_vault(kernel: Any, dataset_id: str, file: str, grammar: CellGrammar, *,
+                         metric: str | None = None, baseline_predictions: list[str] | None = None,
+                         n_confirm: int | None = None, config: L4Config = DEFAULTS) -> FormulationResult:
+    """Scan one PUBLIC file of a DEV dataset in the vault. Refused, before any byte is fetched: a dataset whose role
+    is not dev; a private file; a file whose bytes equal any file of a held-out dataset. The grammar is committed to
+    the ledger first (`register_artifact`, kind `formulator-grammar`), so the record shows it preceded the scan."""
+    vault = kernel.vault
+    check_dev_public(vault, dataset_id, file)
     body = json.dumps(grammar.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
     art = vault.register_artifact(f"formulator-grammar@{grammar.digest()[:16]}", body, "formulator-grammar")
     table = list(csv.reader(io.StringIO(vault.read_public(dataset_id, file).decode("utf-8-sig"), newline="")))

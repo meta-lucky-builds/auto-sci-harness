@@ -49,7 +49,17 @@ Rules enforced here (each refusal raises a `TreeRefusal` with a closed `Code` AN
    from the root only `tune`; from a `tune` node `tune` or `creative`; from `creative` `creative` or `ablation`; from
    `ablation` only `ablation` (`CURRICULUM_ORDER`). A `tune` option keeps its round parent's code (only the config
    differs), on `add_option` and on every `edit` (`CURRICULUM_ORDER`). A tree without the curriculum refuses stage
-   labels (`ROUND_INVALID`): a label nobody enforces would claim an order that was not kept.
+   labels (`ROUND_INVALID`): a label nobody enforces would claim an order that was not kept. Rounds off the root may
+   be `draft` rounds (first implementations; they start no stage). Two modes, fixed in the create event:
+   - `stage_rule`: `declared` (the caller picks within the order above) or `evidence`: the stage is decided by CODE
+     from the tree's own log (`next_stage`): from the root `draft`; from a node, its own stage (a draft node: `tune`),
+     moved on while that stage has plateaued at the node: STAGE_PATIENCE failed rounds (decided with no confirmed
+     winner although an option was answered, i.e. dev racing found no confirmed improvement) opened from it, or
+     STAGE_MAX_ROUNDS rounds at that stage along its lineage. A declared stage that differs is `CURRICULUM_ORDER`;
+     a replay recomputes it. Nothing a model writes (code, notes, config) is an input, so a model cannot advance it.
+   - `tune_match`: `code` (a tune option keeps the parent's code hash) or `literals` (it keeps the parent's program
+     skeleton, `code_skeleton`: only literal values differ; for script candidates that have no config channel).
+     Every node's code is stored as a blob so the check (and its replay) reads the real code.
 
 Storage: the log is an append-only, hash-chained event list in the evidence store's `records` table (kind
 `exptree`), one record per event. `ExperimentTree.load` replays the log through the SAME checks, so a forged,
@@ -58,7 +68,8 @@ Kernel ledger kind for tree events (requested in the build16 mailbox); this is N
 
 Logs written before rules 6-8 existed replay unchanged: a create event without `curriculum`/`revive_theta` gets the
 defaults, and an answer without a snapshot hashes exactly as before (the `snapshot` key is added only when present).
-Rules 6-8 are NOT yet used by research/modules.py (it opens untyped rounds, passes no snapshot and never revives).
+Rules 6-8 are used by research/modules.py behind spec flags (run node `backtrack`, `curriculum`; next node `revive`;
+all default off): see docs/tree_extras.md.
 
 Wired into the research loop by research/modules.py (`run_candidate`, `next_hypothesis`, `ensemble`) and into the
 run report by research/claims.py (`report` logs `report()`, `render_report` includes `report_lines()`).
@@ -91,7 +102,13 @@ REVIVE_THETA = 0.9  # UNCALIBRATED (owner decision, GOAL §13.8): P(improvement)
 REVIVE_N_BOOT = 2000  # UNCALIBRATED (owner decision, GOAL §13.8): paired example resamples behind P(improvement)
 REVIVE_SEED = 0  # fixed, so a replay recomputes the same P(improvement)
 
+STAGE_PATIENCE = 1  # UNCALIBRATED (owner decision, GOAL §13.8): failed rounds at a stage from a node, then move on
+STAGE_MAX_ROUNDS = 3  # UNCALIBRATED (owner decision, GOAL §13.8): rounds at a stage along a lineage, then move on
+
 STAGES = ("tune", "creative", "ablation")  # the curriculum, in order (L4.7; AI-Scientist v2)
+DRAFT = "draft"  # rule 8: a curriculum tree's rounds off the root (first implementations); before the curriculum
+STAGE_RULES = ("declared", "evidence")  # rule 8: who picks the stage of a round (the caller, or code from the log)
+TUNE_MATCH = ("code", "literals")  # rule 8: what a tune option must keep of its parent (the code, or its skeleton)
 
 RECORD_KIND = "exptree"  # records table, until a Kernel ledger kind exists (kstats)
 GENESIS = "0" * 64
@@ -243,6 +260,25 @@ def _content(n: _Node, answer: _Attempt) -> dict[str, Any]:
     return c
 
 
+def code_skeleton(code: bytes | str) -> str | None:
+    """The program with every literal's VALUE erased (its type kept): two programs with the same skeleton differ only in
+    numeric / string / boolean / bytes constants, i.e. in hyperparameter values. Comments and layout do not count
+    (they are not in the AST). None if the code does not parse (then only byte-identical code keeps the skeleton).
+    Stated limit: a literal can still select a code path (`if 0:` -> `if 1:`); "config-only" means "literals only"."""
+    import ast
+    try:
+        tree = ast.parse(code.decode("utf-8") if isinstance(code, bytes) else code)
+    except (SyntaxError, ValueError, UnicodeDecodeError):
+        return None
+
+    class _Erase(ast.NodeTransformer):
+        def visit_Constant(self, node: ast.Constant) -> ast.AST:
+            # a Name whose id is not an identifier never comes out of ast.parse, so no source text can collide with it
+            return ast.copy_location(ast.Name(id=f"<literal:{type(node.value).__name__}>", ctx=ast.Load()), node)
+
+    return hashlib.sha256(ast.dump(_Erase().visit(tree), include_attributes=False).encode()).hexdigest()
+
+
 def _tree_of(manifest: dict[str, Any]) -> dict[str, Any]:
     """What a byte-exact restore must reproduce: each file's blob and mode, symlinks, empty directories (not the
     filesystem timestamps, which a restore cannot and need not keep)."""
@@ -276,6 +312,7 @@ class ExperimentTree:
         self.metric, self.higher_is_better, self.labels_sha = "", True, ""
         self.max_repairs = MAX_REPAIRS
         self.curriculum, self.revive_theta, self.revive_n_boot = False, REVIVE_THETA, REVIVE_N_BOOT
+        self.stage_rule, self.tune_match = "declared", "code"
         self.nodes: dict[str, _Node] = {}
         self.rounds: dict[str, _Round] = {}
         self.root: str | None = None
@@ -287,18 +324,24 @@ class ExperimentTree:
     def create(cls, store: Any, tree_id: str, contract: RunContract, *, root_code: bytes | str,
                root_config: dict[str, Any], metric: str, higher_is_better: bool,
                dev_labels: list[str], max_repairs: int = MAX_REPAIRS, curriculum: bool = False,
-               revive_theta: float = REVIVE_THETA) -> ExperimentTree:
+               revive_theta: float = REVIVE_THETA, stage_rule: str = "declared",
+               tune_match: str = "code") -> ExperimentTree:
         """`max_repairs` is the ONE repair cap of the tree (research_v1/v2 pass their `run` node's `max_fixes`);
-        it is fixed in the create event, so a replay applies the same cap. `curriculum` (rule 8) and `revive_theta`
-        (rule 7) are fixed there too."""
+        it is fixed in the create event, so a replay applies the same cap. `curriculum`, `stage_rule`, `tune_match`
+        (rule 8) and `revive_theta` (rule 7) are fixed there too. The root's code is stored as a blob (rule 8's
+        `literals` tune check reads it back)."""
         if store.records_where(RECORD_KIND, "tree", tree_id):
             raise TreeRefusal(Code.BAD_EVENT, f"tree {tree_id!r} already exists")
+        store.blobs.put(root_code.encode() if isinstance(root_code, str) else root_code)
         t = cls(store, tree_id)
-        t._commit({"op": "create", "contract": contract.to_json(), "root_code_hash": code_hash(root_code),
-                   "root_config": root_config, "metric": metric, "higher_is_better": higher_is_better,
-                   "labels_sha": _sha(list(dev_labels)), "max_repairs": int(max_repairs),
-                   "curriculum": bool(curriculum), "revive_theta": float(revive_theta),
-                   "revive_n_boot": REVIVE_N_BOOT})
+        ev: dict[str, Any] = {"op": "create", "contract": contract.to_json(), "root_code_hash": code_hash(root_code),
+                              "root_config": root_config, "metric": metric, "higher_is_better": higher_is_better,
+                              "labels_sha": _sha(list(dev_labels)), "max_repairs": int(max_repairs),
+                              "curriculum": bool(curriculum), "revive_theta": float(revive_theta),
+                              "revive_n_boot": REVIVE_N_BOOT}
+        if (stage_rule, tune_match) != ("declared", "code"):  # only when set: earlier create events replay unchanged
+            ev.update(stage_rule=stage_rule, tune_match=tune_match)
+        t._commit(ev)
         return t
 
     @classmethod
@@ -394,7 +437,14 @@ class ExperimentTree:
         nb = ev.get("revive_n_boot", REVIVE_N_BOOT)  # logs written before it was pinned used the module default
         if isinstance(nb, bool) or not isinstance(nb, int) or nb < 1:
             raise TreeRefusal(Code.BAD_EVENT, f"revive_n_boot must be a positive integer, not {nb!r}")
+        rule, match = ev.get("stage_rule", "declared"), ev.get("tune_match", "code")  # absent before rule 8's modes
+        if rule not in STAGE_RULES or match not in TUNE_MATCH:
+            raise TreeRefusal(Code.BAD_EVENT, f"stage_rule must be one of {STAGE_RULES} and tune_match one of "
+                                              f"{TUNE_MATCH}, not {rule!r} / {match!r}")
+        if (rule, match) != ("declared", "code") and not cur:
+            raise TreeRefusal(Code.BAD_EVENT, "stage_rule / tune_match only apply to a tree with the curriculum")
         self.curriculum, self.revive_theta, self.revive_n_boot = cur, float(th), nb
+        self.stage_rule, self.tune_match = str(rule), str(match)
         self.root = "root"
         self.nodes["root"] = _Node("root", None, None, ev["root_code_hash"], dict(ev["root_config"]))
         return {"node": "root"}
@@ -412,17 +462,55 @@ class ExperimentTree:
         if not str(ev.get("decision", "")).strip():
             raise TreeRefusal(Code.ROUND_INVALID, "a round names the ONE decision its options differ on")
         stage = ev.get("stage")
+        auto = self.curriculum and self.stage_rule == "evidence" and stage is None
+        if auto:  # the code-decided stage; it is logged, and a replay recomputes it
+            stage = self.next_stage(parent.id)
         self._check_stage(parent, stage)
         rid = f"r{len(self.rounds) + 1}"
         self.rounds[rid] = _Round(rid, parent.id, str(ev["decision"]), stage=stage)
-        return {"round": rid}
+        return {"round": rid, "stage": stage, **({"_log": {"stage": stage}} if auto else {})}
 
     def _lineage_stage(self, node: _Node) -> int:
-        """Index in STAGES of the round `node` belongs to (-1 for the root)."""
+        """Index in STAGES of the round `node` belongs to (-1 for the root, a draft round or an unstaged round)."""
         if node.round is None:
             return -1
         stage = self.rounds[node.round].stage
-        return STAGES.index(stage) if stage is not None else -1
+        return STAGES.index(stage) if stage in STAGES else -1
+
+    def _failed_round(self, rnd: _Round) -> bool:
+        """Dev-racing evidence that a round did not improve on its parent: it is decided without a winner (no
+        provisional option left) and at least one option was answered (a round whose options all crashed is no
+        evidence about the stage, only about the implementations)."""
+        opts = [self.nodes[o] for o in rnd.options]
+        return (rnd.winner is None and bool(opts) and all(o.status != "provisional" for o in opts)
+                and any(o.status == "answered" for o in opts))
+
+    def stage_evidence(self, parent_id: str, stage: str) -> dict[str, Any]:
+        """The ledgered evidence rule 8's `evidence` mode reads for `stage` at `parent_id`: failed rounds at that stage
+        opened from the node itself, and rounds at that stage along the node's lineage segment at that stage."""
+        segment, cur = [parent_id], self.nodes[parent_id]
+        while cur.round is not None and self.rounds[cur.round].stage == stage and cur.parent is not None:
+            cur = self.nodes[cur.parent]
+            segment.append(cur.id)
+        own = [r for r in self.rounds.values() if r.parent == parent_id and r.stage == stage]
+        spent = [r.id for r in self.rounds.values() if r.parent in segment and r.stage == stage]
+        failed = [r.id for r in own if self._failed_round(r)]
+        return {"stage": stage, "failed_rounds": failed, "rounds_in_lineage": spent,
+                "plateau": len(failed) >= STAGE_PATIENCE or len(spent) >= STAGE_MAX_ROUNDS}
+
+    def next_stage(self, parent_id: str) -> str:
+        """Rule 8, `evidence` mode: the stage of the next round from `parent_id`, decided by code from the tree's log
+        only (no caller, model or config input). From the root: `draft`. Otherwise start at the node's own stage (a
+        draft or unstaged node starts at `tune`) and move to the next stage while the current one has plateaued at
+        this node: STAGE_PATIENCE failed rounds (dev racing found no confirmed improvement) opened from it, or
+        STAGE_MAX_ROUNDS rounds at that stage along its lineage. `ablation` is terminal."""
+        node = self._node(parent_id)
+        if node.id == self.root:
+            return DRAFT
+        i = max(self._lineage_stage(node), 0)
+        while i < len(STAGES) - 1 and self.stage_evidence(node.id, STAGES[i])["plateau"]:
+            i += 1
+        return STAGES[i]
 
     def _check_stage(self, parent: _Node, stage: Any) -> None:
         if not self.curriculum:
@@ -430,9 +518,22 @@ class ExperimentTree:
                 raise TreeRefusal(Code.ROUND_INVALID, "this tree was not created with the curriculum; a stage label "
                                                       "would claim an order nobody enforced")
             return
+        if stage == DRAFT:
+            if parent.id != self.root:
+                raise TreeRefusal(Code.CURRICULUM_ORDER, f"a {DRAFT} round (first implementations) descends only from "
+                                                         f"the root, not from {parent.id}")
+            return
         if stage not in STAGES:
             raise TreeRefusal(Code.ROUND_INVALID, f"this tree enforces the curriculum {STAGES}; every round declares "
-                                                  f"one of them, not {stage!r}")
+                                                  f"one of them (or {DRAFT!r} off the root), not {stage!r}")
+        if self.stage_rule == "evidence":
+            due = self.next_stage(parent.id)
+            if stage != due:
+                ev = self.stage_evidence(parent.id, due) if due in STAGES else {}
+                raise TreeRefusal(Code.CURRICULUM_ORDER, f"{parent.id}: the stage is decided by code from the tree's "
+                                                         f"dev-racing evidence; it is {due!r}, not {stage!r} "
+                                                         f"(evidence: {ev})")
+            return
         at, new = self._lineage_stage(parent), STAGES.index(stage)
         if not max(at, 0) <= new <= at + 1:
             here = STAGES[at] if at >= 0 else "the root"
@@ -441,10 +542,27 @@ class ExperimentTree:
                                                      f"allows only {allowed} next, not {stage!r}")
 
     def _check_tune_code(self, rnd: _Round, code: str) -> None:
-        if rnd.stage == "tune" and code != self.nodes[rnd.parent].code_hash:
+        if rnd.stage != "tune":
+            return
+        parent_code = self.nodes[rnd.parent].code_hash
+        if code == parent_code:
+            return
+        if self.tune_match == "literals":
+            try:
+                a, b = self.store.blobs.get(parent_code), self.store.blobs.get(code)
+            except (OSError, KeyError, ValueError) as e:
+                raise TreeRefusal(Code.CURRICULUM_ORDER, f"round {rnd.id} is a tune round and the code is not stored, "
+                                                         f"so 'literals only' cannot be checked ({e})") from e
+            sa, sb = code_skeleton(a), code_skeleton(b)
+            if sa is not None and sa == sb:
+                return
             raise TreeRefusal(Code.CURRICULUM_ORDER, f"round {rnd.id} is a tune round: its options keep the parent's "
-                                                     f"code {self.nodes[rnd.parent].code_hash} and differ only in "
-                                                     f"config; a code change belongs in a creative round")
+                                                     f"program and change only literal values (hyperparameters); "
+                                                     f"this code changes its structure: that belongs in a creative "
+                                                     f"round")
+        raise TreeRefusal(Code.CURRICULUM_ORDER, f"round {rnd.id} is a tune round: its options keep the parent's "
+                                                 f"code {parent_code} and differ only in "
+                                                 f"config; a code change belongs in a creative round")
 
     def _op_add_option(self, ev: dict[str, Any]) -> dict[str, Any]:
         rnd = self.rounds.get(str(ev.get("round")))
@@ -685,16 +803,24 @@ class ExperimentTree:
 
     # ------------------------------------------------------------ public API
     def open_round(self, parent: str, decision: str, *, stage: str | None = None) -> str:
+        """In a curriculum tree with stage_rule `evidence`, leave `stage` None to get the code-decided stage (logged);
+        a declared stage must equal it."""
         ev: dict[str, Any] = {"op": "open_round", "parent": parent, "decision": decision}
         if stage is not None:  # only when declared: rounds logged before rule 8 replay unchanged
             ev["stage"] = stage
         return str(self._commit(ev)["round"])
 
+    def _store_code(self, code: bytes | str) -> str:
+        """Every node's code is a blob (content address = code hash), so rule 8's `literals` check can read it."""
+        return str(self.store.blobs.put(code.encode() if isinstance(code, str) else code))
+
     def add_option(self, round_id: str, decision: str, code: bytes | str, config: dict[str, Any]) -> str:
+        self._store_code(code)
         return str(self._commit({"op": "add_option", "round": round_id, "decision": decision,
                                  "code_hash": code_hash(code), "config": config})["node"])
 
     def edit(self, node_id: str, code: bytes | str, config: dict[str, Any], *, repair_of: int | None = None) -> None:
+        self._store_code(code)
         self._commit({"op": "edit", "node": node_id, "code_hash": code_hash(code), "config": config,
                       "repair_of": repair_of})
 
@@ -719,6 +845,14 @@ class ExperimentTree:
         """Exact backtracking (rule 6): restore `node_id`'s frozen workspace into `workspace`, verify it byte-exactly,
         log the backtrack and return the snapshot hash. Refusals (no frozen snapshot) are logged; a corrupted blob
         raises SnapshotError before the live workspace is touched."""
+        snap = self.restore(node_id, workspace)
+        self.log_checkout(node_id)
+        return snap
+
+    def restore(self, node_id: str, workspace: Path | str) -> str:
+        """The workspace half of `checkout`: restore and verify byte-exactly, but do NOT log the success yet (the
+        research loop does its sandbox work before its tree commits; it logs the backtrack with `log_checkout`).
+        Refusals are logged and raised like `checkout`'s."""
         self._stale_check()
         n = self.nodes.get(node_id)
         snap = n.snapshot if n is not None and n.status == "answered" else None
@@ -733,8 +867,13 @@ class ExperimentTree:
             self._append({"op": "refused", "code": Code.RESTORE_MISMATCH.value,
                           "attempted": {**ev, "restored": got}})
             raise TreeRefusal(Code.RESTORE_MISMATCH, f"{node_id}: the restored workspace differs from snapshot {snap}")
-        self._commit(ev)
         return snap
+
+    def log_checkout(self, node_id: str) -> None:
+        """Log a backtrack to `node_id`'s frozen snapshot (after `restore` verified it)."""
+        n = self.nodes.get(node_id)
+        self._commit({"op": "checkout", "node": node_id,
+                      "snapshot": n.snapshot if n is not None and n.status == "answered" else None})
 
     def p_improvement(self, node_id: str, dev_labels: list[str]) -> float:
         """P(improvement) of a node over its round parent (rule 7), without reviving it."""
@@ -826,9 +965,9 @@ class ExperimentTree:
 def _snapshot(t: ExperimentTree) -> Any:
     import copy
     return copy.deepcopy((t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root,
-                          t.max_repairs, t.curriculum, t.revive_theta, t.revive_n_boot))
+                          t.max_repairs, t.curriculum, t.revive_theta, t.revive_n_boot, t.stage_rule, t.tune_match))
 
 
 def _restore(t: ExperimentTree, s: Any) -> None:
     (t.contract, t.metric, t.higher_is_better, t.labels_sha, t.nodes, t.rounds, t.root, t.max_repairs,
-     t.curriculum, t.revive_theta, t.revive_n_boot) = s
+     t.curriculum, t.revive_theta, t.revive_n_boot, t.stage_rule, t.tune_match) = s

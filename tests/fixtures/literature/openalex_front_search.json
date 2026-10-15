@@ -1,0 +1,212 @@
+{
+ "meta": {
+  "count": 2,
+  "db_response_time_ms": 12,
+  "page": 1,
+  "per_page": 5,
+  "groups_count": null
+ },
+ "results": [
+  {
+   "id": "https://openalex.org/W4500000001",
+   "doi": "https://doi.org/10.5555/front.2022.001",
+   "title": "Radial Features for Ring-Shaped Classes",
+   "display_name": "Radial Features for Ring-Shaped Classes",
+   "publication_year": 2022,
+   "publication_date": "2022-05-01",
+   "ids": {
+    "openalex": "https://openalex.org/W4500000001",
+    "doi": "https://doi.org/10.5555/front.2022.001"
+   },
+   "authorships": [
+    {
+     "author_position": "first",
+     "author": {
+      "id": "https://openalex.org/A590000001",
+      "display_name": "Ada Quist"
+     },
+     "institutions": []
+    }
+   ],
+   "abstract_inverted_index": {
+    "We": [
+     0
+    ],
+    "propose": [
+     1
+    ],
+    "radial": [
+     2
+    ],
+    "features": [
+     3
+    ],
+    "because": [
+     4
+    ],
+    "ring-shaped": [
+     5
+    ],
+    "classes": [
+     6
+    ],
+    "are": [
+     7
+    ],
+    "separable": [
+     8
+    ],
+    "by": [
+     9
+    ],
+    "their": [
+     10
+    ],
+    "distance": [
+     11
+    ],
+    "from": [
+     12
+    ],
+    "the": [
+     13
+    ],
+    "origin.": [
+     14
+    ],
+    "A": [
+     15
+    ],
+    "reported": [
+     16
+    ],
+    "gain": [
+     17
+    ],
+    "of": [
+     18
+    ],
+    "4": [
+     19
+    ],
+    "points": [
+     20
+    ],
+    "failed": [
+     21
+    ],
+    "to": [
+     22
+    ],
+    "replicate": [
+     23
+    ],
+    "on": [
+     24
+    ],
+    "data": [
+     25
+    ],
+    "with": [
+     26
+    ],
+    "noise": [
+     27,
+     30
+    ],
+    "columns.": [
+     28
+    ],
+    "Why": [
+     29
+    ],
+    "columns": [
+     31
+    ],
+    "hurt": [
+     32
+    ],
+    "nearest": [
+     33
+    ],
+    "neighbours": [
+     34
+    ],
+    "remains": [
+     35
+    ],
+    "open.": [
+     36
+    ]
+   },
+   "relevance_score": 50.0
+  },
+  {
+   "id": "https://openalex.org/W4500000002",
+   "doi": "https://doi.org/10.5555/front.2023.002",
+   "title": "A Conjecture on Margin Bounds for Rings",
+   "display_name": "A Conjecture on Margin Bounds for Rings",
+   "publication_year": 2023,
+   "publication_date": "2023-02-01",
+   "ids": {
+    "openalex": "https://openalex.org/W4500000002",
+    "doi": "https://doi.org/10.5555/front.2023.002"
+   },
+   "authorships": [
+    {
+     "author_position": "first",
+     "author": {
+      "id": "https://openalex.org/A590000002",
+      "display_name": "Bo Lindgren"
+     },
+     "institutions": []
+    }
+   ],
+   "abstract_inverted_index": {
+    "We": [
+     0
+    ],
+    "state": [
+     1
+    ],
+    "a": [
+     2
+    ],
+    "conjecture": [
+     3
+    ],
+    "on": [
+     4
+    ],
+    "margin": [
+     5
+    ],
+    "bounds": [
+     6
+    ],
+    "for": [
+     7
+    ],
+    "concentric": [
+     8
+    ],
+    "classes": [
+     9
+    ],
+    "whose": [
+     10
+    ],
+    "proof": [
+     11
+    ],
+    "remains": [
+     12
+    ],
+    "open.": [
+     13
+    ]
+   },
+   "relevance_score": 50.0
+  }
+ ]
+}

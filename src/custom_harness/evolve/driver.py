@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -28,6 +30,8 @@ from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .generations import AnnealSchedule, LedgerError, first_parent, last_parent, open_campaign
 from .loop import Evaluator, EvolveConfig, evolve_generation, proposer_calibration
 from .multiplicity import check_campaign, runs_per_task_bound
+from .reveal import TemporalReveal
+from .router import Router, RouteRefused, build_router
 
 
 def load_suite(path: Path) -> list[SuiteTask]:
@@ -56,7 +60,8 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
            proposer: Backend, store: EvidenceStore, sandbox_factory: SandboxFactory,
            cfg: EvolveConfig | None = None, out_dir: Path | None = None, log=print,
            campaign_budget: Budget | None = None, branching: BranchConfig | None = None,
-           campaign: str | None = None, anneal: AnnealSchedule | None = None) -> HarnessSpec:
+           campaign: str | None = None, anneal: AnnealSchedule | None = None,
+           reveals: Sequence[tuple[TemporalReveal, Path]] = ()) -> HarnessSpec:
     """Run `generations` rounds. The sealed split is filtered out before anything runs. Refuses a campaign whose
     claim nodes do not pre-declare n_comparisons >= its multiplicity bound (R2-2, multiplicity.py).
 
@@ -71,6 +76,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     gen_ledger = open_campaign(store, campaign, anneal, cfg)
     parent = _resume_parent(store, campaign, seed_spec) if campaign is not None else seed_spec
     working = [t for t in suite if t.split != "sealed"]
+    check_reveals(reveals, suite, out_dir)  # L6.11: every seal outside every mount this campaign uses (fail closed)
     n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
     bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
         generations=generations, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds), n_fresh_seeds=n_fresh,
@@ -83,6 +89,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
         # the campaign-global generation index (continued across resume); the local loop index without a campaign
         gi = gen_ledger.generation if gen_ledger is not None else g
         cfg = gen_ledger.begin(cfg) if gen_ledger is not None else cfg  # annealed n_edits (<= the bound's)
+        reveal_step(reveals, log)  # L6.11: labels whose date the watermark passed become visible (ledgered)
         t0 = time.time()
         try:
             res = evolve_generation(parent, working, evaluator=evaluator, proposer=proposer, store=store, cfg=cfg,
@@ -97,7 +104,7 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
             led = gen_ledger.record(res)
             log(json.dumps({"campaign": campaign, "ledger_generation": led["generation"], "budget": led["budget"],
                             "stalled": led["stall"]["stalled"]}))
-        summary = {"generation": gi, "accepted": res.accepted, "decision": res.decision,
+        summary = {"generation": gi, "loop_label": res.loop_label, "accepted": res.accepted, "decision": res.decision,
                    "parent": res.parent_hash[:12], "new_parent": res.new_parent.spec_hash()[:12],
                    "harness_runs": res.evaluations, "fixed_k_equivalent": res.evaluations_fixed_k,
                    "candidates": [{k: c.get(k) for k in ("status", "reason", "survived")} | (
@@ -111,6 +118,8 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
             (out_dir / f"spec_gen{gi:03d}.yaml").write_text(
                 yaml.safe_dump(res.new_parent.model_dump(mode="json"), sort_keys=False), encoding="utf-8")
         parent = res.new_parent
+    if branching is not None:  # L6.9: route table over the FINAL trunk's branches (fail closed: none on refusal)
+        route_after(store, parent, branching, out_dir, log)
     return parent
 
 
@@ -132,3 +141,44 @@ def _resume_parent(store: EvidenceStore, campaign: str, seed_spec: HarnessSpec) 
     if spec.spec_hash() != last:
         raise LedgerError(f"campaign {campaign!r}: stored parent {last[:12]} does not hash to itself")
     return spec
+
+
+ROUTE_KIND = "route_table"
+
+
+def route_after(store: EvidenceStore, trunk: HarnessSpec, branching: BranchConfig, out_dir: Path | None,
+                log: Callable[[str], Any] = print) -> Router | None:
+    """Build the router over `trunk`'s branches (router.build_router: released verdict bits and a passing LOFO/LODO
+    bit only) and record its table (spec hashes and cluster names; no gate value) as a `route_table` store record and
+    `router.json`. A refused router is recorded as refused and None is returned: the trunk alone serves (fail
+    closed). Branches made against an earlier trunk are stale for the final one and are not routed."""
+    try:
+        router = build_router(store, trunk, cluster_key=branching.cluster_key)
+    except RouteRefused as e:
+        rec: dict[str, Any] = {"trunk": trunk.spec_hash(), "status": "refused", "reason": str(e)[:500]}
+        store.append_record(ROUTE_KIND, rec)
+        log(json.dumps({"router": rec}))
+        return None
+    rec = {"trunk": router.trunk, "status": "built", "table": router.table(), "table_hash": router.table_hash()}
+    store.append_record(ROUTE_KIND, rec)
+    log(json.dumps({"router": rec}))
+    if out_dir is not None:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "router.json").write_text(json.dumps(rec, indent=1, sort_keys=True), encoding="utf-8")
+    return router
+
+
+def check_reveals(reveals: Sequence[tuple[TemporalReveal, Path]], suite: list[SuiteTask],
+                  out_dir: Path | None) -> None:
+    """Each stream's seal must lie outside every task directory of the suite and the output directory (in addition
+    to the mounts the stream declares), and its destination must be one of its declared mounts' files."""
+    paths = [t.task_dir for t in suite] + ([out_dir] if out_dir is not None else [])
+    for rv, dest in reveals:
+        rv.check_mounts(paths)
+        rv.check_destination(dest)
+
+
+def reveal_step(reveals: Sequence[tuple[TemporalReveal, Path]], log: Callable[[str], Any] = print) -> None:
+    for rv, dest in reveals:
+        rv.write_revealed(dest)
+        log(json.dumps({"reveal": rv.stream_id, "visible": rv.n_revealed()}))
