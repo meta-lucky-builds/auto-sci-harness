@@ -33,7 +33,13 @@ from .base import (
     schema_instruction,
     to_strict_schema,
 )
+from .pacing import HostPacer, shared_pacer
 from .registry import require_usable
+
+# Pacing key for Codex calls (GOAL L0 per-host pacing). Codex makes its own network calls; with ChatGPT sign-in they go
+# to chatgpt.com (inferred from the sign-in flow, not observed: we never see Codex's traffic). The key only groups
+# calls for pacing; a wrong guess changes which calls share a slot, never what a call returns.
+CODEX_PACING_HOST = "chatgpt.com"
 
 
 def _flatten(req: ChatRequest) -> str:
@@ -51,8 +57,11 @@ class CodexCLIBackend(Backend):
     mode = AccessMode.SUBSCRIPTION
 
     def __init__(self, model: str | None = None, timeout_s: float = 600, executable: str = "codex",
-                 registry: dict | None = None):
+                 registry: dict | None = None, pacer: HostPacer | None = None):
         entry = require_usable("openai-codex-cli", registry)
+        self.host = CODEX_PACING_HOST
+        self._pacer = pacer if pacer is not None else shared_pacer()
+        self.paced_wait_s = 0.0
         self.training_on_outputs = entry.get("training_on_outputs", "unknown")
         self.model = model
         self.timeout_s = timeout_s
@@ -93,6 +102,8 @@ class CodexCLIBackend(Backend):
                 schema_file.write_text(json.dumps(schema), encoding="utf-8")
                 cmd += ["--output-schema", str(schema_file)]
             cmd.append("-")
+            # every codex process start takes a pacing slot (the schema fallback re-call takes its own)
+            self.paced_wait_s += self._pacer.acquire(self.host)
             t0 = time.time()
             try:
                 proc = subprocess.run(cmd, input=_flatten(req), capture_output=True, text=True, check=False,

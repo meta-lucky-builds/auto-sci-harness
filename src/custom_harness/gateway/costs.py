@@ -106,6 +106,103 @@ class CostedBackend(Backend):
         return getattr(self._inner, item)
 
 
+# ------------------------------------------------------------------------------------------- run cost records
+# A run's cost record (invariant 9) prices its model spend through the cost table. usd is reported only when EVERY
+# model step was priced from a calibrated (non-placeholder) row; otherwise it is None, never 0 (AI-Sci's "missing = 0"
+# pitfall): "unknown" when a step had no row (or spent tokens with no provenance to look one up), "UNCALIBRATED" when
+# only placeholder rows applied. The usd a backend itself reported is kept apart and never presented as the cost.
+USD_CALIBRATED, USD_UNCALIBRATED, USD_UNKNOWN, USD_NONE = "calibrated", "UNCALIBRATED", "unknown", "no model spend"
+
+
+def _has_model_spend(cost: Cost) -> bool:
+    return bool(cost.prompt_tokens or cost.completion_tokens or cost.quota_units or cost.usd)
+
+
+def cost_record(steps: Any, table: Mapping[tuple[str, str], Rate] | None = None) -> dict[str, Any]:
+    """The priced cost record of a run's trace steps (objects with `.cost` and `.provenance`, e.g. TraceStep)."""
+    total = Cost()
+    rows: dict[tuple[str, str], dict[str, Any]] = {}
+    missing: list[str] = []
+    usd = 0.0
+    any_model, any_placeholder = False, False
+    for s in steps:
+        c: Cost = s.cost
+        total = total + c
+        prov = s.provenance
+        if prov is None:
+            if _has_model_spend(c):
+                missing.append(f"step {getattr(s, 'index', '?')} ({getattr(s, 'node_id', '?')}): model spend with "
+                               "no provenance (no cost-table row can be looked up)")
+                any_model = True
+            continue
+        any_model = True
+        key = (prov.provider, prov.model)
+        row = rows.setdefault(key, {"provider": prov.provider, "model": prov.model, "steps": 0, "tokens": 0,
+                                    "quota_units": 0.0, "backend_reported_usd": 0.0, "rate": None})
+        row["steps"] += 1
+        row["tokens"] += c.prompt_tokens + c.completion_tokens
+        row["quota_units"] += c.quota_units
+        row["backend_reported_usd"] += c.usd
+        try:
+            rate = rate_for(prov.provider, prov.model, table)
+        except UnknownRate:
+            row["rate"] = "missing"
+            missing.append(f"no cost-table row for provider {prov.provider!r}, model {prov.model!r}")
+            continue
+        if rate.placeholder or rate.usd_per_mtok_in is None or rate.usd_per_mtok_out is None:
+            row["rate"] = USD_UNCALIBRATED
+            any_placeholder = True
+            continue
+        row["rate"] = f"{USD_CALIBRATED} ({rate.source})"
+        usd += (c.prompt_tokens * rate.usd_per_mtok_in + c.completion_tokens * rate.usd_per_mtok_out) / 1e6
+    if missing:
+        status, value = USD_UNKNOWN, None
+    elif any_placeholder:
+        status, value = USD_UNCALIBRATED, None
+    elif any_model:
+        status, value = USD_CALIBRATED, usd
+    else:
+        status, value = USD_NONE, 0.0
+    return {"usd": value, "usd_status": status, "missing_rates": sorted(set(missing)),
+            # which rates priced it: UNCALIBRATED whenever any placeholder row applied (even if another step is unknown)
+            "calibration": (USD_UNCALIBRATED if any_placeholder else USD_UNKNOWN if missing
+                            else "calibrated" if any_model else "n/a"),
+            "tokens": total.prompt_tokens + total.completion_tokens, "prompt_tokens": total.prompt_tokens,
+            "completion_tokens": total.completion_tokens, "quota_units": total.quota_units,
+            "gpu_hours": total.gpu_hours, "wall_s": total.wall_s, "estimated": total.estimated,
+            "backend_reported_usd": total.usd,
+            "by_model": [rows[k] for k in sorted(rows)]}
+
+
+def run_cost_record(store: Any, run_id: str, table: Mapping[tuple[str, str], Rate] | None = None) -> dict[str, Any]:
+    """`cost_record` of one run in an EvidenceStore."""
+    return cost_record(store.trace(run_id), table)
+
+
+def usd_text(record: Mapping[str, Any]) -> str:
+    """How a report shows a cost record's usd: a number only when calibrated, never 0 for unknown."""
+    status = record.get("usd_status")
+    if status == USD_CALIBRATED and isinstance(record.get("usd"), (int, float)):
+        return f"${float(record['usd']):.4f}"
+    if status == USD_NONE:
+        return "$0 (no model spend)"
+    if status == USD_UNCALIBRATED:
+        return "usd UNCALIBRATED (placeholder cost table: no real price)"
+    return "usd unknown (" + "; ".join(record.get("missing_rates") or ["no priced record"]) + ")"
+
+
+def combine_usd(records: list[Mapping[str, Any]]) -> tuple[float | None, str]:
+    """(total usd, status) over several cost records: a number only when every record is calibrated or has no model
+    spend; any unknown makes the total unknown, else any placeholder makes it UNCALIBRATED."""
+    statuses = [r.get("usd_status") for r in records]
+    if any(s not in (USD_CALIBRATED, USD_UNCALIBRATED, USD_NONE) for s in statuses):
+        return None, USD_UNKNOWN
+    if USD_UNCALIBRATED in statuses:
+        return None, USD_UNCALIBRATED
+    return sum(float(r.get("usd") or 0.0) for r in records), (USD_CALIBRATED if USD_CALIBRATED in statuses
+                                                              else USD_NONE)
+
+
 # ------------------------------------------------------------------------------------------- registry checks
 MODES = ("api", "byos", "ow")
 BYOS_STATUSES = ("allowed", "needs_partner_approval", "prohibited", "unknown")

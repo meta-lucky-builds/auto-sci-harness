@@ -394,7 +394,9 @@ def test_generation_counters_record_yield_and_prune(store, tmp_path):
     c = res.counters
     assert c["proposed"] == 4 and c["rejected_static"] == 2 and c["raced"] == 2
     assert c["pruned"] == 1 and c["gated"] == 1 and c["accepted"] == 1 and c["yield"] == pytest.approx(0.25)
-    assert store.records("generation_stats")[-1] == {"parent": res.parent_hash, **c}
+    # the loop instance's record also carries its loop label (invariant 10) and the harness runs it spent (axis B)
+    assert store.records("generation_stats")[-1] == {"parent": res.parent_hash, **c, "loop_label": res.loop_label,
+                                                     "harness_runs": res.evaluations}
 
 
 def test_novelty_gate_refuses_a_re_proposed_rejected_edit(store, tmp_path):
