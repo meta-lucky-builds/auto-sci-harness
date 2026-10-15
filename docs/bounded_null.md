@@ -22,7 +22,8 @@ delta = `effect.min_effect` on the claim's targets. It is part of the claim, so 
 (K2: claim hash). Omitted from every dump when unset, so existing claims keep their hashes.
 
 K1 refuses (`K1_POWER`) a declaration outside `[KernelConfig.min_power, KernelConfig.max_power]` = [0.5, 0.95]
-(both UNCALIBRATED, owner decision §13.8), and any declaration on a kind other than `negative_result`.
+(both UNCALIBRATED, owner decision §13.8), and any declaration on a kind other than `negative_result` or
+`equivalence` (TOST, below).
 
 ## Hypotheses and test (unchanged K4/K6 machinery)
 Per target, theta = the sign-corrected effect subject - comparator in metric units (positive = subject better),
@@ -79,11 +80,66 @@ alpha_eff), `observed_limit`, `reported_limit`, `declared_power`, `proven_power`
 `plantings` (N). K7's observation renders it in words. `verify()` re-derives the plasmode and compares the
 statement: a recorded statement that differs from its re-derivation is reported as forged.
 
-## Equivalence claims
-Kept **failing closed** (`K7_NO_RISK_MODEL`; `K1_POWER` if a power is declared). The two-sided analogue needs
-plantings of both +delta and -delta; planting -delta means degrading the subject, which has no unique form (which
-wrong label for a multi-class example, which shift for a regression), and that choice changes the detection
-probability. Not built; a separate decision.
+## Equivalence claims (TOST; s4-kernel, 2026-10-15, owner-delegated statistics decision)
+**Status: built, NOT test-verified** (tests deferred by the owner; `tests/test_kernel_s4.py`, item 3). Before this
+change every equivalence claim failed K7 (`K7_NO_RISK_MODEL`) and K1 refused a declared power (`K1_POWER`). The
+statistical procedure below was chosen by the s4-kernel agent under the owner's delegation; it is recorded in
+`redteam/kernel_core_changes.yaml` as a `delegated` record (cooling-off not observed) and needs the owner's review.
+
+**The claim.** `kind: equivalence`, margin delta = `effect.min_effect` (> 0, K1), declared power `AnalysisPlan.power`
+in `[KernelConfig.min_power, max_power]` (K1). Both are fields of the claim, so they are part of the claim hash that
+the pre-registration commits (K2 checks that the registered content hashes to the claim hash): the margin and the
+power are **fixed at registration** (invariant 17); nothing after the data can move them. The level alpha_eff of each
+target is K4's fixed per-target level (plan alpha / multiplicity, or the alpha-account slot level, §16.4).
+
+**Hypotheses, per target** (theta = sign-corrected subject - comparator, metric units, averaged over the planned seeds):
+H0: |theta| >= delta (the arms differ by at least the margin). H1 (the claim): -delta < theta < delta.
+
+**The test: two one-sided tests (TOST), each at one-sided level alpha_eff.** K4 computes the registered intervals
+(BCa over examples, Student t over seeds) at two-sided level 2 alpha_eff (`ml.statistics`, unchanged), so their lower
+limit L and upper limit U are each a one-sided (1 - alpha_eff) confidence limit. K6's criterion (`ml.criterion`,
+unchanged since v1) is
+
+    -delta < L_examples  and  U_examples < delta, and the same for the seed interval when it is not degenerate.
+
+That rejects H0- (theta <= -delta) with the one-sided test L > -delta at level alpha_eff AND H0+ (theta >= delta) with
+U < delta at level alpha_eff. Stated exactly: **each of the two one-sided tests has level alpha_eff (not alpha_eff / 2);
+the equivalence conclusion has size <= alpha_eff** by the intersection-union principle (under H0 at least one of H0-,
+H0+ is true, and falsely rejecting that one alone has probability <= alpha_eff). Requiring every target (and both
+intervals) keeps the size <= alpha_eff per target. Assumptions: those of the K4 intervals (iid test examples; BCa is
+asymptotic, so the size is approximate at small n, as for every data claim).
+
+**Sensitivity: the positive plasmode control, on both sides** (`ml.bounded_null`, `ml.plasmode(side=...)`). With
+N = ceil(ln gamma / ln power) plantings per side (gamma = `KernelConfig.plasmode_gamma` = 0.1, UNCALIBRATED):
+- **+delta side** (`side = 1`): exactly the negative-result plasmode above (same seed string, so a negative result's
+  plasmode is bit-identical to before): plant an effect of +delta into the SUBJECT's stored predictions (fewest wrong
+  predictions replaced by the truth, random order), bootstrap-resample the examples, run the registered intervals at
+  2 alpha_eff; detected iff each used interval's LOWER limit exceeds the observed estimate.
+- **-delta side** (`side = -1`): an effect of -delta on subject - comparator is planted by IMPROVING the COMPARATOR by
+  delta in the same way (its fewest wrong predictions replaced by the truth). This avoids the problem the earlier
+  note raised: degrading the subject has no unique form (which wrong label, which shift), while improving an arm is
+  unique up to the random order. Randomness: `sha256(claim_hash | "plasmode" | target | material | "|-")` per
+  planting. Detected iff each used interval's UPPER limit is below the observed estimate.
+- If either arm cannot gain delta on some seed (all its wrong predictions fixed still gain less), no effect of that
+  sign and size exists on the target: `K7_NOT_PLANTABLE` (vacuous margin). One undetected planting on either side:
+  `K7_INSENSITIVE`.
+
+K7 passes iff all 2N plantings are detected. If the detection probability on EITHER side were below the declared
+power, passing would need all N plantings of that side detected, probability < power^N <= gamma: so a pass proves both
+detection probabilities >= power jointly at confidence 1 - gamma (one-sided lower bound; `proven_power` = gamma^(1/N)
+per side).
+
+**The statement** (`resolution["exclusion"]`, CERTIFIED only): `sided` = `ml.SIDED_TOST`; `excluded_effect` = delta;
+`level` = the largest per-target alpha_eff (each limit one-sided at this level); `observed_limit` = the largest |limit|
+(max(-L, U)) over targets and used intervals; `reported_limit` = max(observed_limit, delta) (lucky limits clipped, as for
+negative results; a certified claim has observed_limit < delta, so reported_limit = delta); `plantings` = N (per side).
+K7's observation: "|effects| >= delta excluded (TOST: each side one-sided, level ...)". `verify()` re-derives it.
+
+**Not proven (stated):** as for negative results (bootstrap world, shape of the planted effect: oracle corrections
+concentrated on an arm's wrong examples, seed-level variance); in addition the -delta side's planted effect is
+"the comparator gets better", which for a metric whose gain is not monotone in the count of corrections (none of the
+registered metrics today; f1_macro is approximately so) could be detected with another probability than "the subject
+gets worse". The Monte Carlo study (`scripts/sim_bounded_null.py`) does not yet cover equivalence: to add (not run).
 
 ## What the plasmode proves, and what it does not
 Proves (at confidence 1 - gamma, over the plasmode's own randomness, given the stored data): on bootstrap
