@@ -213,6 +213,20 @@ class BoundedZip:
             raise RunBundleError(f"bundle member {name} is corrupt: {e}") from e
 
 
+def write_run_bundle(store: EvidenceStore, run_id: str, *, environment: dict[str, str] | None,
+                     workspace_ref: str | None = None) -> str | None:
+    """Invariant 9 for runs that do not go through the engine (e.g. the claim-audit arm runs, audit/claim_audit.py):
+    write `<data>/bundles/runs/<run_id>.zip` and its `run_bundle` record, as runtime/engine.Engine._write_run_bundle
+    does. A failure is recorded (`run_bundle` with `error`), never silent. Returns the manifest sha256 or None."""
+    path = config.data_dir() / "bundles" / "runs" / f"{run_id}.zip"
+    try:
+        digest = build_run_bundle(store, run_id, path, environment=environment, workspace_ref=workspace_ref)
+    except (OSError, ValueError, KeyError) as e:
+        store.append_record("run_bundle", {"run_id": run_id, "error": f"{type(e).__name__}: {e}"})
+        return None
+    store.append_record("run_bundle", {"run_id": run_id, "path": str(path), "manifest_sha256": digest})
+    return digest
+
 def read_run_bundle_bytes(path: Path) -> tuple[dict[str, Any], str]:
     """(manifest, sha256 of manifest.json), read under the caps."""
     try:
