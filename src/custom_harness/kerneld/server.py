@@ -211,6 +211,32 @@ class Server:
         raise P.ProtocolError()
 
 
+    # ----------------------------------------------------------------------------------------- truth queries
+    def op_truth_query(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A fact about a task's held-out truth (kerneld/truth.py): ids, hashes, counts or location strings, never
+        truth bytes. Needs a run capability (no per-claim token: no claim is involved); every query is recorded."""
+        from . import truth as T
+        cap = P.arg(args, "run_cap", str)
+        run_id = self.table.run_id(cap)
+        kind = P.arg(args, "kind", str)
+        if kind not in P.TRUTH_QUERIES:
+            raise P.ProtocolError()
+        q: dict[str, Any] = {}
+        if kind in ("target_id", "truth_hashes", "label_agreement"):
+            q["task_dir"] = P.arg(args, "task_dir", str)
+        if kind == "label_agreement":
+            q["guess"] = P.str_list(args.get("guess"))
+        if kind == "export_scan":
+            tasks = P.arg(args, "tasks", dict)
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in tasks.items()):
+                raise P.ProtocolError()
+            q["tasks"], q["root"] = tasks, P.arg(args, "root", str)
+        try:
+            return T.query(self.store, run_id, kind, q)
+        except T.TruthQueryRefused as e:
+            raise TokenError(e.code if e.code in P.ERRORS else "internal") from None
+
+
 def _readline(inp: BinaryIO) -> str | None:
     b = inp.readline()
     if not b:

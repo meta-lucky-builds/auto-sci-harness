@@ -257,6 +257,11 @@ class RunHandle:
                            approved_protocol_seq=int(approved_protocol_seq))
         return str(res["data_sha256"])
 
+    # ------------------------------------------------------------------------------- truth queries (kerneld/truth.py)
+    def truth_query(self, kind: str, **args: Any) -> dict[str, Any]:
+        """A fact about a task's held-out truth computed in kerneld: ids, hashes, counts or location strings."""
+        return self._call("truth_query", kind=kind, **args)
+
     def held_out_score(self, dataset_id: str, file: str, metric: str, preds: Sequence[str], *, claim_hash: str,
                        arm: str, seed: int) -> float:
         tok = self.token("evaluate", dataset_id, file, claim_hash=claim_hash, arm=arm, seed=seed)
@@ -264,3 +269,20 @@ class RunHandle:
 
     def close(self) -> None:
         self._call("close_run")
+
+
+def truth_query(kind: str, *, store_root: Path | str | None = None, run_id: str = "truth-query",
+                **args: Any) -> dict[str, Any]:
+    """One truth query in a short-lived kerneld (GOAL §16.5.2): for host code that has no kerneld session of its own
+    (evolve/export.py, evolve/multiplicity.py, research/rebuild.py). `store_root` defaults to the data dir's store
+    (the record of the query goes there). kerneld unavailable -> KernelDUnavailable (no fallback: the host never
+    reads the truth itself)."""
+    from ..config import data_dir
+    root = Path(store_root) if store_root is not None else data_dir() / "store"
+    root.mkdir(parents=True, exist_ok=True)  # kerneld serves only an existing store directory
+    with KernelD(root) as kd:
+        run = kd.open_run(run_id)
+        try:
+            return run.truth_query(kind, **args)
+        finally:
+            run.close()
