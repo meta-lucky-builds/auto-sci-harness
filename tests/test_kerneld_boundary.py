@@ -26,6 +26,12 @@ COVERED = ["evolve", "runtime/engine.py", "kerneld/client.py", "research/claims.
 # logged read of them so the real K4 sees logged = reported evaluations. It never opens the real store and never reads
 # real held-out data; routing simulated labels through kerneld would add a process and protect nothing.
 SCRATCH_STORE_SITES = {"research/preflight.py": 1}
+# Store opens only (int17 merge, 2026-10-15; owner to confirm): assure/corpus.py (s3-assure, GOAL §16.6 honest corpus)
+# opens a SCRATCH COPY of a committed corpus item's store, unpacked into a temporary directory, to re-derive the
+# Kernel's verdict on it; it never opens the real store and makes no private read or ingest of its own (the Kernel's
+# reads stay inside the Kernel). Listed here, not in SCRATCH_STORE_SITES, because that list is also the expected
+# private-read and ingest sites.
+SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1}
 # Private ingest outside the Kernel (old path, 2026-10-08; no kerneld ingest op exists): the host reads the private
 # file itself and hands the bytes to the vault. cli.py: `chh return-data` (FUTURE measurements); research/claims.py:
 # task registration (the task dir's private/test labels); audit/data.py: the claim-audit's EXTERNAL split.
@@ -88,7 +94,7 @@ def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites(
 
 
 def test_store_opens_outside_the_kernel_are_only_the_listed_old_path_sites():
-    assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES
+    assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES | SCRATCH_STORE_OPEN_ONLY
 
 
 def test_private_ingest_outside_the_kernel_is_only_the_listed_old_path_sites():

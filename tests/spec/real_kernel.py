@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import random
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -117,9 +119,15 @@ class RealWorld:
     keys: dict[str, str] = field(default_factory=dict)  # claim hash -> key
 
     def __post_init__(self) -> None:
+        fast = os.environ.get("CHH_SPEC_FAST") == "1"
+        if fast:  # scale runs only (scripts/diffscale.py): start from a copy of a store whose adapter is approved
+            shutil.copytree(_template(), self.root / "store")
         self.store = EvidenceStore(self.root / "store")
+        if fast:  # durability only (no fsync per commit); no Kernel rule depends on it
+            self.store._db.execute("PRAGMA synchronous=OFF")
         self.kernel = Kernel(self.store, replayer=StoredReplayer(), clock=lambda: 1.0)
-        self.kernel.approve_adapter("ml", approver="spec-harness")
+        if not fast:
+            self.kernel.approve_adapter("ml", approver="spec-harness")
         self._runs = 0
 
     def close(self) -> None:
@@ -200,6 +208,24 @@ class RealWorld:
                          limits={"timeout_s": 10.0}, preds_ref=self.store.blobs.put_json(preds), metric="accuracy",
                          score=M.score("accuracy", labels, preds), run_id=run.id)
         return self.kernel.record_evaluation(rec)
+
+
+_TEMPLATE: list[tempfile.TemporaryDirectory[str]] = []
+
+
+def _template() -> Path:
+    """CHH_SPEC_FAST only: one store per process in which the ML adapter was approved exactly as a fresh world does
+    it (`approve_adapter("ml", approver="spec-harness")`); every world starts from a byte copy of it. The approval is
+    a ledger entry naming the adapter hash, so a copy is the same state; the 1.4 s validation runs once."""
+    if not _TEMPLATE:
+        tmp = tempfile.TemporaryDirectory(prefix="spec-template-")
+        store = EvidenceStore(Path(tmp.name) / "store")
+        try:
+            Kernel(store, replayer=StoredReplayer(), clock=lambda: 1.0).approve_adapter("ml", approver="spec-harness")
+        finally:
+            store.close()
+        _TEMPLATE.append(tmp)
+    return Path(_TEMPLATE[0].name) / "store"
 
 
 def fresh() -> tuple[RealWorld, tempfile.TemporaryDirectory[str]]:
