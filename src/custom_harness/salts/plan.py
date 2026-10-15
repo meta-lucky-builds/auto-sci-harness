@@ -2,7 +2,7 @@
 
     spec = CampaignSpec(...)                                   # the campaign, frozen: its hash is the prereg hash
     plan = assign(spec, beacon=..., secret=load_secret())      # draw("salt_assignment"): REQUIRES the human secret
-    salts = generate(plan, out, real_data=...)                 # write the salt tasks (same files as real tasks)
+    salts = generate(plan, out)                                # fresh generator draws (same files as real tasks)
     seal(plan, salts, exam, sealed_path, vault)                # plant list -> human-held file; hash -> ledger
     ... the campaign runs; salt results must go to an audit store only (isolation_problems checks) ...
     revealed = reveal(sealed_path, vault, human="...", today=date.today())   # HUMAN command, on/after the date
@@ -33,12 +33,11 @@ from typing import Any
 from ..commitment import agent_readable_root_of, as_key, draw, stream, subkey
 from . import config as C
 from .generate import (
-    PLASMODE_DATASETS,
+    NULL_FAMILIES,
     POSITIVE_FAMILIES,
     GeneratedSalt,
     SaltError,
     null_salt,
-    plasmode_null,
     positive_salt,
 )
 
@@ -53,19 +52,26 @@ def _canon(obj: Any) -> bytes:
 
 @dataclass(frozen=True)
 class Slot:
-    """One task of a campaign that MAY become a salt. family: a synthetic family, or "real" with `dataset`."""
+    """One task of the campaign's real pool that MAY become a salt. family: a synthetic family, or "real" with
+    `dataset` (real-data tasks are pool members but host no salt since plasmodes were dropped, 2026-10-14).
+    `n_rows` and `heldout_rows` are the real task's generator sizes (suite.yaml provenance "rows" / "heldout_rows"):
+    a salt of this slot is drawn with exactly these, so it matches the real tasks of its family. `heldout_rows` was
+    added 2026-10-14, which changes every campaign_hash (asdict includes it)."""
 
     task_id: str
     family: str
     split: str
     n_rows: int = 0
     dataset: str | None = None
+    heldout_rows: int | None = None
 
     def positive_ok(self) -> bool:
         return self.family in POSITIVE_FAMILIES
 
     def null_ok(self) -> bool:
-        return self.positive_ok() or (self.family == "real" and self.dataset in PLASMODE_DATASETS)
+        """Only genuinely null families (research.suite.FAMILIES[f].null). rho = 1/2 relabelling of rings, xor or
+        spirals and plasmodes of real data were dropped 2026-10-14 (detectable: docs/salts_redesign.md)."""
+        return self.family in NULL_FAMILIES
 
 
 @dataclass(frozen=True)
@@ -105,7 +111,10 @@ class AssignmentPlan:
 def assign(spec: CampaignSpec, *, beacon: str, secret: bytes | None) -> AssignmentPlan:
     """Pick which slots become positive and null salts. The draw is draw("salt_assignment", ...), which refuses to
     run without the human secret, so nobody without it can predict the assignment. Fails closed (SaltError) on a
-    gate/sealed slot, duplicate slots, a bad reveal date, or too few eligible slots."""
+    gate/sealed slot, duplicate slots, a bad reveal date, or too few eligible slots. The campaign's real pool is its
+    slots: a positive salt needs a slot of a reference-rule family (rings, xor, spirals), a null salt a slot of a
+    genuinely null family (e.g. noise), and every salted family keeps at least one unsalted (real) task in the pool,
+    so a campaign whose pool has no (or only one) task of a family gets no salt of it (decision 2026-10-14)."""
     ids = [s.task_id for s in spec.slots]
     if len(set(ids)) != len(ids):
         raise SaltError("duplicate slot task ids")
@@ -118,36 +127,73 @@ def assign(spec: CampaignSpec, *, beacon: str, secret: bytes | None) -> Assignme
     if not spec.delta > 0:
         raise SaltError("delta must be positive")
     dt.date.fromisoformat(spec.reveal_on)
+    for s in spec.slots:
+        if (s.positive_ok() or s.null_ok()) and s.n_rows < 2:
+            raise SaltError(f"slot {s.task_id}: n_rows must be the real task's generator rows (got {s.n_rows})")
+    pos_pool, null_pool = _eligible(spec.slots, "positive"), _eligible(spec.slots, "null")
+    for kind, want, pool in (("positive", spec.n_positive, pos_pool), ("null", spec.n_null, null_pool)):
+        cap = _capacity(spec.slots, pool)
+        if want > cap:
+            raise SaltError(f"{want} {kind} salts asked, at most {cap} possible: a {kind} salt needs a slot of an "
+                            f"eligible family in the campaign's real pool, and every salted family must keep at "
+                            f"least one real (unsalted) task there (eligible slots: {len(pool)})")
     value = draw("salt_assignment", prereg_hash=spec.campaign_hash(), beacon=beacon, secret=secret)
     master = as_key(value)
     rng = stream(master, "salt-assignment")
-    pos_pool = sorted((s for s in spec.slots if s.positive_ok()), key=lambda s: s.task_id)
-    if len(pos_pool) < spec.n_positive:
-        raise SaltError(f"{spec.n_positive} positive salts asked, {len(pos_pool)} eligible slots")
-    positives = rng.sample(pos_pool, spec.n_positive)
-    taken = {s.task_id for s in positives}
-    null_pool = sorted((s for s in spec.slots if s.null_ok() and s.task_id not in taken), key=lambda s: s.task_id)
-    if len(null_pool) < spec.n_null:
-        raise SaltError(f"{spec.n_null} null salts asked, {len(null_pool)} eligible slots left")
-    nulls = rng.sample(null_pool, spec.n_null)
+    positives = _draw(rng, spec.slots, pos_pool, spec.n_positive)
+    nulls = _draw(rng, spec.slots, null_pool, spec.n_null)
     return AssignmentPlan(spec, beacon, tuple([Assigned(s, "positive") for s in positives] +
                                               [Assigned(s, "null") for s in nulls]), master)
 
 
-def generate(plan: AssignmentPlan, out: Path, *, real_data: dict[str, dict] | None = None) -> list[GeneratedSalt]:
-    """Write every salt task of `plan` under `out` (task dir named by its slot's task id)."""
+def pool_families(slots: Iterable[Slot]) -> frozenset[str]:
+    """The families of the campaign's real pool: a salt may only be a fresh draw of one of them."""
+    return frozenset(s.family for s in slots)
+
+
+def _eligible(slots: Sequence[Slot], kind: str) -> list[Slot]:
+    return sorted((s for s in slots if (s.positive_ok() if kind == "positive" else s.null_ok())),
+                  key=lambda s: s.task_id)
+
+
+def _capacity(slots: Sequence[Slot], pool: Sequence[Slot]) -> int:
+    """Most salts `pool` can give while every salted family keeps one unsalted task in the campaign's pool."""
+    return sum(max(0, sum(s.family == f for s in slots) - 1) for f in {s.family for s in pool})
+
+
+def _draw(rng: Any, slots: Sequence[Slot], pool: Sequence[Slot], n: int) -> list[Slot]:
+    """`n` slots of `pool` in keyed random order, skipping a slot whose family would be left with no unsalted task.
+    Positive and null families are disjoint (reference-rule vs genuinely null families), so the two draws do not
+    interact. Succeeds whenever n <= _capacity (checked before the draw)."""
+    order = list(pool)
+    rng.shuffle(order)
+    left = {f: sum(s.family == f for s in slots) for f in {s.family for s in pool}}
+    out: list[Slot] = []
+    for s in order:
+        if len(out) == n:
+            break
+        if left[s.family] > 1:
+            out.append(s)
+            left[s.family] -= 1
+    if len(out) != n:  # unreachable after the capacity check; fail closed anyway
+        raise SaltError(f"could not draw {n} salts keeping a real task of every salted family")
+    return out
+
+
+def generate(plan: AssignmentPlan, out: Path, *, mc_rows: int | None = None) -> list[GeneratedSalt]:
+    """Write every salt task of `plan` under `out` (task dir named by its slot's task id): a fresh draw of the slot's
+    family generator at the slot's n_rows and heldout_rows. `mc_rows`: Monte Carlo rows behind positive salts'
+    planted effects (default config.SALT_MC_ROWS)."""
+    pool = pool_families(plan.spec.slots)
     made = []
     for a in plan.salts:
         s, k = a.slot, plan.salt_key(a.slot.task_id)
         if a.kind == "positive":
-            made.append(positive_salt(s.family, s.n_rows, key=k, task_id=s.task_id, delta=plan.spec.delta, out=out))
-        elif s.family == "real":
-            if real_data is None or s.dataset not in real_data:
-                raise SaltError(f"slot {s.task_id}: plasmode needs the real data of {s.dataset!r}")
-            made.append(plasmode_null(str(s.dataset), real_data[str(s.dataset)], key=k, task_id=s.task_id,
-                                      delta=plan.spec.delta, out=out))
+            made.append(positive_salt(s.family, s.n_rows, key=k, task_id=s.task_id, out=out, pool_families=pool,
+                                      heldout_rows=s.heldout_rows, mc_rows=mc_rows))
         else:
-            made.append(null_salt(s.family, s.n_rows, key=k, task_id=s.task_id, delta=plan.spec.delta, out=out))
+            made.append(null_salt(s.family, s.n_rows, key=k, task_id=s.task_id, out=out, pool_families=pool,
+                                  heldout_rows=s.heldout_rows))
     return made
 
 
@@ -155,7 +201,9 @@ def generate(plan: AssignmentPlan, out: Path, *, real_data: dict[str, dict] | No
 def _plant_list(salts: Sequence[GeneratedSalt]) -> list[dict[str, Any]]:
     return sorted(({"task_id": s.task_id, "kind": s.kind, "family": s.family, "source": s.source,
                     "metric": s.metric, "target_effect": s.target_effect, "planted_effect": s.planted_effect,
-                    "residual_bound": s.residual_bound, "files": s.files} for s in salts),
+                    "residual_bound": s.residual_bound, "mc_se": s.mc_se, "mc_rows": s.mc_rows,
+                    "realised_effect": s.realised_effect, "heldout_rows": s.heldout_rows, "files": s.files}
+                   for s in salts),
                   key=lambda e: e["task_id"])
 
 
