@@ -52,11 +52,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..kerneld.client import truth_query
 from ..kerneld.releases import Releases, run_targets
 from ..runtime.taint import step_labels
 from ..store import EvidenceStore
-from ..truth_layout import legacy_truth_dir, truth_dir, truth_files
-from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
+from ..verify.leak import CANARY_PREFIX, scan_text
 from ..weights.goodhart import scan as goodhart_scan
 from ..weights.goodhart import sealed_fingerprints
 from .evaluate import RunOutcome, SuiteTask
@@ -346,26 +346,9 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
     windows: list[str] = []
     paths: list[str] = []
     found: list[str] = [c for c in canaries if c]
-    for t in tasks:
-        # truth_layout: the truth dir (outside agent-readable roots) and the legacy in-task location; truth_files
-        # refuses an unmigrated suite task instead of silently fingerprinting nothing
-        files = truth_files(t.task_dir)
-        if not files:
-            continue
-        for pdir in {truth_dir(t.task_dir), legacy_truth_dir(t.task_dir)}:
-            for variant in {str(pdir), pdir.as_posix(), str(pdir.resolve()), pdir.resolve().as_posix()}:
-                paths.append(variant.replace("\\", "/").lower())
-        for rel, p in files.items():
-            data = p.read_bytes()
-            hashes[hashlib.sha256(data).hexdigest()] = f"{t.task_id}/private/{rel}"
-            if len(data) > _MAX_PRIVATE_SCAN:
-                continue
-            text = data.decode("utf-8", errors="ignore")
-            found += [tok for tok in text.split() if tok.startswith(CANARY_PREFIX)]
-            if len(text.strip()) >= 16:
-                contents.append(text.strip())
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            windows += label_windows(lines[1:])  # a private CSV: header, then one label per line
+    # GOAL §16.5.2: no host read of task truth. The truth part of the audit (hashes, truth canaries, label windows,
+    # verbatim contents, truth dir paths) runs in kerneld (`truth_query export_scan`, see `_audit`); the truth keys
+    # stay for shape and are empty here.
     secrets_: list[str] = []
     for run_id in exported:
         if not run_id:
@@ -380,7 +363,10 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
             state = doc.get("state", doc) if isinstance(doc, dict) else {}
             secrets_ += _private_values(state)
     return {"hashes": hashes, "contents": contents, "windows": windows, "paths": sorted(set(paths)),
-            "canaries": sorted(set(found)), "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True),
+            "canaries": sorted(set(found)),
+            # secrets minus the PASSED canaries only (canaries inside truth files are no longer known here)
+            "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True),
+            "truth_tasks": {t.task_id: str(t.task_dir) for t in tasks}, "store_root": str(store.root),
             # L8 (s3-verifiers): owner-only coupled-Goodhart reports (they hold sealed scores, invariant 18)
             "goodhart": sealed_fingerprints(store)}
 
@@ -426,6 +412,9 @@ def _audit(root: Path, fp: dict[str, Any]) -> list[str]:
             norm = text.replace("\\", "/").lower()
             if any(pp in norm for pp in fp["paths"]):
                 problems.append(f"a task's private directory path found in {rel}")
+    if fp.get("truth_tasks"):  # the truth part of the audit, computed in kerneld (fail closed: errors propagate)
+        problems += truth_query("export_scan", store_root=fp["store_root"], tasks=fp["truth_tasks"],
+                                root=str(root))["problems"]
     return list(dict.fromkeys(problems))
 
 

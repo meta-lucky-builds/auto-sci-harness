@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from ..commitment import agent_readable_root_of, as_key, default_agent_readable_roots, draw, secret_leak_scan
-from ..truth_layout import truth_dir, truth_file
+from ..truth_layout import truth_dir
 from . import suite as S
 from .suite import MintRefused, dataset_hash, require_anchored
 
@@ -85,14 +85,16 @@ def task_digest(out: Path) -> dict[str, str]:
     `<task>/private/<file>` wherever truth_layout keeps it, so a suite under `<data>/suites` (truth outside the tree)
     and the same suite built in a scratch dir (legacy in-task private/) give the same keys. An unmigrated suite under
     `<data>/suites` is refused (TruthLayoutError), never digested from its agent-readable copy."""
-    from ..truth_layout import LEGACY_DIRNAME, truth_files
+    from ..kerneld.client import truth_query
+    from ..truth_layout import LEGACY_DIRNAME
 
     out = Path(out)
     d = {p.relative_to(out).as_posix(): _sha(p.read_bytes()) for p in sorted(out.rglob("*"))
          if p.is_file() and p.parent != out}
     for task in sorted(p for p in out.iterdir() if p.is_dir()) if out.is_dir() else []:
-        for rel, p in truth_files(task).items():
-            d.setdefault(f"{task.name}/{LEGACY_DIRNAME}/{rel}", _sha(p.read_bytes()))
+        # the truth hashes come from kerneld (GOAL 16.5.2): this host never reads the truth bytes; kerneld down raises
+        for rel, h in truth_query("truth_hashes", task_dir=str(task))["hashes"].items():
+            d.setdefault(f"{task.name}/{LEGACY_DIRNAME}/{rel}", h)
     return dict(sorted(d.items()))
 
 
@@ -361,19 +363,20 @@ def _test_labels(spec: Any) -> list[str]:
 def prng_regression(suite_dir: Path, generators: ModuleType) -> dict[str, dict[str, Any]]:
     """The attack of the COUPLED-PRNG finding (GOAL §16.1): regenerate every synthetic task from `generators`
     (code an agent can read, with its published seeds) and compare with the task's held-out labels. Reads the
-    private labels to SCORE the attack only. Returns {task_id: {"exact", "agree", "n", "train_features_match"}}."""
+    private labels, through kerneld (`label_agreement`), to SCORE the attack only.
+    Returns {task_id: {"exact", "agree", "n", "train_features_match"}}."""
+    from ..kerneld.client import truth_query
+
     out: dict[str, dict[str, Any]] = {}
     for gen, seed, n in generators.SYNTHETIC:
         spec = gen(seed, n)
         d = Path(suite_dir) / spec.task_id
-        truth_p = truth_file(d, "test_y.csv")
-        if not truth_p.is_file():
-            continue
-        truth = [ln for ln in truth_p.read_text(encoding="utf-8").splitlines()[1:] if ln]
         guess = _test_labels(spec)
-        agree = sum(a == b for a, b in zip(guess, truth, strict=False))
+        res = truth_query("label_agreement", task_dir=str(d), guess=guess)
+        if not res["present"]:
+            continue
         train_rows = (d / "public" / "train.csv").read_text(encoding="utf-8").splitlines()[1:]
         regen_train = {",".join(r) for r in spec.train}
-        out[spec.task_id] = {"exact": guess == truth, "agree": agree, "n": len(truth),
+        out[spec.task_id] = {"exact": res["exact"], "agree": res["agree"], "n": res["n"],
                              "train_features_match": sum(r in regen_train for r in train_rows)}
     return out
