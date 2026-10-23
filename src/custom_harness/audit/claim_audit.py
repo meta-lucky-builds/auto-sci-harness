@@ -329,8 +329,8 @@ def _evaluate_arms(store: EvidenceStore, kernel: Kernel, kd: Any, loaded: Loaded
         for seed in seeds:
             for arm, (h, _) in arms.items():
                 p = preds[(arm, ds.dataset_id, seed)]
-                run_rec = Run(harness_id="chh-audit", harness_hash=wrapper.wrapper_hash(), task_id=ds.dataset_id,
-                              seed=seed)
+                run_rec = Run(harness_id="chh-audit", harness_hash=wrapper.wrapper_spec_ref(store, "chh-audit"),
+                              task_id=ds.dataset_id, seed=seed)
                 store.add_run(run_rec)
                 now = time.time()
                 store.add_step(TraceStep(run_id=run_rec.id, index=0, node_id="audit_arm", kind=StepKind.TOOL,

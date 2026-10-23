@@ -451,8 +451,8 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
         with KernelD(store.root) as kd:
             for seed in claim.analysis_plan.seeds:
                 for arm, (h, _) in arms.items():
-                    run_rec = Run(harness_id="chh-court", harness_hash=wrapper.wrapper_hash(), task_id=target,
-                                  seed=seed)
+                    run_rec = Run(harness_id="chh-court", harness_hash=wrapper.wrapper_spec_ref(store, "chh-court"),
+                                  task_id=target, seed=seed)
                     store.add_run(run_rec)
                     now = time.time()
                     store.add_step(TraceStep(run_id=run_rec.id, index=0, node_id="court_arm", kind=StepKind.TOOL,

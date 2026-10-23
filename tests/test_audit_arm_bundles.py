@@ -23,7 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_write_run_bundle_writes_zip_and_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     store = EvidenceStore(tmp_path / "data" / "store")
-    run = Run(harness_id="chh-audit", harness_hash="h" * 64, task_id="ds", seed=0)
+    from custom_harness.audit.wrapper import WRAPPER_SOURCE, wrapper_hash, wrapper_spec_ref
+
+    # the run names a RESOLVABLE harness spec, as claim_audit / court arm runs do (stage-c 2026-10-23: the first draft
+    # used a fake "h"*64 and production used wrapper_hash(); neither names a stored spec, so no bundle was ever built)
+    run = Run(harness_id="chh-audit", harness_hash=wrapper_spec_ref(store, "chh-audit"), task_id="ds", seed=0)
     store.add_run(run)
     now = time.time()
     store.add_step(TraceStep(run_id=run.id, index=0, node_id="audit_arm", kind=StepKind.TOOL, input={}, output={},
@@ -32,7 +36,9 @@ def test_write_run_bundle_writes_zip_and_record(tmp_path: Path, monkeypatch: pyt
     assert digest is not None
     recs = [r for r in store.records("run_bundle") if r["run_id"] == run.id]
     assert len(recs) == 1 and recs[0]["manifest_sha256"] == digest
-    assert read_run_bundle_bytes(Path(recs[0]["path"]))[1] == digest
+    manifest, sha = read_run_bundle_bytes(Path(recs[0]["path"]))
+    assert sha == digest and "error" not in recs[0]
+    assert manifest["spec"]["wrapper_sha256"] == wrapper_hash() and manifest["spec"]["wrapper_source"] == WRAPPER_SOURCE
 
 
 def test_audit_arm_runs_are_bundled() -> None:
@@ -43,3 +49,4 @@ def test_audit_arm_runs_are_bundled() -> None:
                  for c in ast.walk(fn) if isinstance(c, ast.Call)}
         if "add_run" in calls:
             assert "write_run_bundle" in calls, fn.name
+            assert "wrapper_spec_ref" in calls, fn.name  # its harness_hash resolves to a stored spec

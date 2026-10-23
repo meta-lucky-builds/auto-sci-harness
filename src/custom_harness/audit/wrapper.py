@@ -14,6 +14,7 @@ every audit claim as `wrapper_sha256`).
 from __future__ import annotations
 
 import hashlib
+from typing import Any
 
 WRAPPER_SOURCE = '''
 
@@ -65,6 +66,15 @@ if __name__ == "__main__":
 
 def wrapper_hash() -> str:
     return hashlib.sha256(WRAPPER_SOURCE.encode("utf-8")).hexdigest()
+
+
+def wrapper_spec_ref(store: Any, harness_id: str) -> str:
+    """The `harness_hash` of a non-engine arm run (Claim Audit `chh-audit`, Court `chh-court`): the content address of
+    a JSON spec holding the wrapper source and its hash, so `store.harness_spec(run.harness_hash)` resolves and the
+    run's Reproducibility Bundle can be built (invariant 9). int18 stage-c: the arm runs carried the raw
+    wrapper_hash(), which names no stored spec, so every arm bundle failed (FileNotFoundError, recorded as an error)."""
+    return str(store.blobs.put_json({"format": "chh-arm-wrapper/1", "harness_id": harness_id,
+                                     "wrapper_sha256": wrapper_hash(), "wrapper_source": WRAPPER_SOURCE}))
 
 
 def compose(arm_code: bytes) -> bytes:
