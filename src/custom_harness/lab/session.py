@@ -62,13 +62,14 @@ def events(store: EvidenceStore, session_id: str) -> list[dict[str, Any]]:
     return store.records_where(RECORD_KIND, "session_id", session_id)
 
 
-def started(store: EvidenceStore, session_id: str) -> dict[str, Any]:
-    """The session's `started` record; LabError if the session never started or has stopped."""
+def started(store: EvidenceStore, session_id: str, *, allow_stopped: bool = False) -> dict[str, Any]:
+    """The session's `started` record; LabError if the session never started or (unless `allow_stopped`) has
+    stopped. A stopped session's workspace can still be promoted: no agent runs in it any more."""
     evs = events(store, session_id)
     starts = [e for e in evs if e.get("event") == "started"]
     if not starts:
         raise LabError(f"no started Lab session {session_id!r}")
-    if any(e.get("event") == "stopped" for e in evs[evs.index(starts[-1]):]):
+    if not allow_stopped and any(e.get("event") == "stopped" for e in evs[evs.index(starts[-1]):]):
         raise LabError(f"Lab session {session_id!r} is stopped")
     return starts[-1]
 

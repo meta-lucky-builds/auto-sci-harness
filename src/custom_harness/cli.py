@@ -15,6 +15,7 @@ import yaml
 from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
+from .lab import cli as lab_cli
 from .literature import cli as lit_cli
 from .records import Cost
 from .runtime import Engine, HarnessSpec
@@ -946,6 +947,7 @@ def main(argv: list[str] | None = None) -> int:
     scorecard_cli.add_parsers(sub)
     timesplit_cli.add_parsers(sub)
     studio_cli.add_parsers(sub)
+    lab_cli.add_parsers(sub)
     a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
@@ -967,7 +969,8 @@ def main(argv: list[str] | None = None) -> int:
                 "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
                 "verify-registry": cmd_verify_registry,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
-                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS}[a.cmd](a, store)
+                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
+                **lab_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 

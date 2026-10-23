@@ -339,7 +339,8 @@ _SECRETISH_ENV = re.compile(r"^\s*(ENV|ARG)\s+\S*(?i:key|token|secret|passw|cred
 
 
 def recipe_problems(text: str) -> list[str]:
-    """Static check of the lab image recipe (docker/lab.Dockerfile). Empty = clean."""
+    """Static check of the lab image recipe (docker/lab.Dockerfile). Empty = clean. Comment lines are ignored."""
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
     problems = []
     for m in re.finditer(r"^\s*(COPY|ADD)\b.*$", text, re.M):
         problems.append(f"the lab recipe copies files into the image ({m.group(0).strip()!r}): a lab image is built "

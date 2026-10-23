@@ -120,7 +120,8 @@ class AcpClient:
 
     def _handle_incoming(self, msg: dict[str, Any], turn: Turn | None) -> None:
         method = str(msg.get("method"))
-        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        raw = msg.get("params")
+        params: dict[str, Any] = raw if isinstance(raw, dict) else {}
         if "id" not in msg:  # a notification
             if method == "session/update" and turn is not None:
                 self._update(params.get("update") or {}, turn)
@@ -130,7 +131,8 @@ class AcpClient:
             chosen = self.permission(params)
             outcome = {"outcome": "selected", "optionId": chosen} if chosen else {"outcome": "cancelled"}
             if turn is not None:
-                tool = params.get("toolCall") if isinstance(params.get("toolCall"), dict) else {}
+                tc = params.get("toolCall")
+                tool: dict[str, Any] = tc if isinstance(tc, dict) else {}
                 turn.permissions.append({"title": str(tool.get("title", ""))[:200], "answer": outcome})
             self._send({"id": rid, "result": {"outcome": outcome}})
             return
