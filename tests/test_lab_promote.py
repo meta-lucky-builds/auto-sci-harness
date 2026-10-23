@@ -151,10 +151,17 @@ def test_release_is_the_label_only_and_is_ledgered(store, lab, monkeypatch):
             return value
 
     monkeypatch.setattr(R.Releases, "live", classmethod(lambda cls, s: Rec()))
+    # int18 (stage-a): the verification level (court/levels.py, code only) is released with the label, as its own
+    # ledgered `count` release (a small closed alphabet); stubbed here because the certificate above is a stub
+    import custom_harness.court.levels as L
+    monkeypatch.setattr(L, "level", lambda s, h: SimpleNamespace(badge="NONE"))
     P.release_verdict(store, rec["promotion_id"], "owner", docker=lab.docker)
     assert emitted == [{"value": "REJECTED", "targets": hand["targets"], "channel": "prompt",
                         "alphabet": "verdict_bit", "note": "lab:promotion_verdict",
+                        "key": f"lab:{rec['promotion_id']}"},
+                       {"value": "NONE", "targets": hand["targets"], "channel": "prompt",
+                        "alphabet": "count", "note": "lab:promotion_level",
                         "key": f"lab:{rec['promotion_id']}"}]
     written = json.loads((lab.ws / ".court" / f"verdict-{rec['promotion_id']}.json").read_text(encoding="utf-8"))
-    assert written["label"] == "REJECTED"
+    assert written["label"] == "REJECTED" and written["level"] == "NONE"
     assert "K6" not in json.dumps(written) and "NOT CONFIRMED" not in json.dumps(written)
