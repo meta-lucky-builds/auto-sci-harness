@@ -1007,3 +1007,18 @@ the point of claiming, not by limiting exploration. Nothing built so far is dele
 - OpenResearch (MIT, alphaXiv) components are ported selectively to Python behind Lab isolation and the Court, per
   `META/openresearch_portmap/PORTMAP.md` (kept outside the repo); its copyright and MIT notice are kept in a
   third-party notices file. Telemetry, agent feedback and auto-update from it are dropped.
+
+### 17.1 Verification levels (owner decision 2026-10-23)
+Every promoted claim gets the strongest level its evidence supports; lower levels are shown as real, positive
+results, never as failures. Levels are cumulative and each is computed by code (the Kernel), never by a model.
+
+| Level | Meaning | Kernel basis |
+|---|---|---|
+| **REPRODUCIBLE** | Re-executed from the frozen bundle (pinned environment, offline) with the same result, across seeds and machines | K0, K3, bundle |
+| **REPLICATED** | An independent agent (ideally another model family, invariant 5) re-implemented it from the claim text alone and agreed | + replication |
+| **VALIDATED** | Pre-registered, then confirmed on held-out data that did not exist or was sealed when the Lab worked (minted after the freeze, §16.2, or future/private data), with valid statistics | K0–K9 |
+
+- Reproducible does not mean true: leakage, p-hacking and overfitting all reproduce. Only VALIDATED is a finding.
+- Claims tested on public datasets a networked Lab could have downloaded can reach REPLICATED at most and are
+  labelled RETROSPECTIVE; they never reach VALIDATED.
+- The UI shows the level as a badge with its exact meaning; an honest rejection names the failing check.
