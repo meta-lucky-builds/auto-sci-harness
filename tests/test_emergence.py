@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from custom_harness.emergence import ALLOWLIST, check_novelty_isolation
+from custom_harness.emergence import ALLOWLIST, BUDGET_PATHS, check_novelty_isolation
 from custom_harness.evolve.driver import load_suite
 from custom_harness.research import suite as suite_mod
 from custom_harness.research.suite import (
@@ -103,10 +103,12 @@ def test_comments_and_docstrings_are_not_flagged(tree):
 
 
 def _budget_module(tree: Path) -> dict:
-    """A fake allocation module holding a 'budget' novelty token, and the config that declares it."""
+    """A fake allocation module holding a 'budget' novelty token, and the config that declares it: the REAL config
+    plus this module. (int18: BUDGET_PATHS is no longer empty; replacing it instead of extending it un-declared the
+    station archive's real budget token, so every exact-equality assertion below saw that unrelated problem.)"""
     (tree / "custom_harness" / "allocate.py").write_text("novelty_bonus = 1.0\n", encoding="utf-8", newline="")
     allow = {**ALLOWLIST, ("allocate.py", "novelty_bonus"): ("budget", "allocation weight (test)")}
-    return {"budget_paths": ("allocate.py",), "allowlist": allow}
+    return {"budget_paths": (*BUDGET_PATHS, "allocate.py"), "allowlist": allow}
 
 
 def test_a_budget_token_in_a_budget_module_is_allowed(tree):

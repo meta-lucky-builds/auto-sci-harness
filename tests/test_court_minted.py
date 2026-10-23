@@ -162,7 +162,8 @@ def _promoted_case(w: World, tmp_path: Path, round_: str = "r1") -> dict:
     """A promotion case as `chh court register` makes it, with the lab_promotion `frozen` record it reads."""
     from custom_harness.lab.promote import RECORD_KIND as PROMOTION_KIND
     from custom_harness.lab.promote import PromoteRequest
-    req = PromoteRequest(format="chh-lab-promote/1", title="t", sentence="a sentence of ten chars", method="m.py",
+    # a VALID request: PromoteRequest.title has min_length 3 (the first draft's "t" was refused by the model itself)
+    req = PromoteRequest(format="chh-lab-promote/1", title="toy", sentence="a sentence of ten chars", method="m.py",
                          baseline="b.py", lock="requirements.lock", claim=PART, budget=Budget(timeout_s=60))
     lock = w.store.blobs.put(b"x==1\n")
     w.store.append_record(PROMOTION_KIND, {"promotion_id": "p1", "session_id": "s1", "event": "frozen",

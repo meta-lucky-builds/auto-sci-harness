@@ -21,10 +21,12 @@ import pytest
 
 from _lab_fakes import FakeDocker, docker
 from custom_harness.audit.spec import load_spec
+from custom_harness.commitment import agent_readable_root_of
 from custom_harness.lab import promote as P
 from custom_harness.lab import session as S
 from custom_harness.lab.agents import AgentOptions
 from custom_harness.lab.walls import lab_root
+from custom_harness.pathsafe import is_within
 
 METHOD = b"def build_model(seed):\n    from sklearn.ensemble import RandomForestClassifier\n" \
          b"    return RandomForestClassifier(random_state=seed)\n"
@@ -68,7 +70,10 @@ def test_freeze_pauses_the_box_and_records_hashes_outside_the_lab(store, lab):
     assert rec["workspace_snapshot"] and rec["n_files"] == 3
     intake = P.intake_root() / rec["promotion_id"]
     assert (intake / "method.py").read_bytes() == METHOD
-    assert not str(intake.resolve()).lower().startswith(str(lab_root().resolve()).lower())
+    # path containment, not a string prefix: `<data>/lab_court` starts with the string `<data>/lab` but is outside it
+    # (the string test failed on the correct layout, stage-c 2026-10-23); and it is under NO agent-readable root
+    assert not is_within(intake, lab_root()) and not is_within(lab_root(), intake)
+    assert agent_readable_root_of(intake) is None
     assert store.blobs.get(rec["frozen"]["lock"]["blob"]) == LOCK
     assert S.events(store, "s-prom")[-1]["event"] == "promoted"
 
