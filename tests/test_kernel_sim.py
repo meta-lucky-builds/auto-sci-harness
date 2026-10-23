@@ -32,6 +32,7 @@ from custom_harness.kernel import adapters as A
 from custom_harness.kernel import checks as K
 from custom_harness.kernel.bundle import build_bundle, reproduce_bundle
 from custom_harness.kernel.execution import SandboxReplayer
+from custom_harness.kernel.reasons import Code
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.tiers import Tier
 from kernel_world import World
@@ -230,7 +231,9 @@ def test_simulated_claim_without_an_approved_sim_adapter_fails_k1(tmp_path, monk
         cert = sim_certify(w, sim_claim(w))
         assert cert.label == Label.REJECTED and "K1" in cert.failed() and cert.adapters == ()
         assert "adapter 'sim'" in reasons(cert.checks["K1"]) and "no human approval" in reasons(cert.checks["K1"])
-        assert "no approved simulator adapter" in reasons(cert.checks["K3"])
+        # s4-kernel e5bd893 shared the exact-class K3 input check: same refusal (K3_INPUTS), reworded
+        assert "no approved adapter with a simulator module (see K1)" in reasons(cert.checks["K3"])
+        assert cert.checks["K3"].codes == (Code.K3_INPUTS,)
         no_mod = A.AdapterSpec("sim", "1", frozenset({EvidenceClass.SIMULATED}), ("custom_harness.kernel.sim",),
                                frozenset({"sim_value"}))
         monkeypatch.setitem(A.REGISTRY, "sim", (no_mod, sim.SIM_CHECKS))

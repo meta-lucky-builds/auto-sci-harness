@@ -701,7 +701,10 @@ def test_adapter_approval_refuses_unknown_anonymous_or_failing_adapters(tmp_path
     from custom_harness.kernel import AdapterError
     from custom_harness.kernel import adapters as A
     assert A.validate(A.ML_CHECKS) == []  # the real ML adapter passes its own fault-injection validation
-    assert A._raises(lambda: None) is False  # a "must refuse" check whose target does NOT refuse fails
+    # the fixture helper moved with the ML validation checks to verify/ml_validation.py (s4-kernel c648278, Kernel
+    # budget); same rule: a "must refuse" check whose target does NOT refuse fails
+    from custom_harness.verify import ml_validation as MV
+    assert MV.raises(lambda: None) is False and MV.raises(lambda: (_ for _ in ()).throw(ValueError("x"))) is True
     w = World(tmp_path / "w", approve_adapters=False)
     try:
         with pytest.raises(AdapterError, match="unknown adapter"):

@@ -87,31 +87,43 @@ def test_human_only_kinds_are_appended_only_by_their_writers():
     assert bad == []
 
 
+def _human_write_imports(text: str, rel: str) -> list[str]:
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(text)):
+        names: list[str] = []
+        if isinstance(node, ast.ImportFrom):
+            mod = node.module or ""
+            if any(a.name == "human" for a in node.names):  # `from . import human`: the whole package
+                bad.append(f"{rel}:{node.lineno} imports the human package")
+            if mod.endswith("human") or ".human." in f".{mod}." or mod == "human":
+                names = [f"{mod}.{a.name}" for a in node.names]
+        elif isinstance(node, ast.Import):
+            names = [a.name for a in node.names if ".human" in a.name]
+        for n in names:
+            tail = n.split("human.", 1)[-1].split(".")[0] if "human." in n else ""
+            if tail in HUMAN_WRITE_MODULES:
+                bad.append(f"{rel}:{node.lineno} imports {n}")
+    return bad
+
+
 def test_only_the_cli_layers_import_the_human_write_api():
     bad = []
     for p in _files():
         rel = _rel(p)
         if rel.startswith("human/") or rel in HUMAN_IMPORTERS:
             continue
-        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
-            names: list[str] = []
-            if isinstance(node, ast.ImportFrom):
-                mod = node.module or ""
-                if any(a.name == "human" for a in node.names):  # `from . import human`: the whole package
-                    bad.append(f"{rel}:{node.lineno} imports the human package")
-                if mod.endswith("human") or ".human." in f".{mod}." or mod == "human":
-                    names = [f"{mod}.{a.name}" for a in node.names]
-            elif isinstance(node, ast.Import):
-                names = [a.name for a in node.names if ".human" in a.name]
-            for n in names:
-                tail = n.split("human.", 1)[-1].split(".")[0] if "human." in n else ""
-                if tail in HUMAN_WRITE_MODULES:
-                    bad.append(f"{rel}:{node.lineno} imports {n}")
+        bad += _human_write_imports(p.read_text(encoding="utf-8"), rel)
     assert bad == []
+    # not vacuous (stage-c 2026-10-23: on the parent, with no human package, this test passed): the write API exists
+    # and the scan really sees an allowed layer's import of it
+    assert {f.stem for f in (SRC / "human").glob("*.py")} >= HUMAN_WRITE_MODULES
+    assert _human_write_imports((SRC / "cli.py").read_text(encoding="utf-8"), "cli.py")
 
 
 def test_the_human_package_registers_no_module():
-    for p in (SRC / "human").glob("*.py"):
+    files = list((SRC / "human").glob("*.py"))
+    assert {f.stem for f in files} >= HUMAN_WRITE_MODULES  # not vacuous: the package exists (it passed without one)
+    for p in files:
         text = p.read_text(encoding="utf-8")
         assert "@register(" not in text and "runtime import register" not in text, p.name
 
