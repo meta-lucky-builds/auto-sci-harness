@@ -163,7 +163,9 @@ def inspect_script(run_dir: str, job_id: str) -> str:
 def map_inspect_token(out: str) -> JobStatus:
     """Pure token -> status mapping (OR `map_inspect_token` with our failure classes)."""
     out = out.strip()
-    if out.startswith("EXIT "):
+    # "EXIT " with an empty code strips to "EXIT" (stage-c 2026-10-23: the empty-file branch below was unreachable and
+    # a job in the open/write window read as UNKNOWN "unexpected inspect output")
+    if out == "EXIT" or out.startswith("EXIT "):
         code_s = out[5:].strip()
         if not code_s:  # between open(O_TRUNC) and the write: not a verdict
             return JobStatus(JobStage.RUNNING)

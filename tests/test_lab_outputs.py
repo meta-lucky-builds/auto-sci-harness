@@ -91,10 +91,14 @@ def test_latex_program_and_driver_choice():
 
 def test_latex_never_compiles_on_the_host(tmp_path):
     from custom_harness.sandbox import LocalSandbox
-    (tmp_path / "p.tex").write_text("x")
+    # the workspace is a subdirectory: tmp_path itself holds the test's data dir (conftest CHH_DATA_DIR), which the
+    # sandbox's protected-mount check rightly refuses, so the first draft never reached compile_in_sandbox
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "p.tex").write_text("x")
+    box = LocalSandbox(ws, i_understand_no_isolation=True)
     with pytest.raises(L.CompileRefused):
-        L.compile_in_sandbox(LocalSandbox(tmp_path, i_understand_no_isolation=True), "p.tex",
-                             available=lambda t: True)
+        L.compile_in_sandbox(box, "p.tex", available=lambda t: True)
 
 
 def test_figure_assets_are_vendored_with_their_notice(tmp_path):
