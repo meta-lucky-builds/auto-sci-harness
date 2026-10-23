@@ -142,8 +142,9 @@ Assume it is capable and, at worst, adversarial. It may want to:
      - targets are named after the freeze;
      - the deny-only screen;
      - the audit's listed assumptions.
-   - The real fix is minted or future targets (§16.2), which this route does not have yet (§6 next). Truth memorised
-     in model weights remains (§16.12).
+   - The real fix is minted or future targets (§16.2): built on int18 as the minted Court route (`chh court`,
+     `court/minted.py`, section 10). The audit route stays for public datasets, and its certificates are capped at
+     REPLICATED and labelled RETROSPECTIVE (`court/levels.py`). Truth memorised in model weights remains (§16.12).
 6. **Transformed copies of truth are not found by the content scans.** Only exact copies and common encodings of the
    secret are found. The guarantee rests on the truth never being reachable from the box (mount checks, no Court
    socket, separate OS user), not on the scan.
@@ -202,10 +203,7 @@ Assume it is capable and, at worst, adversarial. It may want to:
 
 ## 6. Next (not built)
 
-- **Minted-target Court route for promotions** (§16.2). It needs a research-loop entry point that accepts an
-  externally frozen candidate (method code plus pinned lock) as the claim's subject, then runs the existing
-  `research.claim` → `confirm` → `certify` on freshly minted held-out data, sized by the preflight. This is a
-  research-loop change, **not a Kernel change**. It should be designed with the integrator.
+- **Minted-target Court route for promotions:** built on int18 (section 10), NOT test-verified.
 - **A Court image built from a frozen lock.** It needs an owner decision. The build must be offline at run time and
   get the same bundled-data truth scan as the candidate image.
 - **Renderers never show EXPLORATORY records as findings:** a static check over report and studio code.
@@ -359,3 +357,25 @@ A promotion request may name the `idea` it came from. It must exist in the trace
 - Action and cost extraction from vendor output is best effort [U].
 - `seq` and `prev` assume one writer per session at a time (the manager).
 - The trace is owner-side (the store); nothing of it is mounted into the box.
+
+## 10. Court routes for a promotion and verification levels (int18, stage-a; built, NOT test-verified)
+
+One Court route per freeze:
+
+| Route | Commands | Held-out data | Highest level |
+|---|---|---|---|
+| Minted | `chh court register PROMOTION --family F --beacon-round R` → `chh court mint CASE --beacon VALUE` → `chh approve-role TARGET` (HUMAN) → `chh court run CASE --docker` | minted by kerneld AFTER the claim is pre-registered and anchored (`kerneld/mint.py`, ingest kind `minted_heldout`, `Kernel.record_mint`); FUTURE role; sized by the certifiability preflight (default 4,500 rows, UNCALIBRATED) | VALIDATED |
+| Retrospective | `chh lab handoff PROMOTION --targets FILE` → the Claim Audit commands | fixed public OpenML datasets (a networked Lab could have them) | REPLICATED, labelled RETROSPECTIVE |
+
+**What can be minted:** the synthetic generator families of `research/suite.FAMILIES` (rings, xor, spirals,
+imbalanced, friedman, interactions, and the null family noise), each with its own metric (`chh court families`).
+**What cannot:** public datasets (retrospective route), and simulated, formal, computational or physical claims (no
+generator; physical claims get FUTURE data only through `chh return-data`). A minted claim is generator-scoped: its
+population is the family (§16.2).
+
+**Levels** (`court/levels.py`, `chh court level CERT|CASE`, a column of `chh certificates`; code only, never a
+model; cumulative): REPRODUCIBLE (K0 + K3 pass, a bundle recorded), REPLICATED (+ a certified, reproducible replica
+case written from the claim text by a replicator of another model family: `chh court replicate`; invariant 5 NOT MET
+never counts), VALIDATED (+ K0-K9 pass, CERTIFIED-VALIDATED, every target minted after the freeze, future, or sealed
+external data on a human role approval). The level reaches the Lab only through `chh lab release-verdict` (a ledgered
+`count` release, field `released_level` of `promote/verdict_released`).

@@ -18,12 +18,15 @@ names exactly what is missing (an honest rejection names the failing check).
                 replicator is not of the author's model family). A replica with invariant 5 NOT MET is recorded and
                 shown, but does not count (invariant 5 is a hard invariant, §10).
   VALIDATED     + every Kernel check K0-K9 passed with label CERTIFIED-VALIDATED (K6 on external/future data whose role
-                a human approved), and EVERY target is fresh: minted after the freeze (a `mint` ledger entry for this
-                claim hash and target, the target registered after the pre-registration) or future data registered
-                after the pre-registration (role FUTURE). Data claims only.
-  RETROSPECTIVE a cap, not a level: a target that existed before the pre-registration, or a fixed public dataset
-                (a Claim Audit OpenML split: a networked Lab could have downloaded it), caps the claim at REPLICATED
-                and labels it RETROSPECTIVE. It never reaches VALIDATED (§17.1).
+                a human approved), and EVERY target is fresh: `minted` (a `mint` ledger entry for this claim hash and
+                target, registered after the pre-registration), `future` (role FUTURE, registered after the
+                pre-registration) or `sealed` (an external/future dataset that is neither: VALIDATED then rests on the
+                human role approval that it was sealed or private when the Lab worked; listed as an untested
+                assumption in `facts`). Data claims only.
+  RETROSPECTIVE a cap, not a level: a target that is a fixed public dataset (a Claim Audit OpenML split: a networked
+                Lab could have downloaded it) caps the claim at REPLICATED and labels it RETROSPECTIVE. It never
+                reaches VALIDATED (§17.1). Internal held-out data (role TEST / SEALED) is neither: such a claim is
+                CERTIFIED-INTERNAL at best, so it stops below VALIDATED on the label.
 
 Built, NOT test-verified (int18, stage-a).
 """
@@ -48,8 +51,8 @@ MEANING = {
                   "agreed (a certified replica)",
     "VALIDATED": "pre-registered, then confirmed on held-out data that did not exist when the Lab worked (minted "
                  "after the freeze, or future data), with valid statistics (K0-K9): a finding",
-    "RETROSPECTIVE": "tested on data that existed before the claim (e.g. a public dataset a networked Lab could have "
-                     "downloaded): capped at REPLICATED, never VALIDATED",
+    "RETROSPECTIVE": "tested on a fixed public dataset a networked Lab could have downloaded: capped at REPLICATED, "
+                     "never VALIDATED",
 }
 INGEST_RECORD = "kerneld_ingest"  # kerneld/ingest.RECORD_KIND (read only)
 
@@ -75,6 +78,32 @@ def _passed(cert: Certificate, ids: tuple[str, ...]) -> list[str]:
     return [k for k in ids if k not in cert.checks or cert.checks[k].status != "pass"]
 
 
+def classify_target(ingest_kind: str | None, minted: bool, registered_after_prereg: bool,
+                    role: DatasetRole | None) -> str:
+    """How a target's data came to exist relative to its claim (pure; module docstring):
+    retrospective (a public-dataset ingest) | minted | future | sealed | internal."""
+    external = role in (DatasetRole.EXTERNAL, DatasetRole.FUTURE)
+    if ingest_kind == "openml_split":
+        return "retrospective"  # a fixed public dataset a networked Lab could have downloaded
+    if minted and registered_after_prereg:
+        return "minted"
+    if role == DatasetRole.FUTURE and registered_after_prereg:
+        return "future"
+    if external:
+        return "sealed"  # rests on the human role approval (sealed/private when the Lab worked): untested
+    return "internal"  # TEST / SEALED / DEV roles: CERTIFIED-INTERNAL at best
+
+
+def ladder(missing: dict[str, list[str]]) -> str:
+    """The highest level whose requirements (and every lower level's) all hold: cumulative levels (§17.1)."""
+    reached = "NONE"
+    for lv in LEVELS[1:]:
+        if missing.get(lv):
+            break
+        reached = lv
+    return reached
+
+
 def target_freshness(store: EvidenceStore, kernel: ScopedKernel, cert: Certificate) -> dict[str, dict[str, Any]]:
     """Per target: how its data came to exist relative to the claim's pre-registration (code-only facts)."""
     prereg = cert.prereg_seq if isinstance(cert.prereg_seq, int) else None
@@ -98,14 +127,7 @@ def target_freshness(store: EvidenceStore, kernel: ScopedKernel, cert: Certifica
         after = prereg is not None and reg is not None and reg > prereg
         ingest = public_kinds.get(t)
         role = rec.role.value if rec is not None else None
-        if ingest == "openml_split" or not after:
-            kind = "retrospective"  # a fixed public dataset, or data that existed before the claim
-        elif minted:
-            kind = "minted"
-        elif rec is not None and rec.role == DatasetRole.FUTURE:
-            kind = "future"
-        else:
-            kind = "internal"  # registered after the claim but neither minted nor future (e.g. sealed internal)
+        kind = classify_target(ingest, minted, after, rec.role if rec is not None else None)
         out[t] = {"role": role, "registered_seq": reg, "prereg_seq": prereg, "registered_after_prereg": after,
                   "minted_for_this_claim": minted, "ingest_kind": ingest, "freshness": kind,
                   "role_approved": rec is not None and kernel.vault.role_approval(t) is not None}
@@ -184,17 +206,16 @@ def level(store: EvidenceStore, cert_hash: str, *, _depth: int = 0) -> LevelResu
         val.append(f"label is {cert.label.value}, not CERTIFIED-VALIDATED (K6 on human-approved external/future data)")
     val += [f"{k} did not pass" for k in _passed(cert, tuple(CHECK_IDS))]
     for t, f in fresh.items():
-        if f["freshness"] not in ("minted", "future"):
-            val.append(f"target {t} is {f['freshness']}: not minted after the freeze nor future data")
+        if f["freshness"] not in ("minted", "future", "sealed"):
+            val.append(f"target {t} is {f['freshness']}: not minted after the freeze, future or sealed external data")
+        if f["freshness"] == "sealed":
+            res.facts.setdefault("untested_assumptions", []).append(
+                f"{t}: sealed or private when the Lab worked (the human role approval; not checked by code)")
     if res.retrospective:
-        val.append("RETROSPECTIVE: a target existed before the claim (or is a public dataset): capped at REPLICATED")
+        val.append("RETROSPECTIVE: a target is a fixed public dataset: capped at REPLICATED")
     missing["VALIDATED"] = val
     # the ladder
-    reached = "NONE"
-    for lv in LEVELS[1:]:
-        if missing[lv]:
-            break
-        reached = lv
+    reached = ladder(missing)
     res.level, res.missing = reached, {k: v for k, v in missing.items() if v}
     res.badge = reached + (" (RETROSPECTIVE)" if res.retrospective and reached != "NONE" else "")
     res.meaning = MEANING[reached] + (f"; {MEANING['RETROSPECTIVE']}" if res.retrospective else "")
