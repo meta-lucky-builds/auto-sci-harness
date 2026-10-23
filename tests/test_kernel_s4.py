@@ -464,6 +464,7 @@ def test_a_private_file_given_as_a_program_input_is_a_coded_k9_finding(world):
     from custom_harness.kernel import ExecRecord, InputRef
     from custom_harness.records import Run
     claim = world.claim(world.artifact("good"), world.artifact("baseline", "baseline"), n_boot=1000, seeds=(31, 32, 33))
+    world.kernel.preregister(claim)  # K9 reads the target's labels, which the Vault serves to registered claims only
     label = world.vault.dataset("test").files["test_y.csv"].blob
     run = Run(harness_id="kernel-world", harness_hash="world", task_id="test", seed=31)
     world.store.add_run(run)
