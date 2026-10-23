@@ -315,7 +315,7 @@ def test_a_computational_problem_without_an_approved_exact_adapter_is_refused(sw
 def _k1_statement_refused(sw: SW, cert_hash: str) -> bool:
     """The Kernel rejected the certificate on K1's scope-statement rule (s4-kernel: a data claim's statement must be
     exactly the adapter's rendering of its fields)."""
-    from custom_harness.kernel import Code
+    from custom_harness.kernel.reasons import Code
     cert = sw.kernel.certificate(cert_hash)
     return cert.label == Label.REJECTED and "K1" in cert.failed() and Code.K1_STATEMENT in cert.checks["K1"].codes
 
