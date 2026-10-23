@@ -407,16 +407,23 @@ def load_rulings(store: EvidenceStore, *, anchors: Sequence[Path] = ()) -> Rulin
 
 
 def record_ruling(task_dir: Path, feature: str, ruling: str, approver: str, note: str = "", *,
-                  store: EvidenceStore, anchors: Sequence[Path] = ()) -> dict[str, Any]:
+                  store: EvidenceStore, anchors: Sequence[Path] = (),
+                  expect_report_hash: str | None = None) -> dict[str, Any]:
     """Backend of the HUMAN-only ``chh rule-feature`` command; that command is the way a ruling is recorded.
     Appends a ``feature_ruling`` Kernel ledger entry bound to the CURRENT screen report of ``task_dir`` (data
     digest, tags hash, report hash) and naming the human approver. Refuses an empty approver, a ruling outside
-    the closed set, an item the screen does not route, and a ledger whose chain (or any given anchor) fails."""
+    the closed set, an item the screen does not route, and a ledger whose chain (or any given anchor) fails.
+    `expect_report_hash` (custom_harness.human.features passes it): the report hash the human reviewed; refused if
+    the screen now gives another (data, tags or screen changed). The body records `anchors_checked` (how many
+    anchor files the chain was checked against before the append)."""
     if not isinstance(approver, str) or not approver.strip():
         raise ProvenanceError("a ruling needs a named human approver")
     if ruling not in RULINGS:
         raise ProvenanceError("ruling must be 'legitimate' or 'leak'")
     report = screen(Path(task_dir))
+    if expect_report_hash is not None and report["report_hash"] != expect_report_hash:
+        raise ProvenanceError(f"the screen report is now {report['report_hash']}, not the {expect_report_hash} you "
+                              "reviewed (data, tags or screen changed): re-screen and review again")
     if feature not in report["routed"]:
         raise ProvenanceError(f"{feature!r} is not routed to a human (refused features cannot be ruled legitimate)")
     if not load_rulings(store, anchors=anchors).chain_ok:
@@ -425,6 +432,7 @@ def record_ruling(task_dir: Path, feature: str, ruling: str, approver: str, note
         "data_digest": report["data_digest"], "feature": feature, "tags_hash": report["tags_hash"],
         "report_hash": report["report_hash"], "ruling": ruling, "approver": approver.strip(), "note": str(note),
         "timestamp": datetime.now(UTC).isoformat(), "recorded_by": "chh rule-feature",
+        "anchors_checked": len(anchors),
     }
     e = Ledger(store).append(RULING_KIND, body)
     return {**e.body, "seq": e.seq, "hash": e.hash}

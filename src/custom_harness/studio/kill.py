@@ -29,6 +29,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..human.catalog import MODULE_FORBIDDEN_KINDS
 from ..kernel import KernelError
 from ..kernel.claim import Claim
 from ..kernel.ledger import Entry, Ledger
@@ -135,12 +136,17 @@ def kill_run(store: EvidenceStore, run_id: str, *, by: str, reason_code: str = "
 
 
 class _ModuleLedger(Ledger):
-    """The ledger a module's Kernel writes through: it cannot write the L9 human-only kinds."""
+    """The ledger a module's Kernel writes through: it cannot write a human-only kind (custom_harness/human/catalog.py
+    MODULE_FORBIDDEN_KINDS: approvals of every kind, adapter / role / statement approvals, alpha-account opening,
+    feature rulings, verifier and suite reviews, kills, tier-policy pins, salt reveals), nor a HUMAN early retirement
+    of an alpha-account (kind `alpha_retire` with body code "human"; the Kernel's own retirement of an exhausted
+    account is not refused). So a module, or an evolved node that can only call registered modules, cannot take a
+    human action through its Kernel (invariants 13, 15)."""
 
-    HUMAN_ONLY = frozenset({KILL_KIND, "tier_policy"})
+    HUMAN_ONLY = frozenset({KILL_KIND, "tier_policy"}) | MODULE_FORBIDDEN_KINDS
 
     def append(self, kind: str, body: dict[str, Any]) -> Entry:
-        if kind in self.HUMAN_ONLY:
+        if kind in self.HUMAN_ONLY or (kind == "alpha_retire" and body.get("code") == "human"):
             raise KernelError(f"ledger kind {kind!r} is a human action (L9 CLI); module code cannot write it")
         return super().append(kind, body)
 

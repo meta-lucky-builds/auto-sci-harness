@@ -291,6 +291,9 @@ def test_queue_and_graph_are_cli_commands(capsys):
     store.close()
     assert cli.main(["queue", "--json"]) == 0
     items = json.loads(capsys.readouterr().out)
-    assert {i["kind"] for i in items} == {"adapter"}  # a fresh store: only the adapters wait for a human
+    # a fresh store: the adapters, the agent-authored fault suites, the provider sign-offs and the human-held check
+    # (invariant 22) wait for a human (s4-human: one queue over every human action), each naming what it binds
+    assert {i["kind"] for i in items} == {"adapter", "suite_review", "provider_signoff", "human_check"}
+    assert all("binds" in i and "decide" in i for i in items)
     assert cli.main(["graph", "--limitations"]) == 0
     assert all(x["certificates"] == [] for x in json.loads(capsys.readouterr().out))

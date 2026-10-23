@@ -88,16 +88,20 @@ def cmd_graph(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def cmd_queue(a: argparse.Namespace, store: EvidenceStore) -> int:
-    from .queue import pending
+    """Read-only: every pending human action (custom_harness.human.queue), with the hash each one binds."""
+    from ..human.queue import counts, pending
     items = pending(store)
+    if a.kind:
+        items = [it for it in items if it["kind"] in a.kind]
     if a.json:
-        print(json.dumps(items, indent=1))
+        print(json.dumps(items, indent=1, default=str))
     else:
         for it in items:
-            what = {k: v for k, v in it.items() if k not in ("kind", "decide", "prompt")}
-            print(f"[{it['kind']}] {json.dumps(what, sort_keys=True)}")
+            what = {k: v for k, v in it.items() if k not in ("kind", "decide", "prompt", "binds")}
+            print(f"[{it['kind']}] {json.dumps(what, sort_keys=True, default=str)}")
+            print(f"    binds:  {json.dumps(it.get('binds', {}), sort_keys=True)}")
             print(f"    decide: {it['decide']}")
-        print(f"{len(items)} pending")
+        print(f"{len(items)} pending {json.dumps(counts(items), sort_keys=True)}")
     return 0
 
 
@@ -121,9 +125,11 @@ def add_parsers(sub: Any) -> None:
     ex.add_argument("--no-verify", action="store_true", help="do not re-derive; the status is UNVERIFIED")
     gr = sub.add_parser("graph", help="research graph: trees, claims, predictions, evidence (read-only JSON)")
     gr.add_argument("--limitations", action="store_true", help="only the limitations register")
-    qu = sub.add_parser("queue", help="items waiting for a HUMAN decision (approval nodes, adapters, roles, "
-                                      "statements)")
+    qu = sub.add_parser("queue", help="every pending HUMAN action (approval nodes, physical protocols, adapters, "
+                                      "statements, roles, alpha-accounts, verifier/suite reviews, feature rulings, "
+                                      "provider sign-offs, human-held checks), read-only")
     qu.add_argument("--json", action="store_true")
+    qu.add_argument("--kind", action="append", default=[], help="only this kind (repeatable)")
     tp = sub.add_parser("tier-policy", help="L9 tier policy: init | show | pin (HUMAN)")
     tp.add_argument("action", choices=["init", "show", "pin"])
     tp.add_argument("--by", help="pin: the human pinning the policy (recorded in the ledger)")

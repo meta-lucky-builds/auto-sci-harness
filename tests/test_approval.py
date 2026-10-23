@@ -43,9 +43,19 @@ def _plant_state(state, params, ctx):
 
 @register("appr.forge_ledger")
 def _forge_ledger(state, params, ctx):
-    # trusted module code writes a well-formed approval BEFORE the node pauses. The direct store path is closed
-    # (ModuleStore, test_module_store_facade.py); the Kernel object's ledger is the remaining in-process path
+    # trusted module code tries to write a well-formed approval BEFORE the node pauses through its Kernel: the
+    # module Kernel's ledger refuses every human-only kind (studio/kill.py _ModuleLedger, human/catalog.py)
     ctx.kernel().ledger.append("approval", {"run_id": ctx.run_id, "node_id": "review",
+                                          "item_hash": item_hash(state["protocol"]), "decision": "approved",
+                                          "approver": "module", "note": ""})
+    return {}
+
+
+@register("appr.forge_ledger_raw")
+def _forge_ledger_raw(state, params, ctx):
+    # the remaining in-process path: deliberately malicious module code reaching the real store (ctx._store is
+    # private; modules are trusted, human-written code). The engine's request-order rule must still hold.
+    Ledger(ctx._store).append("approval", {"run_id": ctx.run_id, "node_id": "review",
                                           "item_hash": item_hash(state["protocol"]), "decision": "approved",
                                           "approver": "module", "note": ""})
     return {}
@@ -178,12 +188,22 @@ def test_state_planted_by_earlier_node_cannot_approve(dstore):
     assert "review_approval" not in res.state and "review_decision" not in res.state  # discarded by the engine
 
 
+def test_module_kernel_cannot_write_an_approval(dstore):
+    """The module's Kernel refuses the human-only `approval` kind (s4-human: before this, the append succeeded and
+    only the engine's request-order rule stopped it)."""
+    s = spec(pre=["appr.forge_ledger"])
+    res = Engine(s, backends={}, store=dstore).run("t", {})
+    assert "outcome" not in res.state and res.status != RunStatus.COMPLETED
+    assert any("is a human action" in (st.error or "") for st in dstore.trace(res.run_id))
+    assert not Ledger(dstore).entries("approval")
+
+
 def test_module_cannot_preplant_a_ledger_approval(dstore):
-    """Modules are trusted code with store access, so they CAN write ledger rows. The engine only honours an
+    """A module reaching the real store CAN write ledger rows (modules are trusted code). The engine only honours an
     approval appended after the engine itself recorded the pause for that exact item; a module that runs before
     the pause cannot satisfy that. (A deliberately malicious module could still forge trace rows too: modules are
     trusted code, see engine docstring.)"""
-    s = spec(pre=["appr.forge_ledger"])
+    s = spec(pre=["appr.forge_ledger_raw"])
     res = Engine(s, backends={}, store=dstore).run("t", {})
     assert res.status == _paused() and "outcome" not in res.state
     assert Engine(s, backends={}, store=dstore).resume(res.run_id).status == _paused()
