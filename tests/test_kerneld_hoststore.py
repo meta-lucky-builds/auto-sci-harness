@@ -69,6 +69,33 @@ def test_host_store_refuses_private_and_canary_blobs_but_serves_public_ones(worl
             hs.blobs.get_json(digest)
     # the refusal is not an OSError/ValueError: "missing"/"malformed" handlers cannot swallow it into a skip
     assert not issubclass(PrivateDataRefused, (OSError, ValueError))
+    # the ledger names the label file by its KEYED digest only (s4-kernel); the refused digest above is the CONTENT
+    # address the Vault resolves it to (int18 stage-c: the facade indexed only the keyed ref and served the labels)
+    keyed = [f["blob"] for row in world.store.ledger_rows("register_dataset")
+             for f in json.loads(row[2])["files"].values() if f["private"]]
+    assert keyed and all(b.startswith("hmac-sha256:") for b in keyed) and _private_blob(world) not in keyed
+
+
+def test_an_unresolvable_keyed_private_ref_fails_every_host_read_closed(tmp_path):
+    """A keyed private ref whose Vault index entry is missing: the facade cannot tell which blob holds that file, so
+    it refuses every blob read outside a grant; once the index entry is back, public blobs are served again."""
+    w = World(tmp_path / "w", seed=12, n_train=40, n_test=40)
+    try:
+        idx = Path(w.store.root) / "private" / "index"
+        entries = {p.name: p.read_text(encoding="ascii") for p in idx.iterdir()}
+        assert entries
+        for name in entries:
+            (idx / name).unlink()
+        hs = host_store(w.store)
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get(_public_blob(w))
+        for name, text in entries.items():
+            (idx / name).write_text(text, encoding="ascii")
+        assert hs.blobs.get(_public_blob(w)) == w.store.blobs.get(_public_blob(w))
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get(_private_blob(w))
+    finally:
+        w.close()
 
 
 def test_vault_read_through_the_host_store_is_refused_before_it_is_logged(world):

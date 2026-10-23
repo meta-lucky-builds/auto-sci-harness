@@ -34,6 +34,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..kernel.vault import KEYED
 from ..store.blobs import BlobStore
 from ..store.evidence import EvidenceStore, LedgerRow
 
@@ -76,12 +77,35 @@ class _PrivateIndex:
     _HEAD = "SELECT coalesce(max(seq), 0) FROM ledger"
     _NEW = "SELECT body FROM ledger WHERE kind='register_dataset' AND seq > ? AND seq <= ? ORDER BY seq"
 
-    def __init__(self, rows: Callable[..., list[tuple]]):
+    def __init__(self, rows: Callable[..., list[tuple]], store_root: Path):
         self.__rows = rows
         self.__seen = 0
         self.__private: set[str] = set()
+        self.__keyed_index = Path(store_root) / "private" / "index"
+        self.__unresolved: set[str] = set()  # keyed refs whose content address is not (yet) in the Vault's index
+
+    def _add(self, blob: str) -> None:
+        """A private file's ledger ref. Since s4-kernel the Vault records it as KEYED + HMAC digest (never the content
+        address), so the content address that blobs.get is called with comes from the Vault's index
+        (`<store>/private/index/<digest>`, written before the ledger entry). int18 merge bug found by stage-c: the
+        index held only the keyed ref, so every private label blob was served to host code."""
+        if not blob.startswith(KEYED):
+            self.__private.add(blob)
+            return
+        idx = self.__keyed_index / blob.removeprefix(KEYED)
+        try:
+            address = idx.read_text(encoding="ascii").strip() if blob.removeprefix(KEYED).isalnum() else ""
+        except OSError:
+            address = ""
+        if address:
+            self.__private.add(address)
+            self.__unresolved.discard(blob)
+        else:
+            self.__unresolved.add(blob)
 
     def _refresh(self) -> None:
+        for blob in sorted(self.__unresolved):
+            self._add(blob)
         head = int(self.__rows(self._HEAD)[0][0])
         if head <= self.__seen:
             return
@@ -96,14 +120,16 @@ class _PrivateIndex:
             for f in files.values() if isinstance(files, dict) else ():
                 # fail closed: a file entry whose privacy is not exactly False counts as private
                 if isinstance(f, dict) and f.get("private") is not False and isinstance(f.get("blob"), str):
-                    self.__private.add(f["blob"])
+                    self._add(f["blob"])
             if isinstance(b.get("canary_ref"), str):
                 self.__private.add(b["canary_ref"])
         self.__seen = head
 
     def is_private(self, digest: str) -> bool:
+        """True for a private digest. Fails closed: while any keyed private ref cannot be resolved to its content
+        address, every digest counts as private (the store cannot tell which blob holds that file)."""
         self._refresh()
-        return digest in self.__private
+        return digest in self.__private or bool(self.__unresolved)
 
 
 class HostBlobs(BlobStore):
@@ -129,7 +155,7 @@ class HostStore(EvidenceStore):
         self.root = inner.root
         self._db = inner._db
         self._lock = inner._lock  # no reference to `inner` is kept (s4-kerneld-review finding 8)
-        self.__index = _PrivateIndex(self._rows)
+        self.__index = _PrivateIndex(self._rows, inner.root)
         self.blobs = HostBlobs(inner.blobs.root, self.__index)
 
     # ---------------------------------------------------------------- refusals
