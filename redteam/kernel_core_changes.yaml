@@ -166,3 +166,23 @@ changes:
     Recorded by the s4-int17 integrator agent, not typed by a human. The 7-day cooling-off was NOT observed. The owner
     should review together with the 8dc2497e, d9524887 and 59e42223 records.
   recorded: '2026-10-15'
+- fingerprint: 25dd85a3c070b531c18891052c7878cd38a294964299274dc9f5be5e1a6f410d
+  kind: delegated
+  approver: owner (delegated to orchestrator, 2026-10-08)
+  note: 'Integration record on int18 by the stage-a builder agent (typed by an agent, not a human). s4-kernel left its core
+    change without a record; this records the merged core (int17-fix b540544f + s4-kernel, clean auto-merge, no Kernel edit
+    by the integrator). Cooling-off NOT observed. Includes non-tightening changes (TOST equivalence widens what K1/K7 accept
+    for equivalence claims). NOT test-verified: the Kernel suite with the coverage gate and tests/test_kernel_s4.py, tests/test_redteam_s4kernel_*.py
+    must run (docs/int18_test_plan.md). The owner should review and may replace it by a window record.'
+  recorded: '2026-10-23'
+  delegated_by: owner
+  basis: "GOAL \xA74.3, \xA716.4, \xA716.5, \xA716.7, invariants 2, 13, 17, 18, 22; s4-kernel brief items 1-9 + run_id (agent_worklogs/s4-kernel/LOG.md,\
+    \ docs/kernel_s4.md)"
+  changes:
+  - 's4-kernel items 1-9 (c78a88d): K9 reader_texts for data/inputs; ledger.inside path check for anchors and adapter sources;
+    TOST equivalence in ml.plasmode/bounded_null with K1 power allowed on equivalence; scope_phrase + K1 data-statement check;
+    tolerance_evidence + Kernel.record_noise_floor; declare_truth_copy idempotent; checklist cost UNCALIBRATED when unknown;
+    adapter_hash cache; governance delegated kind'
+  - run_id on prereg and certificate ledger entries (s4-kernel c648278)
+  - ML/LP validation fixtures moved from kernel/ to verify/ (LOC)
+  cooling_off_observed: false
