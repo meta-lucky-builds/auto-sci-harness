@@ -11,6 +11,7 @@ NOT RUN when written (owner: no test runs this phase).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,11 @@ from custom_harness.kerneld.scope import ScopedKernel, screening_canaries
 from kernel_world import World
 
 ROOT = Path(__file__).resolve().parents[1]
+# The module-scoped `world` runs programs in LocalSandbox before conftest's function-scoped autouse fixture sets test
+# mode (pytest instantiates wider-scoped fixtures first): set it at import, as test_exploit_eval.py and
+# test_kernel_s16.py do. (stage-c 2026-10-23: run alone, every `world` test errored with PermissionError; inside the
+# full suite it passed only because another module's import had set the variable first.)
+os.environ.setdefault("CHH_ALLOW_UNISOLATED", "1")
 
 
 @pytest.fixture(scope="module")
@@ -220,6 +226,31 @@ def test_ingest_refuses_a_task_whose_canary_differs_for_the_same_data(tmp_path, 
             with pytest.raises(KernelDError) as ei:
                 run.ingest_research_task(load_task(twin).id, twin)
             assert ei.value.code == "canary_mismatch" and str(ei.value) == "canary_mismatch"
+    finally:
+        s.close()
+
+
+def test_a_second_task_on_already_registered_data_is_ingested_not_refused(tmp_path, rings):
+    """Two tasks sharing the same data (same canary), different baselines: the second ingest re-finds the SAME
+    datasets and registers only its own baseline. Fails on int18 d2ec8b3 (stage-c): the ingest pre-check compared the
+    Vault's hash of KEYED private refs (s4-kernel) with a plain-sha256 hash, so every already-registered dataset with
+    a private file read as 'other content' and the ingest was refused (ingest_refused)."""
+    from custom_harness.research.task import load_task
+    twin = tmp_path / "twin"
+    shutil.copytree(rings, twin)
+    (twin / "baseline.py").write_text((rings / "baseline.py").read_text() + "\n# another baseline\n")
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-shared")
+            first = run.ingest_research_task(load_task(rings).id, rings)
+            second = run.ingest_research_task(load_task(twin).id, twin)
+            assert (second["train"], second["test"]) == (first["train"], first["test"])
+            assert second["baseline"] != first["baseline"]
+            v = Vault(s)
+            assert {first["baseline"], second["baseline"]} <= set(v.artifacts())
+            assert sum(e.body.get("dataset_id") == first["test"] for e in v.ledger.entries("register_dataset")) == 1
+            assert len(s.records("kerneld_ingest")) == 2
     finally:
         s.close()
 

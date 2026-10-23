@@ -79,7 +79,12 @@ def _precheck(vault: Vault, plan: list[tuple[str, DatasetRole, dict[str, bytes],
         files = {n: FileRef(blob=hashlib.sha256(b).hexdigest(), private=False) for n, b in public.items()}
         files |= {n: FileRef(blob=hashlib.sha256(b).hexdigest(), private=True) for n, b in private.items()}
         old = known.get(ds_id)
-        if old is not None and (old.hash != dataset_hash(files) or old.role != role):
+        # The Vault records a private file by its KEYED digest (s4-kernel), so old.hash is the hash of the sealed refs
+        # and never equals dataset_hash(files) of plain sha256 refs; datasets() returns the files resolved to content
+        # addresses, so the content comparison is on those (an unresolvable ref stays keyed: no match, refused). A
+        # record written before s4 holds the plain hash. (int18 merge bug, s4-kernel x s4-kerneld, found by stage-c:
+        # every second ingest of already-registered data with private files was refused as ingest_refused.)
+        if old is not None and (dataset_hash(files) not in (old.hash, dataset_hash(old.files)) or old.role != role):
             raise IngestRefused("ingest_refused")
         for ref in files.values():
             if seen.get(ref.blob, ref.private) != ref.private:
