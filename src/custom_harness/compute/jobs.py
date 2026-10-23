@@ -18,7 +18,10 @@ What is OURS (not in OR) and why:
 - handles are APPENDED to a hash-chained journal (never mutated in place), so `reattach(job_key)` after a crash reads
   the submit entry back and a rewritten journal line breaks every later hash;
 - results come back only by `collect`, which pulls named files into the content-addressed store; a remote status
-  string is never trusted as a result (invariant 8).
+  string is never trusted as a result (invariant 8);
+- every lifecycle step is also emitted to the Lab discovery trace (discovery_trace.py): submitted, started, log
+  pointers, finished/failed/cancelled with duration and cost, collected outputs as content hashes. Events carry
+  environment variable NAMES only, never values, and no credentials (TraceRefused otherwise).
 Built, NOT test-verified. No backend in this package has been run against a real host or cluster.
 """
 
@@ -38,6 +41,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..discovery_trace import JsonlTraceSink, TraceSink, safe_emit, sha256_text
 from ..errors import InfraError
 from ..sandbox.base import DEFAULT_MAX_OUTPUT_BYTES, LIMIT_RETURNCODE, ExecResult, Sandbox, run_bounded
 from ..store import EvidenceStore
@@ -273,9 +277,11 @@ class AsyncComputeBackend(ComputeBackend):
     submit_grace_s: float = 600.0  # scheduling time allowed on top of the request's timeout before run() gives up
 
     def __init__(self, store: EvidenceStore, runs_root: Path, *, journal: JobJournal | None = None,
-                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic):
+                 sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic,
+                 trace: TraceSink | None = None):
         super().__init__(store, runs_root)
         self.journal = journal or JobJournal.for_store(store)
+        self.trace: TraceSink = trace if trace is not None else JsonlTraceSink.for_store(store)
         self._sleep, self._clock = sleep, clock
         self._run_dirs: dict[str, Path] = {}  # job key -> the local materialised revision (this process only)
 
@@ -320,7 +326,34 @@ class AsyncComputeBackend(ComputeBackend):
         self._run_dirs[job_key] = run_dir
         self.journal.append("submit", job_key, {"handle": handle.to_json(), "item": item,
                                                 "isolation_class": self.isolation_class.value})
+        safe_emit(self.trace, "compute.submitted", job_key, {
+            "backend": self.name, "job_key": job_key, "isolation_class": self.isolation_class.value,
+            "origin": request.origin.value, "item_hash": handle.item_hash,
+            "revision": {"kind": request.revision.kind, "ref": request.revision.ref},
+            "command_sha256": sha256_text(json.dumps(list(request.command))), "env_names": sorted(request.env)})
         return handle
+
+    def _submitted_at(self, job_key: str) -> float | None:
+        for e in self.journal.entries():
+            if e["kind"] == "submit" and e["job_key"] == job_key:
+                return float(e["at"])
+        return None
+
+    def _trace_status(self, handle: JobHandle, previous: str | None, st: JobStatus) -> None:
+        if st.stage is JobStage.RUNNING and previous != JobStage.RUNNING.value:
+            safe_emit(self.trace, "compute.started", handle.job_key, {"backend": self.name,
+                                                                      "job_key": handle.job_key})
+        if st.terminal and previous not in {s.value for s in TERMINAL}:
+            t0 = self._submitted_at(handle.job_key)
+            duration = None if t0 is None else max(0.0, time.time() - t0)
+            kind = {JobStage.COMPLETED: "compute.finished", JobStage.CANCELED: "compute.cancelled"}.get(
+                st.stage, "compute.failed")
+            safe_emit(self.trace, kind, handle.job_key, {
+                "backend": self.name, "job_key": handle.job_key, "isolation_class": self.isolation_class.value,
+                "stage": st.stage.value, "failure": st.failure.value, "exit_code": st.exit_code, "oom": st.oom,
+                "message": st.message[:500], "duration_s": duration,
+                # wall time is all we measure; provider billing is not read (usd null = unknown, never 0)
+                "cost": {"wall_s": duration, "usd": None}})
 
     def reattach(self, job_key: str) -> JobHandle:
         h = self.journal.handle(job_key)
@@ -331,7 +364,9 @@ class AsyncComputeBackend(ComputeBackend):
     def status(self, handle: JobHandle) -> JobStatus:
         self._own(handle)
         st = self._status(handle)
-        if self.journal.last_stage(handle.job_key) != st.stage.value or st.terminal:
+        previous = self.journal.last_stage(handle.job_key)
+        self._trace_status(handle, previous, st)
+        if previous != st.stage.value or st.terminal:
             self.journal.append("status", handle.job_key, {"stage": st.stage.value, "failure": st.failure.value,
                                                            "message": st.message[:500], "exit_code": st.exit_code,
                                                            "oom": st.oom})
@@ -341,7 +376,11 @@ class AsyncComputeBackend(ComputeBackend):
         self._own(handle)
         if cursor < 0 or max_bytes <= 0:
             raise ValueError("cursor must be >= 0 and max_bytes > 0")
-        return self._logs(handle, cursor, max_bytes)
+        batch = self._logs(handle, cursor, max_bytes)
+        safe_emit(self.trace, "compute.log", handle.job_key, {"backend": self.name, "job_key": handle.job_key,
+                                                              "cursor": cursor, "next_cursor": batch.next_cursor,
+                                                              "eof": batch.eof})
+        return batch
 
     def cancel(self, handle: JobHandle, reason: str) -> None:
         self._own(handle)
@@ -356,6 +395,8 @@ class AsyncComputeBackend(ComputeBackend):
             raise RemoteError(f"job {handle.job_key} is {st.stage}: collect only after it has finished")
         out = {rel: self.store.blobs.put(self._fetch(handle, check_rel(rel))) for rel in rels}
         self.journal.append("collect", handle.job_key, {"files": dict(sorted(out.items()))})
+        safe_emit(self.trace, "compute.collected", handle.job_key, {"backend": self.name, "job_key": handle.job_key,
+                                                                    "outputs": dict(sorted(out.items()))})
         return out
 
     def cleanup(self, handle: JobHandle) -> None:
@@ -374,12 +415,13 @@ class AsyncComputeBackend(ComputeBackend):
         t0 = self._clock()
         handle = self.submit(request)
         deadline = t0 + request.timeout_s + self.submit_grace_s
-        st = self._status(handle)
+        st = self.status(handle)
         timed_out = False
         while not st.terminal:
             if self._clock() >= deadline:
                 timed_out = True
                 self.cancel(handle, "timeout in run()")
+                self.status(handle)  # journal + trace whatever the provider reports right after the cancel
                 break
             self._sleep(self.poll_interval_s)
             st = self.status(handle)

@@ -22,6 +22,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from ..compute.credentials import OwnerConfig
+from ..discovery_trace import TraceSink, safe_emit
 from .alphaxiv import AlphaXivPermission, AlphaXivSource, ConnectorDisabled
 from .client import LiteratureClient, SearchResult
 from .http import HttpxTransport, LiteratureError, PacedTransport, Pacer, Transport
@@ -59,13 +60,24 @@ def lab_client(store: SnapshotStore, *, as_of: date | None = None, config: Owner
 
 
 def lab_search(client: LiteratureClient, query: str, *, limit: int = 10, sources: Sequence[str] = LAB_SOURCES,
-               published_from: date | None = None, published_to: date | None = None) -> list[SearchResult]:
-    """Ask each source separately (one SearchResult per source; a failing source is reported, not fatal)."""
+               published_from: date | None = None, published_to: date | None = None,
+               trace: TraceSink | None = None) -> list[SearchResult]:
+    """Ask each source separately (one SearchResult per source; a failing source is reported, not fatal). Each
+    result is also emitted to the Lab discovery trace as `literature.retrieval` (source, query, window, the stored
+    response digests and the record ids; never record text)."""
     unknown = [s for s in sources if s not in client.sources]
     if unknown:
         disabled = [s for s in unknown if s in ALPHAXIV_SOURCES]
         if disabled:
             raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown; needs owner permission")
         raise LiteratureError(f"unknown sources {unknown}", infra=False)
-    return [client.search(query, limit, [name], published_from=published_from, published_to=published_to)
-            for name in sources]
+    out = []
+    for name in sources:
+        res = client.search(query, limit, [name], published_from=published_from, published_to=published_to)
+        safe_emit(trace, "literature.retrieval", name, {
+            "source": name, "query": query, "window": list(res.window), "as_of": res.as_of,
+            "envelopes": [r.get("envelope") for r in res.retrievals], "n_records": len(res.records),
+            "record_ids": sorted({i for rec in res.records for i in rec.ids()})[:200], "complete": res.complete,
+            "errors": [e.get("error", "")[:200] for e in res.errors]})
+        out.append(res)
+    return out

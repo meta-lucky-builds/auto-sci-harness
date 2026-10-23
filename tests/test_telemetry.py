@@ -29,6 +29,9 @@ NETWORK_MODULES = {
     "literature/http.py": "literature retrieval, only from `chh lit ...` commands (per-host pacing)",
     "audit/data.py": "OpenML dataset fetch, only from the claim audit command a user runs",
     "runtime/engine.py": "socket.gethostname() for the run-owner record (no connection)",
+    # lab-compute 2026-10-23 (GOAL §17): Ray Jobs / HF Jobs REST calls, only when the owner configured that backend
+    # and a run is submitted to it; httpx is imported inside the call, never at import time
+    "compute/rest.py": "Ray Jobs / HF Jobs REST backends, only on an owner-configured submit (lab-compute)",
 }
 
 
