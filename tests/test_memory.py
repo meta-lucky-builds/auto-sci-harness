@@ -632,11 +632,27 @@ def test_memory_package_has_no_model_path_and_only_trusted_code_writes():
     allowed = {"cli.py", "research/memory_wiring.py", "research/claims.py", "research/station/archive.py"}
     # any relative depth (`from ...memory` was missed by the earlier substring check), and `import ... memory`
     pattern = re.compile(r"custom_harness\.memory\b|from\s+\.+memory\b|from\s+\.+\s+import\s+[^\n]*\bmemory\b")
+    # int18 merge (s4-station's stricter textual pattern x s4-human's catalog): human/catalog.py NAMES
+    # "custom_harness.memory.store" as the writer of the human `memory_revoke` action (a string in its table). It is
+    # exempt from the textual pattern only while its AST imports nothing from memory and never imports dynamically.
+    text_only = {"human/catalog.py"}
     importers = []
     for p in (SRC / "custom_harness").rglob("*.py"):
         rel = p.relative_to(SRC / "custom_harness").as_posix()
         if rel.startswith("memory/") or rel in allowed:
             continue
-        if pattern.search(p.read_text(encoding="utf-8")):
+        text = p.read_text(encoding="utf-8")
+        if rel in text_only:
+            import ast
+            tree = ast.parse(text)
+            mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+            mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+            names = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names]
+            dynamic = [n for n in ast.walk(tree) if isinstance(n, ast.Name | ast.Attribute)
+                       and getattr(n, "id", getattr(n, "attr", "")) in ("import_module", "__import__")]
+            if any("memory" in m for m in mods) or "memory" in names or dynamic:
+                importers.append(rel)
+            continue
+        if pattern.search(text):
             importers.append(rel)
     assert importers == []
