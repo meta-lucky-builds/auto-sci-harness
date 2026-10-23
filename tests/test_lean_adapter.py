@@ -203,10 +203,15 @@ def test_cli_approve_statement_records_the_human_approval(tmp_path, capsys):
 
 
 def test_only_the_human_cli_writes_statement_approvals():
-    """Invariant 15: no model-reachable code path appends a statement approval (only `chh approve-statement`)."""
+    """Invariant 15: no model-reachable code path appends a statement approval (only `chh approve-statement`).
+    s4-human moved the write into human/nodes.approve_statement, which `chh approve-statement` calls (stage-c
+    2026-10-23: this test still named cli.py); that only the human CLI layers import human.nodes is pinned by
+    tests/test_human_static.py (rule 2)."""
     writers = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "src").rglob("*.py")
                      if re.search(r"append\(\s*\"statement_approval\"", p.read_text(encoding="utf-8")))
-    assert writers == ["src/custom_harness/cli.py"]
+    assert writers == ["src/custom_harness/human/nodes.py"]
+    cli = (ROOT / "src" / "custom_harness" / "cli.py").read_text(encoding="utf-8")
+    assert "from .human.nodes import approve_statement" in cli
 
 
 # ------------------------------------------------------------------ the image recipe (NOT built here)

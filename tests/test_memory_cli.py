@@ -82,5 +82,9 @@ def test_cli_memory_sync_processes_kernel_retractions(world, capsys):
     assert main(["memory", "sync"]) == 0
     (cascade,) = json.loads(capsys.readouterr().out)["cascades"]
     assert cascade["revoked"] == [a]
-    assert main(["memory", "harvest-negatives"]) == 0
+    # harvest re-derives every certificate (K3 re-executes): it needs a replayer and refuses without one (s4-integrity;
+    # stage-c 2026-10-23: this test predated that requirement)
+    with pytest.raises(SystemExit, match="re-derives"):
+        main(["memory", "harvest-negatives"])
+    assert main(["memory", "harvest-negatives", "--dev-sandbox"]) == 0
     assert json.loads(capsys.readouterr().out) == []  # no verified failure in this ledger

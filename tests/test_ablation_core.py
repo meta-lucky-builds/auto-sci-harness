@@ -119,9 +119,23 @@ def test_no_env_var_config_default_or_cli_flag_switches_ablation_on():
         # (evolve/driver.py left this list in s4-wiring: it now threads an AblationSet it is GIVEN, checked above)
         text = (SRC / rel).read_text(encoding="utf-8").lower()
         assert "ablat" not in text and "--disable" not in text, rel
-    env_reads = [p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py")
-                 if re.search(r"(environ|getenv)[^\n]*ABLAT", p.read_text(encoding="utf-8"), re.I)]
+    # on CODE, not prose (stage-c 2026-10-23: the textual regex matched evolve/driver.py's docstring "no CLI flag,
+    # environment variable or config default for it. ... marked ABLATED"): every source line that touches
+    # environ/getenv in the AST, and every string constant on it, must not mention ablation
+    def env_ablation_lines(text: str) -> list[int]:
+        lines = text.splitlines()
+        return sorted({n.lineno for n in ast.walk(ast.parse(text))
+                       if ((isinstance(n, ast.Attribute) and n.attr in ("environ", "getenv"))
+                           or (isinstance(n, ast.Name) and n.id in ("environ", "getenv")))
+                       and re.search(r"ablat", lines[n.lineno - 1], re.I)})
+
+    env_reads = [f"{p.relative_to(SRC).as_posix()}:{ln}" for p in SRC.rglob("*.py")
+                 for ln in env_ablation_lines(p.read_text(encoding="utf-8"))]
     assert env_reads == []
+    # not vacuous: planted reads are found, a docstring is not
+    assert env_ablation_lines('import os\nx = os.environ.get("CHH_ABLATION")\n') == [2]
+    assert env_ablation_lines('from os import getenv\ny = getenv("chh_ablate")\n') == [2]
+    assert env_ablation_lines('"""no environment variable switches ABLATION"""\n') == []
 
 
 # ===================================================================== the ABLATED marker
