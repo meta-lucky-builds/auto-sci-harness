@@ -151,10 +151,10 @@ def test_release_is_the_label_only_and_is_ledgered(store, lab, monkeypatch):
             return value
 
     monkeypatch.setattr(R.Releases, "live", classmethod(lambda cls, s: Rec()))
-    # int18 (stage-a): the verification level (court/levels.py, code only) is released with the label, as its own
-    # ledgered `count` release (a small closed alphabet); stubbed here because the certificate above is a stub
+    # int18 (stage-a): the verification badges (court/levels.py, code only; LevelResult.release_value) are released
+    # with the label, as their own ledgered `count` release; stubbed here because the certificate above is a stub
     import custom_harness.court.levels as L
-    monkeypatch.setattr(L, "level", lambda s, h: SimpleNamespace(badge="NONE"))
+    monkeypatch.setattr(L, "level", lambda s, h: SimpleNamespace(release_value=lambda: "NONE"))
     P.release_verdict(store, rec["promotion_id"], "owner", docker=lab.docker)
     assert emitted == [{"value": "REJECTED", "targets": hand["targets"], "channel": "prompt",
                         "alphabet": "verdict_bit", "note": "lab:promotion_verdict",

@@ -26,17 +26,18 @@
 3. Feedback (`release_verdict`). The Lab sees nothing of the Court by default. A human may release the verdict LABEL
    (a finite alphabet) to the session workspace; it goes through the release ledger (`kerneld.releases.Releases`,
    channel `prompt`, alphabet `verdict_bit`, one release per held-out target), which K4 counts. Since int18 the
-   verification LEVEL (court/levels.py, GOAL §17.1) goes with it, as a second release (alphabet `count`), and into
-   the discovery trace (`promote/verdict_released.released_level`). Failed checks, reasons, effects and intervals
-   are never released here.
+   verification BADGES (court/levels.py, GOAL §17.1: REPRODUCIBLE / REPLICATED / VALIDATED / RE-VALIDATED, and
+   "RE-VALIDATION-FAILED") go with it, as a second release (alphabet `count`, at most 16 values: no families,
+   reasons or numbers), and into the discovery trace (`promote/verdict_released.released_level`). Failed checks,
+   reasons, effects and intervals are never released here.
 
 Two Court routes per freeze (exactly one may be taken):
   - the MINTED route (int18, stage-a; court/minted.py, `chh court register PROMOTION --family F ...`): the claim is
     pre-registered first, then kerneld mints fresh held-out truth after the freeze (GOAL §16.2): eligible for
-    VALIDATED (court/levels.py);
+    VALIDATED and RE-VALIDATED (court/levels.py);
   - the RETROSPECTIVE route (`handoff`, below): fixed public OpenML targets, which a networked Lab can download:
-    hence the freeze-then-name order, the deny-only screen and the assumption on every such certificate; its level
-    is capped at REPLICATED and labelled RETROSPECTIVE (GOAL §17.1).
+    hence the freeze-then-name order, the deny-only screen and the assumption on every such certificate; it can
+    never hold VALIDATED or RE-VALIDATED and is labelled RETROSPECTIVE (GOAL §17.1).
 
 Built, NOT test-verified.
 """
@@ -334,9 +335,9 @@ def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCL
         rel = Releases.live(store)
         rel.emit(label, targets=targets, channel="prompt", alphabet="verdict_bit", note="lab:promotion_verdict",
                  key=f"lab:{pid}")
-        # the verification level (GOAL §17.1; court/levels.py, code only) is a small closed alphabet (NONE /
-        # REPRODUCIBLE / REPLICATED / VALIDATED, +RETROSPECTIVE): released as a COUNT, which K4 counts as such
-        level = level_of(store, str(outcome["cert_hash"])).badge
+        # the verification badges (GOAL §17.1; court/levels.py, code only): LevelResult.release_value, a closed
+        # alphabet of at most 16 values, released as a COUNT, which K4 counts as such
+        level = level_of(store, str(outcome["cert_hash"])).release_value()
         rel.emit(level, targets=targets, channel="prompt", alphabet="count", note="lab:promotion_level",
                  key=f"lab:{pid}")
         payload: dict[str, Any] = {"promotion_id": pid, "label": label, "level": level}
@@ -345,8 +346,8 @@ def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCL
         payload = {"promotion_id": pid, "status": "COULD NOT RUN (no held-out label was read)"}
     else:
         raise PromoteError("the Court read labels but issued no certificate: releasing anything needs a review")
-    payload["notice"] = ("verdict label and verification level only; reasons, effects and intervals stay with the "
-                         "Court (GOAL §17)")
+    payload["notice"] = ("verdict label and verification badges only; reasons, effects and intervals stay with "
+                         "the Court (GOAL §17)")
     _write_into_workspace(session_id, f".court/verdict-{pid}.json", json.dumps(payload, sort_keys=True), docker)
     body = {"promotion_id": pid, "event": "verdict_released", "label": EXPLORATORY, "released_label": label,
             "released_level": level, "targets": targets, "by": by, "at": time.time(),

@@ -4,8 +4,10 @@ JSON on stdout.
   chh court register PROMOTION --family F --beacon-round R [--dev-pairs a,b,c,d] [--n-test N] [--anchor FILE]
   chh court mint CASE --beacon VALUE
   chh court run CASE --docker                      (--dev-sandbox: trusted test code only)
-  chh court replicate CASE --replicator KIND --beacon-round R [--allow-same-family]
-  chh court level CERT_HASH | CASE                 the verification level, computed by code (never a model)
+  chh court register ... --revalidation-round R2   both beacon rounds fixed at registration (RE-VALIDATED)
+  chh court revalidate CASE --beacon-round R2      declare the second fresh-data test (before the first verdict)
+  chh court replicate CASE --replicator KIND --beacon-round R
+  chh court level CERT_HASH | CASE                 the verification badges, computed by code (never a model)
   chh court status CASE
   chh court families                               which claim families can be minted (and which cannot)
 
@@ -36,6 +38,11 @@ def add_parsers(sub: Any) -> None:
     r.add_argument("--n-test", type=int, help="held-out rows (checked by the preflight; default: sized by it)")
     r.add_argument("--n-train", type=int, help="minted training rows (default MINT_TRAIN_ROWS)")
     r.add_argument("--anchor", help="anchor file outside the store (default <data>/anchors/court.jsonl)")
+    r.add_argument("--revalidation-round", help="a SECOND beacon round, fixed now, for the re-validation test")
+    rv = s.add_parser("revalidate", help="declare the second fresh-data test of a case (before its first verdict)")
+    rv.add_argument("case")
+    rv.add_argument("--beacon-round", required=True, help="a beacon round other than the first, committed now")
+    rv.add_argument("--anchor")
     m = s.add_parser("mint", help="kerneld mints the case's held-out target (after the freeze)")
     m.add_argument("case")
     m.add_argument("--beacon", required=True, help="the public value of the committed beacon round")
@@ -48,11 +55,9 @@ def add_parsers(sub: Any) -> None:
     rp.add_argument("--replicator", required=True, help="backend kind, as `chh run --role` (codex[:model] | "
                                                         "openai:<model> | ollama:<model> | mock)")
     rp.add_argument("--beacon-round", required=True)
-    rp.add_argument("--allow-same-family", action="store_true", help="record invariant 5 as NOT MET instead of "
-                                                                     "refusing (the replica then never counts)")
     rp.add_argument("--dev-pairs")
     rp.add_argument("--n-test", type=int)
-    lv = s.add_parser("level", help="the verification level of a certificate or a case (code only)")
+    lv = s.add_parser("level", help="the verification badges of a certificate or a case (code only)")
     lv.add_argument("ref", help="a certificate hash or a case id")
     st = s.add_parser("status", help="a case: registration, mint, outcome")
     st.add_argument("case")
@@ -81,7 +86,11 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
         if a.court_cmd == "register":
             _print(C.register_promotion(store, a.promotion, a.family, beacon_round=a.beacon_round,
                                         dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test, n_train=a.n_train,
-                                        anchor_file=Path(a.anchor) if a.anchor else None))
+                                        anchor_file=Path(a.anchor) if a.anchor else None,
+                                        revalidation_round=a.revalidation_round))
+        elif a.court_cmd == "revalidate":
+            _print(C.declare_revalidation(store, a.case, a.beacon_round,
+                                          anchor_file=Path(a.anchor) if a.anchor else None))
         elif a.court_cmd == "mint":
             _print(C.mint(store, a.case, a.beacon))
         elif a.court_cmd == "run":
@@ -95,7 +104,7 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
             from ..cli import _backend  # local: the root CLI imports this module
             from .replicate import replicate
             _print(replicate(store, a.case, _backend(a.replicator), beacon_round=a.beacon_round,
-                             allow_same_family=a.allow_same_family, dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test))
+                             dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test))
         elif a.court_cmd == "level":
             res = L.level(store, a.ref) if _HEX64.fullmatch(a.ref) else L.level_of_case(store, a.ref)
             _print(res.as_dict() if isinstance(res, L.LevelResult) else res)

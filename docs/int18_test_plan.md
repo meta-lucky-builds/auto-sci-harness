@@ -75,19 +75,27 @@ the K7-gap test still exercises the vacuous-bound loophole.
 - A compute job with the default sink: `lab_trace` records under session `unattached`, chain verifies, no
   `<store>/lab_trace/events.jsonl` file appears.
 
-### 3.5 Minted Court route, levels, replication
+### 3.5 Minted Court route, badges, replication, re-validation
 - New: `tests/test_court_minted.py`, `tests/test_court_levels.py`, `tests/test_court_replicate.py`.
 - Updated: `tests/test_lab_promote.py::test_release_is_the_label_only_and_is_ledgered` (two releases now: verdict_bit
-  + the level as `count`).
+  + the badges as `count`: `LevelResult.release_value`).
 - kerneld protocol: `tests/test_kerneld.py`, `tests/test_kerneld_boundary.py`, `tests/test_kerneld_hoststore.py`
   (new ingest kind `minted_heldout`, new error code `not_anchored`).
-- `chh certificates` prints a `level=` column: `tests/test_telemetry.py` (runs it offline).
+- `chh certificates` prints a `badges=` column: `tests/test_telemetry.py` (runs it offline).
+- Badges (owner decisions 2026-10-23: separate badges, not a ladder): `tests/test_court_levels.py` (rewritten: VALIDATED
+  without a bundle or a replica; the 16-value release alphabet; claim_core), `tests/test_court_replicate.py` (a
+  same-family replica counts and is named; one without a reproducible certificate does not),
+  `tests/test_court_minted.py` (re-validation: same claim core on a second target; another round; refused once the
+  first test read labels; one per case; independent mints; states none / declared / failed). Each test docstring says
+  why it fails against the first Stage A build (the strict ladder, 0464555).
 - **End-to-end (owner, real kerneld + Docker):** a toy Lab promotion: `chh lab promote` -> `chh court register P
   --family rings --beacon-round R` -> `chh court mint CASE --beacon V` -> `chh approve-role lab-mint-CASE` ->
   `chh court run CASE --docker` -> `chh court level CASE` -> `chh lab release-verdict P --by NAME` (check the two
-  release ledger entries and `promote/verdict_released.released_level` in the trace). Then
-  `chh court replicate CASE --replicator <other family>` and the replica's mint / run; the original's level must
-  become REPLICATED only when the replica is certified, reproducible and invariant 5 is met.
+  release ledger entries and `promote/verdict_released.released_level` in the trace). Register with
+  `--revalidation-round R2`, mint and run the re-validation case too: RE-VALIDATED must appear only when both
+  fresh-data tests pass; force a failing second test and check "validated once, failed re-validation" is shown. Then
+  `chh court replicate CASE --replicator <any family>` and the replica's mint / run: REPLICATED must appear when the
+  replica is certified and reproducible, naming both families, whatever they are.
 - Measure: the preflight sizing ladder (4,500 / 9,000 / 20,000) wall time with real dev pairs.
 
 ### 3.6 Static checks to keep green
@@ -157,8 +165,9 @@ tests (lab-compute).
 
 1. Governance: the `delegated` record for 25dd85a3 was typed by an agent (cooling-off NOT observed); review or replace
    with a window record.
-2. Levels: cumulative ladder (VALIDATED needs REPLICATED); "across machines" not checked for REPRODUCIBLE; a replica
-   with invariant 5 NOT MET never counts; `sealed` external targets rest on the human role approval.
+2. Badges (decided 2026-10-23, built here): separate badges; REPLICATED by any model family (named; invariant 5 a
+   note); VALIDATED by the fresh-data test alone; RE-VALIDATED declared before the first verdict. Still open: "across
+   machines" for REPRODUCIBLE; `sealed` external targets rest on the human role approval.
 3. I1: account targets still get the campaign's runs-based declaration requirement in check_campaign (stricter).
 4. Minted route: beacon value typed by a human (no drand verifier); the frozen lock is recorded, not installed.
 5. Emergence: station archive listed as a BUDGET_PATHS module.

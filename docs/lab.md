@@ -143,8 +143,8 @@ Assume it is capable and, at worst, adversarial. It may want to:
      - the deny-only screen;
      - the audit's listed assumptions.
    - The real fix is minted or future targets (§16.2): built on int18 as the minted Court route (`chh court`,
-     `court/minted.py`, section 10). The audit route stays for public datasets, and its certificates are capped at
-     REPLICATED and labelled RETROSPECTIVE (`court/levels.py`). Truth memorised in model weights remains (§16.12).
+     `court/minted.py`, section 10). The audit route stays for public datasets, and its certificates are labelled
+     RETROSPECTIVE and can never be VALIDATED or RE-VALIDATED (`court/levels.py`). Truth memorised in model weights remains (§16.12).
 6. **Transformed copies of truth are not found by the content scans.** Only exact copies and common encodings of the
    secret are found. The guarantee rests on the truth never being reachable from the box (mount checks, no Court
    socket, separate OS user), not on the scan.
@@ -358,14 +358,14 @@ A promotion request may name the `idea` it came from. It must exist in the trace
 - `seq` and `prev` assume one writer per session at a time (the manager).
 - The trace is owner-side (the store); nothing of it is mounted into the box.
 
-## 10. Court routes for a promotion and verification levels (int18, stage-a; built, NOT test-verified)
+## 10. Court routes for a promotion and verification badges (int18, stage-a; built, NOT test-verified)
 
 One Court route per freeze:
 
-| Route | Commands | Held-out data | Highest level |
+| Route | Commands | Held-out data | Badges possible |
 |---|---|---|---|
-| Minted | `chh court register PROMOTION --family F --beacon-round R` → `chh court mint CASE --beacon VALUE` → `chh approve-role TARGET` (HUMAN) → `chh court run CASE --docker` | minted by kerneld AFTER the claim is pre-registered and anchored (`kerneld/mint.py`, ingest kind `minted_heldout`, `Kernel.record_mint`); FUTURE role; sized by the certifiability preflight (default 4,500 rows, UNCALIBRATED) | VALIDATED |
-| Retrospective | `chh lab handoff PROMOTION --targets FILE` → the Claim Audit commands | fixed public OpenML datasets (a networked Lab could have them) | REPLICATED, labelled RETROSPECTIVE |
+| Minted | `chh court register PROMOTION --family F --beacon-round R` → `chh court mint CASE --beacon VALUE` → `chh approve-role TARGET` (HUMAN) → `chh court run CASE --docker` | minted by kerneld AFTER the claim is pre-registered and anchored (`kerneld/mint.py`, ingest kind `minted_heldout`, `Kernel.record_mint`); FUTURE role; sized by the certifiability preflight (default 4,500 rows, UNCALIBRATED) | all four |
+| Retrospective | `chh lab handoff PROMOTION --targets FILE` → the Claim Audit commands | fixed public OpenML datasets (a networked Lab could have them) | REPRODUCIBLE, REPLICATED; labelled RETROSPECTIVE |
 
 **What can be minted:** the synthetic generator families of `research/suite.FAMILIES` (rings, xor, spirals,
 imbalanced, friedman, interactions, and the null family noise), each with its own metric (`chh court families`).
@@ -373,9 +373,16 @@ imbalanced, friedman, interactions, and the null family noise), each with its ow
 generator; physical claims get FUTURE data only through `chh return-data`). A minted claim is generator-scoped: its
 population is the family (§16.2).
 
-**Levels** (`court/levels.py`, `chh court level CERT|CASE`, a column of `chh certificates`; code only, never a
-model; cumulative): REPRODUCIBLE (K0 + K3 pass, a bundle recorded), REPLICATED (+ a certified, reproducible replica
-case written from the claim text by a replicator of another model family: `chh court replicate`; invariant 5 NOT MET
-never counts), VALIDATED (+ K0-K9 pass, CERTIFIED-VALIDATED, every target minted after the freeze, future, or sealed
-external data on a human role approval). The level reaches the Lab only through `chh lab release-verdict` (a ledgered
-`count` release, field `released_level` of `promote/verdict_released`).
+**Badges** (GOAL §17.1 as decided 2026-10-23; `court/levels.py`, `chh court level CERT|CASE`, a column of
+`chh certificates`; code only, never a model; SEPARATE, not a ladder):
+- REPRODUCIBLE: K0 + K3 pass and a bundle is recorded; "across machines" is not checked yet (the badge says so).
+- REPLICATED: a certified, reproducible replica case by a DIFFERENT AGENT (`chh court replicate`: a separate
+  replicator call given the claim text, never the code). Any model family; the badge names them ("openai -> openai,
+  same family"; a different family is the stronger form); invariant 5 is a note.
+- VALIDATED: the fresh-data test alone (CERTIFIED-VALIDATED, K0-K9 pass, every target minted after the freeze,
+  future, or sealed external data on a human role approval).
+- RE-VALIDATED: a second, independent fresh-data test of the same claim and frozen code, declared before the first
+  verdict (`chh court register ... --revalidation-round R2`, or `chh court revalidate CASE --beacon-round R2` while no
+  label of the first test was read; one per case). A failed one is shown ("validated once, failed re-validation").
+The badges reach the Lab only through `chh lab release-verdict` (`LevelResult.release_value`: at most 16 values, no
+families or reasons; a ledgered `count` release; field `released_level` of `promote/verdict_released`).

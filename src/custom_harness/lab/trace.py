@@ -242,8 +242,9 @@ class PromoteEv(_M):
     spec_hash: Sha | None = None
     audit_id: str | None = None
     released_label: str | None = None  # verdict_released only: the label the ledgered release carried
-    # verdict_released only (int18): the verification level (court/levels.py) its own ledgered `count` release carried
-    released_level: Annotated[str, Field(max_length=40)] | None = None
+    # verdict_released only (int18): the verification badges (court/levels.LevelResult.release_value) its own ledgered
+    # `count` release carried, e.g. "REPRODUCIBLE+VALIDATED+RE-VALIDATED"
+    released_level: Annotated[str, Field(max_length=80, pattern=r"^[A-Z+-]{1,80}$")] | None = None
 
 
 PAYLOADS: dict[str, type[_M]] = {"session": SessionEv, "idea": IdeaEv, "run": RunEv, "file": FileEv,

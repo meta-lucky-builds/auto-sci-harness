@@ -1,16 +1,16 @@
 """Independent replication of a certified Court case (GOAL §17.1 REPLICATED; invariant 5; GOAL L4.9).
 
-    chh court replicate CASE --replicator KIND --beacon-round R [--allow-same-family]
+    chh court replicate CASE --replicator KIND --beacon-round R
 
 The existing replication agent's rules (research/claims.py: the replicator sees the claim and the idea, NEVER the
 code; a brief that carries original code lines is refused; a replica structurally similar to the original is not an
 independent replication) applied to a Lab promotion:
   1. the case must be CERTIFIED (nothing to replicate otherwise);
-  2. invariant 5: the replicator's model family must differ from the author's (the Lab agent that wrote the method,
-     from its session record). policy.model_policy refuses a violation unless `--allow-same-family`; an override is
-     RECORDED as "NOT MET" and the replica then never counts toward REPLICATED (court/levels.py). An author whose
-     family cannot be determined is "unknown" and never counts as different (fail closed): with only one model
-     family available, invariant 5 is NOT MET by construction;
+  2. a DIFFERENT AGENT (owner decision 2026-10-23): the replicator is a separate model call, outside the author's
+     Lab session and box, given the claim text only. A different model family is NOT required: both families are
+     RECORDED (the author's from its Lab session record, the replicator's from its backend), the badge names them
+     ("anthropic -> openai, different family" is the stronger form) and the invariant-5 status (policy.model_policy,
+     unknown families never count as different) is a note, never a block;
   3. the brief (claim statement, the researcher's sentence, the minted family's PUBLIC description and columns, the
      contract) goes to the replicator (a gateway backend, role `replicator`); a replayed (cassette) answer is refused
      (invariant 21);
@@ -73,8 +73,7 @@ def extract_code(text: str) -> str:
 
 
 def replicate(store: EvidenceStore, case_id: str, replicator: Backend, *, beacon_round: str,
-              allow_same_family: bool = False, dev_pairs: tuple[int, int, int, int] | None = None,
-              n_test: int | None = None) -> dict[str, Any]:
+              dev_pairs: tuple[int, int, int, int] | None = None, n_test: int | None = None) -> dict[str, Any]:
     from ..kerneld.scope import ScopedKernel
     from ..lab.promote import PromoteRequest, _promotion
     from ..lab.session import started
@@ -88,8 +87,9 @@ def replicate(store: EvidenceStore, case_id: str, replicator: Backend, *, beacon
         raise ReplicationRefused(f"case {case_id} is not certified: nothing to replicate")
     session = started(store, str(c["session_id"]), allow_stopped=True)
     fam_author = author_family(session)
+    # recorded, never a block (owner decision 2026-10-23): the badge shows the families, invariant 5 is a note
     policy = model_policy({"executor": SimpleNamespace(family=fam_author), "replicator": replicator},
-                          allow_same_family=allow_same_family)  # PolicyError propagates: refused before any call
+                          allow_same_family=True)
     req = PromoteRequest.model_validate(_promotion(store, str(c["promotion_id"]))[0]["request"])
     kernel = ScopedKernel(store)
     claim = kernel.certificate(str(o["cert_hash"])).claim

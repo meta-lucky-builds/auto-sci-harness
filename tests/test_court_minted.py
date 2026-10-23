@@ -155,3 +155,88 @@ def test_host_code_of_the_route_never_builds_or_reads_minted_labels():
 def test_without_dev_pairs_the_default_size_is_used():
     s = C.size_held_out(PART, dev_pairs=None)
     assert s["n_test"] == 4500 and "UNCALIBRATED" in s["preflight"]
+
+
+# ===================================================================== RE-VALIDATED (owner decision 2026-10-23)
+def _promoted_case(w: World, tmp_path: Path, round_: str = "r1") -> dict:
+    """A promotion case as `chh court register` makes it, with the lab_promotion `frozen` record it reads."""
+    from custom_harness.lab.promote import RECORD_KIND as PROMOTION_KIND
+    from custom_harness.lab.promote import PromoteRequest
+    req = PromoteRequest(format="chh-lab-promote/1", title="t", sentence="a sentence of ten chars", method="m.py",
+                         baseline="b.py", lock="requirements.lock", claim=PART, budget=Budget(timeout_s=60))
+    lock = w.store.blobs.put(b"x==1\n")
+    w.store.append_record(PROMOTION_KIND, {"promotion_id": "p1", "session_id": "s1", "event": "frozen",
+                                           "request": req.model_dump(mode="json"),
+                                           "frozen": {"lock": {"blob": lock}}})
+    return C.register_case(w.store, role="promotion", promotion_id="p1", session_id="s1", title=req.title,
+                           sentence=req.sentence, part=PART, budget=req.budget, method=METHOD, baseline=BASELINE,
+                           lock=b"x==1\n", family="rings", beacon_round=round_, sizing={"n_test": 200}, n_train=50,
+                           anchor_file=tmp_path / "anchors" / "court.jsonl")
+
+
+def test_a_revalidation_is_the_same_claim_on_a_second_target_declared_up_front(tmp_path):
+    """FAILS against the first Stage A build: no declare_revalidation, no `revalidation` role."""
+    from custom_harness.court.levels import claim_core
+    w = World(tmp_path / "w", seed=54, n_train=60, n_test=60)
+    try:
+        first = _promoted_case(w, tmp_path)
+        second = C.declare_revalidation(w.store, first["case_id"], "r2", anchor_file=tmp_path / "anchors" / "c.jsonl")
+        assert second["role"] == "revalidation" and second["of_case"] == first["case_id"]
+        assert second["target"] != first["target"] and second["beacon_round"] == "r2"
+        claims = {e.body["claim_hash"]: e.body["claim"] for e in w.kernel.ledger.entries("prereg")}
+        assert claim_core(claims[first["claim_hash"]]) == claim_core(claims[second["claim_hash"]])
+        assert claims[first["claim_hash"]]["subject"]["hash"] == claims[second["claim_hash"]]["subject"]["hash"]
+        with pytest.raises(C.CourtRefused, match="one per case"):
+            C.declare_revalidation(w.store, first["case_id"], "r3")
+    finally:
+        w.close()
+
+
+def test_a_revalidation_needs_another_round_and_comes_before_the_first_verdict(tmp_path):
+    w = World(tmp_path / "w", seed=55, n_train=60, n_test=60)
+    try:
+        first = _promoted_case(w, tmp_path)
+        with pytest.raises(C.CourtRefused, match="different beacon round"):
+            C.declare_revalidation(w.store, first["case_id"], "r1")
+        w.store.append_record(C.RECORD_KIND, {"case_id": first["case_id"], "event": "outcome", "labels_read": True,
+                                              "claim_hash": first["claim_hash"], "verdict": "COULD NOT RUN"})
+        with pytest.raises(C.CourtRefused, match="too late"):
+            C.declare_revalidation(w.store, first["case_id"], "r2")
+    finally:
+        w.close()
+
+
+def test_the_two_mints_are_independent(tmp_path):
+    """Both cases minted by kerneld's ingest under their own claim hash and round: different labels, no shared row."""
+    from custom_harness.kernel.checks import related_targets
+    w = World(tmp_path / "w", seed=56, n_train=60, n_test=60)
+    try:
+        first = _promoted_case(w, tmp_path)
+        second = C.declare_revalidation(w.store, first["case_id"], "r2", anchor_file=tmp_path / "anchors" / "c.jsonl")
+        for c, value in ((first, "v" * 20), (second, "u" * 20)):
+            I.minted_heldout(w.vault, "run", c["target"], c["claim_hash"], family="rings", n_train=50, n_test=200,
+                             beacon_round=c["beacon_round"], beacon_value=value, anchor_file=c["anchor_file"])
+        d = w.vault.datasets()
+        assert d[first["target"]].files["test_y.csv"].blob != d[second["target"]].files["test_y.csv"].blob
+        assert second["target"] not in related_targets(w.vault, first["target"])
+    finally:
+        w.close()
+
+
+def test_revalidation_states_are_shown_never_hidden(tmp_path):
+    from types import SimpleNamespace
+
+    from custom_harness.court.levels import revalidation_facts
+    w = World(tmp_path / "w", seed=57, n_train=60, n_test=60)
+    try:
+        first = _promoted_case(w, tmp_path)
+        cert = SimpleNamespace(claim_hash=first["claim_hash"], claim={"generalization_targets": [first["target"]]})
+        assert revalidation_facts(w.store, cert)["state"] == "none"
+        second = C.declare_revalidation(w.store, first["case_id"], "r2", anchor_file=tmp_path / "anchors" / "c.jsonl")
+        assert revalidation_facts(w.store, cert)["state"] == "declared"
+        w.store.append_record(C.RECORD_KIND, {"case_id": second["case_id"], "event": "outcome", "labels_read": True,
+                                              "cert_hash": None, "claim_hash": second["claim_hash"],
+                                              "verdict": "COULD NOT RUN"})
+        assert revalidation_facts(w.store, cert)["state"] == "failed"  # labels read, no certificate: a failure
+    finally:
+        w.close()

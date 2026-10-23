@@ -445,8 +445,8 @@ def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
-    """Every certificate with its verification level (GOAL §17.1, court/levels.py: computed by code, never a model;
-    the meaning of each badge: `chh court level CERT`)."""
+    """Every certificate with its verification badges (GOAL §17.1, court/levels.py: separate badges computed by
+    code, never a model; their exact meaning, forms and notes: `chh court level CERT`)."""
     from .court.levels import level
     from .kerneld.scope import ScopedKernel
     k = ScopedKernel(store)
@@ -454,7 +454,7 @@ def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
         cert = k.certificate(e.body["cert_hash"])
         badge = level(store, e.body["cert_hash"]).badge
         print(f"{e.body['cert_hash'][:16]}  {cert.label.value:<20} {k.status(e.body['cert_hash']):<9} "
-              f"level={badge:<27} failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")
+              f"badges={badge}  failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")
     return 0
 
 

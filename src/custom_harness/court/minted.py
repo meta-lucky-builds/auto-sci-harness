@@ -14,12 +14,14 @@
     chh court run CASE --docker
         both frozen arms run offline in the network-free candidate sandbox on the minted data, every program before
         any label is read; scores come from kerneld; the Kernel certifies (K0-K9, re-execution). One look per claim.
-    chh court level CERT | CASE                  the verification level (court/levels.py), computed by code
+    chh court revalidate CASE --beacon-round R2  the SECOND fresh-data test (RE-VALIDATED), declared before the first
+                                                 verdict (or `register --revalidation-round R2`): declare_revalidation
+    chh court level CERT | CASE                  the verification badges (court/levels.py), computed by code
 
 Which claim families can be minted: the synthetic generator families (kerneld/mint.py, research/suite.FAMILIES:
 rings, xor, spirals, imbalanced, friedman, interactions, and the null family noise), for the family's own metric.
 A promotion on a fixed public dataset cannot be minted: it takes the existing retrospective Claim Audit route
-(`chh lab handoff`), and its level is capped below VALIDATED (RETROSPECTIVE, court/levels.py).
+(`chh lab handoff`), and can never be VALIDATED or RE-VALIDATED (RETROSPECTIVE, court/levels.py).
 
 Stated limits (not solved here):
   - the claim is generator-scoped: the population is the minted family (§16.2: the family is the main Goodhart surface;
@@ -78,7 +80,7 @@ from ..store.run_bundle import write_run_bundle
 from ..verify import metrics as M
 
 RECORD_KIND = "court_case"
-ROLES = ("promotion", "replica")
+ROLES = ("promotion", "replica", "revalidation")
 
 
 class CourtRefused(RuntimeError):
@@ -138,6 +140,12 @@ def latest(store: EvidenceStore, case_id: str, event: str) -> dict[str, Any] | N
 
 def cases_of_promotion(store: EvidenceStore, pid: str) -> list[dict[str, Any]]:
     return [r for r in store.records_where(RECORD_KIND, "promotion_id", pid) if r.get("event") == "registered"]
+
+
+def related_cases(store: EvidenceStore, case_id: str, role: str) -> list[dict[str, Any]]:
+    """Registered cases of `role` (replica | revalidation) that point at case `case_id` (`of_case`), oldest first."""
+    return [r for r in store.records(RECORD_KIND) if r.get("event") == "registered" and r.get("role") == role
+            and r.get("of_case") == case_id]
 
 
 def case_of_claim(store: EvidenceStore, claim_hash: str) -> dict[str, Any] | None:
@@ -218,7 +226,7 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
     n_train = MINT_TRAIN_ROWS if n_train is None else int(n_train)
     n_test = int(sizing["n_test"])
     method_code, baseline_code = wrapper.compose(method), wrapper.compose(baseline)
-    link = f"lab:{session_id}:{promotion_id}" + (f":replica:{of_case}" if role == "replica" else "")
+    link = f"lab:{session_id}:{promotion_id}" + (f":{role}:{of_case}" if role != "promotion" else "")
     case_id = _case_id({"format": MINTED_FORMAT, "role": role, "link": link, "family": family, "n_train": n_train,
                         "n_test": n_test, "beacon_round": beacon_round,
                         "method": hashlib.sha256(method_code).hexdigest(),
@@ -257,7 +265,8 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
 
 def register_promotion(store: EvidenceStore, pid: str, family: str, *, beacon_round: str,
                        dev_pairs: tuple[int, int, int, int] | None = None, n_test: int | None = None,
-                       n_train: int | None = None, anchor_file: Path | None = None) -> dict[str, Any]:
+                       n_train: int | None = None, anchor_file: Path | None = None,
+                       revalidation_round: str | None = None) -> dict[str, Any]:
     """A frozen Lab promotion -> a minted Court case (HUMAN: the researcher who promoted it). Refused if the promotion
     already went to the Court (one Court route per freeze: either this or `chh lab handoff`)."""
     from ..lab import trace as T
@@ -287,7 +296,67 @@ def register_promotion(store: EvidenceStore, pid: str, family: str, *, beacon_ro
     T.record(store, str(frozen["session_id"]), "promote",
              {"op": "handed_off", "promotion_id": pid, "claim_hash": body["claim_hash"], "audit_id": body["case_id"],
               "idea_id": frozen.get("idea_id")}, actor=T.human())
+    if revalidation_round is not None:  # both rounds fixed at registration (the soundest form; declare_revalidation)
+        body = {**body, "revalidation": declare_revalidation(store, body["case_id"], revalidation_round,
+                                                             anchor_file=anchor_file)}
     return body
+
+
+# ---------------------------------------------------------------- re-validation (RE-VALIDATED, court/levels.py)
+def first_test_started(store: EvidenceStore, case_id: str) -> bool:
+    """True once any held-out label of the case's test was read: an outcome that read labels, or any `evaluate`
+    vault read of its claim (the Kernel's data_access log)."""
+    c = case(store, case_id)
+    if any(o.get("labels_read") or o.get("cert_hash") for o in events(store, case_id) if o.get("event") == "outcome"):
+        return True
+    return any(a.body.get("claim_hash") == c["claim_hash"] and a.body.get("purpose") == "evaluate"
+               for a in ScopedKernel(store).vault.accesses())
+
+
+def declare_revalidation(store: EvidenceStore, case_id: str, beacon_round: str, *,
+                         anchor_file: Path | None = None) -> dict[str, Any]:
+    """Declare the SECOND fresh-data test of a promotion case (RE-VALIDATED): the same claim and the same frozen code
+    (both arms, byte for byte), the same family and sizes, on a second minted target under a second beacon round.
+    It is PRE-REGISTERED and anchored now, as its own case (role `revalidation`, `of_case`).
+
+    Soundness (owner question: fix both rounds at registration, or require the second before the first verdict):
+    both are allowed, and the second is the rule code enforces. A declaration is refused once any held-out label of
+    the first test was read (`first_test_started`), and one re-validation per case, so the decision to re-validate
+    and the round cannot depend on the first outcome (no selection on results, no repeated attempts until one
+    passes). Independence: the second target is minted from draw("heldout_mint", <second claim hash>, <round 2>:
+    <value 2>), a different frozen hash AND a different round from the first, so the two keyed streams share no key;
+    the beacon value of round 2 must not be public when the round is declared (as for round 1: the round is a plain
+    identifier and its futurity is not checked offline). `chh court register --revalidation-round R2` fixes both
+    rounds at registration, which also removes any doubt about timing."""
+    from ..lab.promote import PromoteRequest, _promotion
+    c = case(store, case_id)
+    if c.get("role") != "promotion":
+        raise CourtRefused("only a promotion case is re-validated (one level deep)")
+    if related_cases(store, case_id, "revalidation"):
+        raise CourtRefused(f"case {case_id} already has its re-validation (one per case)")
+    if beacon_round == c.get("beacon_round"):
+        raise CourtRefused("the re-validation needs a different beacon round from the first test")
+    if first_test_started(store, case_id):
+        raise CourtRefused("too late: held-out labels of the first test were already read; a re-validation is "
+                           "declared before the first verdict")
+    rows = _promotion(store, str(c["promotion_id"]))
+    req = PromoteRequest.model_validate(rows[0]["request"])
+    kernel = ScopedKernel(store)
+    claim = next(e.body["claim"] for e in kernel.ledger.entries("prereg")
+                 if e.body.get("claim_hash") == c["claim_hash"])
+    arts = kernel.vault.artifacts()
+    method = wrapper.arm_part(store.blobs.get(arts[claim["subject"]["artifact_id"]].hash))
+    baseline = wrapper.arm_part(store.blobs.get(arts[claim["comparator"]["artifact_id"]].hash))
+    if method is None or baseline is None:
+        raise CourtRefused("the case's arms are not composed with the audit wrapper")
+    lock = store.blobs.get(rows[0]["frozen"]["lock"]["blob"])
+    sizing = {"n_test": int(c["n_test"]), "preflight": f"the size of case {case_id} (the claim is unchanged)"}
+    return register_case(store, role="revalidation", promotion_id=str(c["promotion_id"]),
+                         session_id=str(c["session_id"]), title=req.title, sentence=req.sentence, part=req.claim,
+                         budget=req.budget, method=method, baseline=baseline, lock=lock, family=str(c["family"]),
+                         beacon_round=beacon_round, sizing=sizing, n_train=int(c["n_train"]),
+                         anchor_file=anchor_file, of_case=case_id,
+                         extra={"first_claim_hash": c["claim_hash"], "first_beacon_round": c["beacon_round"]})
 
 
 # ---------------------------------------------------------------- mint (kerneld)
