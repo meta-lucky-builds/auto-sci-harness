@@ -2,8 +2,9 @@
 
 A run capability (random hex) is bound to one run id and is handed out by `open_run` only to the holder of the
 launch secret. A token is bound to (run capability, purpose, dataset, private file, claim, arm, seed), fixed at
-issue: host code holding a token can make exactly the read it names and no other. `evaluate` tokens are
-single-use; `kernel` and `leakscan` tokens are reusable until `close_run`, which revokes the capability and every
+issue: host code holding a token can make exactly the read it names and no other. An `ingest` token (issue_ingest)
+is bound to (run capability, ingest kind, subject, claim) and registers exactly that. `evaluate` and `ingest` tokens
+are single-use; `kernel` and `leakscan` tokens are reusable until `close_run`, which revokes the capability and every
 token issued under it. Nothing here is persisted: a restarted kerneld knows no capability.
 
 The issue-time checks (registered dataset, private file, pre-registered claim, claim target) duplicate the
@@ -17,7 +18,7 @@ import secrets
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from .protocol import PURPOSES
+from .protocol import INGEST, INGEST_KINDS, PURPOSES
 
 # A leak scan answers "is this text (or workspace file) a copy of the hidden labels?", so unlimited scans make
 # kerneld a membership oracle for the labels (STATUS §6.2). Each RUN ID gets this many scans for the life of the
@@ -38,6 +39,7 @@ class TokenError(Exception):
 class _VaultLike(Protocol):
     def datasets(self) -> dict[str, Any]: ...
     def registered_targets(self, claim_hash: str | None) -> frozenset[str] | None: ...
+    def registered(self, claim_hash: str | None) -> bool: ...
 
 
 @dataclass
@@ -102,8 +104,29 @@ class TokenTable:
         self.tokens[token] = Token(run_cap, purpose, dataset_id, file, claim_hash, arm, seed)
         return token
 
+    def issue_ingest(self, run_cap: str, kind: str, subject: str, claim_hash: str | None = None) -> str:
+        """A single-use INGEST token (kerneld/ingest.py), bound to (run capability, kind, subject): the subject is
+        the dataset id the ingest registers (`returned_measurements`, `openml_split`) or the task id
+        (`research_task`). An `openml_split` token also binds the claim, which must already be pre-registered (fresh
+        data are touched only after the claim is committed); a `returned_measurements` token is refused once its
+        dataset is registered. Stored with purpose `ingest`, kind in `file`, subject in `dataset_id`."""
+        self.run_id(run_cap)
+        if kind not in INGEST_KINDS or not subject:
+            raise TokenError("bad_request")
+        if kind == "openml_split" and (claim_hash is None or not self.vault.registered(claim_hash)):
+            raise TokenError("not_registered")
+        if kind == "returned_measurements":
+            if claim_hash is None:  # the claim the measurements answer is bound here, not taken from the ingest call
+                raise TokenError("bad_request")
+            if subject in self.vault.datasets():
+                raise TokenError("already_registered")
+        token = secrets.token_hex(32)
+        self.tokens[token] = Token(run_cap, INGEST, subject, kind, claim_hash, None, None)
+        return token
+
     def use(self, run_cap: str, token: str, purpose: str) -> Token:
-        """The token's scope, for one use by `purpose` under `run_cap` (an evaluate token is then spent)."""
+        """The token's scope, for one use by `purpose` under `run_cap` (an evaluate or ingest token is then
+        spent)."""
         tok = self.tokens.get(token)
         if tok is None or run_cap not in self.runs or not hmac.compare_digest(tok.run_cap, run_cap):
             raise TokenError("bad_token")
@@ -111,8 +134,8 @@ class TokenTable:
             raise TokenError("token_scope")
         if tok.spent:
             raise TokenError("token_spent")
-        if purpose == "evaluate":
-            tok.spent = True  # spent BEFORE the read: a failed score still uses up the token (fail closed)
+        if purpose in ("evaluate", INGEST):
+            tok.spent = True  # spent BEFORE the read/ingest: a failed attempt still uses up the token (fail closed)
         return tok
 
     def charge_leak_scan(self, run_cap: str) -> None:

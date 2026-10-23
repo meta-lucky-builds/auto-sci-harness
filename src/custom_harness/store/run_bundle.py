@@ -67,10 +67,22 @@ def _file_sha(path: Path) -> tuple[int, str]:
     return n, h.hexdigest()
 
 
-def task_file_hashes(task_dir: str | Path) -> dict[str, str]:
-    """sha256 of every file under a task directory (relative posix path -> hash)."""
+def task_file_paths(task_dir: str | Path) -> dict[str, Path]:
+    """Every file of a task (relative posix path -> path on disk): the files under the task directory, plus its
+    held-out truth under `private/<name>` wherever truth_layout keeps it (outside agent-readable roots for suite
+    tasks), so a bundle records the same keys whichever layout the task uses."""
+    from ..truth_layout import LEGACY_DIRNAME, truth_files
+
     root = Path(task_dir)
-    return {p.relative_to(root).as_posix(): _file_sha(p)[1] for p in sorted(root.rglob("*")) if p.is_file()}
+    out = {p.relative_to(root).as_posix(): p for p in sorted(root.rglob("*")) if p.is_file()}
+    for rel, p in truth_files(root).items():
+        out.setdefault(f"{LEGACY_DIRNAME}/{rel}", p)
+    return out
+
+
+def task_file_hashes(task_dir: str | Path) -> dict[str, str]:
+    """sha256 of every file of a task (relative posix path -> hash; see task_file_paths)."""
+    return {rel: _file_sha(p)[1] for rel, p in task_file_paths(task_dir).items()}
 
 
 def guess_kind(name: str) -> str:
@@ -105,14 +117,15 @@ def build_run_bundle(store: EvidenceStore, run_id: str, out_path: Path, *, envir
     status, detail = store.run_status(run_id)
     inputs = store.blobs.get_json(run.inputs_ref) if run.inputs_ref else None
     task_dir = (inputs or {}).get("input", {}).get("task_dir") if isinstance(inputs, dict) else None
-    task_files = task_file_hashes(task_dir) if task_dir and Path(task_dir).is_dir() else {}
+    task_paths = task_file_paths(task_dir) if task_dir and Path(task_dir).is_dir() else {}
+    task_files = {rel: _file_sha(p)[1] for rel, p in task_paths.items()}
     private = {h for rel, h in task_files.items() if rel.startswith("private/")}
     cap = config.LARGE_ARTIFACT_BYTES
     blobs: dict[str, bytes] = {}
     refused: list[str] = []
     artifacts: list[dict[str, Any]] = []
     for rel, h in task_files.items():
-        size = (Path(task_dir) / rel).stat().st_size  # type: ignore[arg-type]
+        size = task_paths[rel].stat().st_size
         artifacts.append({"path": f"task/{rel}", "bytes": size, "sha256": h, "kind": "dataset", "required": True,
                           "status": "available_locally"})
     for d in _declared(inputs):
@@ -145,7 +158,12 @@ def build_run_bundle(store: EvidenceStore, run_id: str, out_path: Path, *, envir
                                   "kind": guess_kind(rel), "required": False,
                                   "status": "available_locally" if store.blobs.has(entry["blob"]) else "referenced"})
                 continue
-            data = store.blobs.get(entry["blob"])
+            from ..kerneld.hoststore import PrivateDataRefused
+            try:
+                data = store.blobs.get(entry["blob"])
+            except PrivateDataRefused:  # a HostStore refuses a private blob: the file is refused, the run unharmed
+                refused.append(rel)
+                continue
             if _sha(data) in private:  # defence in depth: the workspace must never hold private bytes
                 refused.append(rel)
                 continue

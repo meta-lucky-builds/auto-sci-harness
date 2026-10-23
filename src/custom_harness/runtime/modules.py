@@ -12,8 +12,8 @@ from ..ablation import NO_ABLATION, AblationSet
 if TYPE_CHECKING:
     from ..budget import Budget
     from ..gateway import Backend, ChatRequest, ChatResponse
-    from ..kernel import Kernel
     from ..kernel.checks import Replayer as _Replayer
+    from ..kerneld.scope import ScopedKernel
     from ..records import Cost
     from ..sandbox import Sandbox
     from ..store import EvidenceStore
@@ -47,6 +47,8 @@ class ModuleStore:
               "get_claim", "claim_tier", "claim_status", "harness_spec", "records_where", "records", "ledger_rows")
 
     def __init__(self, store: EvidenceStore):
+        from ..kerneld.hoststore import host_store
+        store = host_store(store)  # private blobs refused outside kerneld (GOAL §16.5.2)
         object.__setattr__(self, "_ModuleStore__store", store)
         object.__setattr__(self, "blobs", store.blobs)
 
@@ -89,11 +91,14 @@ class ModuleContext:
     _touched: set[str] | None = field(init=False, repr=False, default=None)
 
     def __post_init__(self) -> None:
+        # modules work on the HOST store (kerneld/hoststore.py, GOAL §16.5.2): private blobs, private ingest and
+        # private-read log entries are refused outside kerneld, whatever store the caller handed in
         if not isinstance(self.store, ModuleStore):
-            self._store = self.store
-            self.store = ModuleStore(self.store)
+            facade = ModuleStore(self.store)  # wraps the store in a HostStore
+            self._store = facade._ModuleStore__store
+            self.store = facade
         else:
-            self._store = self.store._ModuleStore__store
+            self._store = self.store._ModuleStore__store  # already a HostStore (ModuleStore.__init__)
 
     def __getattribute__(self, name: str) -> Any:
         if name in _RECORDED:
@@ -103,7 +108,7 @@ class ModuleContext:
             _note_touch(name)
         return object.__getattribute__(self, name)
 
-    def kernel(self, replayer: _Replayer | None = None) -> Kernel:
+    def kernel(self, replayer: _Replayer | None = None) -> ScopedKernel:
         """The Evidence Kernel on the run's store: the only module path to ledger, vault and evidence writes. It is
         bound to the run: once a human kills the run (`chh kill`), it pre-registers, records and certifies nothing
         (studio/kill.py)."""

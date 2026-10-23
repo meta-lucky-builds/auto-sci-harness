@@ -44,6 +44,7 @@ from ..kernel import Claim, Kernel, KernelConfig
 from ..kernel.checks import Replayer
 from ..kernel.execution import ExecRecord, SandboxReplayer
 from ..kernel.vault import Vault
+from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
 from . import looks
 
@@ -245,7 +246,7 @@ def recheck(item: Item, config: KernelConfig | None = None, trusted: set[str] | 
                                                                              **(overrides or {}))
             rep = replayer_for(exp["replayer"], work, trusted if trusted is not None else set(exp.get("trusted", [])),
                                store)
-            kernel = Kernel(store, config=cert_cfg, replayer=rep, clock=lambda: 1.0)
+            kernel = ScopedKernel(store, config=cert_cfg, replayer=rep, clock=lambda: 1.0)
             claim = Claim.model_validate(kernel.certificate(exp["cert_hash"]).claim)
             again = kernel.certify(claim, list(exp["evidence_ids"]), as_of=int(exp["cert_seq"]) - 1)
     except Uncheckable as e:

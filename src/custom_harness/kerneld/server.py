@@ -2,15 +2,18 @@
 path. Run as `python -m custom_harness.kerneld.server --store ROOT`; the client (`client.py`) spawns it.
 
 Transport: JSON lines on stdin/stdout (`protocol.py`). The first stdin line is the launch secret; `open_run` must
-present it. Every private read is a `Vault.read` made HERE, so its `data_access` ledger entry is written by this
-process before any label is used, and labels never leave it: `score`/`rescore` return one float, `leak_scan`
-returns location strings only (`verify.leak.leak_audit` never reports values), and errors are closed codes.
+present it. Private INGEST (`issue_ingest` / `ingest`, kerneld/ingest.py) also happens only here: the host names
+paths, this process reads the bytes and registers them. Every host-initiated private read is a `Vault.read` made
+HERE, so its `data_access` ledger entry is written by this process before any label is used, and labels never leave
+it: `score`/`rescore` return one float, `leak_scan` returns location strings only (`verify.leak.leak_audit` never
+reports values), ingest returns ids/counts/a sha256, and errors are closed codes.
 
 Trust boundary (stated, not hidden): the parent holds the launch secret and the pipe, so it can open runs and
 issue tokens for any purpose the token table allows. What the boundary buys is that host code which only holds a
 RunHandle can make exactly the reads its tokens name, every read is logged by a process that host code cannot
-skip, and no private byte crosses the pipe. Host code that still opens the store itself can still read the blobs
-directly; moving those reads here is the migration this module enables.
+skip, and no private byte crosses the pipe. Host code holds only a HostStore (kerneld/hoststore.py), which refuses
+private blobs outside the in-process Kernel's per-claim grants (kerneld/scope.py): a code boundary, not an OS one
+(docs/kerneld_boundary.md, "Process model").
 """
 
 from __future__ import annotations
@@ -168,6 +171,70 @@ class Server:
         except (ValueError, KernelError):
             raise TokenError("release_error") from None
         return {"ok": True}
+
+    # ----------------------------------------------------------------------------------------- private ingest
+    def op_issue_ingest(self, args: dict[str, Any]) -> dict[str, Any]:
+        token = self.table.issue_ingest(P.arg(args, "run_cap", str), P.arg(args, "kind", str),
+                                        P.arg(args, "subject", str),
+                                        claim_hash=P.arg(args, "claim_hash", str, optional=True))
+        return {"token": token}
+
+    def op_ingest(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Register private data named by PATH (kerneld reads the bytes; kerneld/ingest.py). The token is spent
+        before anything is read. Result: ids/counts/sha256 only; a refusal is a closed code (and, for returned
+        measurements, closed problem classes)."""
+        from . import ingest as I
+        cap = P.arg(args, "run_cap", str)
+        kind = P.arg(args, "kind", str)
+        tok = self.table.use(cap, P.arg(args, "token", str), P.INGEST)
+        if tok.file != kind:
+            raise TokenError("token_scope")
+        run_id = self.table.run_id(cap)
+        try:
+            if kind == "research_task":
+                return I.research_task(self.vault, run_id, tok.dataset_id, P.arg(args, "task_dir", str))
+            if kind == "openml_split":
+                spec = P.arg(args, "spec", dict)
+                return I.openml_split(self.vault, run_id, tok.dataset_id, str(tok.claim_hash),
+                                      P.arg(args, "cache_root", str), spec)
+            if kind == "returned_measurements":
+                if P.arg(args, "claim_hash", str) != tok.claim_hash:  # the provenance claim is bound at issue
+                    raise TokenError("token_scope")
+                return I.returned_measurements(
+                    self.vault, run_id, tok.dataset_id, P.arg(args, "file", str), P.arg(args, "protocol", dict),
+                    P.arg(args, "claim_hash", str), P.arg(args, "attestation", str),
+                    P.arg(args, "approved_protocol_seq", int))
+        except I.IngestRefused as e:
+            if e.code == "measurements_refused":
+                return {"refused": e.code, "problems": [p for p in e.problems if p in P.MEASUREMENT_PROBLEMS]}
+            raise TokenError(e.code if e.code in P.ERRORS else "ingest_refused") from None
+        raise P.ProtocolError()
+
+
+    # ----------------------------------------------------------------------------------------- truth queries
+    def op_truth_query(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A fact about a task's held-out truth (kerneld/truth.py): ids, hashes, counts or location strings, never
+        truth bytes. Needs a run capability (no per-claim token: no claim is involved); every query is recorded."""
+        from . import truth as T
+        cap = P.arg(args, "run_cap", str)
+        run_id = self.table.run_id(cap)
+        kind = P.arg(args, "kind", str)
+        if kind not in P.TRUTH_QUERIES:
+            raise P.ProtocolError()
+        q: dict[str, Any] = {}
+        if kind in ("target_id", "truth_hashes", "label_agreement"):
+            q["task_dir"] = P.arg(args, "task_dir", str)
+        if kind == "label_agreement":
+            q["guess"] = P.str_list(args.get("guess"))
+        if kind == "export_scan":
+            tasks = P.arg(args, "tasks", dict)
+            if not all(isinstance(k, str) and isinstance(v, str) for k, v in tasks.items()):
+                raise P.ProtocolError()
+            q["tasks"], q["root"] = tasks, P.arg(args, "root", str)
+        try:
+            return T.query(self.store, run_id, kind, q)
+        except T.TruthQueryRefused as e:
+            raise TokenError(e.code if e.code in P.ERRORS else "internal") from None
 
 
 def _readline(inp: BinaryIO) -> str | None:

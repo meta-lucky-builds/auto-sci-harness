@@ -40,6 +40,7 @@ from ..kernel import (
     run_program,
 )
 from ..kernel.certificate import CHECK_IDS, CHECK_NAMES
+from ..kerneld.scope import ScopedKernel
 from ..literature.cite import Citation as LitCitation
 from ..literature.cite import Resolver, check_citations, i3_verdict
 from ..records import Run, StepKind, TraceStep
@@ -161,7 +162,7 @@ def prepare(store: EvidenceStore, loaded: LoadedSpec, cache: data.OpenMLCache,
             fetcher: data.Fetcher | None = None) -> dict[str, Any]:
     """Register the arms, pre-register the claim, THEN read and register the fresh datasets. Returns what the
     human must approve next (the datasets' external role)."""
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     claim = loaded.claim()
     ch = claim.claim_hash()
     if gate.fidelity_approval(store, loaded.audit_id, loaded.spec_hash, ch, loaded.spec.paper.sentence) is None:
@@ -176,7 +177,7 @@ def prepare(store: EvidenceStore, loaded: LoadedSpec, cache: data.OpenMLCache,
     out: dict[str, Any] = {"audit_id": loaded.audit_id, "claim_hash": ch, "prereg_seq": prereg.seq, "datasets": []}
     for ds in loaded.spec.datasets:
         try:
-            sp = data.ingest(kernel, ch, ds, cache.ensure(ds, fetcher))
+            sp = _ingest(store, loaded.audit_id, ch, ds, cache, fetcher)
         except (data.DataUnavailable, ValueError) as e:
             needs = isinstance(e, data.DataUnavailable) and e.needs_owner
             out["could_not_run"] = _record(store, {
@@ -185,10 +186,37 @@ def prepare(store: EvidenceStore, loaded: LoadedSpec, cache: data.OpenMLCache,
                 "report_hash": hashlib.sha256(render_could_not_run(loaded.audit_id, ch, str(e), needs).encode())
                 .hexdigest(), "at": time.time()})
             return out
-        out["datasets"].append({"dataset_id": ds.dataset_id, "n_train": sp.n_train, "n_test": sp.n_test,
+        out["datasets"].append({"dataset_id": ds.dataset_id, "n_train": sp["n_train"], "n_test": sp["n_test"],
                                 "role_approved": kernel.vault.role_approval(ds.dataset_id) is not None,
                                 "approve": f"chh approve-role {ds.dataset_id} --approver <you>"})
     return out
+
+
+def _ingest(store: EvidenceStore, audit_id: str, claim_hash: str, ds: Any, cache: data.OpenMLCache,
+            fetcher: data.Fetcher | None) -> dict[str, int]:
+    """The fresh dataset, split and registered BY KERNELD (kerneld/ingest.py, GOAL §16.5.2): this process only makes
+    sure the pinned file is in the local cache (an owner-approved fetch, if any); kerneld re-reads it, checks the pin,
+    splits it and registers the held-out labels. No held-out label of the split enters this process. kerneld
+    unavailable -> InfraError (no fallback)."""
+    from ..kerneld.client import KernelD, KernelDError
+    path = cache.ensure_path(ds, fetcher)
+    try:
+        with KernelD(store.root) as kd:
+            run = kd.open_run(f"audit-prepare-{audit_id}")
+            try:
+                return run.ingest_openml_split(claim_hash, path.parent, ds.model_dump(mode="json"))
+            finally:
+                run.close()
+    except KernelDError as e:
+        if e.code == "not_registered":
+            raise data.DataUnavailable("the audit claim is not pre-registered: fresh data are not touched before "
+                                       "it is") from None
+        if e.code == "not_found":
+            raise data.DataUnavailable(f"openml:{ds.openml_id} is not in the local cache or does not match its pin; "
+                                       f"downloading it is an owner decision (`chh audit fetch --allow-download`)",
+                                       needs_owner=True) from None
+        raise data.DataUnavailable(f"openml:{ds.openml_id}: kerneld refused the pinned data ({e.code}: hash, format, "
+                                   f"size or an earlier registration)") from None
 
 
 def _check_citations(loaded: LoadedSpec, resolver: Resolver | None) -> dict[str, Any] | None:
@@ -215,7 +243,7 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
     and refuses a second run of the same claim (one look per claim)."""
     claim = loaded.claim()
     ch = claim.claim_hash()
-    kernel = Kernel(store, replayer=SandboxReplayer(sandbox_factory))
+    kernel = ScopedKernel(store, replayer=SandboxReplayer(sandbox_factory))
     vault = kernel.vault
     if gate.fidelity_approval(store, loaded.audit_id, loaded.spec_hash, ch, loaded.spec.paper.sentence) is None:
         raise gate.AuditRefused("no human fidelity approval for this exact spec")
@@ -325,12 +353,11 @@ def _evaluate_arms(store: EvidenceStore, kernel: Kernel, kd: Any, loaded: Loaded
 def current_report(store: EvidenceStore, outcome: dict[str, Any]) -> str:
     """Re-render the report of a recorded outcome from the certificate (or, without one, the recorded reason)."""
     if outcome.get("cert_hash"):
-        return render_report(Kernel(store).certificate(outcome["cert_hash"]))
+        return render_report(ScopedKernel(store).certificate(outcome["cert_hash"]))
     return render_could_not_run(outcome["audit_id"], outcome["claim_hash"], outcome["reason"],
                                 bool(outcome.get("needs_owner")))
 
 
 def bundle(store: EvidenceStore, outcome: dict[str, Any], out: Path) -> Path:
-    from ..kernel.bundle import build_bundle
-    build_bundle(Kernel(store), outcome["cert_hash"], Path(out))
+    ScopedKernel(store).bundle(outcome["cert_hash"], Path(out))  # a grant for the claim's private files only
     return Path(out)

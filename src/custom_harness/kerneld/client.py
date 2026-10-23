@@ -37,11 +37,13 @@ class KernelDUnavailable(InfraError):
 
 
 class KernelDError(Exception):
-    """kerneld refused a request; `.code` is the closed protocol code (no other detail exists)."""
+    """kerneld refused a request; `.code` is the closed protocol code. The only other detail that ever exists is
+    `.problems`: the closed problem classes of refused returned measurements (protocol.MEASUREMENT_PROBLEMS)."""
 
-    def __init__(self, code: str):
+    def __init__(self, code: str, problems: tuple[str, ...] = ()):
         super().__init__(code)
         self.code = code
+        self.problems = problems
 
 
 def _wire_safe(v: Any) -> Any:
@@ -215,6 +217,51 @@ class RunHandle:
         self._call("record_release", target_dataset_id=target_dataset_id, channel=channel, alphabet=alphabet,
                    note=note)
 
+    # ------------------------------------------------------------------------------- private ingest (kerneld/ingest.py)
+    def ingest_token(self, kind: str, subject: str, *, claim_hash: str | None = None) -> str:
+        return str(self._call("issue_ingest", kind=kind, subject=subject, claim_hash=claim_hash)["token"])
+
+    def _ingest(self, kind: str, subject: str, bind_claim: str | None = None, **args: Any) -> dict[str, Any]:
+        tok = self.ingest_token(kind, subject, claim_hash=bind_claim)
+        res = self._call("ingest", token=tok, kind=kind, **args)
+        if "refused" in res:
+            problems = res.get("problems")
+            if (res["refused"] != "measurements_refused" or not isinstance(problems, list)
+                    or not all(p in P.MEASUREMENT_PROBLEMS for p in problems)):
+                raise KernelDUnavailable("kerneld sent a malformed ingest refusal")
+            raise KernelDError("measurements_refused", tuple(problems))
+        return res
+
+    def ingest_research_task(self, task_id: str, task_dir: Path | str) -> dict[str, str]:
+        """Register a research task's data (kerneld reads the files; the labels never enter this process). Returns
+        the vault ids {train, test, baseline}."""
+        ids = self._ingest("research_task", task_id, task_dir=str(Path(task_dir).resolve()))["ids"]
+        if not isinstance(ids, dict) or set(ids) != {"train", "test", "baseline"}:
+            raise KernelDUnavailable("kerneld sent a malformed ingest reply")
+        return {str(k): str(v) for k, v in ids.items()}
+
+    def ingest_openml_split(self, claim_hash: str, cache_root: Path | str, spec: dict[str, Any]) -> dict[str, int]:
+        """Split and register a Claim Audit's pinned fresh dataset (kerneld loads it from the cache and splits it).
+        `spec` is the OpenMLDataset fields. Returns {n_train, n_test}."""
+        subject = f"openml-{spec.get('openml_id')}-{str(spec.get('sha256', ''))[:16]}"  # OpenMLDataset.dataset_id
+        res = self._ingest("openml_split", subject, bind_claim=claim_hash, cache_root=str(Path(cache_root).resolve()),
+                           spec=dict(spec))
+        return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"])}
+
+    def ingest_returned_measurements(self, dataset_id: str, file: Path | str, protocol: dict[str, Any], *,
+                                     claim_hash: str, attestation: str, approved_protocol_seq: int) -> str:
+        """Register measurements humans returned (`chh return-data`) as a FUTURE dataset; kerneld reads the file and
+        checks it against the protocol. Returns the data's sha256."""
+        res = self._ingest("returned_measurements", dataset_id, bind_claim=claim_hash, file=str(Path(file).resolve()),
+                           protocol=dict(protocol), claim_hash=claim_hash, attestation=attestation,
+                           approved_protocol_seq=int(approved_protocol_seq))
+        return str(res["data_sha256"])
+
+    # ------------------------------------------------------------------------------- truth queries (kerneld/truth.py)
+    def truth_query(self, kind: str, **args: Any) -> dict[str, Any]:
+        """A fact about a task's held-out truth computed in kerneld: ids, hashes, counts or location strings."""
+        return self._call("truth_query", kind=kind, **args)
+
     def held_out_score(self, dataset_id: str, file: str, metric: str, preds: Sequence[str], *, claim_hash: str,
                        arm: str, seed: int) -> float:
         tok = self.token("evaluate", dataset_id, file, claim_hash=claim_hash, arm=arm, seed=seed)
@@ -222,3 +269,20 @@ class RunHandle:
 
     def close(self) -> None:
         self._call("close_run")
+
+
+def truth_query(kind: str, *, store_root: Path | str | None = None, run_id: str = "truth-query",
+                **args: Any) -> dict[str, Any]:
+    """One truth query in a short-lived kerneld (GOAL §16.5.2): for host code that has no kerneld session of its own
+    (evolve/export.py, evolve/multiplicity.py, research/rebuild.py). `store_root` defaults to the data dir's store
+    (the record of the query goes there). kerneld unavailable -> KernelDUnavailable (no fallback: the host never
+    reads the truth itself)."""
+    from ..config import data_dir
+    root = Path(store_root) if store_root is not None else data_dir() / "store"
+    root.mkdir(parents=True, exist_ok=True)  # kerneld serves only an existing store directory
+    with KernelD(root) as kd:
+        run = kd.open_run(run_id)
+        try:
+            return run.truth_query(kind, **args)
+        finally:
+            run.close()

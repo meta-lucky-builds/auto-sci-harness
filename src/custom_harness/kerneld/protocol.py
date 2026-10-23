@@ -15,10 +15,19 @@ import json
 import re
 from typing import Any
 
-OPS = ("hello", "open_run", "issue", "score", "rescore", "leak_scan", "record_release", "close_run", "shutdown")
+OPS = ("hello", "open_run", "issue", "score", "rescore", "leak_scan", "record_release", "issue_ingest", "ingest",
+       "truth_query", "close_run", "shutdown")
 ERRORS = ("bad_request", "unknown_op", "bad_secret", "bad_token", "token_scope", "token_spent", "not_registered",
-          "not_target", "not_private", "vault_error", "release_error", "rate_limited", "internal")
-PURPOSES = ("evaluate", "kernel", "leakscan")  # the only purposes a token can carry
+          "not_target", "not_private", "vault_error", "release_error", "rate_limited", "internal",
+          # private ingest (kerneld/ingest.py, 2026-10-14)
+          "not_found", "data_unavailable", "already_registered", "canary_mismatch", "ingest_refused",
+          "measurements_refused", "truth_layout")
+PURPOSES = ("evaluate", "kernel", "leakscan")  # the only READ purposes a token can carry (`issue`)
+INGEST = "ingest"  # the purpose of an ingest token (`issue_ingest` only; never a read)
+INGEST_KINDS = ("research_task", "openml_split", "returned_measurements")  # kerneld/ingest.py
+# closed problem classes of refused returned measurements (kerneld/ingest.py classifies check_measurements' messages)
+TRUTH_QUERIES = ("target_id", "truth_hashes", "label_agreement", "export_scan")  # kerneld/truth.py
+MEASUREMENT_PROBLEMS = ("not_utf8", "columns", "row_length", "non_finite", "replicates", "other")
 HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 

@@ -21,6 +21,7 @@ from custom_harness.kernel.execution import DEFAULT_ARGV, run_program
 from custom_harness.research.suite import check_split_isolation
 from custom_harness.research.task import load_task
 from custom_harness.sandbox.docker import DockerSandbox
+from custom_harness.truth_layout import truth_file
 from custom_harness.verify import metrics as M
 
 REFERENCE = '''import argparse
@@ -60,7 +61,7 @@ def main() -> int:
             task = load_task(d)
             train = (d / "public" / task.train_file).read_bytes()
             test = (d / "public" / task.test_features_file).read_bytes()
-            y = labels(d / "private" / task.test_labels_file)
+            y = labels(truth_file(d, task.test_labels_file))  # truth_layout: outside agent-readable roots
             header = test.decode("utf-8").splitlines()[0].split(",")
             problems = [] if task.target_column not in header else ["target column present in public test file"]
             scores = {}

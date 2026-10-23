@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..kernel import Kernel
 from ..kernel.checklist import fill
 from ..kernel.checklist import render as render_checklist
+from ..kerneld.scope import ScopedKernel
 from ..publication import NOT_A_LOOP_PREFIX, render_loop_item
 from ..records import Cost
 from ..store import EvidenceStore
@@ -40,7 +40,7 @@ def audit_checklist(store: EvidenceStore, outcome: dict[str, Any], bundle_hash: 
                     reply: dict[str, Any] | None, approval: dict[str, Any] | None) -> dict[str, str | None]:
     """The filled checklist of a certified audit outcome (KeyError/KernelError if its certificate is absent)."""
     from .gate import FIDELITY, _entries  # the gate's own approval reader (no import cycle at module load)
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     cert = kernel.certificate(outcome["cert_hash"])
     produced = [store.get_evidence(e).produced_by_run for e in cert.evidence_ids]
     run_ids = sorted({r for r in produced if r})  # evidence without a producing run has no trace: `traces` says so

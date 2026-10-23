@@ -15,6 +15,7 @@ import yaml
 from .audit import cli as audit_cli
 from .config import data_dir
 from .gateway import Backend, MockBackend
+from .kerneld.hoststore import open_host_store
 from .literature import cli as lit_cli
 from .records import Cost
 from .runtime import Engine, HarnessSpec
@@ -105,15 +106,22 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
 APPROVAL_ITEM_PRINT_CHARS = 20_000
 
 
+# closed problem classes of refused returned measurements (kerneld/protocol.MEASUREMENT_PROBLEMS) as text
+_MEASUREMENT_TEXT = {"not_utf8": "data is not UTF-8 text", "columns": "the columns differ from the protocol's columns",
+                     "row_length": "a line has the wrong number of values",
+                     "non_finite": "a number column holds a value that is not a finite number",
+                     "replicates": "an arm has fewer replicates than the protocol's minimum",
+                     "other": "the data do not match the protocol"}
+
+
 def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
     """HUMAN action (GOAL §4.7): register the measurements humans returned for an APPROVED physical protocol, with an
     attestation. Refused unless the run is paused at the data gate, the exact protocol was approved by a human
     (engine rule), the protocol passes the prohibited screen, the data match the protocol, and nothing was registered
     for it before. The data become a `future` dataset; the attestation is recorded but remains untested."""
-    import hashlib
-
-    from .kernel import DatasetRole, Kernel
-    from .research.physical import Protocol, check_measurements, screen
+    from .kerneld.client import KernelD, KernelDError
+    from .kerneld.scope import ScopedKernel
+    from .research.physical import Protocol, screen
     from .runtime.engine import approval_decision, approval_item_hash, paused_approval
     from .studio.kill import kill_entry, killed_detail
     kill = kill_entry(store, a.run_id)
@@ -134,20 +142,26 @@ def cmd_return_data(a: argparse.Namespace, store: EvidenceStore) -> int:
         raise SystemExit("the protocol matches a prohibited category")
     if not a.attest.strip():
         raise SystemExit("an attestation (who, where, when) is required")
-    data = Path(a.file).read_bytes()
-    problems = check_measurements(protocol, data)
-    if problems:
-        raise SystemExit("returned data refused: " + "; ".join(problems[:10]))
-    vault = Kernel(store).vault
-    if item["dataset_id"] in vault.datasets():
+    if item["dataset_id"] in ScopedKernel(store).vault.datasets():
         raise SystemExit(f"data for this protocol are already registered ({item['dataset_id']})")
-    provenance = {"protocol_hash": item["protocol_hash"], "claim_hash": item["claim_hash"], "run_id": a.run_id,
-                  "attestation": a.attest, "attestation_sha256": hashlib.sha256(a.attest.encode()).hexdigest(),
-                  "data_sha256": hashlib.sha256(data).hexdigest(), "approved_protocol_seq": decision["ledger_seq"]}
-    vault.register_dataset(item["dataset_id"], DatasetRole.FUTURE,
-                           public={"provenance.json": json.dumps(provenance, sort_keys=True).encode()},
-                           private={protocol.measurements.filename: data})
-    print(json.dumps({"registered": item["dataset_id"], "data_sha256": provenance["data_sha256"],
+    # kerneld reads the file, checks it against the protocol and registers it (kerneld/ingest.py, GOAL §16.5.2):
+    # the measurements never enter this process; a refusal names closed problem classes only
+    try:
+        with KernelD(store.root) as kd:
+            run = kd.open_run(a.run_id)
+            try:
+                data_sha256 = run.ingest_returned_measurements(
+                    item["dataset_id"], a.file, protocol.model_dump(mode="json"), claim_hash=item["claim_hash"],
+                    attestation=a.attest, approved_protocol_seq=decision["ledger_seq"])
+            finally:
+                run.close()
+    except KernelDError as e:
+        if e.code == "measurements_refused":
+            raise SystemExit("returned data refused: " + "; ".join(_MEASUREMENT_TEXT[p] for p in e.problems)) from None
+        if e.code == "already_registered":
+            raise SystemExit(f"data for this protocol are already registered ({item['dataset_id']})") from None
+        raise SystemExit(f"returned data refused by kerneld ({e.code})") from None
+    print(json.dumps({"registered": item["dataset_id"], "data_sha256": data_sha256,
                       "next": f"chh approve {a.run_id} data_received --decision approve --approver <you>",
                       "role": f"role 'future' earns CERTIFIED-VALIDATED only after a human runs: chh approve-role "
                               f"{item['dataset_id']} --approver <you>"}))
@@ -323,7 +337,13 @@ def cmd_reproduce(a: argparse.Namespace, store: EvidenceStore) -> int:
     roots = [Path(r) for r in getattr(a, "artifact_root", None) or []]
 
     def local(sha: str) -> bytes | None:  # a large artifact the bundle lists but does not carry: this machine's copy
-        for f in [store.blobs._path(sha), *(r / sha for r in roots)]:
+        from .kerneld.hoststore import PrivateDataRefused
+        try:  # through the HostStore: a private blob is refused (= missing), never copied out (GOAL §16.5.2)
+            if store.blobs.has(sha):
+                return store.blobs.get(sha)
+        except (PrivateDataRefused, OSError):
+            return None
+        for f in (r / sha for r in roots):
             if f.is_file():
                 return f.read_bytes()
         return None
@@ -378,16 +398,15 @@ def _headline(cert: Any) -> dict[str, Any] | None:
 
 
 def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
-    from .kernel import Kernel
-    from .kernel.bundle import build_bundle
+    from .kerneld.scope import ScopedKernel
     out = Path(a.out or (data_dir() / "bundles" / f"{a.cert_hash[:16]}.zip"))
-    print(json.dumps({"bundle": str(out), "bundle_hash": build_bundle(Kernel(store), a.cert_hash, out)}))
+    print(json.dumps({"bundle": str(out), "bundle_hash": ScopedKernel(store).bundle(a.cert_hash, out)}))
     return 0
 
 
 def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
-    from .kernel import Kernel
-    k = Kernel(store)
+    from .kerneld.scope import ScopedKernel
+    k = ScopedKernel(store)
     for e in k.ledger.entries("certificate"):
         cert = k.certificate(e.body["cert_hash"])
         print(f"{e.body['cert_hash'][:16]}  {cert.label.value:<20} {k.status(e.body['cert_hash']):<9} "
@@ -429,8 +448,9 @@ def cmd_approve_role(a: argparse.Namespace, store: EvidenceStore) -> int:
     """HUMAN action: approve that a dataset registered as external/future really is external/future data. Without it
     the dataset never supports CERTIFIED-VALIDATED (at most CERTIFIED-INTERNAL). Models and harness code never run
     this; the ledger entry names the approver."""
-    from .kernel import Kernel, VaultError
-    kernel = Kernel(store)
+    from .kernel import VaultError
+    from .kerneld.scope import ScopedKernel
+    kernel = ScopedKernel(store)
     try:
         rec = kernel.vault.dataset(a.dataset_id)
         print(f"dataset {rec.dataset_id}: role {rec.role.value}, content hash {rec.hash}, files {sorted(rec.files)}")
@@ -446,10 +466,11 @@ def cmd_alpha(a: argparse.Namespace, store: EvidenceStore) -> int:
     """`chh alpha open` is a HUMAN action (GOAL §16.4): it gives a held-out target a fixed budget of slots, each claim
     tested at alpha / slots and releases paid in slots (kernel/alpha.py). The ledger entry names the approver; no
     production code path opens an account. `chh alpha status` only reads."""
-    from .kernel import Kernel, KernelError, VaultError
+    from .kernel import KernelError, VaultError
     from .kernel import alpha as A
     from .kernel.checks import related_targets, slot_charge
-    kernel = Kernel(store)
+    from .kerneld.scope import ScopedKernel
+    kernel = ScopedKernel(store)
     try:
         if a.alpha_cmd == "open":
             e = kernel.open_alpha_account(a.dataset_id, a.alpha, a.slots, approver=a.approver)
@@ -502,15 +523,17 @@ def cmd_build_suite(a: argparse.Namespace, store: EvidenceStore) -> int:
         real = export_real(lambda ws: DockerSandbox(ws, image=FULL_IMAGE, trusted_task_building=True),
                            Path(a.record_dir) / "_export" if a.frozen else Path(a.out) / "_export")
     if a.frozen:
-        from .kernel import Kernel
+        from .kerneld.scope import ScopedKernel
         try:
             res = RB.rebuild(Path(a.out), record_dir=Path(a.record_dir), beacon_file=Path(a.beacon_file),
-                             vault=Kernel(store).vault, store_root=store.root, real_data=real, name=a.name)
+                             vault=ScopedKernel(store).vault, store_root=store.root, real_data=real, name=a.name,
+                             heldout_rows=a.heldout_rows, null_families=tuple(a.null_family or ()))
         except (RB.RebuildRefused, RB.MintRefused) as e:
             raise SystemExit(f"refused: {e}") from None
         print(json.dumps(res, indent=1))
         return 0
-    path = build_suite(Path(a.out), real_data=real)
+    path = build_suite(Path(a.out), real_data=real, heldout_rows=a.heldout_rows,
+                       null_families=tuple(a.null_family or ()))
     print(json.dumps({"suite": str(path), "real_data": real is not None}))
     return 0
 
@@ -620,15 +643,16 @@ def cmd_rerun(a: argparse.Namespace, store: EvidenceStore) -> int:
 def cmd_approve_adapter(a: argparse.Namespace, store: EvidenceStore) -> int:
     """HUMAN action (GOAL §4.7, invariant 13): approve a domain adapter's current content after its validation passes.
     The approval names the approver and is recorded in the hash-chained ledger."""
-    from .kernel import AdapterError, Kernel
+    from .kernel import AdapterError
     from .kernel.adapters import REGISTRY, adapter_hash
+    from .kerneld.scope import ScopedKernel
     if a.name not in REGISTRY:
         raise SystemExit(f"unknown adapter {a.name!r}; known: {sorted(REGISTRY)}")
     spec, checks = REGISTRY[a.name]
     print(f"adapter {spec.name} v{spec.version}: classes {sorted(spec.classes)}, modules {list(spec.modules)}")
     print(f"content hash {adapter_hash(spec)}; running {len(checks)} validation checks")
     try:
-        entry = Kernel(store).approve_adapter(a.name, approver=a.approver)
+        entry = ScopedKernel(store).approve_adapter(a.name, approver=a.approver)
     except AdapterError as e:
         raise SystemExit(f"NOT approved: {e}") from e
     print(json.dumps({"approved": a.name, "approver": a.approver, "ledger_seq": entry.seq}))
@@ -668,9 +692,9 @@ def cmd_finalize(a: argparse.Namespace, store: EvidenceStore) -> int:
 def cmd_memory(a: argparse.Namespace, store: EvidenceStore) -> int:
     """L5 memory (GOAL §5 L5). Inspection, retraction sync, Kernel-derived negative memory and HUMAN revocation.
     No command writes free text into memory: every write comes from Kernel certificates through the gate."""
-    from .kernel import Kernel
+    from .kerneld.scope import ScopedKernel
     from .memory import MemoryStore, NotReadable, harvest_negatives
-    mem = MemoryStore(Kernel(store), namespace=a.namespace)
+    mem = MemoryStore(ScopedKernel(store), namespace=a.namespace)
     try:
         if a.action == "verify-log":
             problems = mem.verify_log()
@@ -708,9 +732,9 @@ def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
     is the ONLY code path that writes a `statement_approval` ledger entry; a formal claim's K1 requires one."""
     import hashlib
 
-    from .kernel import Kernel
     from .kernel.formal import FormalError, hygiene, parse_statement
     from .kernel.vault import VaultError
+    from .kerneld.scope import ScopedKernel
     data = Path(a.file).read_bytes()
     try:
         st = parse_statement(data)
@@ -726,7 +750,7 @@ def cmd_approve_statement(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(f"theorem {st.theorem}\n--- statement source ---\n{st.source}\n--- end ---\nstatement_hash: {digest}")
     if a.statement_hash is not None and a.statement_hash != digest:
         raise SystemExit(f"refused: --statement-hash {a.statement_hash} does not match the file's hash {digest}")
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     try:
         kernel.vault.register_artifact(a.artifact_id, data, "lean-statement")
     except VaultError as e:
@@ -743,11 +767,11 @@ def cmd_salts_reveal(a: argparse.Namespace, store: EvidenceStore) -> int:
     custom_harness.salts reveal`)."""
     import datetime as dt
 
-    from .kernel import Kernel
+    from .kerneld.scope import ScopedKernel
     from .salts.generate import SaltError
     from .salts.plan import reveal
     try:
-        revealed = reveal(a.sealed, Kernel(store).vault, human=a.by, today=dt.date.today())
+        revealed = reveal(a.sealed, ScopedKernel(store).vault, human=a.by, today=dt.date.today())
     except SaltError as e:
         raise SystemExit(f"refused: {e}") from None
     print(json.dumps({"campaign_hash": revealed.campaign_hash, "plant_list": list(revealed.plant_list)}, indent=1))
@@ -909,6 +933,11 @@ def main(argv: list[str] | None = None) -> int:
     bs.add_argument("--beacon-file", help="the sealed beacon (outside agent-readable roots)")
     bs.add_argument("--real-export", help="real-data export written by the trusted exporter (instead of --docker)")
     bs.add_argument("--name", default="m2", help="suite name recorded in the manifest")
+    bs.add_argument("--heldout-rows", type=int, default=None,
+                    help="held-out rows per synthetic task (GOAL 16.2 small train / large test; frozen in manifest). "
+                         "Proposed 4500 (research.suite.PROPOSED_HELDOUT_ROWS, UNCALIBRATED, from a partial preflight)")
+    bs.add_argument("--null-family", action="append", choices=["noise"],
+                    help="add a genuinely null family to the real pool (null salts may only come from such a family)")
     pf = sub.add_parser("preflight-suite", help="zero-call certifiability audit of a task suite (GOAL 16.8)")
     pf.add_argument("suite", help="a suite directory (task subdirectories) or one task directory")
     pf.add_argument("--baseline-acc", type=float, default=0.8, help="ASSUMED baseline dev accuracy")
@@ -952,7 +981,7 @@ def main(argv: list[str] | None = None) -> int:
         if os.environ.get(TEST_MODE_ENV) != "1":
             raise SystemExit(f"--dev-sandbox runs programs on the host WITHOUT isolation; it is refused unless "
                              f"{TEST_MODE_ENV}=1 (trusted test code only). Use --docker.")
-    store = EvidenceStore(data_dir() / "store")
+    store = open_host_store(data_dir() / "store")  # GOAL §16.5.2: private data only through kerneld
     try:
         if a is None:
             return evolve_cli.main(args[1:], store)

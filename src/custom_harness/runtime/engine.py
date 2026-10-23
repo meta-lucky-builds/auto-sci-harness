@@ -323,7 +323,10 @@ class Engine:
         # killed mid-flight can be recovered by resume instead of being lost (M0 review)
         self._cursor: tuple[Any, ...] | None = None
         self.backends: dict[str, Backend] = {role: _JournalingBackend(b, self) for role, b in backends.items()}
-        self.store = store
+        # the Engine runs on the HOST store (GOAL §16.5.2, kerneld/hoststore.py): it, its modules and its Kernel read
+        # private data only through kerneld (tokens) or the Kernel's per-claim grants (kerneld/scope.py)
+        from ..kerneld.hoststore import host_store
+        self.store = store = host_store(store)
         self.sandbox = sandbox
         if budget is None:
             limits = {k: v for k, v in spec.budget.model_dump().items() if v is not None}

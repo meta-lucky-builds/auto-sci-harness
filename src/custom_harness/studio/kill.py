@@ -29,9 +29,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from ..kernel import Kernel, KernelError
+from ..kernel import KernelError
 from ..kernel.claim import Claim
 from ..kernel.ledger import Entry, Ledger
+from ..kerneld.scope import ScopedKernel
 from ..records import RunStatus
 from ..store import EvidenceStore
 
@@ -144,9 +145,10 @@ class _ModuleLedger(Ledger):
         return super().append(kind, body)
 
 
-class RunGuardedKernel(Kernel):
+class RunGuardedKernel(ScopedKernel):
     """The Kernel bound to one run (what `ModuleContext.kernel()` returns): refuses every claim-making call once the
-    run is killed, and retracts a certificate that was recorded after the kill."""
+    run is killed, and retracts a certificate that was recorded after the kill. A ScopedKernel: its private reads
+    happen only inside kerneld's per-claim grants (kerneld/scope.py, GOAL §16.5.2)."""
 
     run_id: str  # the binding (narrower than Kernel.run_id); recorded on prereg/certificate entries (s4-kernel)
 
@@ -154,8 +156,8 @@ class RunGuardedKernel(Kernel):
         super().__init__(store, **kw)
         from ..kernel.vault import Vault
         self.run_id = run_id
-        self.ledger = _ModuleLedger(store)
-        self.vault = Vault(store, self.ledger)
+        self.ledger = _ModuleLedger(self.store)  # self.store: the HostStore view (ScopedKernel), never the raw store
+        self.vault = Vault(self.store, self.ledger)
 
     def _refuse_if_killed(self, what: str) -> None:
         kill = kill_entry(self.store, self.run_id)
@@ -177,6 +179,18 @@ class RunGuardedKernel(Kernel):
     def record_certificate(self, claim: Claim, artifact_id: str) -> str:
         self._refuse_if_killed("evidence")
         return super().record_certificate(claim, artifact_id)
+
+    def bundle(self, cert_hash: str, out_path: Any) -> str:
+        """A module may bundle only into the data dir's `bundles/` (the research loop's place), never to a path of its
+        choosing, and not on a killed run (s4-kerneld-review finding 2; every bundling is also recorded)."""
+        from pathlib import Path
+
+        from ..config import data_dir
+        from ..pathsafe import is_within
+        self._refuse_if_killed("bundling")
+        if not is_within(Path(out_path), data_dir() / "bundles"):
+            raise KernelError(f"bundle refused: a module bundles only into {data_dir() / 'bundles'}")
+        return super().bundle(cert_hash, out_path)
 
     def certify(self, claim: Claim, evidence_ids: Sequence[str], *, full_chain: bool = True,
                 record: bool = True, as_of: int | None = None) -> Any:

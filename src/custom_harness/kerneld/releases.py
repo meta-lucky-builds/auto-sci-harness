@@ -90,8 +90,8 @@ class LedgerSink:
         self.store = store
 
     def record_release(self, target_dataset_id: str, channel: str, alphabet: str, note: str) -> Any:
-        from ..kernel import Kernel
-        kernel = Kernel(self.store)
+        from .scope import ScopedKernel
+        kernel = ScopedKernel(self.store)
         fn = getattr(kernel, "record_release", None)
         if fn is not None:  # pragma: no cover - exercised once kstats' Kernel.record_release is merged
             return fn(target_dataset_id, channel, alphabet, note)
@@ -176,8 +176,8 @@ def attributed_read_log(store: EvidenceStore, *, after_seq: int = 0, run_ids: Co
             private, rid, ds = bool(b.get("private")), b.get("run_id"), str(b["dataset_id"])
         except (ValueError, TypeError, KeyError, AttributeError):
             if everything is None:
-                from ..kernel import Kernel
-                everything = set(Kernel(store).vault.datasets())
+                from .scope import ScopedKernel
+                everything = set(ScopedKernel(store).vault.datasets())
             out.append((int(seq), float(at), set(everything)))
             continue
         if not private:

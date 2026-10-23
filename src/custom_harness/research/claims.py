@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import ast
 import csv
-import hashlib
 import io
 import statistics
 import time
@@ -34,7 +33,6 @@ from ..kernel import (
     ArtifactRef,
     Claim,
     ClaimKind,
-    DatasetRole,
     Effect,
     ExecRecord,
     InputRef,
@@ -47,10 +45,10 @@ from ..kernel import (
     ml,
     run_program,
 )
-from ..kernel.bundle import build_bundle
 from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
 from ..kerneld.client import KernelD, KernelDError, KernelDUnavailable, RunHandle
+from ..kerneld.scope import ScopedKernel
 from ..publication import blockers as publication_blockers
 from ..publication import render_loop_item
 from ..runtime import register
@@ -78,7 +76,7 @@ def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [h for h in items if isinstance(h, dict)] if isinstance(items, list) else []
 
 
-def _kernel(ctx: ModuleContext) -> Kernel:
+def _kernel(ctx: ModuleContext) -> ScopedKernel:
     """A Kernel whose replayer re-executes in fresh sandboxes of the same kind as the run's sandbox."""
     sb = _sb(ctx)
     root = sb.workspace.parent / f"{sb.workspace.name}-replay"
@@ -89,29 +87,18 @@ def _kernel(ctx: ModuleContext) -> Kernel:
 
 def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[str, str]:
     """Register the task's data and baseline in the vault and return their ids (content-based, see
-    TaskSpec.dataset_ids). The labels are read from disk here, once, to register them; afterwards only through the
-    vault. A task whose canary differs from the canary registered for the same data is refused: its own canary
-    would never be scanned for (tasks sharing data must share the canary)."""
-    vault = ctx.kernel().vault
-    train = (task_dir / "public" / task.train_file).read_bytes()
-    test_x = (task_dir / "public" / task.test_features_file).read_bytes()
-    test_y = (task_dir / "private" / task.test_labels_file).read_bytes()
-    baseline = (task_dir / task.baseline_file).read_bytes()
-
-    def digest(*parts: bytes) -> str:  # fixed-length per-file digests: no separator ambiguity
-        return hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
-
-    ids = task.dataset_ids(digest(train, test_x, test_y), digest(train, test_x, test_y, baseline))
-    vault.register_dataset(ids["train"], DatasetRole.DEV, public={task.train_file: train}, private={})
-    canary_path = task_dir / "private" / task.canary_file
-    canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.exists() else None
-    vault.register_dataset(ids["test"], DatasetRole.TEST, public={task.test_features_file: test_x},
-                           private={task.test_labels_file: test_y}, canary=canary)
-    if vault.canary(ids["test"]) != canary:
-        raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same held-out data "
-                         f"({ids['test']}); tasks sharing data must share the canary")
-    vault.register_artifact(ids["baseline"], baseline, "baseline")
-    return ids
+    TaskSpec.dataset_ids). The kerneld process reads the task files and registers them (kerneld/ingest.py,
+    GOAL §16.5.2): the held-out labels and the canary never enter this process. A task whose canary differs from the
+    canary registered for the same data is refused: its own canary would never be scanned for (tasks sharing data must
+    share the canary). kerneld unavailable -> KernelDUnavailable (no fallback to reading the labels here)."""
+    with _KernelDRun(ctx) as kd:
+        try:
+            return kd.run().ingest_research_task(task.id, task_dir)
+        except KernelDError as e:
+            if e.code == "canary_mismatch":
+                raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same "
+                                 f"held-out data; tasks sharing data must share the canary") from None
+            raise ValueError(f"task {task.id}: kerneld refused to register its data ({e.code})") from None
 
 
 # ------------------------------------------------------------------ claim (pre-registration)
@@ -371,7 +358,7 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     cert = kernel.certify(claim, state.get(f"{p}evidence_ids") or [])
     h = cert.cert_hash()
     bundle_path = data_dir() / "bundles" / f"{h[:20]}.zip"
-    bundle_hash = build_bundle(kernel, h, bundle_path)
+    bundle_hash = kernel.bundle(h, bundle_path)  # a grant for exactly the claim's private files (kerneld/scope.py)
     n_hyp = len(_hypotheses(state))
     policy = state.get("model_policy") or {}
     models = [*_models_used(ctx),  # invariant 5 status, never omitted (a missing record is reported as unknown)

@@ -33,6 +33,7 @@ import yaml
 from ..gateway.costs import run_cost_record
 from ..kernel.checklist import missing as checklist_missing
 from ..kernel.kernel import Kernel, KernelError
+from ..kerneld.scope import ScopedKernel
 from ..records import Claim as StoreClaim
 from ..store.evidence import EvidenceStore
 from .refs import all_claim_rows, canonical, record_ref, run_ref, sha
@@ -176,7 +177,7 @@ def extract(store: EvidenceStore, *, museum_log: Path | None = None, findings: P
             salts_audit: Path | None = None, registry: Path | None = None, capabilities: Path | None = None,
             timesplit: Path | None = None,
             inputs_dir: Path | None = None) -> dict[str, Any]:
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     certs = _certificates(store, kernel)
     by_hash = {c["cert_hash"]: c for c in certs}
     all_runs = list(reversed(store.list_runs(limit=2**62)))

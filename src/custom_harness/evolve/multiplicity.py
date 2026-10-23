@@ -21,13 +21,12 @@ Cost: a stricter alpha for every claim in the campaign (accepted in the design).
 
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
-from ..kernel import Kernel
 from ..kernel.checks import family, releases_on, shared_examples
 from ..kernel.releases import transcript_bound
+from ..kerneld.scope import ScopedKernel
 from ..runtime.spec import HarnessSpec, ModuleNode
 from ..store import EvidenceStore
 
@@ -53,21 +52,17 @@ def runs_per_task_bound(*, generations: int, n_edits: int, n_seeds: int, n_fresh
 
 
 def held_out_target_id(task_dir: Path) -> str:
-    """The vault id research.setup registers for a task's held-out data (content-based; register_task)."""
-    from ..research.task import load_task
-    task_dir = Path(task_dir)
-    task = load_task(task_dir)
-    parts = [(task_dir / "public" / task.train_file).read_bytes(),
-             (task_dir / "public" / task.test_features_file).read_bytes(),
-             (task_dir / "private" / task.test_labels_file).read_bytes()]
-    digest = hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
-    return task.dataset_ids(digest, digest)["test"]
+    """The vault id research.setup registers for a task's held-out data (content-based; register_task). Computed in
+    kerneld (truth_query "target_id", GOAL §16.5.2): the host never reads the held-out labels itself; kerneld
+    unavailable raises KernelDUnavailable (no in-process fallback)."""
+    from ..kerneld.client import truth_query
+    return str(truth_query("target_id", task_dir=str(Path(task_dir).resolve()))["target"])
 
 
 def related(store: EvidenceStore, target: str) -> set[str]:
     """`target` plus every registered dataset sharing held-out example rows with it (K4's rule) or a byte-identical
     private file (R1-F4's rule): a superset of the Kernel's related targets on main and on the R1 fix."""
-    vault = Kernel(store).vault
+    vault = ScopedKernel(store).vault
     datasets = vault.datasets()
     if target not in datasets:
         return {target}
@@ -78,7 +73,7 @@ def related(store: EvidenceStore, target: str) -> set[str]:
 
 def family_size(store: EvidenceStore, target: str) -> int:
     rel = related(store, target)
-    return len({e.body.get("claim_hash") for e in Kernel(store).ledger.entries("prereg")
+    return len({e.body.get("claim_hash") for e in ScopedKernel(store).ledger.entries("prereg")
                 if rel & set((e.body.get("claim") or {}).get("generalization_targets") or [])})
 
 
@@ -86,7 +81,7 @@ def kernel_family_size(store: EvidenceStore, target: str) -> int:
     """K4's multiplicity N on `target` as the ledger stands now (kernel/checks.target_level without an
     alpha-account): the transcript bound over the family's claims, where every release logged before a claim
     multiplies its term (a verdict bit by 2). Equals family_size only while no release touched the family."""
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     rel = related(store, target)
     return transcript_bound([e.seq for e in family(kernel.ledger, rel)], releases_on(kernel.ledger, rel),
                             kernel.config.count_alphabet)
@@ -117,7 +112,7 @@ def check_run(store: EvidenceStore, since_seq: int) -> list[dict[str, Any]]:
     """After a run: every claim registered after ledger seq `since_seq` must have a family <= its declared
     n_comparisons on each target. Returns the checked claims; raises MultiplicityDrift otherwise."""
     checked = []
-    for e in Kernel(store).ledger.entries("prereg"):
+    for e in ScopedKernel(store).ledger.entries("prereg"):
         if e.seq <= since_seq:
             continue
         claim = e.body.get("claim") or {}
@@ -138,5 +133,5 @@ def check_run(store: EvidenceStore, since_seq: int) -> list[dict[str, Any]]:
 
 
 def last_prereg_seq(store: EvidenceStore) -> int:
-    entries = Kernel(store).ledger.entries("prereg")
+    entries = ScopedKernel(store).ledger.entries("prereg")
     return entries[-1].seq if entries else 0

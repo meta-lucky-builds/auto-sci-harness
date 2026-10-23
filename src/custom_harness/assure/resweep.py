@@ -49,9 +49,10 @@ from pathlib import Path
 from typing import Any
 
 from ..errors import InfraError
-from ..kernel import Certificate, Claim, Kernel, KernelConfig, KernelError
+from ..kernel import Certificate, Claim, KernelConfig, KernelError
 from ..kernel.checks import Replayer
 from ..kernel.predictions import score_predictions
+from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
 from . import corpus, looks
 
@@ -171,7 +172,7 @@ ReplayerFactory = Callable[[], Replayer | None]
 
 def classify(store: EvidenceStore, cert_hash: str, rule: Rule, replayer: ReplayerFactory) -> CertResult:
     today = KernelConfig()
-    base = Kernel(store, replayer=replayer())
+    base = ScopedKernel(store, replayer=replayer())
     chain = base.ledger.verify()
     try:
         cert = base.certificate(cert_hash)
@@ -193,9 +194,9 @@ def classify(store: EvidenceStore, cert_hash: str, rule: Rule, replayer: Replaye
         out.reasons.append("the certificate's rules name fields today's Kernel does not have")
         return _finish(out)
     try:
-        old_prefix = _verdict(Kernel(store, config=own, replayer=replayer()).certify(claim, ids, as_of=seq - 1))
-        old_today = _verdict(Kernel(store, config=own, replayer=replayer()).certify(claim, ids, record=False))
-        new_prefix = _verdict(Kernel(store, config=rule.apply_to(own), replayer=replayer()).certify(
+        old_prefix = _verdict(ScopedKernel(store, config=own, replayer=replayer()).certify(claim, ids, as_of=seq - 1))
+        old_today = _verdict(ScopedKernel(store, config=own, replayer=replayer()).certify(claim, ids, record=False))
+        new_prefix = _verdict(ScopedKernel(store, config=rule.apply_to(own), replayer=replayer()).certify(
             claim, ids, as_of=seq - 1))
     except (InfraError, corpus.Uncheckable) as e:
         out.statuses.append(UNCHECKABLE)
@@ -237,7 +238,7 @@ def _finish(r: CertResult) -> CertResult:
 
 def certificates(store: EvidenceStore) -> list[str]:
     seen: list[str] = []
-    for e in Kernel(store).ledger.entries("certificate"):
+    for e in ScopedKernel(store).ledger.entries("certificate"):
         h = e.body.get("cert_hash")
         if isinstance(h, str) and h not in seen:
             seen.append(h)
@@ -292,7 +293,7 @@ def write_clawbacks(path: Path, rule: Rule, results: list[CertResult], at: str) 
 
 
 def vds_split(store: EvidenceStore, path: Path, now: float) -> dict[str, float]:
-    kernel = Kernel(store)
+    kernel = ScopedKernel(store)
     latest: dict[str, str] = {}
     for e in kernel.ledger.entries("certificate"):
         if isinstance(e.body.get("claim_hash"), str) and isinstance(e.body.get("cert_hash"), str):
@@ -391,7 +392,7 @@ def apply(store: EvidenceStore, rule: Rule, replayer: ReplayerFactory, *, ledger
     written = write_clawbacks(path, rule, results, at)
     released = 0
     if release:
-        kernel = Kernel(store)
+        kernel = ScopedKernel(store)
         datasets = set(kernel.vault.datasets())
         for r in results:
             for t in sorted(set(r.targets) & datasets):

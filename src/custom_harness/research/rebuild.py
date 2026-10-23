@@ -38,7 +38,8 @@ from typing import Any
 
 import yaml
 
-from ..commitment import as_key, default_agent_readable_roots, draw, secret_leak_scan
+from ..commitment import agent_readable_root_of, as_key, default_agent_readable_roots, draw, secret_leak_scan
+from ..truth_layout import truth_dir
 from . import suite as S
 from .suite import MintRefused, dataset_hash, require_anchored
 
@@ -80,10 +81,21 @@ def _normalised_suite_yaml(out: Path) -> bytes:
 
 
 def task_digest(out: Path) -> dict[str, str]:
-    """SHA-256 of every task file (public and private), keyed by path relative to `out`."""
+    """SHA-256 of every task file (public and private), keyed by path relative to `out`. A task's truth is keyed
+    `<task>/private/<file>` wherever truth_layout keeps it, so a suite under `<data>/suites` (truth outside the tree)
+    and the same suite built in a scratch dir (legacy in-task private/) give the same keys. An unmigrated suite under
+    `<data>/suites` is refused (TruthLayoutError), never digested from its agent-readable copy."""
+    from ..kerneld.client import truth_query
+    from ..truth_layout import LEGACY_DIRNAME
+
     out = Path(out)
-    return {p.relative_to(out).as_posix(): _sha(p.read_bytes()) for p in sorted(out.rglob("*"))
-            if p.is_file() and p.parent != out}
+    d = {p.relative_to(out).as_posix(): _sha(p.read_bytes()) for p in sorted(out.rglob("*"))
+         if p.is_file() and p.parent != out}
+    for task in sorted(p for p in out.iterdir() if p.is_dir()) if out.is_dir() else []:
+        # the truth hashes come from kerneld (GOAL 16.5.2): this host never reads the truth bytes; kerneld down raises
+        for rel, h in truth_query("truth_hashes", task_dir=str(task))["hashes"].items():
+            d.setdefault(f"{task.name}/{LEGACY_DIRNAME}/{rel}", h)
+    return dict(sorted(d.items()))
 
 
 def suite_digest(out: Path) -> dict[str, str]:
@@ -104,13 +116,14 @@ def _stub(task_id: str, family: str, source: str | None, retrospective: bool) ->
 
 
 def build_manifest(name: str, *, real_data: dict[str, dict] | None, beacon: str,
-                   heldout_families: tuple[str, ...] = S.DEFAULT_HELDOUT_FAMILIES) -> dict[str, Any]:
+                   heldout_families: tuple[str, ...] = S.DEFAULT_HELDOUT_FAMILIES, heldout_rows: int | None = None,
+                   null_families: tuple[str, ...] = ()) -> dict[str, Any]:
     from ..sandbox.docker import CANDIDATE_IMAGE, FULL_IMAGE
 
     probe = b"\x00" * 32  # task ids do not depend on the key; nothing built with this probe is kept
     tasks: list[dict[str, Any]] = []
     stubs = []
-    for gen, seed, n in S.SYNTHETIC:
+    for gen, seed, n in S.synthetic_plan(tuple(null_families)):
         tid = gen(seed, 1, key=probe).task_id
         fam = tid.rsplit("-s", 1)[0]
         tasks.append({"id": tid, "family": fam, "source": tid, "kind": "synthetic", "rows": n})
@@ -134,7 +147,10 @@ def build_manifest(name: str, *, real_data: dict[str, dict] | None, beacon: str,
             "heldout_families": list(heldout_families), "tasks": sorted(tasks, key=lambda t: t["id"]),
             "real_export_sha256": real_hashes, "candidate_image": CANDIDATE_IMAGE,
             "exporter_image": FULL_IMAGE if real_data is not None else None,
-            "beacon_commitment": _sha(beacon.encode()), "draw_purpose": "heldout_mint"}
+            "beacon_commitment": _sha(beacon.encode()), "draw_purpose": "heldout_mint",
+            # frozen only when set, so a manifest built without them hashes as before
+            **({"heldout_rows": heldout_rows} if heldout_rows is not None else {}),
+            **({"null_families": sorted(null_families)} if null_families else {})}
 
 
 def generator_block(manifest: dict[str, Any], mhash: str) -> dict[str, Any]:
@@ -153,12 +169,8 @@ def read_beacon(path: Path) -> str:
 
 
 def _inside(p: Path, roots: Iterable[Path]) -> Path | None:
-    rp = Path(p).resolve()
-    for r in roots:
-        rr = Path(r).resolve()
-        if rp == rr or rp.is_relative_to(rr):
-            return rr
-    return None
+    """Alias-safe (pathsafe): a `\\\\?\\`, admin-share, 8.3 or other-case spelling of a path in a root is in it."""
+    return agent_readable_root_of(p, roots)
 
 
 def require_private_locations(record_dir: Path, beacon_file: Path) -> None:
@@ -167,7 +179,7 @@ def require_private_locations(record_dir: Path, beacon_file: Path) -> None:
 
 
 def _require_private(**paths: Path) -> None:
-    roots = default_agent_readable_roots()
+    roots = default_agent_readable_roots(existing_only=False)
     for what, p in paths.items():
         r = _inside(p, roots)
         if r is not None:
@@ -218,7 +230,8 @@ def master_key(mhash: str, beacon: str) -> bytes:
 def _build(out: Path, manifest: dict[str, Any], mhash: str, master: bytes,
            real_data: dict[str, dict] | None) -> None:
     S.build_suite(out, real_data=real_data, key=master, heldout_families=tuple(manifest["heldout_families"]),
-                  generator_extra=generator_block(manifest, mhash))
+                  generator_extra=generator_block(manifest, mhash), heldout_rows=manifest.get("heldout_rows"),
+                  null_families=tuple(manifest.get("null_families", ())))
     doc = yaml.safe_load((out / "suite.yaml").read_text(encoding="utf-8"))
     built = {t["id"]: t["split"] for t in doc["tasks"]}
     frozen = {t["id"]: t["split"] for t in manifest["tasks"]}
@@ -238,7 +251,8 @@ def _digest_hash(d: dict[str, str]) -> str:
 # ---------------------------------------------------------------- rebuild / verify
 def rebuild(out: Path, *, record_dir: Path, beacon_file: Path, vault: Any, store_root: Path,
             real_data: dict[str, dict] | None, name: str = "m2",
-            heldout_families: tuple[str, ...] = S.DEFAULT_HELDOUT_FAMILIES) -> dict[str, Any]:
+            heldout_families: tuple[str, ...] = S.DEFAULT_HELDOUT_FAMILIES, heldout_rows: int | None = None,
+            null_families: tuple[str, ...] = ()) -> dict[str, Any]:
     """Freeze the manifest, then mint the suite into `out` (see the module docstring). Returns a summary with
     status "built" or "unchanged"."""
     out, record_dir = Path(out), Path(record_dir)
@@ -246,7 +260,8 @@ def rebuild(out: Path, *, record_dir: Path, beacon_file: Path, vault: Any, store
     beacon = read_beacon(Path(beacon_file))
     record_dir.mkdir(parents=True, exist_ok=True)
     _store_real_export(record_dir, real_data)
-    manifest = build_manifest(name, real_data=real_data, beacon=beacon, heldout_families=heldout_families)
+    manifest = build_manifest(name, real_data=real_data, beacon=beacon, heldout_families=heldout_families,
+                              heldout_rows=heldout_rows, null_families=null_families)
     mhash = manifest_hash(manifest)
     anchor = freeze(manifest, vault=vault, store_root=store_root, anchor_file=record_dir / "anchor.jsonl")
     master = master_key(mhash, beacon)
@@ -254,6 +269,10 @@ def rebuild(out: Path, *, record_dir: Path, beacon_file: Path, vault: Any, store
         ref = Path(tmp) / out.name
         _build(ref, manifest, mhash, master, real_data)
         want = suite_digest(ref)
+        out_truth = truth_dir(out)  # where OUT's tasks keep their truth (outside agent-readable roots)
+        if not (out.exists() and any(out.iterdir())) and out_truth.is_dir() and any(out_truth.iterdir()):
+            raise RebuildRefused(f"{out} is empty but its truth dir {out_truth} is not: archive that too (a rebuild "
+                                 f"never overwrites held-out truth)")
         if out.exists() and any(out.iterdir()):
             have = suite_digest(out)
             if have != want:
@@ -344,19 +363,20 @@ def _test_labels(spec: Any) -> list[str]:
 def prng_regression(suite_dir: Path, generators: ModuleType) -> dict[str, dict[str, Any]]:
     """The attack of the COUPLED-PRNG finding (GOAL §16.1): regenerate every synthetic task from `generators`
     (code an agent can read, with its published seeds) and compare with the task's held-out labels. Reads the
-    private labels to SCORE the attack only. Returns {task_id: {"exact", "agree", "n", "train_features_match"}}."""
+    private labels, through kerneld (`label_agreement`), to SCORE the attack only.
+    Returns {task_id: {"exact", "agree", "n", "train_features_match"}}."""
+    from ..kerneld.client import truth_query
+
     out: dict[str, dict[str, Any]] = {}
     for gen, seed, n in generators.SYNTHETIC:
         spec = gen(seed, n)
         d = Path(suite_dir) / spec.task_id
-        truth_p = d / "private" / "test_y.csv"
-        if not truth_p.is_file():
-            continue
-        truth = [ln for ln in truth_p.read_text(encoding="utf-8").splitlines()[1:] if ln]
         guess = _test_labels(spec)
-        agree = sum(a == b for a, b in zip(guess, truth, strict=False))
+        res = truth_query("label_agreement", task_dir=str(d), guess=guess)
+        if not res["present"]:
+            continue
         train_rows = (d / "public" / "train.csv").read_text(encoding="utf-8").splitlines()[1:]
         regen_train = {",".join(r) for r in spec.train}
-        out[spec.task_id] = {"exact": guess == truth, "agree": agree, "n": len(truth),
+        out[spec.task_id] = {"exact": res["exact"], "agree": res["agree"], "n": res["n"],
                              "train_features_match": sum(r in regen_train for r in train_rows)}
     return out

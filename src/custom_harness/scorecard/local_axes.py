@@ -228,8 +228,8 @@ def extract_local(store: EvidenceStore, repo: Path, *, museum_log: Path | None =
     by_run = {r["run_id"]: r for r in runs}
     for c in base["certificates"]:
         try:
-            from ..kernel.kernel import Kernel
-            cert = Kernel(store).certificate(c["cert_hash"])
+            from ..kerneld.scope import ScopedKernel
+            cert = ScopedKernel(store).certificate(c["cert_hash"])
             prod = sorted({str(store.get_evidence(e).produced_by_run) for e in cert.evidence_ids})
         except Exception:  # noqa: BLE001  fail closed: an unloadable certificate is never a live claim
             prod = []
