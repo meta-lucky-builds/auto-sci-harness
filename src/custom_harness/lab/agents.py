@@ -34,7 +34,7 @@ Built, NOT test-verified.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
 OR_SOURCE = "github.com/alphaXiv/OpenResearch@fe36f7424855d7218e64812c5fec6f7db955586f (MIT)"
@@ -214,7 +214,7 @@ class OpenCode(AgentAdapter):
 
     def check(self, o: AgentOptions) -> None:
         if o.registry_key is None:
-            o = AgentOptions(**{**o.__dict__, "registry_key": "local-openai-compatible"})
+            o = replace(o, registry_key="local-openai-compatible")  # no __dict__: the kerneld ratchet flags it (int18)
         super().check(o)
         if o.registry_key == "local-openai-compatible" and not o.model:
             raise AdapterRefused("opencode with a local model: name the model (--model, as the server lists it)")
