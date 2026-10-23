@@ -32,6 +32,11 @@ NETWORK_MODULES = {
     # lab-compute 2026-10-23 (GOAL §17): Ray Jobs / HF Jobs REST calls, only when the owner configured that backend
     # and a run is submitted to it; httpx is imported inside the call, never at import time
     "compute/rest.py": "Ray Jobs / HF Jobs REST backends, only on an owner-configured submit (lab-compute)",
+    # int18 merge (stage-a): two `socket.gethostname()` uses that make no connection, found by this scan on int18
+    # (each was already unlisted on its own branch): the local admin-share alias check and the station lock note
+    "pathsafe.py": "socket.gethostname() to recognise \\\\<this host>\\C$ path aliases (s4-integrity; no connection)",
+    "research/station/mode.py": "socket.gethostname() for the station lock's holder note (s4-station; no "
+                                "connection)",
 }
 
 
@@ -55,7 +60,7 @@ def test_only_listed_modules_import_a_network_library():
     found = {k: v for k, v in found.items() if v}
     assert len(list(SRC.rglob("*.py"))) > 100  # the scan really covered the package
     assert set(found) == set(NETWORK_MODULES), found
-    assert found["runtime/engine.py"] == ["socket"]
+    assert found["runtime/engine.py"] == found["pathsafe.py"] == found["research/station/mode.py"] == ["socket"]
     text = "\n".join(p.read_text(encoding="utf-8").lower() for p in SRC.rglob("*.py"))
     for client in ("sentry_sdk", "posthog", "mixpanel", "opentelemetry", "segment.io", "telemetry endpoint"):
         assert client not in text
