@@ -301,8 +301,8 @@ class Acp(AgentAdapter):
             acp, tui = list(o.acp_command), None
         return Plan(adapter=self.name, env={}, config_files={}, setup=[], interactive=tui, headless=None, acp=acp,
                     box_env=self.box_env(o),
-                    notes=["usage-reporting/auto-update switches of ACP agents are agent-specific and unknown: the egress "
-                           "test is the only check (docs/lab.md)"])
+                    notes=["usage-reporting/auto-update switches of ACP agents are agent-specific and unknown: "
+                           "the egress test is the only check (docs/lab.md)"])
 
 
 # ---------------------------------------------------------------- deferred
