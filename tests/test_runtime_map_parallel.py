@@ -60,7 +60,11 @@ class _Rec:
 
 
 def _run(tmp_path: Path, workers: int, items=ITEMS, responder=_slow_first, body=None, **kw):
-    store = EvidenceStore(tmp_path / f"store-{workers}-{len(list(tmp_path.iterdir()))}")
+    # the Engine works on the HOST view of its store (kerneld.hoststore.host_store, idempotent): spy on that object,
+    # not on the raw store the Engine never writes through (stage-c 2026-10-23: since the kerneld merge the spy on the
+    # raw store saw no write at all, and test_workers_write_only_their_journal_rows failed on `worker == []`)
+    from custom_harness.kerneld.hoststore import host_store
+    store = host_store(EvidenceStore(tmp_path / f"store-{workers}-{len(list(tmp_path.iterdir()))}"))
     writes: list[tuple[str, str]] = []
     orig = store.append_record
 
@@ -69,6 +73,7 @@ def _run(tmp_path: Path, workers: int, items=ITEMS, responder=_slow_first, body=
         return _o(kind, body_)
     store.append_record = spy
     eng = Engine(_spec(body), backends={"executor": MockBackend(responder)}, store=store, map_workers=workers, **kw)
+    assert eng.store is store  # the spy is on the object the Engine writes through
     eng.taint["input"] = {"target-1"}
     eng.releases = _Rec()
     res = eng.run("t", {"items": list(items)})

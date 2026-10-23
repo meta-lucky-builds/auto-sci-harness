@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from custom_harness.evolve import SuiteTask
-from custom_harness.evolve.branches import BRANCH_KIND, BranchConfig, propose_branch
+from custom_harness.evolve.branches import BRANCH_KIND, BranchConfig, lofo_note, propose_branch
 from custom_harness.evolve.reveal import LabelItem, RevealRefused, TemporalReveal, label_time, watermark_time
 from custom_harness.evolve.router import RouteRefused, build_router
 from custom_harness.evolve.selection import non_regression, paired_sample
@@ -74,8 +74,14 @@ def test_attack_record_claiming_a_passing_lofo_bit_whose_released_bit_was_false_
     assert template is not None and template["lofo"]["passed"] is True
 
     assert _domain_branch(store, tasks, h_delta=-0.2) is None  # the real world: LOFO fails, no branch
-    lofo_releases = [b for b in released(store) if b["note"] == template["lofo"]["note"]]
-    assert {b["dataset_id"] for b in lofo_releases} == set(template["lofo"]["targets"])  # the bit WAS released (0)
+    # Since 4deec16 a LOFO note binds the released VALUE: the real world released the FALSE note on the same targets,
+    # and nothing backs the template's TRUE note. (stage-c 2026-10-23: the draft's precondition looked for the TRUE
+    # note in this store, written against efc0930; it failed on int17-fix and int18 for that reason alone.)
+    lo = template["lofo"]
+    false_note = lofo_note(template["trunk"], template["spec_hash"], lo["routes"], False)
+    lofo_releases = [b for b in released(store) if b["note"] == false_note]
+    assert {b["dataset_id"] for b in lofo_releases} == set(lo["targets"])  # the bit WAS released (0)
+    assert not [b for b in released(store) if b["note"] == lo["note"]]  # the forged record's note is backed by none
     store.add_harness_version(CA.id, CA.model_dump(mode="json"), parent_hash=TRUNK.spec_hash())  # the loop does this
     store.append_record(BRANCH_KIND, template)
 
@@ -147,21 +153,35 @@ def test_attack_two_routes_each_lofo_checked_alone_compose_into_an_unchecked_reg
     recs = [propose_branch(TRUNK, c, tasks, seeds=SEEDS, outcome=sc.outcome, store=store,
                            releases=Releases.live(store), globally_accepted=False, cfg=cfg, lofo_eps=EPS)
             for c in (CA, CB)]
-    assert recs[0] is not None and recs[0]["won"] == ["ml"] and recs[1] is not None and recs[1]["won"] == ["bio"]
+    # Killed at proposal time since 4deec16 (the LOFO bit covers the WHOLE composed route table): CB's bit is computed
+    # on ml -> CA, bio -> CB, which regresses all of H, so CB gets no branch. (stage-c 2026-10-23: the draft asserted
+    # both branches exist, its efc0930 premise; that failed on int17-fix and int18.)
+    assert recs[0] is not None and recs[0]["won"] == ["ml"] and recs[1] is None
+    cb_note = lofo_note(TRUNK.spec_hash(), CB.spec_hash(), {"ml": CA.spec_hash(), "bio": CB.spec_hash()}, False)
+    assert [b for b in released(store) if b["note"] == cb_note]  # the composed table's bit was computed: 0
     router = build_router(store, TRUNK, cluster_key="domain")
+    assert dict(router.routes) == {"ml": CA.spec_hash()}
     by_id = {t.task_id: t for t in tasks}
     h_units = [(t.task_id, s) for t in tasks if t.split == "gate" and t.family == "H" for s in SEEDS]
+
+    def trunk_score(u):
+        return sc.outcome(TRUNK, u).score
+
+    def table_score(table):
+        return lambda u: sc.outcome(table.get(by_id[u[0]].domain, TRUNK), u).score
+
+    # the attack is real: the composed table the attacker wanted (ml -> CA, bio -> CB) regresses H beyond eps
+    wanted = non_regression(paired_sample(h_units, table_score({"ml": CA, "bio": CB}), trunk_score),
+                            non_regression_eps=EPS)
+    assert wanted["mean_diff"] < -EPS and not wanted["passed"]
 
     def routed(u):
         return sc.outcome(router.route(by_id[u[0]]), u).score
 
-    composed = non_regression(paired_sample(h_units, routed, lambda u: sc.outcome(TRUNK, u).score),
-                              non_regression_eps=EPS)
-    assert composed["mean_diff"] < -EPS  # the attack is real: the composed router regresses H beyond eps
+    composed = non_regression(paired_sample(h_units, routed, trunk_score), non_regression_eps=EPS)
     assert composed["passed"], (
-        f"the router serves ml -> CA and bio -> CB ({dict(router.routes)}); each branch's LOFO bit passed alone, "
-        f"but the COMPOSED routed harness fails leave-one-family-out on H (mean diff {composed['mean_diff']:.3f}, "
-        f"CI lo {composed['lo']:.3f} < -{EPS}) and that check was never run")
+        f"the router serves {dict(router.routes)}, whose routed harness fails leave-one-family-out on H (mean diff "
+        f"{composed['mean_diff']:.3f}, CI lo {composed['lo']:.3f} < -{EPS})")
 
 
 def test_attack_route_policy_reads_the_store_from_the_routers_frame_and_its_choice_is_not_released(store, tmp_path):
