@@ -17,9 +17,21 @@ from custom_harness.store import EvidenceStore
 
 
 class _Ctx:
+    """Models the real ModuleContext: `store` is the read-only module facade (runtime/modules.ModuleStore), writes go
+    through `kernel().store`. (stage-c 2026-10-23: the first double exposed the raw store, so a module write that
+    raises AttributeError in every real run passed here.)"""
+
     def __init__(self, root: Path) -> None:
-        self.store = EvidenceStore(root)
+        from types import SimpleNamespace
+
+        from custom_harness.runtime.modules import ModuleStore
+        self.raw = EvidenceStore(root)
+        self.store = ModuleStore(self.raw)
+        self._kernel = SimpleNamespace(store=self.raw)
         self.run_id = "run-1"
+
+    def kernel(self) -> object:
+        return self._kernel
 
 
 def test_looks_are_recorded_once_per_verifier_and_budgeted(tmp_path: Path) -> None:

@@ -55,8 +55,12 @@ def record_sealed_look(ctx: ModuleContext, problem: str, verifier_hash: str) -> 
         return True
     if len(seen) >= SYNTH_MAX_SEALED_LOOKS:
         return False
-    ctx.store.append_record(LOOK_KIND, {"problem": problem, "verifier_hash": verifier_hash, "run_id": ctx.run_id,
-                                        "half": "sealed", "by": "research.synthesize_verifier"})
+    # a records-table write, like the experiment tree's log (research/modules._tree_store): through the run's Kernel
+    # store, since the module store facade (runtime/modules.ModuleStore) has no write method (int18 stage-c: the
+    # direct ctx.store.append_record raised AttributeError in every real run of the module)
+    ctx.kernel().store.append_record(LOOK_KIND, {"problem": problem, "verifier_hash": verifier_hash,
+                                                 "run_id": ctx.run_id, "half": "sealed",
+                                                 "by": "research.synthesize_verifier"})
     return True
 
 
