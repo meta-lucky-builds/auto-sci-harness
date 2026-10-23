@@ -1022,3 +1022,28 @@ results, never as failures. Levels are cumulative and each is computed by code (
 - Claims tested on public datasets a networked Lab could have downloaded can reach REPLICATED at most and are
   labelled RETROSPECTIVE; they never reach VALIDATED.
 - The UI shows the level as a badge with its exact meaning; an honest rejection names the failing check.
+
+### 17.2 Researcher experiences (owner decision 2026-10-23: all adopted)
+The product is judged by these experiences as much as by the Kernel. Each is built on the Lab trace, the Court and
+the existing evidence machinery; none may grant a certificate or weaken a check.
+1. **Court-readiness meter:** while shaping an idea, the Lab shows the predicted chance of reaching VALIDATED (the
+   certifiability preflight, surfaced live) and what would raise it.
+2. **Overnight mode:** a question plus a budget; agents explore unattended; a morning digest of top leads, honest
+   dead ends and costs, with one-click promote.
+3. **Dead-ends library:** every honest rejection and abandoned idea is searchable ("tried in March, failed because
+   X"); personal first, opt-in sharing later.
+4. **"Reproduce this paper":** a paper's main claim becomes a Court case; result REPRODUCIBLE / REPLICATED / could not
+   reproduce, with where it breaks (Claim Audit path; human approval before any verdict about a named paper).
+5. **Personal track record:** the prediction ledger as a calibration profile per researcher.
+6. **Steer by conversation:** ask agents why, redirect them; every steer is recorded in the discovery story.
+7. **Reviewer link:** share a certificate plus its discovery story; one command reruns it.
+8. **Living papers:** methods, figures and numbers generated from certificates, so a paper cannot disagree with its
+   evidence.
+9. **Challenge a claim:** anyone may submit a counter-test; a failed certificate is retracted openly (cascading).
+10. **Starter kits:** ready problem templates per domain so a first session works in minutes.
+11. **Integrations:** Jupyter, VS Code, Zotero, Overleaf; a phone notification when a verdict arrives.
+12. **Visible self-improvement:** how much the harness improved at the researcher's kind of problem, with evidence.
+
+Requirements this adds: a researcher identity on sessions, claims and predictions (local-first); one backend
+"experience API" that the UI and integrations call; all experiences read through kerneld and never expose
+held-out truth or verdict details beyond the release ledger.
