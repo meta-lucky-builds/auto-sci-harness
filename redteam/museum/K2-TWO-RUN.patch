@@ -1,13 +1,13 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
-index 664c83d..ee93afb 100644
+index 3c2941c..30d503a 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -39,7 +39,7 @@ _NORMAL = statistics.NormalDist()
+@@ -50,7 +50,7 @@ from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, ArtifactRecord, CertificateRe
  # as peeking. TRUST BOUNDARY (docs/kernel.md): purposes are declared by trusted host code, so a host that mislabels a
  # peek as "leakscan" is not caught. "reproduce" is NOT excused: nothing on a live store reads with it (bundles are
  # re-checked on a fresh store with purpose "kernel"), so excusing it would only widen the trusted surface.
 -INTEGRITY_PURPOSES = frozenset({"leakscan"})
 +INTEGRITY_PURPOSES: frozenset[str] = frozenset()
- SCORE_TOLERANCE = 1e-9  # reported vs recomputed score: anything larger is a different number
+ _PLAIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+=@-]{0,199}")  # K1: ids rendered into a data statement
  
  

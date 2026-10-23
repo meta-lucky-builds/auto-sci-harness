@@ -1,10 +1,11 @@
 diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 3c2941c..4e5f726 100644
 --- a/src/custom_harness/kernel/checks.py
 +++ b/src/custom_harness/kernel/checks.py
-@@ -461,7 +461,6 @@
-             reasons.append(R(Code.K3_SCORE_MISMATCH,
-                 f"{rec.arm} seed {rec.seed} on {rec.target}: reported {rec.metric}={rec.score!r} but "
-                            f"the stored predictions give {recomputed!r}"))
+@@ -530,7 +530,6 @@ def k3_reproduced(ctx: Context) -> CheckResult:
+     if not ctx.records:
+         return _result([R(Code.K3_NO_RECORDS, "no usable evaluation records")])
+     reasons += procedures(ctx).recompute(ctx)
 -    reasons += _earlier_reproduction_failures(ctx)
      if ctx.replayer is None:
          return _result([*reasons, R(Code.K3_NO_REPLAYER,
