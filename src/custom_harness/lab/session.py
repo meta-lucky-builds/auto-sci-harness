@@ -29,6 +29,7 @@ from typing import Any
 
 from ..store import EvidenceStore
 from . import EXPLORATORY, NOT_A_FINDING
+from . import trace as T
 from .acp_client import AcpClient, AcpError, allow_once
 from .agents import AgentOptions, Plan, adapter, fill_prompt
 from .box import BoxSpec, DockerCLI, LabBox
@@ -127,11 +128,47 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
     except (LabError, LabWallError, RuntimeError) as e:
         lb.stop()
         _record(store, sid, "start_failed", reason=str(e)[:500], **base)
+        T.record(store, sid, "session", {"op": "start_failed", "agent": agent, "model": options.model,
+                                         "image": spec.image}, actor=T.human())
         raise
     image_id = lb.image_id(spec.image)
-    return _record(store, sid, "started", container_id=cid, image_id=image_id,
-                   config_sha256={p: hashlib.sha256(c.encode()).hexdigest() for p, c in plan.config_files.items()},
-                   **base)
+    rec = _record(store, sid, "started", container_id=cid, image_id=image_id,
+                  config_sha256={p: hashlib.sha256(c.encode()).hexdigest() for p, c in plan.config_files.items()},
+                  **base)
+    # discovery trace (trace.py): who started what, and the workspace baseline (hashes only)
+    T.record(store, sid, "session", {"op": "start", "agent": agent, "model": options.model, "image": spec.image,
+                                     "image_id": image_id}, actor=T.human())
+    T.record_workspace_diff(store, sid, ws, T.system())
+    return rec
+
+
+def _agent_actor(rec: dict[str, Any]) -> T.Actor:
+    return T.Actor(type="agent", id=str(rec.get("agent")), agent=str(rec.get("agent")),
+                   model=(rec.get("options") or {}).get("model"))
+
+
+def _paused(lb: LabBox) -> bool:
+    """Pause a running box for a host-side read of its workspace; True if this call paused it. Refuses when a running
+    box cannot be paused (host code never reads a workspace while agent code runs)."""
+    was_running = lb.state() == "running"
+    paused = was_running and lb.pause()
+    if lb.state() == "running":
+        raise LabError("could not pause the box for a host-side workspace read")
+    return paused
+
+
+def collect_trace(store: EvidenceStore, session_id: str, rec: dict[str, Any], lb: LabBox) -> dict[str, Any]:
+    """After agent activity: ingest agent-reported events and record the workspace diff, with the box paused."""
+    ws = workspace_of(session_id)
+    paused = _paused(lb)
+    try:
+        require_workspace(ws)
+        ingest = T.ingest_agent_events(store, session_id, ws, _agent_actor(rec))
+        files = T.record_workspace_diff(store, session_id, ws, T.system())
+    finally:
+        if paused:
+            lb.unpause()
+    return {"agent_events": ingest, "file_events": len(files)}
 
 
 def attach(store: EvidenceStore, session_id: str, *, docker: DockerCLI | None = None) -> int:
@@ -146,7 +183,11 @@ def attach(store: EvidenceStore, session_id: str, *, docker: DockerCLI | None = 
     if lb.state() != "running":
         raise LabError(f"the box of {session_id} is {lb.state()}")
     _record(store, session_id, "attached", mode="interactive")
-    return subprocess.call(lb.exec_argv(plan.interactive, interactive=True, tty=True))
+    T.record(store, session_id, "human", {"op": "attach"}, actor=T.human())
+    code = subprocess.call(lb.exec_argv(plan.interactive, interactive=True, tty=True))
+    if lb.state() == "running":
+        collect_trace(store, session_id, rec, lb)
+    return code
 
 
 def run_prompt(store: EvidenceStore, session_id: str, prompt: str, *, docker: DockerCLI | None = None,
@@ -162,6 +203,9 @@ def run_prompt(store: EvidenceStore, session_id: str, prompt: str, *, docker: Do
     tdir = lab_root() / session_id / "transcripts"
     tdir.mkdir(parents=True, exist_ok=True)
     out = tdir / f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}.txt"
+    pbytes = prompt.encode("utf-8")
+    T.record(store, session_id, "human", {"op": "prompt", "prompt_sha256": hashlib.sha256(pbytes).hexdigest(),
+                                          "prompt_blob": store.blobs.put(pbytes)}, actor=T.human())
     if plan.acp:
         text, rc, extra = _acp_prompt(lb, plan, prompt, timeout_s)
     elif plan.headless:
@@ -171,9 +215,23 @@ def run_prompt(store: EvidenceStore, session_id: str, prompt: str, *, docker: Do
     else:
         raise LabError(f"agent {rec['agent']} has no headless mode")
     out.write_text(text, encoding="utf-8")
+    agent = _agent_actor(rec)
+    if plan.acp:
+        actions = [{"tool": "acp", "target": t, "outcome": "unknown"} for t in extra.get("tool_calls", [])]
+        actions += [{"tool": m, "outcome": "refused"} for m in extra.get("refused_client_methods", [])]
+    else:
+        actions = T.actions_from_stream_json(text)
+    n_actions = T.record_many(store, session_id, "action", actions, agent)
+    n_costs = T.record_many(store, session_id, "cost", T.costs_from_stream_json(text, str(rec.get("agent")),
+                                                                                agent.model), agent)
+    if not n_costs:  # no cost line parsed: recorded as UNKNOWN, never as zero
+        T.record(store, session_id, "cost", {"agent": rec.get("agent"), "model": agent.model, "usd": None,
+                                             "reported_by": "estimate"}, actor=agent)
+    collected = collect_trace(store, session_id, rec, lb)
     return _record(store, session_id, "prompt", returncode=rc, transcript=str(out),
                    transcript_sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                   prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(), **extra)
+                   prompt_sha256=hashlib.sha256(pbytes).hexdigest(), trace={"actions": n_actions, **collected},
+                   **extra)
 
 
 def _acp_prompt(lb: LabBox, plan: Plan, prompt: str, timeout_s: float) -> tuple[str, int, dict[str, Any]]:
@@ -222,6 +280,12 @@ def status(store: EvidenceStore, session_id: str | None = None, *, docker: Docke
 
 
 def stop(store: EvidenceStore, session_id: str, *, docker: DockerCLI | None = None) -> dict[str, Any]:
-    started(store, session_id)
+    rec = started(store, session_id)
+    T.record(store, session_id, "human", {"op": "stop"}, actor=T.human())
     ok = LabBox(session_id, docker).stop()
-    return _record(store, session_id, "stopped", removed=ok, workspace_kept=str(workspace_of(session_id)))
+    ws = workspace_of(session_id)
+    require_workspace(ws)  # the box is gone: no agent runs, the workspace can be read without a pause
+    T.ingest_agent_events(store, session_id, ws, _agent_actor(rec))
+    T.record_workspace_diff(store, session_id, ws, T.system())
+    T.record(store, session_id, "session", {"op": "stop", "agent": rec.get("agent")}, actor=T.human())
+    return _record(store, session_id, "stopped", removed=ok, workspace_kept=str(ws))

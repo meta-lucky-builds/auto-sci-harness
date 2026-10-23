@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from datetime import date
@@ -56,6 +55,7 @@ from ..config import data_dir
 from ..sandbox.base import is_link_like
 from ..store import EvidenceStore
 from . import EXPLORATORY
+from . import trace as T
 from .box import DockerCLI, LabBox
 from .session import _record, started, workspace_of
 from .walls import (
@@ -94,6 +94,7 @@ class PromoteRequest(_Model):
     lock: str  # workspace-relative path of the pinned package lock
     claim: ClaimPart
     budget: Budget
+    idea: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")  # trace idea_id it came from
 
 
 class TargetsFile(_Model):
@@ -130,32 +131,10 @@ def lock_problems(text: str) -> list[str]:
 
 
 def _manifest(ws: Path) -> dict[str, Any]:
-    files: dict[str, dict[str, Any]] = {}
-    links: list[str] = []
-    n = 0
-    for root, dirs, names in os.walk(ws, followlinks=False):
-        rp = Path(root)
-        for d in list(dirs):
-            if is_link_like(rp / d):
-                dirs.remove(d)
-                links.append((rp / d).relative_to(ws).as_posix())
-        for f in names:
-            n += 1
-            if n > MANIFEST_MAX_FILES:
-                raise PromoteError(f"workspace has more than {MANIFEST_MAX_FILES} files: move caches out first")
-            p = rp / f
-            rel = p.relative_to(ws).as_posix()
-            if is_link_like(p):
-                links.append(rel)
-                continue
-            h = hashlib.sha256()
-            size = 0
-            with open(p, "rb") as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
-                    size += len(chunk)
-            files[rel] = {"sha256": h.hexdigest(), "size": size}
-    return {"kind": "lab_workspace_manifest", "version": 1, "files": files, "links": sorted(links)}
+    try:
+        return T.workspace_manifest(ws, MANIFEST_MAX_FILES)
+    except T.TraceRefused as e:
+        raise PromoteError(f"{e}: move caches out first") from None
 
 
 def _frozen_file(ws: Path, rel: str, manifest: dict[str, Any], what: str) -> bytes:
@@ -204,6 +183,13 @@ def freeze(store: EvidenceStore, session_id: str, request_path: Path, *, docker:
         scan = scan_workspace(ws, store=store, secret=secret, secret_file=secret_file)
         if scan:
             raise LabWallError("workspace refused at promotion: " + "; ".join(scan))
+        # bring the discovery trace up to date first (agent-reported ideas, file changes), then check the idea
+        agent = T.Actor(type="agent", id=str(rec.get("agent")), agent=str(rec.get("agent")),
+                        model=(rec.get("options") or {}).get("model"))
+        T.ingest_agent_events(store, session_id, ws, agent)
+        T.record_workspace_diff(store, session_id, ws, T.system())
+        if req.idea is not None and req.idea not in T.idea_tree(store, session_id):
+            raise PromoteError(f"idea {req.idea!r} is not in the session's discovery trace")
         manifest = _manifest(ws)
         method = _frozen_file(ws, req.method, manifest, "method")
         baseline = _frozen_file(ws, req.baseline, manifest, "baseline")
@@ -238,7 +224,11 @@ def freeze(store: EvidenceStore, session_id: str, request_path: Path, *, docker:
             "image": rec.get("box", {}).get("image"), "image_id": rec.get("image_id"),
             "agent": rec.get("agent"), "intake_dir": str(out), "request": req.model_dump(mode="json"),
             "at": time.time()}
+    path = T.idea_path(store, session_id, req.idea) if req.idea else []
+    body["idea_id"], body["idea_path"] = req.idea, path
     store.append_record(RECORD_KIND, body)
+    T.record(store, session_id, "promote", {"op": "frozen", "promotion_id": pid, "workspace_snapshot": manifest_ref,
+                                            "idea_id": req.idea, "idea_path": path}, actor=T.human())
     (out / "freeze.json").write_text(json.dumps(body, indent=2, sort_keys=True, default=str), encoding="utf-8")
     _record(store, session_id, "promoted", promotion_id=pid)
     return body
@@ -304,6 +294,10 @@ def handoff(store: EvidenceStore, pid: str, targets_path: Path) -> dict[str, Any
                      f"chh audit run {spec_path} --docker",
                      f"chh audit report {spec_path}"]}
     store.append_record(RECORD_KIND, body)
+    T.record(store, frozen["session_id"], "promote", {"op": "handed_off", "promotion_id": pid,
+                                                      "claim_hash": body["claim_hash"], "spec_hash": loaded.spec_hash,
+                                                      "audit_id": loaded.audit_id,
+                                                      "idea_id": frozen.get("idea_id")}, actor=T.human())
     return body
 
 
@@ -341,6 +335,8 @@ def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCL
             "targets": targets, "by": by, "at": time.time(),
             "released_on": date.today().isoformat()}
     store.append_record(RECORD_KIND, body)
+    T.record(store, session_id, "promote", {"op": "verdict_released", "promotion_id": pid, "released_label": label},
+             actor=T.human(by))
     return body
 
 

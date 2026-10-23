@@ -45,6 +45,7 @@ owner host (never visible to a box beyond one directory)
 | `chh lab handoff PROMOTION --targets targets.yaml` | writes the Court spec |
 | `chh audit show / approve-fidelity / prepare`, `chh approve-role`, `chh audit run --docker` | the existing Court, unchanged |
 | `chh lab release-verdict PROMOTION --by NAME` | **HUMAN**: writes the verdict label only, as a ledgered release |
+| `chh lab trace SESSION`, `chh lab trace-add`, `chh lab costs`, `chh lab story CLAIM_HASH` | the discovery trace (§9) |
 
 ### Code
 
@@ -57,6 +58,7 @@ owner host (never visible to a box beyond one directory)
 | `box.py` | the Docker box manager |
 | `session.py` | sessions and their records |
 | `promote.py` | freeze, hand-off and verdict release |
+| `trace.py` | the discovery trace (§9) |
 | `cli.py` | `chh lab` |
 | `docker/lab.Dockerfile` | the image recipe; **not built** |
 | `THIRD_PARTY_NOTICES.md` | OpenResearch's MIT notice |
@@ -194,6 +196,9 @@ Assume it is capable and, at worst, adversarial. It may want to:
 | D18 | Headless transcripts go to `<lab root>/<session>/transcripts/`, outside the mount | Agents cannot rewrite their own history. The store keeps the sha256. |
 | D19 | A stopped session can still be promoted | No agent runs then, which is the safest moment to freeze. |
 | D20 | No gVisor by default in the Lab | GPUs and many dev tools do not work under runsc. A later `--runtime` option can add it per session. |
+| D21 | The discovery trace lives in the Court's store as `lab_trace` records (EXPLORATORY), not in the Kernel ledger | Append-only, owner-side, never mounted. The per-session hash chain gives tamper evidence without touching the Kernel. |
+| D22 | Agent self-reports go through a workspace file (`.lab/trace.jsonl`), ingested with the box paused | It is agent-agnostic (any CLI can write JSON lines) and independent of each agent's own logs. It is untrusted and validated. |
+| D23 | Certificate-to-Lab link through the Claim Audit spec's `paper_doi = lab:<session>:<promotion>` | It needs no Kernel or audit change. The link is inside the certificate's claim, so it survives in the Reproducibility Bundle. |
 
 ## 6. Next (not built)
 
@@ -233,7 +238,7 @@ Assume it is capable and, at worst, adversarial. It may want to:
 ## 8. Tests owed (none run)
 
 `tests/test_lab_walls.py`, `test_lab_credentials.py`, `test_lab_agents.py`, `test_lab_session.py`,
-`test_lab_promote.py` and `test_lab_cli.py` use a fake docker client. `tests/test_telemetry.py` was amended (D16).
+`test_lab_promote.py`, `test_lab_trace.py` and `test_lab_cli.py` use a fake docker client. `tests/test_telemetry.py` was amended (D16).
 
 Real-box tests (owner, after the image build):
 1. **Escape kit, per agent:**
@@ -249,3 +254,107 @@ Real-box tests (owner, after the image build):
 3. **Host reachability:** a probe from a box to `host.docker.internal` ports of known host services.
 4. **One end-to-end promotion on a toy:** start → promote → handoff → audit prepare/run → release-verdict. Check the
    release ledger entry.
+
+## 9. The discovery trace: data contract `chh-lab-trace/1`
+
+Added on the orchestrator's request (2026-10-23). It is a data contract, not UI. Consumers: a future UI, the memory
+and archive layers, and harness self-evolution. Code: `src/custom_harness/lab/trace.py`.
+
+### Where events live
+
+**Storage.** One `lab_trace` record per event in the evidence store (`store.append_record`). Lab events are never
+Kernel ledger entries.
+
+**Common envelope** (every event):
+
+```
+{ "schema": "chh-lab-trace/1",
+  "event_id": "<32 hex>",      # sha256 of the canonical event without event_id: stable, content-bound
+  "session_id": "s-...", "seq": 1..n, "prev": "<event_id of seq-1>" | "genesis",   # per-session hash chain
+  "kind": "session|idea|run|file|literature|action|human|cost|promote",
+  "at": <unix seconds>,
+  "actor": {"type": "human|agent|system|backend", "id": "...", "agent"?: "...", "model"?: "..."},
+  "source": "manager|agent-reported|human|backend",
+  "client_id"?: "...",          # agent / backend de-duplication key
+  "label": "EXPLORATORY",
+  "payload": { ...kind-specific, extra fields refused... } }
+```
+
+`verify_chain` recomputes every id and checks `seq` and `prev`. `chh lab trace` exits 1 on a broken chain.
+
+### Payloads
+
+| Kind | Payload | Written by |
+|---|---|---|
+| `session` | `op` start, stop, attach or start_failed; agent, model, image, image_id | manager |
+| `idea` | `op` propose, branch, abandon, revisit or merge; `idea_id`, `parent_id`, title, summary. `reason` is required for abandon. | the agent (self-report), a human or a backend |
+| `run` | run_id, command, `env_hash` (never the env), backend (`lab-box` or a lab-compute backend name), idea_id, duration_s, exit_code, cost_event, `outputs` [{path, sha256, size}], `metrics` [{name, value, split: **dev\|train**, dataset}] | agent self-report, or a backend through `trace.record` / `chh lab trace-add --source backend` |
+| `file` | `op` add, modify, delete or summary; path, sha256_before, sha256_after, size. `summary` carries the new manifest blob ref and the count of unlisted changes (cap 2000). | manager (workspace diffs at start, after each prompt or attach, at stop and at promote) |
+| `literature` | retrieval_session, entry_digests (RetrievalLog entry digests), ids | agent self-report or backend |
+| `action` | tool, target, outcome (ok, error, refused or unknown), step | manager: Claude stream-json `tool_use` blocks [U] and ACP `tool_call` titles; also agent self-report |
+| `human` | `op` steer, edit, stop, redirect, prompt, attach, start, approve or note; prompt_sha256 and prompt_blob (**text by reference only**), note | manager (with the OS user) and `chh lab trace-add --by NAME` |
+| `cost` | agent, model, `usd` (**None = unknown, never 0**), tokens_in, tokens_out, reported_by | manager (from stream-json [U]; an unknown-cost event when nothing is reported), backends, agents |
+| `promote` | `op` frozen, handed_off or verdict_released; promotion_id, workspace_snapshot, idea_id, idea_path, claim_hash, spec_hash, audit_id, released_label | manager only (`promote.py`) |
+
+### Agent-agnostic intake
+
+Any agent may append JSON lines to `/workspace/.lab/trace.jsonl`:
+
+```
+{"kind": "idea|run|literature|action|cost", "client_id": "...", "payload": {...}}
+```
+
+The manager ingests the file with the box paused:
+- after each headless prompt or interactive attach;
+- at stop;
+- at promote.
+
+The events are validated against the same schema and guards, tagged `agent-reported` and de-duplicated by
+`client_id`. Agents cannot write `session`, `file`, `human` or `promote` events.
+
+### Guards (fail closed: `TraceRefused`)
+
+- **Held-out truth.**
+  - Metric splits are only `dev` or `train`.
+  - A metric naming a vault dataset whose role is not DEV is refused.
+  - A run output or file hash equal to a PRIVATE vault blob is refused (metadata only, no private read).
+- **Verdict details.**
+  - Keys such as `verdict`, `certificate`, `checks`, `test_score`, `labels` and `reasons` are refused anywhere in a
+    payload.
+  - A label appears only in `promote/verdict_released`, which only `promote.release_verdict` may write, after its
+    ledgered `verdict_bit` release.
+- **Secrets.**
+  - Values that look like keys are refused (`sk-…`, `ghp_…`, `AKIA…`, private-key blocks, …).
+  - So are long values under secret-like field names.
+  - Environments are recorded by hash; files and prompts by hash or blob reference only.
+
+### Read side
+
+| Function | Command | What it returns |
+|---|---|---|
+| `idea_tree` / `idea_path` | — | the idea tree, and the root-to-leaf path of an idea |
+| `costs` | `chh lab costs` | per session and per agent; `usd_total` is None when any part is unknown |
+| `story(claim_hash)` | `chh lab story` | claim → promotion (via `promote/handed_off`) → session → idea path → every event in order, with the chain check |
+
+**The link from a Court certificate or rejection back to the Lab.** It is two-way:
+- the certificate's claim carries `scope.conditions.paper_doi = "lab:<session>:<promotion>"` (written by
+  `promote.handoff` into the Claim Audit spec);
+- the trace's `promote/handed_off` event carries the claim hash.
+
+A promotion request may name the `idea` it came from. It must exist in the trace, and its path is frozen into the
+`promote/frozen` event.
+
+### Versioning
+
+- A new optional field is a minor change within `chh-lab-trace/1`, because readers must ignore unknown OPTIONAL
+  fields of newer writers.
+- A new kind, a removed field or a changed meaning is `chh-lab-trace/2`.
+- Writers refuse fields they do not know.
+
+### Stated limits
+
+- Self-reported ideas, runs and metrics are the agent's claims. They are recorded as such and never trusted more for
+  being in the trace.
+- Action and cost extraction from vendor output is best effort [U].
+- `seq` and `prev` assume one writer per session at a time (the manager).
+- The trace is owner-side (the store); nothing of it is mounted into the box.

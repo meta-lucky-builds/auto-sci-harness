@@ -9,6 +9,10 @@
   chh lab promote SESSION --request FILE          freeze code + environment for the Court
   chh lab handoff PROMOTION --targets FILE        name the held-out targets; writes the Court spec (chh-audit/1)
   chh lab release-verdict PROMOTION --by NAME     HUMAN: the verdict label only, as a ledgered release
+  chh lab trace SESSION [--kind K]                the discovery trace (chh-lab-trace/1), chain-verified
+  chh lab trace-add SESSION --file F --by NAME [--source human|backend]   add human / backend events (JSON lines)
+  chh lab costs SESSION                           costs per session and per agent (unknown stays unknown)
+  chh lab story CLAIM_HASH                        certificate/claim -> promotion -> session -> idea path -> events
 
 Built, NOT test-verified.
 """
@@ -69,6 +73,18 @@ def add_parsers(sub: Any) -> None:
     rv = s.add_parser("release-verdict", help="HUMAN: write the Court's verdict label into the session workspace")
     rv.add_argument("promotion")
     rv.add_argument("--by", required=True, help="the human releasing it (recorded)")
+    tr = s.add_parser("trace", help="the session's discovery trace (chh-lab-trace/1), with a chain check")
+    tr.add_argument("session")
+    tr.add_argument("--kind")
+    ta = s.add_parser("trace-add", help="add human interventions or backend runs (JSON lines: kind, payload)")
+    ta.add_argument("session")
+    ta.add_argument("--file", required=True)
+    ta.add_argument("--by", required=True, help="the human (or backend name) adding them; recorded as the actor")
+    ta.add_argument("--source", choices=["human", "backend"], default="human")
+    co = s.add_parser("costs", help="session and per-agent costs from the trace")
+    co.add_argument("session")
+    sy = s.add_parser("story", help="the story of a discovery, from a claim hash back to the Lab")
+    sy.add_argument("claim_hash")
 
 
 def _out(obj: Any) -> int:
@@ -124,7 +140,37 @@ def cmd_lab(a: argparse.Namespace, store: EvidenceStore) -> int:
         return _out(P.handoff(store, a.promotion, Path(a.targets)))
     if c == "release-verdict":
         return _out(P.release_verdict(store, a.promotion, a.by))
+    if c in ("trace", "trace-add", "costs", "story"):
+        return _trace_cmd(a, store)
     raise SystemExit(f"unknown lab command {c!r}")
+
+
+def _trace_cmd(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from . import trace as T
+    if a.lab_cmd == "trace":
+        problems = T.verify_chain(store, a.session)
+        _out({"schema": T.SCHEMA, "chain_problems": problems, "events": T.events(store, a.session, a.kind)})
+        return 1 if problems else 0
+    if a.lab_cmd == "costs":
+        return _out(T.costs(store, a.session))
+    if a.lab_cmd == "story":
+        return _out(T.story(store, a.claim_hash))
+    actor = T.Actor(type="human", id=a.by) if a.source == "human" else T.Actor(type="backend", id=a.by)
+    allowed = {"human"} if a.source == "human" else {"run", "cost", "action"}
+    added, refused = [], []
+    for n, line in enumerate(Path(a.file).read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+            if obj.get("kind") not in allowed:
+                raise T.TraceRefused(f"{a.source} may add {sorted(allowed)} events, not {obj.get('kind')!r}")
+            added.append(T.record(store, a.session, obj["kind"], obj["payload"], actor=actor, source=a.source,
+                                  client_id=obj.get("client_id"))["event_id"])
+        except (ValueError, KeyError, TypeError, AttributeError) as e:
+            refused.append(f"line {n}: {str(e)[:200]}")
+    _out({"added": added, "refused": refused})
+    return 1 if refused else 0
 
 
 COMMANDS = {"lab": cmd_lab}
