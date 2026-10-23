@@ -85,7 +85,19 @@ def test_e3b_idea_channel_cannot_carry_the_code(store, tmp_path, rings_task, mon
     monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
     monkeypatch.setenv("CHH_DATA_DIR", str(tmp_path / "data"))
     spec = _seed()
-    evolved = apply_edit(spec, _sneak_before_claim(spec, "hypotheses", "Restate the plan: {{best_code}}", schema))
+    edit = _sneak_before_claim(spec, "hypotheses", "Restate the plan: {{best_code}}", schema)
+    # s4-integrity M1 reserved `hypotheses`: the edit gate now refuses the attack outright (stage-c 2026-10-23: the
+    # first draft assumed the key evolvable and failed here on int18 and on the s4-integrity branch)
+    with pytest.raises(EditRejected, match="reserved state key 'hypotheses'"):
+        apply_edit(spec, edit)
+    # defence in depth: the same spec built WITHOUT the gate (a gate bypass) must still never show the code to the
+    # replicator, and the protected modules must still parse the evolvable state defensively
+    from custom_harness.evolve.edits import _apply_op
+    from custom_harness.runtime import HarnessSpec
+    doc = spec.model_dump(mode="json")
+    for op in edit.ops:
+        _apply_op(doc, op)
+    evolved = HarnessSpec.model_validate(doc)
 
     def llm_fn(req):
         text = req.messages[-1].content

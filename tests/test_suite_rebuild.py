@@ -37,8 +37,12 @@ def _fake_real() -> dict[str, dict]:
 
 @pytest.fixture
 def env(tmp_path, store, monkeypatch):
-    agent = tmp_path / "agent"
-    agent.mkdir()
+    # the agent-readable root is the data dir's suites/ (conftest: CHH_DATA_DIR = tmp_path/data), a MAPPED subdir of
+    # truth_layout: a suite built there keeps its truth under <data>/private/suites/..., outside the agent's reach.
+    # (stage-c 2026-10-23: the first draft used an unmapped tmp_path/agent, where truth_layout rightly refused to put
+    # held-out truth (TruthLayoutError) and every rebuild test failed before reaching what it tests.)
+    agent = tmp_path / "data" / "suites"
+    agent.mkdir(parents=True)
     monkeypatch.setenv("CHH_AGENT_READABLE", str(agent))
     record = tmp_path / "human" / "suite-m2"
     beacon = tmp_path / "human" / "beacon.txt"
@@ -89,7 +93,7 @@ def test_every_task_records_its_provenance_and_the_candidate_image_but_no_key(tm
 
 # ---------------------------------------------------------------- freeze, then mint
 def test_rebuild_anchors_the_manifest_before_minting_and_derives_the_data_from_the_draw(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     res = _rebuild(env, out, _fake_real())
     assert res["status"] == "built"
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
@@ -118,14 +122,14 @@ def test_rebuild_mints_nothing_when_the_freeze_is_not_anchored(env, tmp_path, mo
         raise S.MintRefused("not anchored (test)")
 
     monkeypatch.setattr(R, "require_anchored", refuse)
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     with pytest.raises(S.MintRefused):
         _rebuild(env, out, _fake_real())
     assert not out.exists() or not any(out.rglob("test_y.csv"))
 
 
 def test_second_rebuild_is_identical_and_adds_no_ledger_entry_or_anchor(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     first = _rebuild(env, out, _fake_real())
     n_led = len(env["vault"].ledger.entries())
     n_anchor = len((env["record"] / "anchor.jsonl").read_text().splitlines())
@@ -138,7 +142,7 @@ def test_second_rebuild_is_identical_and_adds_no_ledger_entry_or_anchor(env, tmp
 
 
 def test_rebuild_never_overwrites_a_different_suite(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     S.build_suite(out, real_data=None, key=b"z" * 32)
     before = R.suite_digest(out)
     with pytest.raises(R.RebuildRefused, match="differs"):
@@ -147,12 +151,14 @@ def test_rebuild_never_overwrites_a_different_suite(env, tmp_path):
 
 
 def test_verify_re_derives_the_suite_and_finds_a_changed_label(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     _rebuild(env, out, _fake_real())
     ok = R.verify(out, record_dir=env["record"], beacon_file=env["beacon"],
                   ledger_entries=env["vault"].ledger.entries())
     assert ok["problems"] == [], ok
-    y = out / "xor-s1" / "private" / "test_y.csv"
+    from custom_harness.truth_layout import truth_file
+    y = truth_file(out / "xor-s1", "test_y.csv")  # where the layout keeps it (outside the agent-readable tree)
+    assert not (out / "xor-s1" / "private").exists()
     labels = _labels(y)
     labels[0] = "1" if labels[0] == "0" else "0"
     y.write_text("label\n" + "".join(v + "\n" for v in labels), encoding="utf-8")
@@ -162,7 +168,7 @@ def test_verify_re_derives_the_suite_and_finds_a_changed_label(env, tmp_path):
 
 
 def test_verify_refuses_a_wrong_beacon(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     _rebuild(env, out, _fake_real())
     other = tmp_path / "human" / "other.txt"
     other.write_text("not-the-beacon-" + "cd" * 24, encoding="utf-8")
@@ -183,12 +189,12 @@ def test_rebuild_refuses_secret_material_inside_an_agent_readable_root(env, tmp_
 
 
 def test_rebuild_refuses_real_data_that_differ_from_the_recorded_export(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     _rebuild(env, out, _fake_real())
     changed = _fake_real()
     changed["iris"]["y"][0] = 2 if changed["iris"]["y"][0] != 2 else 1
     with pytest.raises(R.RebuildRefused, match="real-data export"):
-        _rebuild(env, tmp_path / "agent" / "suites" / "m2b", changed)
+        _rebuild(env, env["agent"] / "suites" / "m2b", changed)
 
 
 def test_cli_frozen_rebuild_then_verify(env, tmp_path, capsys):
@@ -196,7 +202,7 @@ def test_cli_frozen_rebuild_then_verify(env, tmp_path, capsys):
 
     export = tmp_path / "human" / "export.json"
     export.write_text(json.dumps(_fake_real()), encoding="utf-8")
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     args = ["build-suite", str(out), "--record-dir", str(tmp_path / "human" / "rec"),
             "--beacon-file", str(env["beacon"])]
     assert main([*args, "--frozen", "--real-export", str(export)]) == 0
@@ -212,7 +218,7 @@ def test_cli_frozen_rebuild_then_verify(env, tmp_path, capsys):
 
 # ---------------------------------------------------------------- the COUPLED-PRNG regression on a rebuilt suite
 def test_the_old_seeded_generators_cannot_regenerate_rebuilt_labels(env, tmp_path):
-    out = tmp_path / "agent" / "suites" / "m2"
+    out = env["agent"] / "suites" / "m2"
     _rebuild(env, out, _fake_real())
     old_code = R.load_generator_module(PREFIX)
     res = R.prng_regression(out, old_code)

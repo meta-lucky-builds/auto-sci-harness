@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from custom_harness.research import suite as S
 from custom_harness.research.task import load_task
@@ -32,7 +33,13 @@ def test_exporter_records_a_relabelled_label_column(tmp_path: Path) -> None:
     d = S.write_task(_spec(), tmp_path / "suite")
     rec = json.loads((d / "private" / "truth_copies.json").read_text(encoding="utf-8"))
     assert rec == [{"file": "test_X.csv", "column": "leak"}]
-    assert b"leak" not in (d / "task.yaml").read_bytes()  # the declaration never sits in an agent-readable file
+    # the declaration never sits in an agent-readable file. (stage-c 2026-10-23: the first draft tested the bytes
+    # b"leak", which the task id "leaky" contains; now the parsed task.yaml must carry no declaration and no value
+    # naming the copied column.)
+    meta = yaml.safe_load((d / "task.yaml").read_text(encoding="utf-8"))
+    assert isinstance(meta, dict) and meta["id"] == "leaky"
+    assert not {k for k in meta if "truth" in str(k).lower() or "cop" in str(k).lower()}, meta
+    assert "leak" not in {str(v) for v in meta.values()} and "test_X.csv" not in str(meta), meta
 
 
 def test_exporter_records_nothing_for_an_honest_task(tmp_path: Path) -> None:
