@@ -11,6 +11,7 @@ import json
 import re
 from itertools import pairwise
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel.vault import DatasetRole
 from custom_harness.records import StepKind
@@ -39,9 +40,10 @@ def _private(state, params, ctx):
 
 @register("test_critic.held_out_read")
 def _held_out_read(state, params, ctx):
-    vault = ctx.kernel().vault
-    vault.register_dataset("crit-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    vault.read("crit-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)  # a private read during this step
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        vault.register_dataset("crit-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n"})
+        vault.read("crit-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)  # a private read during this step
     return {"held_summary": "derived " * 100}
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.evolve.evaluate import score_state
 from custom_harness.records import RunStatus
 
@@ -61,9 +62,10 @@ from custom_harness.sandbox import LocalSandbox  # noqa: E402
 @register("test.release_reader")
 def _reader(state, params, ctx):
     from custom_harness.kernel import DatasetRole
-    vault = ctx.kernel().vault
-    vault.register_dataset("t-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    vault.read("t-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)  # a private read during the run
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        vault.register_dataset("t-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n"})
+        vault.read("t-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)  # a private read during the run
     return {"audit": {"passed": True}, "certificate": {"label": "CERTIFIED-INTERNAL", "subject_mean": 0.9}}
 
 

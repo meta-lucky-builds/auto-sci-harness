@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.gateway import ChatRequest, Message, MockBackend
 from custom_harness.kernel import Kernel
 from custom_harness.kernel.ledger import Ledger
@@ -79,9 +80,10 @@ def _rec_seed(state, params, ctx):
 
 @register("rt_rec.held")
 def _rec_held(state, params, ctx):
-    vault = ctx.kernel().vault
-    vault.register_dataset("rt-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    vault.read("rt-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        vault.register_dataset("rt-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n"})
+        vault.read("rt-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
     return {"big": "held-out derived value " * 400}
 
 
@@ -94,8 +96,9 @@ def _rec_copy(state, params, ctx):  # an intermediate module that copies a (tain
 def _rec_refs(state, params, ctx):
     """Digests of blobs that EXIST in the store but are never archived in a prompt: a checkpoint, the run inputs,
     a private vault file."""
-    rec = ctx.kernel().vault.register_dataset("rt-refs", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
-                                              private={"y.csv": b"secret label file\n" * 300})
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest (tests/_kerneld_standin.py)
+        rec = vault.register_dataset("rt-refs", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                                     private={"y.csv": b"secret label file\n" * 300})
     tr = ctx.store.trace(ctx.run_id)
     return {"refs": {"checkpoint": tr[0].checkpoint_ref, "inputs": ctx.store.get_run(ctx.run_id).inputs_ref,
                      "vault_private": rec.files["y.csv"].blob}}
@@ -403,9 +406,10 @@ def _c_facts(state, params, ctx):
 
 @register("rt_crit.held")
 def _c_held(state, params, ctx):
-    vault = ctx.kernel().vault
-    vault.register_dataset("rtc-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    vault.read("rtc-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        vault.register_dataset("rtc-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n"})
+        vault.read("rtc-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
     return {"held_summary": "derived " * 20}
 
 

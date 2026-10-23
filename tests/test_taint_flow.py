@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 import _taint_crash_helpers as K
+from _kerneld_standin import kerneld_vault
 from custom_harness.errors import InfraError
 from custom_harness.gateway import ChatRequest, Message, MockBackend
 from custom_harness.kernel import DatasetRole, Kernel
@@ -42,10 +43,10 @@ def _ensure(vault, ds: str = TARGET) -> None:
 
 
 def _held_mean(ctx, ds: str = TARGET, run_id: object = "self") -> float:
-    vault = ctx.kernel().vault
-    _ensure(vault, ds)
     rid = ctx.run_id if run_id == "self" else run_id
-    labels = vault.read(ds, "y.csv", purpose="leakscan", run_id=rid).decode().split()[1:]
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        _ensure(vault, ds)
+        labels = vault.read(ds, "y.csv", purpose="leakscan", run_id=rid).decode().split()[1:]
     return sum(map(float, labels)) / len(labels)
 
 
@@ -339,11 +340,11 @@ EXPORT_LABELS = b"y\n1\n0\n0\n1\n1\n1\n0\n"  # mean 4/7 = 0.5714285714285714: a 
 
 @register("tf.export_held")
 def _export_held(state, params, ctx):
-    vault = ctx.kernel().vault
-    if "tfx-held" not in vault.datasets():
-        vault.register_dataset("tfx-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
-                               private={"y.csv": EXPORT_LABELS})
-    labels = vault.read("tfx-held", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        if "tfx-held" not in vault.datasets():
+            vault.register_dataset("tfx-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                                   private={"y.csv": EXPORT_LABELS})
+        labels = vault.read("tfx-held", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
     return {"raw": {"mean": sum(map(float, labels)) / len(labels)}}
 
 
@@ -390,9 +391,9 @@ def test_failure_signatures_withhold_target_derived_error_text(store, tmp_path):
 @register("tf.recheck_read")
 def _recheck_read(state, params, ctx):
     """A private read that names no run (like a Kernel re-check read)."""
-    vault = ctx.kernel().vault
-    _ensure(vault, "tfr-held")
-    vault.read("tfr-held", "y.csv", purpose="leakscan")
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        _ensure(vault, "tfr-held")
+        vault.read("tfr-held", "y.csv", purpose="leakscan")
     return {"certificate": {"label": "CERTIFIED-INTERNAL"}}
 
 

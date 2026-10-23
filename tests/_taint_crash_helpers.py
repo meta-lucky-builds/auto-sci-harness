@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel import DatasetRole, Kernel
 from custom_harness.runtime import Edge, Engine, HarnessSpec, LLMNode, ModuleNode, register
@@ -17,10 +18,11 @@ TARGET = "tk-held"
 
 @register("taintk.held")
 def _held(state, params, ctx):
-    vault = ctx.kernel().vault
-    if TARGET not in vault.datasets():
-        vault.register_dataset(TARGET, DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    labels = vault.read(TARGET, "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        if TARGET not in vault.datasets():
+            vault.register_dataset(TARGET, DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                                   private={"y.csv": b"y\n1\n"})
+        labels = vault.read(TARGET, "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
     return {"score": f"held-out mean {sum(map(float, labels)) / len(labels):.4f}"}
 
 

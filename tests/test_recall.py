@@ -12,6 +12,7 @@ import json
 import re
 from itertools import pairwise
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.budget import Budget
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel import Kernel
@@ -38,9 +39,10 @@ def _seed(state, params, ctx):
 
 @register("test_recall.held")
 def _held(state, params, ctx):
-    vault = ctx.kernel().vault
-    vault.register_dataset("rec-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n1\n"})
-    vault.read("rec-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        vault.register_dataset("rec-held", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                               private={"y.csv": b"y\n1\n"})
+        vault.read("rec-held", "y.csv", purpose="leakscan", run_id=ctx.run_id)
     return {"big": "held-out derived value " * 400}
 
 
@@ -214,11 +216,11 @@ def _start(state, params, ctx):
 @register("test_recall.reveal_then_shrink")
 def _reveal_then_shrink(state, params, ctx):
     """A private read: the agent's NEXT prompt carries a target-derived note (and no longer archives `big`)."""
-    vault = ctx.kernel().vault
-    if "rec-choice" not in vault.datasets():
-        vault.register_dataset("rec-choice", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
-                               private={"y.csv": b"y\n1\n1\n"})
-    ys = vault.read("rec-choice", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        if "rec-choice" not in vault.datasets():
+            vault.register_dataset("rec-choice", DatasetRole.TEST, public={"x.csv": b"x\n1\n"},
+                                   private={"y.csv": b"y\n1\n1\n"})
+        ys = vault.read("rec-choice", "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
     return {"big": "short", "note": "high" if sum(map(float, ys)) / len(ys) > 0.5 else "low", "phase": 1}
 
 

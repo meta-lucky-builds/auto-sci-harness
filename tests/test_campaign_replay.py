@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from _kerneld_standin import kerneld_vault
 from custom_harness.evolve import evaluate as ev_mod
 from custom_harness.evolve.evaluate import SuiteTask
 from custom_harness.evolve.loop import Evaluator, EvolveConfig, evolve_generation
@@ -40,10 +41,11 @@ def _score(state, params, ctx):
     from custom_harness.kernel import DatasetRole
     task_dir = Path(state["input"]["task_dir"])
     raw = (task_dir / "private" / "y.csv").read_bytes()
-    vault = ctx.kernel().vault
     ds = "held-" + __import__("hashlib").sha256(raw).hexdigest()[:12]
-    vault.register_dataset(ds, DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": raw})
-    labels = vault.read(ds, "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
+    with kerneld_vault(ctx) as vault:  # kerneld's private ingest + logged read (tests/_kerneld_standin.py)
+        if ds not in vault.datasets():
+            vault.register_dataset(ds, DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": raw})
+        labels = vault.read(ds, "y.csv", purpose="leakscan", run_id=ctx.run_id).decode().split()[1:]
     acc = sum(v == "1" for v in labels) / len(labels)
     out = {"audit": {"passed": True}, "best": {"dev_score": 0.8}, "baseline_dev": 0.7, "task": {"metric": "accuracy"},
            "certificate": {"label": "CERTIFIED-INTERNAL" if acc > 0.5 else "REJECTED", "subject_mean": acc,
