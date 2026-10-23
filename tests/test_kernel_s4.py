@@ -44,7 +44,10 @@ CANARY = "CHH-CANARY-world11-0"  # the canary of World(seed=11)'s held-out datas
 @pytest.fixture(scope="module")
 def world(tmp_path_factory):
     w = World(tmp_path_factory.mktemp("s4"), seed=11)
-    w.register_target("tiny", DatasetRole.TEST, n=15)
+    # 5 rows (stage-c 2026-10-23, as int17-fix did for test_kernel_nullbound): 15 rows are NOT reliably insensitive
+    # to +-0.15 (on this world's "tiny" all 11 plantings on both sides were detected and K7 passed, logs/07_alone);
+    # with 5 rows K7_INSENSITIVE fires on both sides (logs/P3_s4_equivalence_debug.log)
+    w.register_target("tiny", DatasetRole.TEST, n=5)
     yield w
     w.close()
 
@@ -199,7 +202,8 @@ def test_equivalence_with_a_vacuous_margin_is_refused(world):
 
 
 def test_equivalence_on_an_insensitive_target_is_refused(world):
-    """15 examples cannot see +-0.15. Fails first: the old code failed K1 (power) and K7 (no risk model) instead."""
+    """5 examples cannot see +-0.15 (15 can: see the fixture). Fails first: the old code failed K1 (power) and K7 (no
+    risk model) instead."""
     claim = equivalence(world, 0.15, targets=("tiny",), power=0.8)
     world.kernel.preregister(claim)
     cert = world.kernel.certify(claim, world.evaluate_all(claim))

@@ -484,7 +484,13 @@ def test_positive_salts_catch_the_amplifier_and_the_defeat_device(tmp_path, stor
     honest, _ = _campaign(salts, W.honest)
     amp, cheated = _campaign(salts, W.amplifier, f=0.3, tau=0.02)
     assert all(cheated.values())  # honest train gain ~0.4 > tau on every positive salt: the attack happened
-    assert all(amp[t].effect.estimate > honest[t].effect.estimate for t in cheated)  # ...inflating
+    # ...inflating. The amplifier only swaps predictions for the true labels, so its accuracy is never below the honest
+    # one on any salt (>= everywhere), and strictly above wherever honest makes errors: on rings and xor. Spirals'
+    # honest rule is ~100% accurate on held-out rows, so there it can add nothing (stage-c 2026-10-23: spirals-s0 and
+    # -s9 were EXACTLY equal, logs/P2_salts_debug.log; the first draft's strict > on every salt was false there).
+    assert all(amp[t].effect.estimate >= honest[t].effect.estimate for t in cheated)
+    vis = [s.task_id for s in salts if s.family in ("rings", "xor")]
+    assert vis and all(amp[t].effect.estimate > honest[t].effect.estimate for t in vis)
     a, h = campaign_audit(revealed, amp), campaign_audit(revealed, honest)
     assert a.pooled_inflation_flag and not h.pooled_inflation_flag
     assert h.coverage.n == 10 and h.coverage.k >= 8 and h.inflated.k <= 1
