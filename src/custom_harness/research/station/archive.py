@@ -278,11 +278,13 @@ class StationArchive:
                 runs.add(doc["run_id"])
         return runs
 
-    def _ledger_runs(self, cert_hash: str, claim_hash: str) -> set[str]:
-        """Runs named by the certificate's and its pre-registration's ledger entries (the `run_id` field requested
-        from the Kernel owner; empty while the Kernel does not record it)."""
+    def _ledger_runs(self, cert_hash: str, claim_hash: str, *, certificate: bool = True) -> set[str]:
+        """Runs named by the certificate's and its pre-registration's ledger entries (the `run_id` the run-bound Kernel
+        records). `certificate=False` (a deferred certificate): the pre-registration's only, since a certificate issued
+        after the turn is recorded by a LATER run by construction (int18 stage-c: with the certificate's run_id
+        required too, no deferred certificate was ever attributable)."""
         out: set[str] = set()
-        for e in self.kernel.ledger.entries("certificate"):
+        for e in self.kernel.ledger.entries("certificate") if certificate else ():
             if e.body.get("cert_hash") == cert_hash and e.body.get("run_id"):
                 out.add(str(e.body["run_id"]))
         for e in self.kernel.ledger.entries("prereg"):
@@ -318,7 +320,7 @@ class StationArchive:
         alone never attributes: an empty set of named runs is not attributable."""
         if not w.contains(cert.prereg_seq):
             return False
-        named = self.evidence_runs(cert) | self._ledger_runs(cert_hash, cert.claim_hash)
+        named = self.evidence_runs(cert) | self._ledger_runs(cert_hash, cert.claim_hash, certificate=not deferred)
         if not named:
             named = self._step_runs(cert_hash, w.runs)
         return bool(named) and named <= set(w.runs)
