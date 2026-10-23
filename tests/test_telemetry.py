@@ -108,5 +108,15 @@ def test_a_run_and_the_studio_commands_make_no_network_attempt(no_network, capsy
 
 def test_no_telemetry_setting_exists_to_be_on_by_default():
     """Nothing reads a telemetry switch: there is no telemetry to opt out of (opt-in would need new code + a test)."""
-    text = "\n".join(p.read_text(encoding="utf-8") for p in SRC.rglob("*.py"))
-    assert "TELEMETRY" not in text.upper()
+    texts = {p.relative_to(SRC).as_posix(): p.read_text(encoding="utf-8") for p in SRC.rglob("*.py")}
+    # lab-agents 2026-10-23 (GOAL §17): lab/agents.py WRITES, never reads, one vendor switch that turns Claude Code's
+    # own usage reporting OFF inside a lab box. Exactly that literal, exactly once, in exactly that file is exempt;
+    # any other mention anywhere still fails.
+    for rel, literals in OFF_SWITCHES.items():
+        for lit in literals:
+            assert texts[rel].count(lit) == 1, (rel, lit)
+            texts[rel] = texts[rel].replace(lit, "")
+    assert "TELEMETRY" not in "\n".join(texts.values()).upper()
+
+
+OFF_SWITCHES = {"lab/agents.py": ['"DISABLE_TELEMETRY": "1"']}

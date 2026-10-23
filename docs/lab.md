@@ -1,0 +1,251 @@
+# The Lab: full-capability exploration, walled off from the Court (GOAL §17)
+
+**Status: built 2026-10-23 on branch `lab-agents` (from `origin/int17` 916bc5d). Built, NOT test-verified.**
+No test was run, no image was built or pulled, nothing was installed, no agent CLI was started. ruff and mypy pass
+on the new code. Every statement about a vendor CLI's flags or switches comes from OpenResearch's code
+(fe36f74, MIT) or vendor documentation, and is marked [U] where I could not check it.
+
+## 1. What it is
+
+GOAL §17: "generous when exploring, strict when claiming".
+
+- **The Lab.** One coding agent per session (Claude Code, Codex, OpenCode with API or local models, ACP agents)
+  runs with ALL its native tools inside a **lab box**. The box is a Docker container with:
+  - network on;
+  - a writable root filesystem (pip, npm, uv and conda installs work);
+  - the session workspace bind-mounted at `/workspace` and kept across stops;
+  - optional GPUs (`--gpus`);
+  - no time limit.
+
+  Inside the box the agent's own permission layer is set to full access. The box is the boundary.
+- **The Court.** It stays exactly as it is: Kernel, kerneld, vault, release ledger, candidate sandbox. The only
+  way from the Lab to a finding is `chh lab promote`, then the existing Court path.
+
+```
+owner host (never visible to a box beyond one directory)
+ ├─ <data>/store, bundles, human, private (truth)   ← Court only; refused as mounts, checked by path
+ ├─ <data>/lab/<session>/workspace  ──bind──▶  lab box /workspace  (agent + native tools + network)
+ ├─ <data>/lab/<session>/transcripts                 (headless outputs; outside the mount)
+ └─ <data>/lab_court/<promotion>/                    (frozen code + Court spec; outside the lab root)
+```
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `chh lab agents` | lists the adapters, with the deferral reasons |
+| `chh lab check` | static walls: the lab root, the image recipe and the truth layout |
+| `chh lab start --agent claude-code --registry-key anthropic-api --credential-env CHH_LAB_CRED_ANTHROPIC --spend-cap-usd 20 --scope "..." [--gpus all]` | starts a session (Claude Code example) |
+| `chh lab start --agent opencode --model qwen2.5-coder:7b` | starts a session with a local model: no credential |
+| `chh lab attach SESSION` | the agent's own UI, interactive |
+| `chh lab attach SESSION --prompt "..."` | one headless prompt; the transcript goes to `transcripts/` |
+| `chh lab status [SESSION]` | the sessions and their state |
+| `chh lab stop SESSION` | stops the box; the workspace stays |
+| `chh lab promote SESSION --request promote.yaml` | freezes the claim's code and environment |
+| `chh lab handoff PROMOTION --targets targets.yaml` | writes the Court spec |
+| `chh audit show / approve-fidelity / prepare`, `chh approve-role`, `chh audit run --docker` | the existing Court, unchanged |
+| `chh lab release-verdict PROMOTION --by NAME` | **HUMAN**: writes the verdict label only, as a ledgered release |
+
+### Code
+
+| Path | What it holds |
+|---|---|
+| `src/custom_harness/lab/walls.py` | the static and run-time wall checks |
+| `credentials.py` | the session credential policy |
+| `agents.py` | the adapters |
+| `acp_client.py` | the ACP v1 client |
+| `box.py` | the Docker box manager |
+| `session.py` | sessions and their records |
+| `promote.py` | freeze, hand-off and verdict release |
+| `cli.py` | `chh lab` |
+| `docker/lab.Dockerfile` | the image recipe; **not built** |
+| `THIRD_PARTY_NOTICES.md` | OpenResearch's MIT notice |
+| `tests/test_lab_*.py`, `tests/_lab_fakes.py` | the tests; **not run** |
+
+## 2. Threat model
+
+**The adversary** is everything inside the box:
+- the agent;
+- the model behind it;
+- any package, web page or repository it pulls in;
+- any prompt injection it meets.
+
+Assume it is capable and, at worst, adversarial. It may want to:
+1. read held-out truth, sealed data, verdict details or the draw secret, to tune on them;
+2. take or misuse owner secrets;
+3. reach the host beyond its workspace, or persist into the Court (store, ledger, Kernel, adapters);
+4. make Lab output look like a finding.
+
+**Trusted:**
+- the owner;
+- the host OS and the Docker daemon;
+- this manager code;
+- the Kernel and kerneld;
+- the human approval steps.
+
+## 3. What is enforced, and where
+
+| Wall | Static check | Run-time check |
+|---|---|---|
+| Only one host directory is visible: the workspace, strictly inside the lab root | `walls.lab_root_problems` (`chh lab check`) | `walls.require_workspace` at start and promote. It checks both directions against the store, bundles, human config, truth locations, draw secret, `~/.ssh` and the other credential stores, the repo, the Python env, the data dir, home and drive roots. It also refuses links or junctions on the workspace path. |
+| No truth or store mount, no Docker socket, no host namespaces, no privileged mode, no added caps or devices | — | `walls.docker_argv_problems` on the final `docker run` argv (fail closed) |
+| No truth copied into the workspace | — | `walls.scan_workspace` at start and promote. It looks for legacy `private/` truth files, exact copies of any PRIVATE vault blob (sha256; metadata only, no private read) and the draw secret in common encodings. |
+| Truth layout vs the Lab | `walls.static_problems`. It calls s4-integrity's `truth_layout_problems` with the lab root added to the agent-readable roots once that module is merged; until then, the truth root vs lab root. | — |
+| Image holds no host files, no secrets, pinned CLI versions, non-root | `walls.recipe_problems` on `docker/lab.Dockerfile` | — |
+| No owner secret: one scoped, spend-capped credential | — | `credentials.resolve` (detail below) |
+| Lab never writes evidence | — | Lab records are `store.append_record` rows labelled EXPLORATORY; no Kernel ledger entry. The test asserts the ledger length is unchanged. |
+| Freeze before naming targets | — | `promote.freeze` must precede `handoff`. `handoff` refuses a second spec and runs a deny-only screen: frozen code that names a target's OpenML id or file hash is refused. |
+| No host read while agent code runs | — | the box is `docker pause`d for the freeze and for the verdict write. Every component is checked with `sandbox.base.safe_path`. |
+| The Lab sees only a verdict bit | — | `promote.release_verdict`, HUMAN-triggered. It emits one release per held-out target through `kerneld.releases.Releases`: channel `prompt`, alphabet `verdict_bit`, note `lab:promotion_verdict`. It writes only `{promotion_id, label}` to `.court/` in the workspace. |
+
+**What `credentials.resolve` checks:**
+- the source is a `CHH_LAB_CRED_*` variable or a file outside every agent-readable root and the lab root. The CLIs'
+  default key variables are refused as sources;
+- the value must not equal any other secret-like host variable;
+- the cap is in (0, 200] USD and the TTL is at most 14 days;
+- the registry gate passes (`gateway.registry.require_usable`);
+- BYOS is refused in the Lab;
+- the value reaches docker only through its environment, as `-e NAME`, and never through argv or a file.
+
+## 4. What is NOT enforced: residual risks
+
+1. **The agent CLI's own behaviour inside the box.**
+   - The off-switches for usage reporting, error reports and auto-update are set from vendor docs and OR's code
+     [U]. Whether each CLI honours them is untested.
+   - The box has network, so anything inside it can talk to the internet: the agent, a package it installs, a
+     vendor CLI ignoring a switch. That includes sending the workspace or the session key anywhere.
+   - This is by design (§17: full network). The walls keep the truth and owner secrets out of the box, so there is
+     nothing of the Court's to exfiltrate.
+2. **Credential misuse within its cap.**
+   - The key is visible to the agent (process environment; Codex also stores it in the box HOME, which is ephemeral).
+   - The agent can spend up to the cap, or leak the key. The cap is enforced by the provider on the scoped key,
+     never by this code. The recorded cap is the owner's declaration.
+   - Revocation at session end is an owner step at the provider. The expiry recorded here only stops
+     `attach`/`--prompt` from this CLI.
+3. **Container escape.**
+   - The box uses Docker's default runtime (no gVisor), so a kernel or runtime bug is a host compromise.
+   - `--root` widens this (Docker's default capability set). On Windows, the Docker Desktop VM sits between the
+     box and the host.
+4. **Host services reachable over the network.**
+   - With network on, the box can reach the LAN. On Docker Desktop it can also reach the host through
+     `host.docker.internal`, including, I believe, services bound to the host's loopback [I, not verified].
+   - kerneld speaks over a pipe only (verified by reading `kerneld/server.py`), so the Court has no socket.
+   - Any other host service (a local model server, a database, a future Studio UI bound to an interface) is
+     reachable.
+   - Owner rule: no unauthenticated service holding private data on this host.
+5. **Retrospective targets are downloadable from the Lab.**
+   - The only Court route wired today is the Claim Audit: fresh, but public, OpenML datasets. A networked Lab can
+     fetch them and tune on them before the freeze.
+   - Mitigations, all partial:
+     - targets are named after the freeze;
+     - the deny-only screen;
+     - the audit's listed assumptions.
+   - The real fix is minted or future targets (§16.2), which this route does not have yet (§6 next). Truth memorised
+     in model weights remains (§16.12).
+6. **Transformed copies of truth are not found by the content scans.** Only exact copies and common encodings of the
+   secret are found. The guarantee rests on the truth never being reachable from the box (mount checks, no Court
+   socket, separate OS user), not on the scan.
+7. **Supply chain of the lab image.**
+   - The npm CLIs are pinned by version, not by hash.
+   - The base image digest is an owner step.
+   - Agents install arbitrary packages at run time. That is fine for the Lab, and it is why the Court never runs in
+     the lab image.
+8. **Court environment mismatch.**
+   - The frozen lock is recorded and checked for exact pins. The Court still runs the arms in the existing candidate
+     image (fixed packages, no network).
+   - A promotion needing other packages ends as `COULD NOT RUN` in the audit route.
+   - Building a Court image from a frozen lock is an owner decision (§7). It must stay truth-scanned like the
+     candidate image.
+9. **The freeze stores a manifest, not the whole workspace.**
+   - The Court holds the sha256 manifest and the three frozen files (method, baseline, lock).
+   - The rest of the workspace (caches, data, notes) is pinned by hash only. Reproducing that context needs the
+     owner to keep the workspace.
+10. **ACP agents.**
+    - Their internal tools, terms and switches are unknown per agent.
+    - The client refuses client-side `fs/*` and `terminal/*`, so an agent that needs them does not work.
+    - No preset is usable until the owner adds a registry entry for its provider.
+11. **The verdict file persists in the workspace.** Later agents of that session can read the label. It is a ledgered
+    `verdict_bit` release, which K4 counts.
+12. **Lab records sit in the Court's store.**
+    - They are labelled EXPLORATORY and are not Kernel ledger entries.
+    - No check yet stops a future report or Studio view from rendering them as findings (§6 next).
+
+## 5. Design choices made where the brief was silent (each consistent with §17)
+
+| # | Choice | Reason |
+|---|---|---|
+| D1 | The workspace is a host **bind mount** under `<data>/lab/<session>/workspace`, not a Docker named volume | The existing mount checks (`check_mount`, path overlap) and the content scans apply to a host path. The owner can inspect it. Promotion can hash it without `docker cp`. |
+| D2 | The box runs as uid 1000, `--cap-drop ALL`, `no-new-privileges`. `--root` is an opt-in that keeps Docker's default capabilities, and it is recorded. | None of this limits the agent's tools (user-space installs work). It limits what the box can do to the host. |
+| D3 | Inside the box each agent runs in its full-access mode: Claude Code `bypassPermissions`, Codex `danger-full-access` plus `approval_policy never`, OpenCode all `allow` | §17: "ALL its native tools". The box, not the CLI, is the boundary. These modes are never used on the host. |
+| D4 | The credential reaches the box only as `docker run -e NAME`, with the value in the docker CLI's environment. Codex additionally logs in with `--with-api-key` into the box HOME [U], which is ephemeral and removed at stop. | It is never in argv (process listings), never in a file we write, never in the workspace. |
+| D5 | Subscription (BYOS) credentials are refused in the Lab, even `openai-codex-cli`, which the gateway allowlist admits | A subscription login is the owner's own account, neither scoped nor spend-capped (§17). `anthropic-subscription` is `prohibited` anyway, so **Claude Code in the Lab is API-key only (`anthropic-api`)**. |
+| D6 | Credential sources must be `CHH_LAB_CRED_*` variables or a file outside agent-readable roots. A value equal to another host secret variable is refused. | It stops the owner's everyday key from being passed by accident. |
+| D7 | The spend cap is declared (0 < cap ≤ 200 USD, UNCALIBRATED) and recorded as "enforced by the provider" | This code cannot enforce a provider-side cap. Saying otherwise would be false. |
+| D8 | The ACP client advertises no `fs` or `terminal` capability and refuses those methods | OR serves them on the host for any absolute path (PORTMAP §10 S5). In the Lab the agent's own in-box tools suffice. |
+| D9 | The Court route is the existing Claim Audit (`chh-audit/1`): method = frozen Lab code, baseline = frozen baseline | It is the existing path that takes code from outside a research run, pre-registers it with the Kernel before the data are read, runs both arms under one contract in the network-free candidate sandbox and certifies. Nothing in the Court changed. |
+| D10 | Held-out targets are named in a separate step after the freeze, with a deny-only screen | It is the strongest ordering available without minted targets (§16.2 spirit). The screen can only deny (invariant 21). |
+| D11 | The freeze is a whole-workspace sha256 manifest, plus the method, baseline and lock bytes in the store's blobs | Lab workspaces can be many GB. The Court needs only what it re-executes; the hash pins the rest. |
+| D12 | The lock must pin every line exactly. Editable, URL, VCS, include and alternative-index lines are refused. `--hash` lines are recorded. | A frozen environment must be re-creatable by the Court without trusting the Lab's index choice. |
+| D13 | The verdict release is HUMAN-triggered and label-only, one `verdict_bit` release per target, written to `.court/` in the workspace | §17: "the Lab never sees verdict details beyond what the existing release ledger allows". |
+| D14 | `truth_layout` (s4-integrity, not on int17) is looked up at call time with importlib. Until it is merged, the same default is used (`$CHH_TRUTH_ROOT` or `<data>/private`). | There is no merge of s4-integrity's 2.8k lines into this branch. After the integrator merges, the check uses the real layout with no code change. |
+| D15 | The lab root defaults to `<data>/lab` | It is outside the repo, the truth root and the store. **Integrator item:** after the s4-integrity merge, add `"lab"` to `commitment.AGENT_READABLE_DATA_SUBDIRS` so every secret and truth scan also walks Lab workspaces. |
+| D16 | `tests/test_telemetry.py`: exactly the one literal `"DISABLE_TELEMETRY": "1"` in `lab/agents.py` is exempt from its "no TELEMETRY anywhere" scan; any other mention still fails | The Lab must WRITE that vendor off-switch. Prose was reworded instead of exempted. |
+| D17 | The box's own `pip freeze` is recorded (hash) next to the lock, as box-reported and untrusted | It is useful for diagnosis and never trusted. |
+| D18 | Headless transcripts go to `<lab root>/<session>/transcripts/`, outside the mount | Agents cannot rewrite their own history. The store keeps the sha256. |
+| D19 | A stopped session can still be promoted | No agent runs then, which is the safest moment to freeze. |
+| D20 | No gVisor by default in the Lab | GPUs and many dev tools do not work under runsc. A later `--runtime` option can add it per session. |
+
+## 6. Next (not built)
+
+- **Minted-target Court route for promotions** (§16.2). It needs a research-loop entry point that accepts an
+  externally frozen candidate (method code plus pinned lock) as the claim's subject, then runs the existing
+  `research.claim` → `confirm` → `certify` on freshly minted held-out data, sized by the preflight. This is a
+  research-loop change, **not a Kernel change**. It should be designed with the integrator.
+- **A Court image built from a frozen lock.** It needs an owner decision. The build must be offline at run time and
+  get the same bundled-data truth scan as the candidate image.
+- **Renderers never show EXPLORATORY records as findings:** a static check over report and studio code.
+- **`chh lab` egress audit:** a `--network` mode with an allowlisting proxy, if the owner ever wants a tighter Lab
+  (not required by §17).
+
+## 7. Owner steps
+
+1. **Build the image.**
+   - Pin the base image by digest and pick the reviewed CLI versions.
+   - Run `docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 --build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… docker`.
+   - For ACP agents, extend the recipe with their pinned CLIs.
+2. **API keys.** Create one key per Lab use, scoped and spend-limited at the provider:
+   - Anthropic: a dedicated workspace with a spend limit;
+   - OpenAI: a dedicated project with a budget.
+
+   Then pass the key with `CHH_LAB_CRED_<NAME>=… chh lab start … --credential-env CHH_LAB_CRED_<NAME>`, and revoke it
+   after the session.
+3. **Separate OS user for private data.**
+   - Run kerneld and keep `<data>/store`, `<data>/private` and the draw secret under a separate OS user. Use ACLs
+     that deny the user who runs `chh lab` and Docker.
+   - The Lab's walls then do not rest on path checks alone.
+   - On Windows, also restrict Docker Desktop file sharing to the lab root.
+4. **Local models.** Run the model server on the host and pass `--local-base-url` if it is not Ollama's default.
+   Bind the server to loopback, and remember residual risk 4.
+5. **GPUs.** Install the NVIDIA container toolkit and use `--gpus all`.
+6. **Decide:** D5 (BYOS in the Lab), D7 cap ceiling, D11 (manifest-only freeze), D20 (gVisor), the Court-image-from-lock
+   question, and which ACP agents get registry entries.
+
+## 8. Tests owed (none run)
+
+`tests/test_lab_walls.py`, `test_lab_credentials.py`, `test_lab_agents.py`, `test_lab_session.py`,
+`test_lab_promote.py` and `test_lab_cli.py` use a fake docker client. `tests/test_telemetry.py` was amended (D16).
+
+Real-box tests (owner, after the image build):
+1. **Escape kit, per agent:**
+   - read a planted host file outside the workspace;
+   - write outside `/workspace`;
+   - reach `/var/run/docker.sock`;
+   - read `<data>/store` and `<data>/private`;
+   - find a host env secret.
+
+   Every attempt must fail.
+2. **Egress capture,** to verify the off-switches. Run each CLI idle for 10 minutes with only a provider allowlist and
+   log any other host it contacts.
+3. **Host reachability:** a probe from a box to `host.docker.internal` ports of known host services.
+4. **One end-to-end promotion on a toy:** start → promote → handoff → audit prepare/run → release-verdict. Check the
+   release ledger entry.
