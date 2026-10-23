@@ -972,3 +972,78 @@ hard-verifier problem per domain.
 - Side channels.
 - About alpha*N false certificates in aggregate.
 - If honest pipelines cannot be made byte-deterministic, the strongest checks fall back to bounded-margin statistics.
+
+---
+
+## 17. Lab and Court (owner decision 2026-10-23)
+
+**Principle: generous when exploring, strict when claiming.** The harness must never feel like it restricts a
+model's capabilities; a frontier model must be able to use all of its reasoning and tools. Integrity is enforced at
+the point of claiming, not by limiting exploration. Nothing built so far is deleted; existing work becomes the Court.
+
+**The Lab (exploration).**
+- Any coding agent (Claude Code, Codex, OpenCode, ACP agents, local models) runs with ALL its native tools (shell,
+  editor, web) inside a full-power lab environment (container, devbox or remote VM), not on the owner's host.
+- Network, package installs, GPUs, long runs, literature, notebooks, figures, drafts, multiple agents: allowed.
+- Any compute backend, each with an isolation class: isolated backends may run agent-written code; trusted-only
+  backends (plain SSH, Slurm, Ray, HF Jobs) run only human-approved code.
+- Agents use scoped, spend-capped credentials inside the lab box; no owner secrets fan out to agents or runs.
+- Lab outputs are labelled EXPLORATORY and are never findings.
+- The one hard wall: held-out truth, sealed data and verdicts never exist inside the Lab. They live with the Court
+  (kerneld, a separate OS user, later possibly a separate machine).
+
+**The Court (certification).** The Evidence Kernel exactly as specified in §4 and §10, uncompromised.
+- A researcher "promotes" a Lab idea: the claim is pre-registered, its code and environment are frozen (pinned
+  packages, snapshot), and the Court re-executes it offline in a network-free sandbox on held-out data, preferably
+  freshly minted after the freeze (§16.2), sized by the certifiability preflight so a real effect can pass.
+- Result: a certificate with a one-command Reproducibility Bundle, or an honest rejection with reasons.
+
+**Product rules.**
+- No telemetry by default (opt-in only, clearly described); no auto-update (an "update available" notice instead;
+  certificates name exact versions).
+- Track two numbers from now on: discovery yield (certified claims per budget) and false certifications.
+- New security work is frozen except fixes for high-severity, reachable findings, until the first Lab discovery is
+  certified by the Court.
+- OpenResearch (MIT, alphaXiv) components are ported selectively to Python behind Lab isolation and the Court, per
+  `META/openresearch_portmap/PORTMAP.md` (kept outside the repo); its copyright and MIT notice are kept in a
+  third-party notices file. Telemetry, agent feedback and auto-update from it are dropped.
+
+### 17.1 Verification levels (owner decision 2026-10-23)
+Every promoted claim gets the strongest level its evidence supports; lower levels are shown as real, positive
+results, never as failures. Levels are cumulative and each is computed by code (the Kernel), never by a model.
+
+| Level | Meaning | Kernel basis |
+|---|---|---|
+| **REPRODUCIBLE** | Re-executed from the frozen bundle (pinned environment, offline) with the same result, across seeds and machines | K0, K3, bundle |
+| **REPLICATED** | An independent agent (ideally another model family, invariant 5) re-implemented it from the claim text alone and agreed | + replication |
+| **VALIDATED** | Pre-registered, then confirmed on held-out data that did not exist or was sealed when the Lab worked (minted after the freeze, §16.2, or future/private data), with valid statistics | K0–K9 |
+
+- Reproducible does not mean true: leakage, p-hacking and overfitting all reproduce. Only VALIDATED is a finding.
+- Claims tested on public datasets a networked Lab could have downloaded can reach REPLICATED at most and are
+  labelled RETROSPECTIVE; they never reach VALIDATED.
+- The UI shows the level as a badge with its exact meaning; an honest rejection names the failing check.
+
+### 17.2 Researcher experiences (owner decision 2026-10-23: all adopted)
+The product is judged by these experiences as much as by the Kernel. Each is built on the Lab trace, the Court and
+the existing evidence machinery; none may grant a certificate or weaken a check.
+1. **Court-readiness meter:** while shaping an idea, the Lab shows the predicted chance of reaching VALIDATED (the
+   certifiability preflight, surfaced live) and what would raise it.
+2. **Overnight mode:** a question plus a budget; agents explore unattended; a morning digest of top leads, honest
+   dead ends and costs, with one-click promote.
+3. **Dead-ends library:** every honest rejection and abandoned idea is searchable ("tried in March, failed because
+   X"); personal first, opt-in sharing later.
+4. **"Reproduce this paper":** a paper's main claim becomes a Court case; result REPRODUCIBLE / REPLICATED / could not
+   reproduce, with where it breaks (Claim Audit path; human approval before any verdict about a named paper).
+5. **Personal track record:** the prediction ledger as a calibration profile per researcher.
+6. **Steer by conversation:** ask agents why, redirect them; every steer is recorded in the discovery story.
+7. **Reviewer link:** share a certificate plus its discovery story; one command reruns it.
+8. **Living papers:** methods, figures and numbers generated from certificates, so a paper cannot disagree with its
+   evidence.
+9. **Challenge a claim:** anyone may submit a counter-test; a failed certificate is retracted openly (cascading).
+10. **Starter kits:** ready problem templates per domain so a first session works in minutes.
+11. **Integrations:** Jupyter, VS Code, Zotero, Overleaf; a phone notification when a verdict arrives.
+12. **Visible self-improvement:** how much the harness improved at the researcher's kind of problem, with evidence.
+
+Requirements this adds: a researcher identity on sessions, claims and predictions (local-first); one backend
+"experience API" that the UI and integrations call; all experiences read through kerneld and never expose
+held-out truth or verdict details beyond the release ledger.
