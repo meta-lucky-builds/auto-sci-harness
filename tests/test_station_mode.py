@@ -652,6 +652,26 @@ def test_station_spec_neutralises_global_memory_and_shows_the_archive_as_data():
         station_spec(spec, archive_node="no_such_node")
 
 
+def test_station_switches_are_registered_with_their_row_and_test():
+    """The _STATION ablation group (custom_harness/ablation.py) is pinned here, as _EVOLVE and _RESEARCH are pinned in
+    their files: each switch is registered, names its capability row, and its test is a function of THIS file."""
+    import inspect
+
+    from custom_harness.ablation import _STATION, SWITCHES
+    from custom_harness.scorecard.registry import load_capabilities, switch_fact
+    caps = {c.id: c for c in load_capabilities()}
+    here = {n for n, f in globals().items() if n.startswith("test_") and inspect.isfunction(f)}
+    assert [sw.name for sw in _STATION] == ["station_coordination"]
+    for sw in _STATION:
+        assert SWITCHES[sw.name] is sw and sw.capability in caps
+        path, fn = sw.test.split("::")
+        assert path == "tests/test_station_mode.py" and fn in here, sw.test
+        rec = caps[sw.capability].ablation
+        assert rec is not None and rec.switch == sw.name, sw.capability
+        fact = switch_fact(sw.capability, rec.model_dump(exclude_defaults=True))
+        assert fact["has_switch"] == (not rec.not_covered), fact
+
+
 def test_station_coordination_switch_runs_independent_agents(sw):
     """Ablation (custom_harness/ablation.py `station_coordination`): with the switch OFF no archive is shown,
     nothing is published and no lane is applied, on the same schedule; the log is kept apart (:ABLATED). With

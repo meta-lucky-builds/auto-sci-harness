@@ -198,6 +198,12 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
                      "scope): kept as the L8 export archive's task selection, reachable from no run by design; the "
                      "row stays an invariant-12 gap",
            test=_T + "test_reward_variance_selection_switch_selects_uniformly"),
+)
+
+# The Station (multi-agent research mode, s4-station). Its own group: tests/test_ablation_switches_research.py pins
+# _RESEARCH to the switches whose tests live in that file; this one's test lives with the station tests
+# (tests/test_station_mode.py pins _STATION the same way). int18 stage-c: s4-station had added it to _RESEARCH.
+_STATION: tuple[Switch, ...] = (
     Switch(name="station_coordination", capability="the-station",
            turns_off="research/station/mode.py StationMode: no agent is shown the shared archive (its archive context "
                      "is the switched-off marker), nothing is published to it (every certificate of a turn is "
@@ -207,7 +213,7 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test="tests/test_station_mode.py::test_station_coordination_switch_runs_independent_agents"),
 )
 
-SWITCHES: Mapping[str, Switch] = _registry(*_CORE, *_EVOLVE, *_RESEARCH)
+SWITCHES: Mapping[str, Switch] = _registry(*_CORE, *_EVOLVE, *_RESEARCH, *_STATION)
 
 
 class AblationSet:
