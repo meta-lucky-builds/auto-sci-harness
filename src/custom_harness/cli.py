@@ -47,6 +47,12 @@ def _backend(kind: str) -> Backend:
     raise SystemExit(f"unknown backend '{kind}'")
 
 
+MAP_WORKERS_HELP = ("opt-in: run the model calls of a map whose body is an LLM node on up to N threads (default 1 = "
+                    "sequential); results are committed in item order, so the committed outputs equal the sequential "
+                    "run's; on an error or budget stop up to N-1 started branches are also charged "
+                    "(runtime/engine.py _ParallelBranches)")
+
+
 def _cost_out(store: EvidenceStore, run_id: str, cost: Cost) -> dict[str, Any]:
     """A run's cost as the CLI reports it (invariant 9): the recorded units, with usd taken from the cost-table record
     (gateway/costs.py), so a usd the table cannot price is printed as null with its status, never as 0."""
@@ -74,8 +80,8 @@ def cmd_run(a: argparse.Namespace, store: EvidenceStore) -> int:
         sandbox = DockerSandbox(ws)
     elif a.dev_sandbox:
         sandbox = LocalSandbox(ws, i_understand_no_isolation=True)
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 allow_same_family=a.allow_same_family).run(a.task, inputs, seed=a.seed)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox, allow_same_family=a.allow_same_family,
+                 map_workers=a.map_workers).run(a.task, inputs, seed=a.seed)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, **_cost_out(store, res.run_id, res.cost)}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -96,8 +102,8 @@ def cmd_resume(a: argparse.Namespace, store: EvidenceStore) -> int:
             sandbox = LocalSandbox(Path(run.workspace), i_understand_no_isolation=True)
         else:
             raise SystemExit("this run used a sandbox: pass --docker (or --dev-sandbox for trusted test code)")
-    res = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 allow_same_family=a.allow_same_family).resume(a.run_id, force=a.force)
+    res = Engine(spec, backends=backends, store=store, sandbox=sandbox, allow_same_family=a.allow_same_family,
+                 map_workers=a.map_workers).resume(a.run_id, force=a.force)
     print(json.dumps({"run_id": res.run_id, "status": res.status, "detail": res.detail,
                       "steps": res.steps, **_cost_out(store, res.run_id, res.cost)}, indent=1))
     return 0 if res.status == "completed" else 1
@@ -235,6 +241,10 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .evolve.branches import BranchConfig
     from .evolve.driver import evolve, load_suite
     from .evolve.loop import EvolveConfig
+    if a.islands is not None:
+        return cmd_evolve_islands(a, store)
+    if not a.proposer:
+        raise SystemExit("--proposer is required (or pass --islands ISLANDS_YAML, which names its proposers)")
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
     backends = {}
     for binding in a.role:
@@ -247,7 +257,10 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
     factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
 
-    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds)
+    # --race-allocator: opt-in race allocation (GOAL §5 L1; evolve/loop.py RACE_ALLOCATORS). race_slots stays 1: the
+    # per-completion allocator then evaluates in exactly the batch order (concurrency needs an owner ack, not a flag)
+    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds,
+                       race_allocator=a.race_allocator)
     from .budget import persistent_budget
     if a.max_usd is not None:
         _refuse_unpriced_usd_cap([*backends.values(), proposer])
@@ -264,6 +277,53 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
     print(f"outputs: {out}")
     print(f"campaign: {campaign_id} (report: chh evolve report {campaign_id}; resume: re-run with --campaign-id "
           f"{campaign_id})")
+    return 0
+
+
+def cmd_evolve_islands(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """`chh evolve SPEC --suite S --islands ISLANDS.yaml` (GOAL §5 L7, explicit opt-in): evolve/search.py
+    evolve_islands with the deterministic orchestrator, the policy gate (a declared challenger is trialled, never set
+    without a passing trial) and, with `controller:`, the downgrade-only budget gate. Rounds come from the file
+    (`--generations` is refused), branching is not offered, no weights lever (no model training). Writes
+    islands.json (spec hashes, policy version, stop reason, trial counts: no gate value) and each island's final
+    spec into the output directory."""
+    import custom_harness.research  # noqa: F401
+
+    from .evolve.driver import load_suite
+    from .evolve.loop import EvolveConfig
+    from .evolve.search import evolve_islands, islands_summary, load_islands_config
+    if a.generations != 1 or a.branch_by or a.proposer:
+        raise SystemExit("refused: with --islands the rounds and proposers come from the islands file; --generations, "
+                         "--proposer and --branch-by do not apply")
+    icfg = load_islands_config(Path(a.islands))
+    spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
+    backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
+    proposers = {name: _backend(kind) for name, kind in sorted(icfg.proposers.items())}
+    controller = _backend(icfg.controller) if icfg.controller else None
+    if a.allow_same_family:
+        os.environ["CHH_ALLOW_SAME_FAMILY"] = "1"
+    run_tag = f"islands-{spec.id}-{int(time.time())}"
+    factory = _sandbox_factory(a, data_dir() / "sandboxes" / run_tag)
+    cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds,
+                       race_allocator=a.race_allocator)
+    from .budget import persistent_budget
+    limits = {"usd": a.max_usd, "tokens": a.max_tokens, "quota_units": a.max_quota, "wall_s": a.max_wall_s}
+    campaign_id = a.campaign_id or run_tag
+    if a.max_usd is not None:  # invariant 9: a usd cap an unpriced backend can never trigger is refused
+        _refuse_unpriced_usd_cap([*backends.values(), *proposers.values(), *([controller] if controller else [])])
+    budget = persistent_budget(store, campaign_id, {k: v for k, v in limits.items() if v is not None})
+    res = evolve_islands(spec, load_suite(Path(a.suite)), islands=list(icfg.islands), policy=icfg.policy,
+                         rounds=icfg.rounds, total_budget=icfg.total_budget, proposers=proposers,
+                         backends=backends, store=store, sandbox_factory=factory, cfg=cfg, campaign=campaign_id,
+                         controller=controller, challenger=icfg.challenger, trial=icfg.trial,
+                         campaign_budget=budget)
+    out = data_dir() / "evolve" / campaign_id
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "islands.json").write_text(json.dumps(islands_summary(res), indent=1, sort_keys=True), encoding="utf-8")
+    for iid, parent in sorted(res.parents.items()):
+        (out / f"spec_{iid}.yaml").write_text(yaml.safe_dump(parent.model_dump(mode="json"), sort_keys=False),
+                                              encoding="utf-8")
+    print(f"outputs: {out}")
     return 0
 
 
@@ -831,17 +891,21 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
     r.add_argument("--docker", action="store_true", help="Docker sandbox (required for agent-written code)")
+    r.add_argument("--map-workers", type=int, default=1, help=MAP_WORKERS_HELP)
     ev = sub.add_parser("evolve", help="evolve a harness spec on a task suite (never touches the sealed split)")
     ev.add_argument("spec")
     ev.add_argument("--suite", required=True)
     ev.add_argument("--role", action="append", default=[], help="role=backend for harness runs")
     ev.add_argument("--allow-same-family", action="store_true",
                    help="override invariant 5 (judge/replicator family); recorded as NOT MET")
-    ev.add_argument("--proposer", required=True, help="backend for the edit proposer")
+    ev.add_argument("--proposer", help="backend for the edit proposer (required unless --islands)")
     ev.add_argument("--generations", type=int, default=1)
     ev.add_argument("--seeds", type=int, nargs="+", default=[0])
     ev.add_argument("--n-edits", type=int, default=3)
     ev.add_argument("--race-rounds", type=int, default=2)
+    ev.add_argument("--race-allocator", choices=["batch", "per_completion", "voi"], default="batch",
+                    help="opt-in race allocation: batch (default) | per_completion (completion-driven, one slot) | "
+                         "voi (knowledge-gradient value of information); the acceptance rule is the same")
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
     ev.add_argument("--campaign-id", help="campaign id: persisted budget, generation ledger, durable units and "
@@ -853,6 +917,10 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--branch-by", choices=["family", "domain"],
                     help="L6.9: make branches of gate-rejected cluster winners and record the route table "
                          "(see `chh evolve branches|route SPEC`)")
+    ev.add_argument("--islands", metavar="ISLANDS_YAML",
+                    help="opt-in L7 campaign mode: islands under the deterministic orchestrator, its policy gate and "
+                         "the downgrade-only controller (evolve/search.py load_islands_config: rounds, budget, "
+                         "policy, proposers per island). No weights lever: no model training")
     er = sub.add_parser("evolve-report", help="`chh evolve report CAMPAIGN`: generation reports from the evolve "
                                               "ledger plus the recompute audit (exit 1 if anything does not reproduce)")
     er.add_argument("campaign")
@@ -867,6 +935,7 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--docker", action="store_true")
     rr.add_argument("--dev-sandbox", action="store_true")
     rr.add_argument("--force", action="store_true", help="resume even if the owning process looks alive")
+    rr.add_argument("--map-workers", type=int, default=1, help=MAP_WORKERS_HELP)
     rd = sub.add_parser("return-data", help="HUMAN: register measurements returned for an approved physical protocol")
     rd.add_argument("run_id")
     rd.add_argument("--file", required=True)

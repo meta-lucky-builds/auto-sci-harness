@@ -127,7 +127,7 @@ def static_problems(src_root: Path) -> list[str]:
                 if decision and "loop_label" not in keys:
                     problems.append(f"{rel}:{node.lineno}: a loop decision record (status {DECISION_STATUSES}) "
                                     f"without 'loop_label'")
-                if rel == "evolve/driver.py" and "generation" in keys and "decision" in keys \
+                if rel == "evolve/driver.py" and "generation" in keys and ({"decision", "decision_code"} & keys) \
                         and "loop_label" not in keys:
                     problems.append(f"{rel}:{node.lineno}: the generation summary without 'loop_label'")
     claims = (root / "research" / "claims.py").read_text(encoding="utf-8")

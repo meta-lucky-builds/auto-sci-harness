@@ -253,11 +253,11 @@ def test_attack_the_proposer_visible_rejecting_stage_carries_a_gate_bit_no_relea
         "('cost' tells the proposer the held-out gate and every LOFO group passed)")
 
 
-@pytest.mark.xfail(strict=True, reason="OPEN, needs owner decision: is the driver's out_dir / stdout agent-visible? "
-                   "(pre-existing driver behaviour; fixing it edits the summary lines w2-wiring also changes)")
 def test_attack_driver_writes_the_continuous_gate_mean_into_the_output_directory_and_log(store, tmp_path,
                                                                                         monkeypatch):
-    """ATTACK (invariant 18; NEEDS OWNER DECISION on who may read the driver's output): `driver.evolve` writes each
+    """KILLED (s4-wiring; orchestrator decision, owner-delegated 2026-10-14: out_dir and the log are agent-visible, so
+    they carry the verdict bit and a closed reason code only, driver.DECISION_CODES).
+    ATTACK (invariant 18): `driver.evolve` wrote each
     generation's free-text `decision` into out_dir/genNNN.json and prints it through `log`. For a gate rejection that
     text is selection.gate's reason, e.g. 'no improvement on gate split (mean=-0.5)': a continuous held-out value.
     export.py drops this exact field from the proposer's view, and driver.check_reveals itself treats out_dir as an
@@ -283,7 +283,11 @@ def test_attack_driver_writes_the_continuous_gate_mean_into_the_output_directory
                   sandbox_factory=lambda k: None, cfg=EvolveConfig(seeds=(0, 1), n_edits=1, race_rounds=1),
                   out_dir=out, log=lines.append)
     written = (out / "gen000.json").read_text(encoding="utf-8")
-    assert "gate split" in written  # the gate-rejection reason reached the file (the attack is observed)
+    import json
+    summary = json.loads(written)
+    # the generation was gate-rejected (the attack's world), and the file says so only by the bit and the closed code
+    assert summary["accepted"] is False and summary["decision_code"] == "held_out_gate"
+    assert "decision" not in summary and "gate split" not in written
     for surface, text in (("out_dir/gen000.json", written), ("driver log", "\n".join(lines))):
         assert "mean=" not in text and "CI lo=" not in text, (
             f"a continuous gate value reached the {surface}: "

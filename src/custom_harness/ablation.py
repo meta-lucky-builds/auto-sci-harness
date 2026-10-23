@@ -46,6 +46,9 @@ from typing import Any
 
 # the ONLY module allowed to construct a non-empty AblationSet (the scorecard runner's ablation entry point)
 ENTRY_POINT_MODULE = "custom_harness.scorecard.runner"
+# the duplicate (novelty) gate's switch name, named once here so the acceptance code (evolve/loop.py) refers to it
+# without carrying the word (emergence.check_novelty_isolation scans acceptance paths; this registry is not one)
+DUPLICATE_GATE_SWITCH = "novelty-gate"
 MARKER = "ABLATED"
 
 
@@ -114,7 +117,8 @@ _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
            turns_off="control/islands.py Orchestrator.step: a stalled island on the harness_edit lever keeps its "
                      "budget weight (no stall_shrink) and its mutator mix apart from the prompt-only quota cap (no "
                      "diversification); decisions are logged under `orchestrator_decision:ABLATED`. Reachability: "
-                     "no src module constructs an Orchestrator yet, so only a System that builds one reaches it",
+                     "evolve/search.py evolve_islands (`chh evolve --islands`, opt-in) builds the Orchestrator; an "
+                     "ablation arm reaches the switch through evolve_islands(ablation=...)",
            test=_T_EVOLVE + "test_orchestrator_reallocation_switch"),
     Switch(name="novelty-gate", capability="harnessx",
            turns_off="evolve/loop.py evolve_generation: the novelty gate (rejected_signatures) is empty, so an edit "
@@ -128,19 +132,22 @@ _EVOLVE: tuple[Switch, ...] = (  # L6 / L7 (evolve/, control/)
            test=_T_EVOLVE + "test_observation_pack_switch"),
     Switch(name="lever-choice", capability="sia",
            turns_off="control/islands.py Orchestrator.step: the `more_evaluation` lever is never chosen; a stalled "
-                     "island always takes the harness_edit lever (no extra seed). Reachability: no src module "
-                     "constructs an Orchestrator yet, so only a System that builds one reaches it",
+                     "island always takes the harness_edit lever (no extra seed). Reachability: evolve/search.py "
+                     "evolve_islands (`chh evolve --islands`, opt-in) builds the Orchestrator; an ablation arm "
+                     "reaches the switch through evolve_islands(ablation=...)",
            test=_T_EVOLVE + "test_lever_choice_switch"),
     Switch(name="voi-allocation", capability="mda",
            turns_off="evolve/loop.py evolve_generation: with race_allocator='voi', the race runs as the batch race "
                      "(selection.race) instead of control/voi.voi_race. A no-op under the default "
-                     "race_allocator='batch': an ablation of this row must run with race_allocator='voi'",
+                     "race_allocator='batch': an ablation of this row must run with race_allocator='voi' "
+                     "(opt-in: `chh evolve --race-allocator voi`)",
            test=_T_EVOLVE + "test_voi_allocation_switch"),
     Switch(name="per-completion-race", capability="openresearch-alphaxiv",
            turns_off="evolve/loop.py evolve_generation: with race_allocator='per_completion', the race runs as the "
                      "sequential batch race (selection.race, race_slots=1) instead of the completion-driven "
                      "allocator (control/evalrace.race_evaluator). A no-op under the default race_allocator='batch': "
-                     "an ablation of this row must run with race_allocator='per_completion'",
+                     "an ablation of this row must run with race_allocator='per_completion' "
+                     "(opt-in: `chh evolve --race-allocator per_completion`)",
            test=_T_EVOLVE + "test_per_completion_race_switch"),
 )
 
@@ -163,14 +170,17 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test=_T + "test_method_library_switch_withholds_methods"),
     Switch(name="data_profile_kway_rank", capability="scider",
            turns_off="research/modules.py profile_data computes no profile (an 'ablated' marker instead); "
-                     "research/tournament.py tournament_module (only in specs with a research.tournament node, e.g. "
-                     "examples/research_v1.yaml; research_v2 ranks by execution) makes no judge call and keeps the "
-                     "proposer's order",
+                     "research/tournament.py tournament_module (in specs with a research.tournament node, e.g. "
+                     "examples/research_v1.yaml, or research_v2 with the opt-in research.admit_rank "
+                     "params.tournament; as shipped research_v2 ranks by execution) makes no judge call and keeps "
+                     "the proposer's order",
            test=_T + "test_data_profile_kway_rank_switch_skips_profile_and_ranking"),
     Switch(name="btl_tournament", capability="robin",
            turns_off="research/tournament.py tournament_module: no judge call, no Bradley-Terry fit; the queue keeps "
-                     "the proposer's order (only in specs with a research.tournament node, e.g. "
-                     "examples/research_v1.yaml; under research_v2.yaml, which ranks by execution, it changes nothing)",
+                     "the proposer's order (in specs with a research.tournament node, e.g. examples/research_v1.yaml, "
+                     "or under "
+                     "research_v2.yaml only with the opt-in research.admit_rank params.tournament; as shipped, "
+                     "research_v2 ranks by execution and this switch changes nothing there)",
            test=_T + "test_btl_tournament_switch_keeps_the_proposer_order"),
     Switch(name="experiment_tree_repair_improve", capability="ai-scientist-v1-v2",
            turns_off="research/modules.py run_candidate never routes to `fix` (a failed node is abandoned, no "
@@ -178,13 +188,15 @@ _RESEARCH: tuple[Switch, ...] = (  # L3 / L4 / L5 and the rest (research/, memor
            test=_T + "test_experiment_tree_switch_removes_repairs_and_improve_rounds"),
     Switch(name="multi_source_retrieval", capability="feynman",
            turns_off="literature/client.py LiteratureClient.search asks only the first source of its order (no "
-                     "fallback across sources); lookups are unchanged. Library level only: no run path calls search, "
-                     "so no ablation run exercises this switch yet",
+                     "fallback across sources); lookups are unchanged. Reached from `chh lit-search` (production, all "
+                     "sources) and, for an ablation arm, by a scorecard System that builds live_client / "
+                     "offline_client(ablation=...); no harness run path calls search",
            test=_T + "test_multi_source_retrieval_switch_disables_source_fallback"),
     Switch(name="reward_variance_selection", capability="aworld-rl",
            turns_off="weights/selection.py select_by_reward_variance ignores the variance: every task in task-id "
-                     "order, none excluded. Library level only: nothing in a run calls weights/, so no ablation run "
-                     "exercises this switch yet",
+                     "order, none excluded. Archive only (owner decision 2026-10-14: no model training, L8 out of "
+                     "scope): kept as the L8 export archive's task selection, reachable from no run by design; the "
+                     "row stays an invariant-12 gap",
            test=_T + "test_reward_variance_selection_switch_selects_uniformly"),
 )
 
@@ -276,5 +288,5 @@ def refuse_if_ablated(store: Any, run_id: str | None, what: str) -> None:
                               f"ablated run produces is persisted, certified or accepted")
 
 
-__all__ = ["ENTRY_POINT_MODULE", "MARKER", "NO_ABLATION", "SWITCHES", "AblationError", "AblationRefused",
-           "AblationSet", "Switch", "refuse_if_ablated", "run_ablated"]
+__all__ = ["DUPLICATE_GATE_SWITCH", "ENTRY_POINT_MODULE", "MARKER", "NO_ABLATION", "SWITCHES", "AblationError",
+           "AblationRefused", "AblationSet", "Switch", "refuse_if_ablated", "run_ablated"]

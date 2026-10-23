@@ -35,6 +35,15 @@ Generation report: built from the ledger only; every value is a cell {"value", "
 generation record (signal, stall, budget). Proposer-written text appears only as quoted data, labelled unverified and
 escaped in the markdown rendering.
 
+ABLATED campaigns (custom_harness/ablation.py: an AblationSet only the scorecard runner's ablation entry point can
+make): `open_campaign(..., ablation=...)` keeps an ablation arm's campaign ENTIRELY in `<kind>:ABLATED` record kinds
+(its declaration, generation and stopped records, and the loop records it attributes, which an ablated generation
+already writes under `<kind>:ABLATED`). An ablated campaign is therefore declared, numbered, resumed and stall-tracked
+apart from production, binds its switched-off set (a resume under another set is refused), and no production reader
+(resume, report, verify, L7 signals) sees it. Every ablated record carries `ABLATED: true` and `disabled`; an ablated
+generation that accepted an edit, or whose loop records do not carry this arm's marker, is refused (fail closed).
+The generation report (`generation_report`) is built for production campaigns only.
+
 Limits: positions are positions in THIS store (a store rebuilt from a subset renumbers them); a second writer
 appending loop records to the same store during a generation makes `record` fail closed (it cannot attribute them).
 """
@@ -52,6 +61,7 @@ from fractions import Fraction
 from typing import Any
 
 from .. import config
+from ..ablation import MARKER, NO_ABLATION, AblationSet
 from ..store import EvidenceStore
 from .export import _STATS_VIEW, lineage_view, proposer_view, stats_view
 from .loop import EvolveConfig, GenerationResult
@@ -79,6 +89,31 @@ STOP_REASONS = ("budget_exceeded",)
 MAX_STOP_DETAIL = 500
 _STOP_FIELDS = frozenset({"format", "campaign", "generation", "parent", "schedule_hash", "budget", "reason", "detail",
                           "refs"})
+# ABLATED campaigns (module docstring): the loop's lineage statuses of an ablated generation, and the marker fields
+# every ablated ledger record carries in addition to its production fields
+ABLATED_STATUSES = ("ablated_not_accepted", "ablated_edit_type")
+_ABL_FIELDS = frozenset({MARKER, "disabled"})
+LOOP_KINDS = ("generation_stats", "lineage", "harness_edit")
+
+
+def kind_of(kind: str, ablated: bool) -> str:
+    """The record kind of `kind` in a production (False) or ABLATED (True) campaign."""
+    return f"{kind}:{MARKER}" if ablated else kind
+
+
+def _check_marker(rec: Any, ablated: bool, disabled: Sequence[str] | None = None) -> None:
+    """An ablated record carries `ABLATED: true` and a non-empty sorted list of switch names (equal to `disabled` when
+    given); a production record carries neither."""
+    if not ablated:
+        if isinstance(rec, dict) and (_ABL_FIELDS & set(rec)):
+            raise LedgerError("a production record carries the ABLATED marker")
+        return
+    names = rec.get("disabled") if isinstance(rec, dict) else None
+    if not isinstance(rec, dict) or rec.get(MARKER) is not True or not isinstance(names, list) or not names \
+            or not all(isinstance(x, str) for x in names) or names != sorted(set(names)):
+        raise LedgerError("an ABLATED record without a well-formed ABLATED marker")
+    if disabled is not None and names != list(disabled):
+        raise LedgerError(f"ABLATED record switched off {names}, this campaign {list(disabled)}")
 
 
 class LedgerError(ValueError):
@@ -174,18 +209,23 @@ class AnnealSchedule:
 
 
 # ============================================================================== signals and stall
-def generation_signal(stats: Mapping[str, Any], lineage: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def generation_signal(stats: Mapping[str, Any], lineage: Sequence[Mapping[str, Any]], *,
+                      ablated: bool = False) -> dict[str, Any]:
     """One generation's gate bits, from its `generation_stats` record and its `lineage` records read through the
     proposer-visible views. Fail closed (LedgerError) on a non-count, an unknown status or stage, or stats counts
-    that disagree with the lineage statuses."""
+    that disagree with the lineage statuses. `ablated`: the records of an ABLATED generation (their `ablated_*`
+    statuses are known; any accept is refused: an ablation arm never accepts)."""
     st = stats_view(dict(stats))
     for k in _COUNT_FIELDS:
         if not _is_int(st.get(k)) or st[k] < 0:
             raise LedgerError(f"generation_stats field {k!r} is not a count")
     rows = [lineage_view(dict(r)) for r in lineage]
     statuses = [r.get("status") for r in rows]
-    if any(s not in LINEAGE_STATUSES for s in statuses):
+    known = LINEAGE_STATUSES + (ABLATED_STATUSES if ablated else ())
+    if any(s not in known for s in statuses):
         raise LedgerError("lineage record with an unknown status")
+    if ablated and (st["accepted"] != 0 or "accepted" in statuses):
+        raise LedgerError("an ABLATED generation accepted an edit (an ablation arm never accepts)")
     for s in ("accepted", "rejected_gate", "infra_aborted"):
         if statuses.count(s) != st[s]:
             raise LedgerError(f"generation_stats {s}={st[s]} disagrees with the lineage ({statuses.count(s)})")
@@ -234,9 +274,11 @@ def stall_evidence(signals: Sequence[Mapping[str, Any]], window: int = STALL_WIN
 
 
 # ============================================================================== campaign ledger (driver hook)
-def _check_gen_record(rec: Any) -> dict[str, Any]:
-    if not isinstance(rec, dict) or set(rec) != _GEN_FIELDS or rec.get("format") != FORMAT:
+def _check_gen_record(rec: Any, ablated: bool = False) -> dict[str, Any]:
+    fields = _GEN_FIELDS | _ABL_FIELDS if ablated else _GEN_FIELDS
+    if not isinstance(rec, dict) or set(rec) != fields or rec.get("format") != FORMAT:
         raise LedgerError("generation_ledger record is malformed")
+    _check_marker(rec, ablated)
     refs = rec["refs"]
     if not isinstance(refs, dict) or set(refs) != {"generation_stats", "lineage", "harness_edit"} \
             or not _is_int(refs["generation_stats"]) or refs["generation_stats"] < 0:
@@ -248,18 +290,24 @@ def _check_gen_record(rec: Any) -> dict[str, Any]:
     if not _is_int(rec["generation"]) or rec["generation"] < 0 or not _is_int(rec["budget"]) or rec["budget"] < 1:
         raise LedgerError("generation_ledger generation/budget malformed")
     _check_signal(rec["signal"])
+    if ablated and rec["signal"]["accepted"]:
+        raise LedgerError("an ABLATED generation record accepted an edit")
     if not isinstance(rec["stall"], dict):
         raise LedgerError("generation_ledger stall malformed")
     return rec
 
 
-def _declaration(store: EvidenceStore, campaign: str) -> tuple[int, dict[str, Any], AnnealSchedule]:
-    rows = [(i, r) for i, r in enumerate(store.records(CAMPAIGN_KIND)) if r.get("campaign") == campaign]
+def _declaration(store: EvidenceStore, campaign: str, ablated: bool = False
+                 ) -> tuple[int, dict[str, Any], AnnealSchedule]:
+    rows = [(i, r) for i, r in enumerate(store.records(kind_of(CAMPAIGN_KIND, ablated)))
+            if r.get("campaign") == campaign]
     if len(rows) != 1:
         raise LedgerError(f"campaign {campaign!r} has {len(rows)} declarations (need exactly 1)")
     n, doc = rows[0]
-    if set(doc) != _CAMPAIGN_FIELDS or doc.get("format") != FORMAT or doc.get("stall_window") != STALL_WINDOW:
+    fields = _CAMPAIGN_FIELDS | _ABL_FIELDS if ablated else _CAMPAIGN_FIELDS
+    if set(doc) != fields or doc.get("format") != FORMAT or doc.get("stall_window") != STALL_WINDOW:
         raise LedgerError(f"campaign {campaign!r} declaration is malformed or has another stall window")
+    _check_marker(doc, ablated)
     sched = AnnealSchedule.from_record(doc["schedule"])
     if doc["schedule_hash"] != sched.schedule_hash() or not _is_int(doc["n_edits_cap"]) \
             or sched.start > doc["n_edits_cap"]:
@@ -267,11 +315,13 @@ def _declaration(store: EvidenceStore, campaign: str) -> tuple[int, dict[str, An
     return n, doc, sched
 
 
-def _campaign_generations(store: EvidenceStore, campaign: str) -> list[tuple[int, dict[str, Any]]]:
+def _campaign_generations(store: EvidenceStore, campaign: str, ablated: bool = False
+                          ) -> list[tuple[int, dict[str, Any]]]:
     """(position, record) of the campaign's generation records, checked to be numbered 0..k-1 in order."""
-    rows = [(i, r) for i, r in enumerate(store.records(GENERATION_KIND)) if r.get("campaign") == campaign]
+    rows = [(i, r) for i, r in enumerate(store.records(kind_of(GENERATION_KIND, ablated)))
+            if r.get("campaign") == campaign]
     for j, (_, r) in enumerate(rows):
-        _check_gen_record(r)
+        _check_gen_record(r, ablated)
         if r["generation"] != j:
             raise LedgerError(f"campaign {campaign!r}: generation records are not numbered 0..k-1")
     return rows
@@ -279,20 +329,27 @@ def _campaign_generations(store: EvidenceStore, campaign: str) -> list[tuple[int
 
 class CampaignLedger:
     """Created by `open_campaign`. Per generation the driver calls `begin(cfg)` (returns cfg with the annealed
-    n_edits and snapshots the record counts) before `evolve_generation`, then `record(res)` after it."""
+    n_edits and snapshots the record counts) before `evolve_generation`, then `record(res)` after it. With a
+    non-empty `ablation` every kind it reads and writes is the `:ABLATED` kind (module docstring)."""
 
     def __init__(self, store: EvidenceStore, campaign: str, schedule: AnnealSchedule, n_edits_cap: int,
-                 next_generation: int):
+                 next_generation: int, ablation: AblationSet = NO_ABLATION):
+        if not isinstance(ablation, AblationSet):
+            raise TypeError("ablation must be an AblationSet (custom_harness.ablation)")
         self.store, self.campaign, self.schedule = store, campaign, schedule
         self.n_edits_cap, self.generation = n_edits_cap, next_generation
+        self.ablation, self.ablated = ablation, bool(ablation)
         self._snap: dict[str, int] | None = None
         self._budget = 0
+
+    def _k(self, kind: str) -> str:
+        return kind_of(kind, self.ablated)
 
     def begin(self, cfg: EvolveConfig) -> EvolveConfig:
         budget = self.schedule.budget_at(self.generation)
         if budget > self.n_edits_cap:  # unreachable after open_campaign's check; kept fail closed
             raise LedgerError("annealed budget above the n_edits the multiplicity bound was computed from")
-        self._snap = {k: len(self.store.records(k)) for k in ("generation_stats", "lineage", "harness_edit")}
+        self._snap = {k: len(self.store.records(self._k(k))) for k in LOOP_KINDS}
         self._budget = budget
         return dataclasses.replace(cfg, n_edits=budget)
 
@@ -302,9 +359,9 @@ class CampaignLedger:
         if self._snap is None:
             raise LedgerError("record() without begin()")
         snap, self._snap = self._snap, None
-        stats = self.store.records("generation_stats")
-        lineage = self.store.records("lineage")
-        edits = self.store.records("harness_edit")
+        stats = self.store.records(self._k("generation_stats"))
+        lineage = self.store.records(self._k("lineage"))
+        edits = self.store.records(self._k("harness_edit"))
         if len(stats) != snap["generation_stats"] + 1:
             raise LedgerError("expected exactly one new generation_stats record for this generation")
         new_lineage = lineage[snap["lineage"]:]
@@ -315,10 +372,15 @@ class CampaignLedger:
             raise LedgerError("a record in this generation's range has another parent")
         if stats_view(stats[-1]) != stats_view({"parent": res.parent_hash, **res.counters}):
             raise LedgerError("generation_stats record disagrees with the generation's counters")
-        signal = generation_signal(stats[-1], new_lineage)
+        if self.ablated:  # this arm's records only, and an ablation arm never accepts (fail closed)
+            for r in [stats[-1], *new_lineage]:
+                _check_marker(r, True, self.ablation.names)
+            if res.accepted:
+                raise LedgerError("an ABLATED generation reported an accepted edit")
+        signal = generation_signal(stats[-1], new_lineage, ablated=self.ablated)
         if signal["accepted"] != res.accepted:
             raise LedgerError("accept bit in the records disagrees with the generation result")
-        prior = [r["signal"] for _, r in _campaign_generations(self.store, self.campaign)]
+        prior = [r["signal"] for _, r in _campaign_generations(self.store, self.campaign, self.ablated)]
         if len(prior) != self.generation:
             raise LedgerError("campaign generation records changed while this campaign was running")
         rec = {"format": FORMAT, "campaign": self.campaign, "generation": self.generation,
@@ -326,8 +388,8 @@ class CampaignLedger:
                "schedule_hash": self.schedule.schedule_hash(), "budget": self._budget,
                "refs": {"generation_stats": len(stats) - 1, "lineage": [snap["lineage"], len(lineage)],
                         "harness_edit": [snap["harness_edit"], len(edits)]},
-               "signal": signal, "stall": stall_evidence([*prior, signal])}
-        self.store.append_record(GENERATION_KIND, rec)
+               "signal": signal, "stall": stall_evidence([*prior, signal]), **self.ablation.marker()}
+        self.store.append_record(self._k(GENERATION_KIND), rec)
         self.generation += 1
         return rec
 
@@ -344,40 +406,46 @@ class CampaignLedger:
         rec = {"format": FORMAT, "campaign": self.campaign, "generation": self.generation, "parent": parent_hash,
                "schedule_hash": self.schedule.schedule_hash(), "budget": self._budget, "reason": reason,
                "detail": str(detail)[:MAX_STOP_DETAIL],
-               "refs": {k: [snap[k], len(self.store.records(k))]
-                        for k in ("generation_stats", "lineage", "harness_edit")}}
-        self.store.append_record(STOPPED_KIND, rec)
+               "refs": {k: [snap[k], len(self.store.records(self._k(k)))] for k in LOOP_KINDS},
+               **self.ablation.marker()}
+        self.store.append_record(self._k(STOPPED_KIND), rec)
         return rec
 
 
-def last_parent(store: EvidenceStore, campaign: str) -> str | None:
+def last_parent(store: EvidenceStore, campaign: str, *, ablated: bool = False) -> str | None:
     """The spec hash a resumed campaign continues from: the `new_parent` of its last completed generation (None when
     no generation completed). Read through the checked numbering (fail closed on malformed records)."""
-    rows = _campaign_generations(store, campaign)
+    rows = _campaign_generations(store, campaign, ablated)
     return rows[-1][1]["new_parent"] if rows else None
 
 
-def first_parent(store: EvidenceStore, campaign: str) -> str | None:
-    rows = _campaign_generations(store, campaign)
+def first_parent(store: EvidenceStore, campaign: str, *, ablated: bool = False) -> str | None:
+    rows = _campaign_generations(store, campaign, ablated)
     return rows[0][1]["parent"] if rows else None
 
 
-def stopped_records(store: EvidenceStore, campaign: str) -> list[tuple[int, dict[str, Any]]]:
+def stopped_records(store: EvidenceStore, campaign: str, *, ablated: bool = False) -> list[tuple[int, dict[str, Any]]]:
     """(position, record) of the campaign's `generation_stopped` records, in order."""
-    return [(i, r) for i, r in enumerate(store.records(STOPPED_KIND)) if r.get("campaign") == campaign]
+    return [(i, r) for i, r in enumerate(store.records(kind_of(STOPPED_KIND, ablated)))
+            if r.get("campaign") == campaign]
 
 
-def verify_stopped(store: EvidenceStore, n: int) -> list[str]:
+def verify_stopped(store: EvidenceStore, n: int, *, ablated: bool = False) -> list[str]:
     """Recompute stopped record `n` (position in `store.records("generation_stopped")`): exact shape, its campaign is
     declared, its budget equals the declared schedule at its index, its index was the next one to complete when it
     stopped (it is at most the number of completed generations), and every loop record in its ranges has its
     parent. Returns problems (empty = consistent)."""
-    rows = store.records(STOPPED_KIND)
+    rows = store.records(kind_of(STOPPED_KIND, ablated))
     if not _is_int(n) or not 0 <= n < len(rows):
         return [f"generation_stopped #{n} does not exist"]
     rec = rows[n]
     where = f"generation_stopped #{n}"
-    if not isinstance(rec, dict) or set(rec) != _STOP_FIELDS or rec.get("format") != FORMAT \
+    try:
+        _check_marker(rec, ablated)
+    except LedgerError as e:
+        return [f"{where}: {e}"]
+    fields = _STOP_FIELDS | _ABL_FIELDS if ablated else _STOP_FIELDS
+    if not isinstance(rec, dict) or set(rec) != fields or rec.get("format") != FORMAT \
             or rec.get("reason") not in STOP_REASONS or not isinstance(rec.get("detail"), str) \
             or not _is_int(rec.get("generation")) or rec["generation"] < 0 or not _is_int(rec.get("budget")):
         return [f"{where}: malformed"]
@@ -387,8 +455,8 @@ def verify_stopped(store: EvidenceStore, n: int) -> list[str]:
             for r in refs.values()):
         return [f"{where}: refs are not [start, end) ranges"]
     try:
-        _, decl, sched = _declaration(store, rec["campaign"])
-        completed = _campaign_generations(store, rec["campaign"])
+        _, decl, sched = _declaration(store, rec["campaign"], ablated)
+        completed = _campaign_generations(store, rec["campaign"], ablated)
     except LedgerError as e:
         return [f"{where}: {e}"]
     problems = []
@@ -401,7 +469,7 @@ def verify_stopped(store: EvidenceStore, n: int) -> list[str]:
     elif rec["generation"] < len(completed) and completed[rec["generation"]][1]["parent"] != rec["parent"]:
         problems.append(f"{where}: its parent differs from the completed generation {rec['generation']}'s")
     for kind, (lo, hi) in refs.items():
-        recs = store.records(kind)
+        recs = store.records(kind_of(kind, ablated))
         if hi > len(recs):
             problems.append(f"{where}: {kind} range points past the end of the records")
         elif any(r.get("parent") != rec["parent"] for r in recs[lo:hi]):
@@ -410,23 +478,30 @@ def verify_stopped(store: EvidenceStore, n: int) -> list[str]:
 
 
 def open_campaign(store: EvidenceStore, campaign: str | None, schedule: AnnealSchedule | None,
-                  cfg: EvolveConfig) -> CampaignLedger | None:
+                  cfg: EvolveConfig, *, ablation: AblationSet = NO_ABLATION) -> CampaignLedger | None:
     """Declare a new campaign or resume a declared one (detected by its `evolve_campaign` record). Without a campaign
     there is no ledger (None) and a schedule is refused (it could not be persisted). A new campaign without a schedule
     declares constant(cfg.n_edits); a resume without one continues the declared schedule. Refused (LedgerError):
-    a resume with a different schedule; a schedule starting above cfg.n_edits; malformed earlier records."""
+    a resume with a different schedule; a schedule starting above cfg.n_edits; malformed earlier records.
+    `ablation` (non-empty): an ABLATED campaign in the `:ABLATED` kinds (module docstring); it declares its
+    switched-off set, and a resume under another set is refused."""
+    if not isinstance(ablation, AblationSet):
+        raise TypeError("ablation must be an AblationSet (custom_harness.ablation)")
+    abl = bool(ablation)
     if campaign is None:
         if schedule is not None:
             raise LedgerError("an annealed schedule needs a `campaign` (it is declared in and resumed from its ledger)")
         return None
     if not isinstance(campaign, str) or not campaign:
         raise LedgerError("campaign must be a non-empty string")
-    declared = [r for r in store.records(CAMPAIGN_KIND) if r.get("campaign") == campaign]
+    declared = [r for r in store.records(kind_of(CAMPAIGN_KIND, abl)) if r.get("campaign") == campaign]
     if declared:
-        _, _, sched = _declaration(store, campaign)
+        _, doc, sched = _declaration(store, campaign, abl)
+        if abl:
+            _check_marker(doc, True, ablation.names)  # an arm resumes only under its own switched-off set
         if schedule is not None and schedule.schedule_hash() != sched.schedule_hash():
             raise LedgerError(f"campaign {campaign!r} was declared with another schedule ({sched.as_record()})")
-        nxt = len(_campaign_generations(store, campaign))
+        nxt = len(_campaign_generations(store, campaign, abl))
     else:
         sched = schedule if schedule is not None else AnnealSchedule("constant", start=cfg.n_edits)
         nxt = 0
@@ -434,25 +509,26 @@ def open_campaign(store: EvidenceStore, campaign: str | None, schedule: AnnealSc
         raise LedgerError(f"schedule start {sched.start} > cfg.n_edits {cfg.n_edits}: the multiplicity bound is "
                           "computed from cfg.n_edits, so annealing may only shrink the budget")
     if not declared:
-        if [r for r in store.records(GENERATION_KIND) if r.get("campaign") == campaign]:
+        if [r for r in store.records(kind_of(GENERATION_KIND, abl)) if r.get("campaign") == campaign]:
             raise LedgerError(f"campaign {campaign!r} has generation records but no declaration")
-        store.append_record(CAMPAIGN_KIND, {"format": FORMAT, "campaign": campaign, "schedule": sched.as_record(),
-                                            "schedule_hash": sched.schedule_hash(), "n_edits_cap": cfg.n_edits,
-                                            "stall_window": STALL_WINDOW})
-    return CampaignLedger(store, campaign, sched, cfg.n_edits, nxt)
+        store.append_record(kind_of(CAMPAIGN_KIND, abl), {
+            "format": FORMAT, "campaign": campaign, "schedule": sched.as_record(),
+            "schedule_hash": sched.schedule_hash(), "n_edits_cap": cfg.n_edits, "stall_window": STALL_WINDOW,
+            **ablation.marker()})
+    return CampaignLedger(store, campaign, sched, cfg.n_edits, nxt, ablation=ablation)
 
 
-def verify_generation(store: EvidenceStore, n: int) -> list[str]:
+def verify_generation(store: EvidenceStore, n: int, *, ablated: bool = False) -> list[str]:
     """Recompute generation record `n` (position in `store.records("generation_ledger")`) from its sources: the
     signal from its referenced stats/lineage records, the budget from the campaign's declared schedule, the stall from
     the campaign's earlier records. Returns problems (empty = consistent)."""
-    gens = store.records(GENERATION_KIND)
+    gens = store.records(kind_of(GENERATION_KIND, ablated))
     if not _is_int(n) or not 0 <= n < len(gens):
         return [f"generation_ledger #{n} does not exist"]
     try:
-        rec = _check_gen_record(gens[n])
-        _, decl, sched = _declaration(store, rec["campaign"])
-        rows = _campaign_generations(store, rec["campaign"])
+        rec = _check_gen_record(gens[n], ablated)
+        _, decl, sched = _declaration(store, rec["campaign"], ablated)
+        rows = _campaign_generations(store, rec["campaign"], ablated)
     except LedgerError as e:
         return [f"generation_ledger #{n}: {e}"]
     problems = []
@@ -467,7 +543,7 @@ def verify_generation(store: EvidenceStore, n: int) -> list[str]:
     recomputed = True
     for i, r in rows:
         try:
-            sig = _recomputed_signal(store, r)
+            sig = _recomputed_signal(store, r, ablated)
         except LedgerError as e:
             problems.append(f"generation_ledger #{i}: {e}")
             recomputed = False
@@ -484,17 +560,20 @@ def verify_generation(store: EvidenceStore, n: int) -> list[str]:
     return problems
 
 
-def _recomputed_signal(store: EvidenceStore, rec: dict[str, Any]) -> dict[str, Any]:
+def _recomputed_signal(store: EvidenceStore, rec: dict[str, Any], ablated: bool = False) -> dict[str, Any]:
     refs = rec["refs"]
-    stats = store.records("generation_stats")
-    lineage = store.records("lineage")
+    stats = store.records(kind_of("generation_stats", ablated))
+    lineage = store.records(kind_of("lineage", ablated))
     if refs["generation_stats"] >= len(stats) or refs["lineage"][1] > len(lineage):
         raise LedgerError("refs point past the end of the records")
     st = stats[refs["generation_stats"]]
     lin = lineage[refs["lineage"][0]:refs["lineage"][1]]
     if any(r.get("parent") != rec["parent"] for r in [st, *lin]):
         raise LedgerError("referenced records belong to another parent")
-    return generation_signal(st, lin)
+    if ablated:
+        for r in [st, *lin]:
+            _check_marker(r, True, rec["disabled"])
+    return generation_signal(st, lin, ablated=ablated)
 
 
 # ============================================================================== generation report

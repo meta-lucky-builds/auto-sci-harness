@@ -98,13 +98,25 @@ def test_no_env_var_config_default_or_cli_flag_switches_ablation_on():
                     offenders.append(f"{rel}:{node.lineno} AblationSet(...) with switches")
                 if name == "ablation_set" and not rel.startswith("scorecard/"):
                     offenders.append(f"{rel}:{node.lineno} calls the ablation entry point")
+                # s4-wiring: the evolve driver and the islands driver TAKE an AblationSet (multi-generation arms),
+                # but no src module hands them one: only a scorecard System (given the runner's set) does
+                if name in ("evolve", "evolve_islands") and any(k.arg == "ablation" for k in node.keywords):
+                    offenders.append(f"{rel}:{node.lineno} passes an ablation to {name}()")
     assert offenders == []
+    import inspect
+
+    from custom_harness.ablation import NO_ABLATION
+    from custom_harness.evolve.driver import evolve
+    from custom_harness.evolve.search import evolve_islands
+    for fn in (evolve, evolve_islands):  # production default: nothing switched off
+        assert inspect.signature(fn).parameters["ablation"].default is NO_ABLATION
     src = (SRC / "ablation.py").read_text(encoding="utf-8")
     names = {n.id for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Name)}
     attrs = {n.attr for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Attribute)}
     assert not ({"os", "environ", "getenv"} & (names | attrs)), "the ablation module reads no environment"
     for rel in ("cli.py", "config.py", "orchestration/cli.py", "studio/cli.py", "audit/cli.py", "literature/cli.py",
-                "timesplit/cli.py", "scorecard/cli.py", "scorecard/config.py", "evolve/driver.py"):
+                "timesplit/cli.py", "scorecard/cli.py", "scorecard/config.py", "evolve/cli.py"):
+        # (evolve/driver.py left this list in s4-wiring: it now threads an AblationSet it is GIVEN, checked above)
         text = (SRC / rel).read_text(encoding="utf-8").lower()
         assert "ablat" not in text and "--disable" not in text, rel
     env_reads = [p.relative_to(SRC).as_posix() for p in SRC.rglob("*.py")

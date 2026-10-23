@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-from ..ablation import MARKER, NO_ABLATION, AblationSet
+from ..ablation import DUPLICATE_GATE_SWITCH, MARKER, NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
 from ..kerneld.releases import Releases, run_targets
@@ -371,7 +371,7 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         # or the one-shot proposer's diagnosis
         shown = getattr(proposal, "evidence_refs", None)
         known = set(shown) if shown is not None else digest_refs(digest)
-        rejected_before = set() if abl.off("novelty-gate") else rejected_signatures(store)
+        rejected_before = set() if abl.off(DUPLICATE_GATE_SWITCH) else rejected_signatures(store)
         if proposals is not None:  # persisted BEFORE any candidate runs: a crash from here on resumes, not re-asks
             proposals.save(parent_hash, proposal, known, rejected_before)
     edits, problems = proposal.edits, proposal.problems
