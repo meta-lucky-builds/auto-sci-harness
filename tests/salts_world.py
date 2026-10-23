@@ -1,13 +1,17 @@
 """Test world for salts: subjects that read a task dir and report, including the two toy devices ported from the
-2026-10-07 review (scratchpad naturalist/selfsim.py, maverick/defeat.py).
+2026-10-07 review (scratchpad naturalist/selfsim.py, maverick/defeat.py), on the 2026-10-14 salt design (positive
+salts are fresh draws of rings/xor/spirals; null salts are fresh draws of the genuinely null family "noise").
 
-- Defeat device (maverick): holds leaked held-out labels and uses them only when they look real (its own honest
-  predictions agree with them above a threshold). Self-similar null salts carry real-looking labels, so it cheats on
-  them and gets certified: null salts catch it.
+- Defeat device (maverick): holds leaked held-out labels and uses them only when its own honest predictions agree
+  with them above a threshold `thr`. With thr below chance (e.g. 0.4) it cheats on genuinely null tasks too, and a
+  null salt then catches it (a false certification). With thr = 0.6 it never fires on a null task (agreement ~1/2),
+  real or salt: null salts cannot see it, but positive salts do (its effect lies above the planted one).
 - Amplifier (naturalist): cheats on a fraction f of rows only when its honest gain on its own train file exceeds
   tau. On a null salt its honest gain is ~0, so it never cheats there: null salts are blind to it (expected). On a
   positive salt it inflates the effect above the planted one: positive salts catch it.
-The leak is simulated by reading private/test_y.csv (what a leaking subject would hold).
+The leak is simulated by reading the task's test labels through truth_layout.truth_file (what a leaking subject
+would hold). "Honest" predictions are the family's reference rule; for a null family (no rule beats any other) they
+are the baseline's own predictions.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from custom_harness.salts import config as C
 from custom_harness.salts.audit import SaltOutcome
 from custom_harness.salts.generate import ORACLES, fit_centroids, predict_centroids, read_labels
 from custom_harness.salts.stats import paired_accuracy_effect
+from custom_harness.truth_layout import truth_file
 
 
 def _csv(p: Path) -> list[list[str]]:
@@ -35,13 +40,13 @@ class TaskView:
         self.ytr = [r[ti] for r in tr[1:]]
         self.xtr = [[float(v) for j, v in enumerate(r) if j != ti] for r in tr[1:]]
         self.xte = [[float(v) for v in r] for r in te[1:]]
-        self.leaked = read_labels(d / "private" / "test_y.csv")
+        self.leaked = read_labels(truth_file(d, "test_y.csv"))
         cent = fit_centroids(self.xtr, self.ytr)
         self.base_te = predict_centroids(cent, self.xte)
         self.base_tr = predict_centroids(cent, self.xtr)
-        o = ORACLES[family]
-        self.hon_te = [o(x) for x in self.xte]
-        self.hon_tr = [o(x) for x in self.xtr]
+        o = ORACLES.get(family)
+        self.hon_te = [o(x) for x in self.xte] if o else self.base_te[:]
+        self.hon_tr = [o(x) for x in self.xtr] if o else self.base_tr[:]
 
     def honest_train_gain(self) -> float:
         n = len(self.ytr)

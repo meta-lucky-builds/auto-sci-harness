@@ -694,7 +694,19 @@ def cmd_memory(a: argparse.Namespace, store: EvidenceStore) -> int:
     No command writes free text into memory: every write comes from Kernel certificates through the gate."""
     from .kerneld.scope import ScopedKernel
     from .memory import MemoryStore, NotReadable, harvest_negatives
-    mem = MemoryStore(ScopedKernel(store), namespace=a.namespace)
+    replayer = None
+    if a.action == "harvest-negatives":
+        # the gate re-derives every certificate (Kernel.verify, K3 re-executes data claims): without a replayer it
+        # cannot, so the command fails closed instead of gating on an incomplete re-derivation (s4-station finding)
+        if not (a.docker or a.dev_sandbox):
+            raise SystemExit("harvest-negatives re-derives each certificate (K3 re-executes): pass --docker (or "
+                             "--dev-sandbox for trusted code only)")
+        import time
+
+        from .config import data_dir
+        from .kernel import SandboxReplayer
+        replayer = SandboxReplayer(_sandbox_factory(a, data_dir() / "sandboxes" / f"harvest-{int(time.time())}"))
+    mem = MemoryStore(ScopedKernel(store, replayer=replayer), namespace=a.namespace)
     try:
         if a.action == "verify-log":
             problems = mem.verify_log()
@@ -956,6 +968,9 @@ def main(argv: list[str] | None = None) -> int:
     mm.add_argument("--namespace", default="global")
     mm.add_argument("--reason")
     mm.add_argument("--by", help="the human revoking (recorded in the memory log)")
+    mm.add_argument("--docker", action="store_true", help="harvest-negatives: re-derive (K3 re-execution) in Docker")
+    mm.add_argument("--dev-sandbox", action="store_true", help="harvest-negatives: LocalSandbox (NO isolation; "
+                    "trusted code only)")
     rs = sub.add_parser("runs")
     rs.add_argument("--limit", type=int, default=20)
     t = sub.add_parser("trace")

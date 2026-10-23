@@ -14,13 +14,12 @@ EXAM_MIN_PER_ARM = 40  # UNCALIBRATED (owner decision, GOAL §13.8)
 EXAM_ALPHA = 0.05  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 # ---------------------------------------------------------------- salt generation
-# A positive salt plants an effect of this multiple of the claim's minimum effect delta (GOAL: "2 delta").
-POSITIVE_EFFECT_MULTIPLIER = 2.0  # UNCALIBRATED (owner decision, GOAL §13.8)
-# A positive salt whose realised planted effect misses the target by more than this fraction of it is refused.
-POSITIVE_EFFECT_TOLERANCE = 0.25  # UNCALIBRATED (owner decision, GOAL §13.8)
-# A null salt is refused when the largest true effect any predictor could have on it (exact, in expectation) exceeds
-# this fraction of delta: then a certification on it would not be clearly false.
-NULL_MAX_RESIDUAL_FRACTION = 0.25  # UNCALIBRATED (owner decision, GOAL §13.8)
+# Redesign 2026-10-14 (docs/salts_redesign.md): a salt is a fresh draw of its family's generator, labels untouched.
+# POSITIVE_EFFECT_MULTIPLIER ("2 delta"), POSITIVE_EFFECT_TOLERANCE and NULL_MAX_RESIDUAL_FRACTION were removed with
+# rho planting: a positive salt's effect is its family's natural one, a null salt's residual bound is 0 by construction.
+# Monte Carlo rows behind a positive salt's planted (expected) effect. The standard error is at most
+# sqrt(Var[d] / n) with d in {-1, 0, 1}; at the suite's effects (~0.4-0.5, discordance ~0.5) about 0.0016 at 100k.
+SALT_MC_ROWS = 100_000  # UNCALIBRATED (owner decision, GOAL §13.8)
 
 # ---------------------------------------------------------------- audit (after reveal)
 # Two-sided confidence of the exact (Clopper-Pearson) intervals on campaign rates, and of a positive salt's effect

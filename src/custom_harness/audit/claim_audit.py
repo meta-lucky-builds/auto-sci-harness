@@ -46,6 +46,7 @@ from ..literature.cite import Resolver, check_citations, i3_verdict
 from ..records import Run, StepKind, TraceStep
 from ..sandbox.base import Sandbox
 from ..store import EvidenceStore
+from ..store.run_bundle import write_run_bundle
 from . import data, gate, wrapper
 from .spec import LoadedSpec
 
@@ -347,6 +348,8 @@ def _evaluate_arms(store: EvidenceStore, kernel: Kernel, kd: Any, loaded: Loaded
                                  preds_ref=store.blobs.put_json(p), metric=claim.metric.id,
                                  score=score, run_id=run_rec.id)
                 ids.append(kernel.record_evaluation(rec))
+                # invariant 9: every run has a Reproducibility Bundle (s3-report finding: arm runs had none)
+                write_run_bundle(store, run_rec.id, environment=env)
     return ids
 
 
