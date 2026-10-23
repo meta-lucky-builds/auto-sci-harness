@@ -84,3 +84,5 @@ def test_readers_refuse_non_canonical_encodings():
         formal._load(b"\xef\xbb\xbf{}", "f", set())
     with pytest.raises(sim.SimError, match="not JSON"):
         sim._load('{"format": "x"}'.encode("utf-16"), "x", set())
+    with pytest.raises(sim.SimError, match="byte-order mark"):  # valid UTF-8 after the BOM: refused all the same
+        sim._load(b'\xef\xbb\xbf{"format": "x"}', "x", set())

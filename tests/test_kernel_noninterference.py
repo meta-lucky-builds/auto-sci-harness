@@ -10,6 +10,7 @@ import random
 import pytest
 
 from custom_harness.kernel import DatasetRole, KernelError, Label
+from custom_harness.kernel.execution import ExecutionError
 from custom_harness.kernel.reasons import Code
 from kernel_world import KNN, World, _csv, _sample
 
@@ -72,6 +73,34 @@ def test_honest_program_passes_non_interference(tmp_path):
         cert = _certify(w, "honest")
         assert cert.label == Label.CERTIFIED_INTERNAL, {k: v.reasons for k, v in cert.checks.items() if v.reasons}
         assert any("non-interference" in o and "PASS (exact" in o for o in cert.checks["K3"].observations)
+    finally:
+        w.close()
+
+
+def test_a_copy_declared_for_another_target_is_not_checked_here(tmp_path):
+    w = _world(tmp_path, "othertarget", declare=False)
+    try:  # a declaration binds its target: one for "train" brings no non-interference replay to "nt" records
+        w.kernel.declare_truth_copy("train", "nt", "test_X.csv", "leak", declarer="task-registration")
+        cert = _certify(w, "honest")
+        assert cert.label == Label.CERTIFIED_INTERNAL, cert.failed()
+        assert not any("non-interference" in o for o in cert.checks["K3"].observations)
+    finally:
+        w.close()
+
+
+def test_a_crashing_counterfactual_replay_fails_closed(tmp_path):
+    w = _world(tmp_path, "crash")
+    try:
+        class Crashing:  # replays production records, but every flipped/constant world crashes
+            def replay(self, record, vault):
+                return w.replayer.replay(record, vault)
+
+            def run_inputs(self, record, vault, files):
+                raise ExecutionError("sandbox lost mid-replay")
+        w.kernel.replayer = Crashing()
+        cert = _certify(w, "honest")
+        assert cert.label == Label.REJECTED and cert.failed() == ["K3"], cert.failed()
+        assert any("non-interference" in r and "failed: ExecutionError" in r for r in cert.checks["K3"].reasons)
     finally:
         w.close()
 

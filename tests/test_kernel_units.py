@@ -39,7 +39,7 @@ from custom_harness.kernel import (
     run_program,
 )
 from custom_harness.kernel import checks as K
-from custom_harness.kernel.bundle import build_bundle, reproduce_bundle
+from custom_harness.kernel.bundle import BundleError, build_bundle, reproduce_bundle
 from custom_harness.kernel.checklist import ITEMS, fill, missing, publishable, render
 from custom_harness.kernel.claim import exact_value
 from custom_harness.kernel.execution import ExecutionError, SandboxReplayer, parse_predictions
@@ -499,6 +499,20 @@ def test_bundle_edge_paths(tmp_path, base):
             zout.writestr(n, json.dumps(m).encode() if n == "manifest.json" else zin.read(n))
     rep = reproduce_bundle(tmp_path / "nocert.zip", fresh)
     assert not rep.reproduced and "certificate entry missing" in rep.problems[-1]
+
+    def tampered(name: str, edit) -> Path:
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / name, "w") as zout:
+            m = json.loads(zin.read("manifest.json"))
+            edit(m)
+            for n in zin.namelist():
+                zout.writestr(n, json.dumps(m).encode() if n == "manifest.json" else zin.read(n))
+        return tmp_path / name
+    # the artifact list must name exactly the blob list: an unlisted blob would escape the missing-artifact report
+    rep = reproduce_bundle(tampered("unlisted.zip", lambda m: m.update(artifacts=m["artifacts"][1:])), fresh)
+    assert not rep.reproduced and "the artifact list does not match the bundle's blob list" in rep.problems
+    # a ledger entry whose body has a duplicated key (two JSON readers would disagree on it) is refused outright
+    with pytest.raises(BundleError, match="ledger entry is unreadable"):
+        reproduce_bundle(tampered("dupkey.zip", lambda m: m["ledger"][0].__setitem__(2, '{"k": 1, "k": 2}')), fresh)
 
 
 def test_check_ids_are_complete():
