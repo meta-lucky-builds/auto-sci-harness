@@ -22,7 +22,7 @@ What changed against OpenResearch (GOAL §17, PORTMAP §3, §10):
   agent gets exactly one scoped credential (credentials.py), as a container environment variable;
 - no store access: OR grants Codex its data dir (orx.db) as a writable root; here no store, ledger or truth exists in
   the box;
-- telemetry, error reporting, agent feedback and auto-update are switched off for every CLI that has a switch
+- usage reporting, error reporting, agent feedback and auto-update are switched off for every CLI that has a switch
   (lists below). Which switches each CLI honours is from vendor documentation and OR's code, NOT verified by running
   them here: the egress check in the owed tests is the real test;
 - OR's injected playbook, skills, MCP permission bridge and hooks are dropped (they gate host execution and point
@@ -111,7 +111,7 @@ class AgentAdapter:
 
 # ---------------------------------------------------------------- Claude Code
 CLAUDE_QUIET_ENV = {
-    # Claude Code's documented switches (vendor docs; not verified here): no telemetry, no error reports, no
+    # Claude Code's documented switches (vendor docs; not verified here): no usage reporting, no error reports, no
     # auto-update, no /bug feedback command, and none of the above "non-essential" traffic
     "DISABLE_TELEMETRY": "1",
     "DISABLE_ERROR_REPORTING": "1",
@@ -151,7 +151,7 @@ class ClaudeCode(AgentAdapter):
 
 # ---------------------------------------------------------------- Codex
 CODEX_CONFIG = """# lab box: written by custom_harness/lab/agents.py (not agent-authored)
-# no update check, no OpenTelemetry export, no analytics (keys from Codex docs; [U] not verified here)
+# no update check, no OTel export, no analytics (keys from Codex docs; [U] not verified here)
 check_for_update_on_startup = false
 sandbox_mode = "danger-full-access"
 approval_policy = "never"
@@ -301,7 +301,7 @@ class Acp(AgentAdapter):
             acp, tui = list(o.acp_command), None
         return Plan(adapter=self.name, env={}, config_files={}, setup=[], interactive=tui, headless=None, acp=acp,
                     box_env=self.box_env(o),
-                    notes=["telemetry/auto-update switches of ACP agents are agent-specific and unknown: the egress "
+                    notes=["usage-reporting/auto-update switches of ACP agents are agent-specific and unknown: the egress "
                            "test is the only check (docs/lab.md)"])
 
 
