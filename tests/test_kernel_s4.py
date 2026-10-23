@@ -454,3 +454,65 @@ def test_a_private_file_of_another_dataset_used_as_code_is_a_coded_k9_finding(wo
                    ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
     res = K.k9_leaks(cx)
     assert Code.K9_PRIVATE_CODE in res.codes and Code.CHECK_RAISED not in res.codes
+
+
+# ================================================================== stage-c: Kernel branches s4-kernel left untested
+def test_a_private_file_given_as_a_program_input_is_a_coded_k9_finding(world):
+    """checks.k9_leaks, program inputs: an evidence record whose input names a PRIVATE file (the held-out labels given
+    to the program as its test input) is K9_PRIVATE_CODE, a coded finding. Uncovered in the int18 fast gate (line
+    'program input ... IS a private file'); the existing test above covers code only (evidence_ids=())."""
+    from custom_harness.kernel import ExecRecord, InputRef
+    from custom_harness.records import Run
+    claim = world.claim(world.artifact("good"), world.artifact("baseline", "baseline"), n_boot=1000, seeds=(31, 32, 33))
+    label = world.vault.dataset("test").files["test_y.csv"].blob
+    run = Run(harness_id="kernel-world", harness_hash="world", task_id="test", seed=31)
+    world.store.add_run(run)
+    rec = ExecRecord(claim_hash=claim.claim_hash(), arm="subject", artifact_hash=claim.subject.hash,
+                     inputs={"train": InputRef(dataset_id="train", file="train.csv",
+                                               blob=world.vault.dataset("train").files["train.csv"].blob),
+                             "test": InputRef(dataset_id="test", file="test_y.csv", blob=label)},
+                     target="test", label_file="test_y.csv", seed=31, env={"sandbox": "local (trusted test code)"},
+                     limits={"timeout_s": 120.0}, preds_ref=world.store.blobs.put_json(["0"]), metric="accuracy",
+                     score=0.5, run_id=run.id)
+    eid = world.kernel.record_evaluation(rec)
+    cx = K.Context(claim=claim, claim_hash=claim.claim_hash(), store=world.store, vault=world.vault,
+                   ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=(eid,))
+    res = K.k9_leaks(cx)
+    assert Code.K9_PRIVATE_CODE in res.codes and Code.CHECK_RAISED not in res.codes
+    assert any("program input" in r and "IS a private file (test/test_y.csv)" in r for r in res.reasons), res.reasons
+
+
+def test_import_index_writes_only_hex_names(tmp_path):
+    """vault.import_index (bundle reproduce): a digest or address that is not a plain alphanumeric name is skipped, so
+    no index entry can be written outside <store>/private/index. Uncovered in the int18 fast gate (the skip branch)."""
+    from custom_harness.kernel import Vault
+    from custom_harness.store import EvidenceStore
+    s = EvidenceStore(tmp_path / "store")
+    try:
+        Vault(s).import_index({"ab12": "cd34", "../escape": "cd34", "ef56": "../x", "": "cd34"})
+        idx = Path(s.root) / "private" / "index"
+        assert sorted(p.name for p in idx.iterdir()) == ["ab12"] and (idx / "ab12").read_text() == "cd34"
+        assert not (Path(s.root) / "private" / "escape").exists() and not (Path(s.root) / "escape").exists()
+    finally:
+        s.close()
+
+
+def test_an_adapter_closure_that_changed_during_the_walk_is_not_cached(monkeypatch):
+    """adapters.adapter_hash: when the import closure differs between the two walks (an edit raced the walk) the
+    closure is NOT cached, and the hash is still computed from the files. Uncovered in the int18 fast gate."""
+    from custom_harness.kernel import adapters as A
+    real = A.covered_modules
+    calls = {"n": 0}
+
+    def racing(spec):
+        calls["n"] += 1
+        out = real(spec)
+        return out if calls["n"] % 2 else dict(list(out.items())[:-1])  # the second walk sees one module fewer
+
+    A._CLOSURES.clear()
+    monkeypatch.setattr(A, "covered_modules", racing)
+    h = A.adapter_hash(A.ML)
+    assert calls["n"] == 2 and A._CLOSURES == {}  # walked twice, disagreed, nothing cached
+    monkeypatch.setattr(A, "covered_modules", real)
+    assert h == A.adapter_hash(A.ML)  # the hash is the files' hash either way
+    assert A._CLOSURES  # a clean walk is cached
