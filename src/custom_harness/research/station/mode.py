@@ -2,8 +2,8 @@
 
 Cognition is decentralised (each agent runs its own research loop with its own model bindings); control is not, as
 in The Station's own code (code_review/station.md §3): one process schedules turns in a seeded order, one at a time,
-holding an exclusive per-mode lock (a lock file next to the store, plus a post-append check of the log's chain, so
-two processes can never run the same turn).
+holding the exclusive store-wide station lock (one OS lock per store for every mode, `store_lock`; plus a post-append
+check of the log's chain), so two processes can never run turns on one store at once.
 
 Per round r (0-based), agents take turns in the order sorted by sha256(mode|seed|order|r|agent). A turn:
   1. budget: the agent's turn caps = min(its cap left, the mode's cap left) per unit; on the primary unit, also at
@@ -46,6 +46,7 @@ import json
 import math
 import os
 import socket
+import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
@@ -296,9 +297,79 @@ def loop_label(labels: Sequence[str]) -> str:
     return "VALIDATED" if labels and all(lb == Label.CERTIFIED_VALIDATED.value for lb in labels) else "MECHANICAL"
 
 
-def _pid_alive(pid: int) -> bool:
-    from ...runtime.engine import _pid_alive as alive
-    return bool(alive(pid))
+STORE_LOCK_NAME = "station.lock"
+NOTE_BYTES = 512  # the holder note (informational only) is written at offset 0, padded to this size
+_LOCK_OFFSET = 1 << 20  # the locked byte lies past the note, so the note stays readable on Windows (msvcrt)
+
+
+def store_lock_path(store_root: Path | str) -> Path:
+    return Path(store_root) / STORE_LOCK_NAME
+
+
+def _os_lock(fd: int) -> bool:
+    """Non-blocking exclusive OS lock on the open handle `fd`; False when another handle holds it."""
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)  # LockFile may lock past the end of the file
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+    try:  # flock: per open file description, so a second handle in the same process conflicts too
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _os_unlock(fd: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _read_note(path: Path) -> dict[str, Any]:
+    try:
+        with path.open("rb") as fh:
+            doc = json.loads(fh.read(NOTE_BYTES).decode("utf-8", "replace").strip() or "{}")
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@contextmanager
+def store_lock(store_root: Path | str, holder: dict[str, Any]) -> Iterator[None]:
+    """The exclusive station lock of one store (one file `<store>/station.lock` for every mode).
+
+    It is an OS lock on a handle this process keeps open for the whole critical section (msvcrt.locking on
+    Windows, fcntl.flock elsewhere), not the existence or content of a file: the OS releases it when the holder
+    dies, so a crash never leaves a lock behind, and an empty, truncated or garbage lock file (a crash while the
+    note was written, the old O_EXCL design's wedge) cannot block anyone. The file is never deleted (deleting a lock
+    file lets a second process lock a new inode while the first still holds the old one). The JSON note at offset 0
+    only names the holder in the refusal message; it decides nothing.
+    Residual (stated): it binds processes that use this code on this filesystem; a tool writing Kernel entries to
+    the store without it is not excluded (docs/multi_agent_mode.md)."""
+    path = store_lock_path(store_root)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        if not _os_lock(fd):
+            raise StationLocked(f"the station lock {path} is held by {_read_note(path) or 'another process'}; "
+                                "one station mode per store runs at a time: stop that process first")
+        try:
+            note = json.dumps(holder, sort_keys=True, default=str).encode("utf-8")[:NOTE_BYTES - 1]
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, note.ljust(NOTE_BYTES - 1) + b"\n")
+            yield
+        finally:
+            _os_unlock(fd)
+    finally:
+        os.close(fd)
 
 
 def run_secrets(store: Any, run_ids: Sequence[str]) -> list[str]:
@@ -372,45 +443,20 @@ class StationMode:
         return f"station:{self.mid}:r{r}"
 
     def lock_path(self) -> Path:
-        """Lower case plus a hash of the EXACT mode id: file names are case-insensitive on Windows (NTFS), so
-        `x-ABLATED` and `x-ablated` must not share one lock file."""
-        digest = hashlib.sha256(self.mid.encode("utf-8")).hexdigest()[:16]
-        return Path(self.store.root) / f"station-{self.mid.lower()}-{digest}.lock"
+        """ONE lock file for the whole store, shared by every mode (s4-station HIGH finding, fixed on int18): a
+        turn's Kernel-ledger window is only this turn's when no other station mode can append to the store
+        meanwhile, so a per-mode lock (the old `station-<mid>-<hash>.lock`) was not enough."""
+        return store_lock_path(self.store.root)
 
-    # ------------------------------------------------------------------ the exclusive per-mode lock
+    # ------------------------------------------------------------------ the exclusive store-wide lock
     @contextmanager
     def lock(self) -> Iterator[None]:
-        """An exclusive lock file (O_CREAT|O_EXCL) next to the store. A lock left by a dead process of THIS host is
-        taken over (its pid is not alive); a live one, or one from another host, refuses (StationLocked)."""
-        path = self.lock_path()
-        me = {"pid": os.getpid(), "host": socket.gethostname(), "at": time.time()}
-        for _ in range(2):
-            try:
-                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                try:
-                    held = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    held = {}
-                if (held.get("host") == me["host"] and isinstance(held.get("pid"), int)
-                        and not _pid_alive(held["pid"])):
-                    path.unlink(missing_ok=True)  # a crashed holder on this host: take over
-                    continue
-                raise StationLocked(f"mode {self.mid!r} is locked by {held or 'an unreadable lock file'} "
-                                    f"({path}); stop that process first") from None
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(json.dumps(me))
-            break
-        else:
-            raise StationLocked(f"mode {self.mid!r}: could not take the lock {path}")
-        try:
+        """The store-wide station lock (`store_lock`): an OS lock on a held handle, released by the OS when the
+        process dies. `run()` folds the mode log only AFTER taking it (`open()` re-reads every event), so a holder
+        that ran before us is always seen. A live holder refuses (StationLocked) before anything is written."""
+        with store_lock(self.store.root, {"pid": os.getpid(), "host": socket.gethostname(), "mode": self.mid,
+                                          "at": time.time()}):
             yield
-        finally:
-            try:
-                if json.loads(path.read_text(encoding="utf-8")).get("pid") == me["pid"]:
-                    path.unlink(missing_ok=True)
-            except (OSError, ValueError):
-                pass
 
     # ------------------------------------------------------------------ open / reopen
     def exact_problems(self) -> dict[str, dict[str, Any] | None]:
@@ -686,7 +732,7 @@ class StationMode:
                     targets |= {str(t) for t in self.kernel.certificate(h).claim.get("generalization_targets", [])}
                 except Exception:  # noqa: BLE001 - an unreadable certificate adds nothing (it was refused above)
                     continue
-            prereg = sum(1 for e in self.kernel.ledger.entries("prereg") if w.contains(e.seq))
+            prereg = len(self.archive.turn_preregs(w))  # only the turn's runs' pre-registrations (run_id)
             progress = [p for p in pubs if p.progress]
             spent = Cost()
             camp = Campaign(self.store, self.campaign_id(agent))

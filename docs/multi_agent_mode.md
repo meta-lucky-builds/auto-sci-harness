@@ -24,7 +24,7 @@ Nothing here has met a real model or a real campaign.
 ## Model
 Several research-loop agents (each with its own model bindings) work one problem or a family of problems.
 Cognition is decentralised; control is not: one process runs the agents' turns one at a time, in a seeded order,
-under an exclusive per-mode lock. The Station's own code does this too (central tick clock, single writer;
+under an exclusive store-wide lock (one per store, every mode; int18). The Station's own code does this too (central tick clock, single writer;
 `code_review/station.md` §3). The agents coordinate ONLY through the archive. Each agent runs
 `examples/research_v2.yaml` patched by `station_spec`:
 - the archive is shown in the `hypothesize` prompt as `{{input.station_archive}}`;
@@ -54,11 +54,19 @@ A certificate belongs to a turn when:
 - every run its evidence names (`Evidence.produced_by_run`, `ExecRecord.run_id`; `research.confirm` records them
   under the turn's own Engine run) is one of the turn's runs (the agent's campaign runs no earlier turn owns); an
   unreadable evidence record names an unknown run (never attributable);
-- if the prereg / certificate ledger entries name a run (`run_id`, built on origin/s4-kernel c648278, reaching
-  int17 later), that run too.
-Exact (LP / circuit) evidence names no run, so until the Kernel field arrives such a certificate is attributed by
-the window alone. The **exclusive lock** makes the window the turn's only: a lock file next to the store
-(`O_CREAT|O_EXCL`, taken over only from a dead pid on the same host), and every log append is checked after the
+- if the prereg / certificate ledger entries name a run (`run_id`, recorded by the run-bound Kernel since
+  s4-kernel), that run too;
+- **int18 (s4-station HIGH finding fixed, stage-a):** the set of named runs must be NON-EMPTY. Exact (LP / circuit)
+  evidence names no run, so such a certificate is attributed only through the `run_id` on its prereg / certificate
+  ledger entry, or (entries written before the Kernel recorded `run_id`) a trusted MODULE step of one of the turn's
+  runs whose output reports `{...certificate: {"hash": h}}`. The window alone never attributes.
+- Only pre-registrations whose ledger `run_id` is one of the turn's runs count (`turn_preregs`: the stall signal's
+  `proposed`, `open_preregs`), and only private reads by the turn's runs count as exposure (reads that name no run
+  count too unless they are the Kernel's own purpose-`kernel` re-reads: over-taint, the safe side).
+The **exclusive lock** is ONE lock per store for every mode (`<store>/station.lock`, `mode.store_lock`): an OS lock
+on a handle held for the whole run (`msvcrt.locking` on Windows, `fcntl.flock` elsewhere), released by the OS when
+the holder dies; the file is never deleted and its content (a holder note) decides nothing, so an empty or garbage
+file cannot wedge it. `run()` folds the mode log only after taking it. Every log append is also checked after the
 fact (a concurrent append breaks the chain and fails closed). Certificates in the window that are not attributable
 are listed as `unattributed` in `turn_end`.
 
@@ -137,17 +145,15 @@ are listed as `unattributed` in `turn_end`.
 Switch `station_coordination` (closed registry, `ablation.py`; row `the-station`): no archive shown, nothing
 published (code `ablated`), no lane or shrink, no deferred publication; same schedule, seeds and budgets. An
 ablated mode (any non-empty AblationSet) uses `<mode_id>-ABLATED` for its archive namespace, campaigns, budgets,
-controller ids and lock (upper case: no production mode id can take that name) and the log kind
+controller ids (upper case: no production mode id can take that name; the lock is store-wide since int18) and the log kind
 `station:<mode_id>:ABLATED`; the mode refuses a runner with another ablation set. The row stays a PARTIAL switch
 (exact evaluators are an integrity mechanism; the switch is library-level only).
 
 ## What is NOT enforced (stated)
-- **Exact certificates before the Kernel `run_id` field reaches int17** are attributed by window + lock only.
-  After it arrives, a residual remains (stated by s4-kernel): trusted host code could assign `Kernel.run_id` by
-  hand.
-- **The lock** is a lock file next to the store: it binds processes that use this code on this filesystem. A
-  process that writes Kernel entries to the store without the lock (another tool) during a turn could have an exact
-  certificate attributed; its private reads would only over-taint (safe side).
+- **`Kernel.run_id`** is set by trusted host code (a residual stated by s4-kernel): host code could assign it by hand.
+- **The lock** binds processes that use this code on this filesystem. A process that writes Kernel entries to the
+  store without the lock (another tool) is not excluded; since int18 it can no longer get an exact certificate
+  attributed by the window (a named run is required); its private reads naming no run over-taint (safe side).
 - **Channels outside the archive** that a custom spec opens (a module reading another run's data) are not closed;
   `station_spec` closes the known one (L5 recall). Checked by reading: shipped research modules dereference blobs
   only from their own run's state or through handles vetted against their own run's trace (`evidence_refs.vet_blob`,

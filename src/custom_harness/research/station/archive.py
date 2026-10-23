@@ -9,9 +9,10 @@ agent's turn and builds each entry from the certificate's PRE-REGISTERED claim f
 held-out estimate, interval or score). A certificate belongs to the turn (`turn_certificates`) when
   - its certificate entry AND its pre-registration are both in the turn's Kernel-ledger window (`TurnWindow`), and
   - every run its evidence names (Evidence.produced_by_run, ExecRecord.run_id) is one of the turn's runs (the agent's
-    campaign runs of this turn), and, if the ledger entries name a run (`run_id` on prereg / certificate: requested
-    from the Kernel owner, not there yet), that run too. Exact (LP / circuit) evidence names no run: such a
-    certificate is attributed by the window alone, which the mode's exclusive lock makes this turn's only.
+    campaign runs of this turn), and, if the ledger entries name a run (`run_id` on prereg / certificate, recorded
+    by the run-bound Kernel), that run too; and at least ONE run is named. Exact (LP / circuit) evidence names no
+    run: such a certificate is attributed only through its ledger `run_id`, or a trusted module step of a turn run
+    that reports it (int18, s4-station HIGH finding: the window alone never attributes).
 Kinds:
   - a certified claim (CERTIFIED-VALIDATED / -INTERNAL / -EXACT)  -> a POSITIVE entry;
   - a verified failure (REJECTED on K6 alone, memory.store.verified_failure) -> a NEGATIVE entry (an honest
@@ -66,11 +67,13 @@ from typing import Any
 from ...errors import infra_cause
 from ...kernel import Certificate, Kernel, KernelError, Label
 from ...kernel.claim import EvidenceClass
+from ...kernel.ledger import Entry as LedgerEntry
 from ...kerneld.releases import Releases, note_code
 from ...memory import WRAPPER, Entry, Kind, MemoryRefused, MemoryStore, NotReadable, Proposal, Status
 from ...memory.model import READABLE
 from ...memory.screen import Fingerprints, screen_strings
 from ...memory.store import CERTIFIED, verified_failure
+from ...records import StepKind
 
 ARCHIVE_KINDS = (Kind.POSITIVE, Kind.NEGATIVE, Kind.LINEAGE)
 _HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
@@ -287,13 +290,38 @@ class StationArchive:
                 out.add(str(e.body["run_id"]))
         return out
 
+    def _step_runs(self, cert_hash: str, runs: Iterable[str]) -> set[str]:
+        """Runs among `runs` with a trusted MODULE step whose output reports this certificate (`certificate` or
+        `<prefix>certificate` -> {"hash": cert_hash}, as research.certify writes it). Only for run-less certificates
+        whose ledger entries name no run (written before the Kernel recorded `run_id`)."""
+        out: set[str] = set()
+        for run_id in sorted(runs):
+            try:
+                steps = self.kernel.store.trace(run_id)
+            except (KeyError, OSError, ValueError):
+                continue
+            for step in steps:
+                if step.kind != StepKind.MODULE or not isinstance(step.output, dict):
+                    continue
+                if any(isinstance(k, str) and k.endswith("certificate") and isinstance(v, dict)
+                       and v.get("hash") == cert_hash for k, v in step.output.items()):
+                    out.add(run_id)
+                    break
+        return out
+
     def attributable(self, cert: Certificate, cert_hash: str, w: TurnWindow, *, deferred: bool = False) -> bool:
         """The certificate belongs to the author of `w` (module docstring). `deferred`: certified after the turn
-        (only its pre-registration must be in the window)."""
+        (only its pre-registration must be in the window).
+        s4-station HIGH finding (fixed on int18): a certificate whose evidence names no run (exact LP / circuit
+        evidence) is attributed ONLY through a run that names it: the `run_id` its prereg / certificate ledger entry
+        carries (Kernel, s4-kernel), else a trusted module step of one of the turn's runs reporting it. The window
+        alone never attributes: an empty set of named runs is not attributable."""
         if not w.contains(cert.prereg_seq):
             return False
         named = self.evidence_runs(cert) | self._ledger_runs(cert_hash, cert.claim_hash)
-        return named <= set(w.runs)
+        if not named:
+            named = self._step_runs(cert_hash, w.runs)
+        return bool(named) and named <= set(w.runs)
 
     def turn_certificates(self, w: TurnWindow) -> list[str]:
         """Certificates issued in the window and attributable to the turn, in ledger order."""
@@ -316,8 +344,17 @@ class StationArchive:
                 out.append(h)
         return out
 
+    def turn_preregs(self, w: TurnWindow) -> list[LedgerEntry]:
+        """Pre-registrations in the window whose ledger entry names one of the turn's runs (`run_id`, recorded by a
+        run-bound Kernel: s4-kernel). A pre-registration that names no run, or another run, is not this turn's (the
+        s4-station HIGH finding: the window alone attributes nothing)."""
+        runs = set(w.runs)
+        return [e for e in self.kernel.ledger.entries("prereg")
+                if w.contains(e.seq) and isinstance(e.body.get("run_id"), str) and e.body["run_id"] in runs]
+
     def open_preregs(self, w: TurnWindow, certified: Iterable[str]) -> list[str]:
-        """Claim hashes pre-registered in the window that no attributable certificate of the turn resolved."""
+        """Claim hashes the turn's runs pre-registered (turn_preregs) that no attributable certificate of the turn
+        resolved."""
         done = set()
         for h in certified:
             try:
@@ -325,29 +362,36 @@ class StationArchive:
             except KernelError:
                 continue
         out = []
-        for e in self.kernel.ledger.entries("prereg"):
+        for e in self.turn_preregs(w):
             ch = e.body.get("claim_hash")
-            if w.contains(e.seq) and isinstance(ch, str) and ch not in done and ch not in out:
+            if isinstance(ch, str) and ch not in done and ch not in out:
                 out.append(ch)
         return out
 
-    def private_reads(self, lo: int, hi: int) -> list[tuple[int, str]]:
-        """(seq, dataset id) of private vault reads with lo < seq < hi."""
+    def private_reads(self, lo: int, hi: int, runs: Iterable[str]) -> list[tuple[int, str]]:
+        """(seq, dataset id) of private vault reads with lo < seq < hi made by one of `runs` (the entry's `run_id`).
+        A private read that names NO run is counted too unless it is the Kernel's own re-read (purpose "kernel": the
+        labels K-checks read, which reach no agent): an unattributable read over-taints, the safe side. Reads of
+        other runs (another agent, another turn) are not this author's exposure."""
+        runs = set(runs)
         out = []
         for e in self.kernel.ledger.entries("data_access"):
-            if lo < e.seq < hi and e.body.get("private") and isinstance(e.body.get("dataset_id"), str):
+            if not (lo < e.seq < hi and e.body.get("private") and isinstance(e.body.get("dataset_id"), str)):
+                continue
+            run_id = e.body.get("run_id")
+            if (isinstance(run_id, str) and run_id in runs) or (not run_id and e.body.get("purpose") != "kernel"):
                 out.append((e.seq, e.body["dataset_id"]))
         return out
 
     def turn_exposure(self, w: TurnWindow) -> set[str]:
         """Targets the author read privately in this turn (its exposure after the turn adds these)."""
-        return {d for _, d in self.private_reads(w.seq_before, w.seq_after + 1)}
+        return {d for _, d in self.private_reads(w.seq_before, w.seq_after + 1, w.runs)}
 
     def taint(self, cert: Certificate, w: TurnWindow, prior_exposure: Iterable[str]) -> dict[str, list[str]]:
         own = sorted({str(t) for t in cert.claim.get("generalization_targets", [])})
         before = set(prior_exposure)
         if isinstance(cert.prereg_seq, int):
-            before |= {d for _, d in self.private_reads(w.seq_before, cert.prereg_seq)}
+            before |= {d for _, d in self.private_reads(w.seq_before, cert.prereg_seq, w.runs)}
         else:  # no registration seq: everything the author read in the turn counts (fail closed)
             before |= self.turn_exposure(w)
         return {"verdict": own, "continuous": sorted(before)}

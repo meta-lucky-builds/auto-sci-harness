@@ -84,26 +84,41 @@ def test_certificate_from_foreign_runs_is_not_attributed_to_the_turn(sw):
     assert codes(m2, (0, first2)) == [PubCode.PUBLISHED.value]
 
 
-# ====================================================================== 2. exclusive lock (#1)
+# ====================================================================== 2. exclusive lock (#1; HIGH finding, int18)
 def test_exclusive_lock_refuses_a_live_holder_and_takes_over_a_dead_one(sw):
-    """A lock file naming THIS live process refuses run() (StationLocked) before anything is written to the mode
-    log; a lock file naming a dead pid on this host is taken over and the mode completes (and the lock is removed).
-    FAILS WITHOUT StationMode.lock (O_CREAT|O_EXCL file, pid liveness check) being entered by run(): without it
-    run() would open the mode and log despite the lock, and a stale lock would not be a decision at all."""
+    """int18 (stage-a, s4-station HIGH finding): ONE OS-level lock per store (`<store>/station.lock`, msvcrt.locking /
+    fcntl.flock on a held handle). A live holder (here: another handle of this process holding it) refuses run()
+    (StationLocked) before anything is written to the mode log; once released the mode runs. A lock FILE alone, empty
+    or naming a live pid, holds nothing: no empty-file wedge. The file is never deleted.
+    FAILS WITHOUT mode.store_lock being entered by run() (run() would open and log despite the holder), and FAILS on
+    the old O_EXCL design (an empty lock file was unreadable and refused forever; a file naming this live pid
+    refused although no process held a lock)."""
+    from custom_harness.research.station.mode import store_lock
     m = mode(sw, cfg(), ScriptRunner(sw))
     path = m.lock_path()
-    try:
-        path.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "at": 0}), encoding="utf-8")
+    assert path == Path(sw.store.root) / "station.lock"
+    with store_lock(sw.store.root, {"pid": os.getpid(), "host": socket.gethostname(), "who": "pytest holder"}):
         with pytest.raises(StationLocked):
             m.run()
         assert sw.store.records(m.log.kind) == []  # nothing written: not even `open`
-        assert path.exists()  # a lock that is not ours is left alone
-        path.write_text(json.dumps({"pid": 2**31 - 7, "host": socket.gethostname(), "at": 0}), encoding="utf-8")
-        st = m.run()
-        assert st["closed"] is True and st["rounds_done"] == 1
-        assert not path.exists()  # released at the end
-    finally:
-        path.unlink(missing_ok=True)
+    path.write_bytes(b"")  # a crash while the note was written: must not wedge
+    path.write_text(json.dumps({"pid": os.getpid(), "host": socket.gethostname(), "at": 0}), encoding="utf-8")
+    st = m.run()
+    assert st["closed"] is True and st["rounds_done"] == 1
+    assert path.exists()  # never deleted
+
+
+def test_one_lock_serialises_every_mode_of_a_store(sw):
+    """Two DIFFERENT modes on one store share the lock: while one holds it the other is refused. FAILS WITH a
+    per-mode lock (the s4-station design: `station-<mid>-<hash>.lock`), under which another mode could append Kernel
+    entries inside this turn's ledger window (the HIGH finding)."""
+    a = mode(sw, cfg(mode_id="lock-a"), ScriptRunner(sw))
+    b = mode(sw, cfg(mode_id="lock-b"), ScriptRunner(sw))
+    assert a.lock_path() == b.lock_path()
+    with a.lock():
+        with pytest.raises(StationLocked):
+            b.run()
+        assert sw.store.records(b.log.kind) == []
 
 
 # ====================================================================== 3. log post-append check (#1)
@@ -272,10 +287,8 @@ def test_ablated_namespace_cannot_collide_with_a_production_mode(sw):
     assert abl.budget_name("a1") != prod.budget_name("a1")
     assert abl.log.kind != prod.log.kind
     assert abl.archive.mode_id == f"{base.mode_id}-ABLATED" and prod.archive.mode_id == f"{base.mode_id}-ablated"
-    # lock files too, also on a case-insensitive filesystem (Windows NTFS): FAILS WITHOUT the hash of the exact mode
-    # id in StationMode.lock_path (`station-<mid>.lock` would be one file for both)
-    assert abl.lock_path().name.lower() != prod.lock_path().name.lower()
-    assert abl.lock_path().parent == prod.lock_path().parent
+    # int18: the lock is store-wide (HIGH finding), so both share ONE lock: no two modes of a store run at once
+    assert abl.lock_path() == prod.lock_path()
 
 
 # ====================================================================== 10. agent_caps over every controller (#14)

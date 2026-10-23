@@ -166,7 +166,15 @@ class ScriptRunner:
                                          output={}, cost=Cost(usd=self.cost), started_at=now, ended_at=now))
         fn = self.script.get((req.round, req.agent))
         before = {r.id for r in self.sw.store.list_runs(limit=1_000_000)}
-        res = fn(self.sw, req) if fn is not None else None
+        # int18 (s4-station HIGH finding): a real research-loop run certifies through a RUN-BOUND Kernel
+        # (studio/kill.RunGuardedKernel), whose prereg / certificate ledger entries carry `run_id`; the window alone
+        # no longer attributes run-less (exact) certificates or pre-registrations, so the double binds the world's
+        # Kernel to the turn's run while the script works, exactly as production does
+        self.sw.kernel.run_id = run_id
+        try:
+            res = fn(self.sw, req) if fn is not None else None
+        finally:
+            self.sw.kernel.run_id = None
         self.out[(req.round, req.agent)] = res
         # the world's evaluation runs stand in for the evaluations a research-loop run makes itself (research.confirm
         # records them under the turn's run): they belong to this turn, so they join its campaign. A script that
