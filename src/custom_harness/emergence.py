@@ -62,10 +62,16 @@ ACCEPTANCE_PATHS: tuple[str, ...] = (
     "control/policy_gate.py",    # L7: accepts or refuses an orchestrator policy change (exact sign test)
 )
 
-# Modules that allocate budget by a novelty / interestingness signal. None exists yet (GOAL §16.10's allocator is
-# not built). NOT budget.py: that is the hard-cap cost ledger (usd, tokens, ...), novelty-free, and imported by the
-# acceptance modules evolve/loop.py and evolve/driver.py to stop a campaign that runs out of money.
-BUDGET_PATHS: tuple[str, ...] = ()
+# Modules that allocate budget by a novelty / interestingness signal. NOT budget.py: that is the hard-cap cost ledger
+# (usd, tokens, ...), novelty-free, and imported by the acceptance modules evolve/loop.py and evolve/driver.py to stop
+# a campaign that runs out of money.
+BUDGET_PATHS: tuple[str, ...] = (
+    # int18 (stage-a, found by this checker at the s4-station merge): the station archive's stall signal. A newly
+    # admitted POSITIVE entry on a (metric, subject) not yet in the archive is "progress"; it feeds only the stall
+    # rule (stagnation lanes, the budget-cap shrink through the downgrade gate). The publication decision (PubCode)
+    # is made before it and never reads it.
+    "research/station/archive.py",
+)
 
 # (file relative to the package, lower-cased token) -> (category, reason). Each reason was checked by reading the code.
 ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
@@ -98,6 +104,10 @@ ALLOWLIST: dict[tuple[str, str], tuple[str, str]] = {
     ("ablation.py", "test_novelty_gate_switch"): (
         "not-a-score", "pytest node name registered as the `novelty-gate` switch's test (tests/"
                        "test_ablation_switches_evolve.py); a string looked up by name, not a scorer"),
+    ("research/station/archive.py", "novel"): (
+        "budget", "Publication.progress of a newly published POSITIVE entry: (metric, subject hash) not already "
+                  "readable in the archive (set membership, no score); read only by the station's stall signal "
+                  "(lanes, cap shrink), after the publication code is fixed; reviewed at the int18 merge"),
     ("audit/checklist.py", "novelty"): (
         "not-a-score", "keyword argument `novelty` of kernel.checklist.fill (name fixed there), passed the text "
                        "'not applicable: a Claim Audit ... makes no new claim'; copied verbatim, never scored"),

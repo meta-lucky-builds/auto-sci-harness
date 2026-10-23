@@ -88,3 +88,15 @@ def test_only_the_turns_private_reads_count_and_unknown_reads_over_taint():
                   _e(5, "data_access", {"dataset_id": "t-unknown", "private": True, "purpose": "evaluate"}),
                   _e(6, "data_access", {"dataset_id": "t-public", "private": False, "run_id": "run-1"})])
     assert a.turn_exposure(W) == {"t-own", "t-unknown"}
+
+
+def test_the_station_progress_signal_is_a_budget_token_and_the_tree_is_clean():
+    """int18 merge finding (emergence static check, GOAL §16.10): s4-station's `novel` progress flag was not
+    allowlisted, so tests/test_emergence.py's real-tree check FAILED on int18. It steers budget only (stall lanes,
+    cap shrink), so the archive is a BUDGET_PATHS module with a pinned "budget" entry, and the whole tree is clean."""
+    from pathlib import Path
+
+    from custom_harness.emergence import ALLOWLIST, BUDGET_PATHS, check_novelty_isolation
+    assert ALLOWLIST[("research/station/archive.py", "novel")][0] == "budget"
+    assert "research/station/archive.py" in BUDGET_PATHS
+    assert check_novelty_isolation(Path(__file__).resolve().parents[1] / "src") == []
