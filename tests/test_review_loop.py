@@ -169,12 +169,12 @@ def _open_alpha_account(store, task_dir: Path) -> str:
     return target
 
 
-@pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=(
-    "R2-2 violated under Kernel 1.2: K4 transcript bound grows with verdict-bit releases, so paired arms are "
-    "certified at order-dependent levels; fix = §16.4 α-account charging (s3-kernel); see "
-    "docs/r2-2_transcript_bound.md. int17 merge: s3-kernel's account fix is merged (step 2 below opens an account), "
-    "but evolve/multiplicity.check_run still mirrors the NO-account transcript bound, so step 2 still halts with "
-    "MultiplicityDrift; marker kept (stricter side) until check_run is made account-aware: docs/int17_test_plan.md"))
+# Strict xfail(raises=MultiplicityDrift) REMOVED on int18 (stage-a, I1): evolve/multiplicity.check_run now mirrors
+# kernel/checks.target_level for account targets (level fixed at alpha_T / S_T at registration; drift only when a
+# family claim holds no slot or the account is overdrawn). By reading, step 2 no longer raises: every claim on the
+# account target holds a slot (Kernel.preregister refuses a claim the account cannot pay instead of registering it
+# without one). NOT test-verified: the assertions after check_run (alpha_eff == SLOT_ALPHA / SLOTS in both arms,
+# paired difference 0) were never reached before; docs/int18_test_plan.md.
 def test_identical_harnesses_score_identically_in_a_paired_comparison(store, tmp_path, rings_task,  # noqa: F811
                                                                        monkeypatch):
     """The Kernel's Bonferroni family for a held-out target is every claim pre-registered on it SO FAR (K4), and
