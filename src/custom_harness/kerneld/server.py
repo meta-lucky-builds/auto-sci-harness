@@ -197,6 +197,11 @@ class Server:
                 spec = P.arg(args, "spec", dict)
                 return I.openml_split(self.vault, run_id, tok.dataset_id, str(tok.claim_hash),
                                       P.arg(args, "cache_root", str), spec)
+            if kind == "minted_heldout":
+                return I.minted_heldout(self.vault, run_id, tok.dataset_id, str(tok.claim_hash),
+                                        P.arg(args, "family", str), P.arg(args, "n_train", int),
+                                        P.arg(args, "n_test", int), P.arg(args, "beacon_round", str),
+                                        P.arg(args, "beacon_value", str), P.arg(args, "anchor_file", str))
             if kind == "returned_measurements":
                 if P.arg(args, "claim_hash", str) != tok.claim_hash:  # the provenance claim is bound at issue
                     raise TokenError("token_scope")

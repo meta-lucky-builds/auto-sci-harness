@@ -21,10 +21,12 @@ ERRORS = ("bad_request", "unknown_op", "bad_secret", "bad_token", "token_scope",
           "not_target", "not_private", "vault_error", "release_error", "rate_limited", "internal",
           # private ingest (kerneld/ingest.py, 2026-10-14)
           "not_found", "data_unavailable", "already_registered", "canary_mismatch", "ingest_refused",
-          "measurements_refused", "truth_layout")
+          "measurements_refused", "truth_layout",
+          # minted Court targets (kerneld/ingest.minted_heldout, int18)
+          "not_anchored")
 PURPOSES = ("evaluate", "kernel", "leakscan")  # the only READ purposes a token can carry (`issue`)
 INGEST = "ingest"  # the purpose of an ingest token (`issue_ingest` only; never a read)
-INGEST_KINDS = ("research_task", "openml_split", "returned_measurements")  # kerneld/ingest.py
+INGEST_KINDS = ("research_task", "openml_split", "returned_measurements", "minted_heldout")  # kerneld/ingest.py
 # closed problem classes of refused returned measurements (kerneld/ingest.py classifies check_measurements' messages)
 TRUTH_QUERIES = ("target_id", "truth_hashes", "label_agreement", "export_scan")  # kerneld/truth.py
 MEASUREMENT_PROBLEMS = ("not_utf8", "columns", "row_length", "non_finite", "replicates", "other")

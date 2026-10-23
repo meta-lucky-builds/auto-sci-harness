@@ -14,6 +14,8 @@ Kinds:
                          public, labels private). Only for a claim that is already pre-registered.
   returned_measurements  `chh return-data` (GOAL §4.7): measurements humans returned for an approved physical
                          protocol, checked against it, registered as a FUTURE dataset with a provenance file.
+  minted_heldout         a Court case's held-out target, MINTED here after its claim is frozen and anchored (GOAL
+                         §16.2, kerneld/mint.py; int18 stage-a): train DEV, target FUTURE, Kernel.record_mint.
 
 The private file location of a research task is resolved in ONE place (`task_private_dir`), so a move of held-out
 truth out of agent-readable roots (s4-integrity) changes only that function, and the new location is read by this
@@ -28,11 +30,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ..kernel import DatasetRole, Kernel, Vault, VaultError
+from ..kernel import DatasetRole, Kernel, KernelError, Vault, VaultError
 from .protocol import INGEST_KINDS, MEASUREMENT_PROBLEMS
 
-__all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "openml_split", "research_task",
-           "returned_measurements", "task_private_dir"]
+__all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "minted_heldout", "openml_split",
+           "research_task", "returned_measurements", "task_private_dir"]
 RECORD_KIND = "kerneld_ingest"
 
 
@@ -225,6 +227,66 @@ def openml_split(vault: Vault, run_id: str, subject: str, claim_hash: str, cache
         raise IngestRefused("ingest_refused") from None
     return _publish(vault, key, run_id, "openml_split", ds.dataset_id, [ds.train_id, ds.dataset_id],
                     {"n_train": sp.n_train, "n_test": sp.n_test})
+
+
+# ------------------------------------------------------------------------------------------- minted held-out (Court)
+def minted_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, family: str, n_train: int, n_test: int,
+                   beacon_round: str, beacon_value: str, anchor_file: str) -> dict[str, Any]:
+    """Mint and register a Court case's held-out target AFTER its claim is frozen (GOAL §16.2, kerneld/mint.py):
+      - the claim must be pre-registered and `subject` one of its targets, `<subject>-train` its development set;
+      - the claim must have frozen exactly this protocol (family, sizes, beacon ROUND) in scope condition `protocol`;
+      - the pre-registration must be anchored in `anchor_file` (research/suite.require_anchored: the ledger verifies,
+        its anchors match, and an anchored entry names the claim hash) BEFORE anything is minted;
+      - the truth is built here, in memory, from draw("heldout_mint", prereg_hash=claim, beacon=round:value) and
+        registered: train DEV (public), the target FUTURE (test_X public; test_y and the mint record private);
+      - Kernel.record_mint ledgers the mint (one mint per frozen hash: a second beacon is refused as beacon shopping;
+        K1 then applies the delta floor to the target).
+    Returns sizes and ids only. Refusals are closed codes."""
+    from .mint import MintSpecError, beacon_value_problems, draw_beacon, minted_files, minted_protocol
+    targets = vault.registered_targets(claim_hash)
+    if targets is None:
+        raise IngestRefused("not_registered")
+    if subject not in targets:
+        raise IngestRefused("token_scope")
+    train_id = f"{subject}-train"
+    claim = next((e.body.get("claim") or {} for e in vault.ledger.entries("prereg")
+                  if e.body.get("claim_hash") == claim_hash), {})
+    try:
+        protocol = minted_protocol(family, n_train, n_test, beacon_round)
+    except MintSpecError:
+        raise IngestRefused("bad_request") from None
+    if ((claim.get("scope") or {}).get("conditions") or {}).get("protocol") != protocol \
+            or train_id not in (claim.get("development") or []):
+        raise IngestRefused("token_scope")  # not the protocol (or development set) this claim froze
+    if beacon_value_problems(beacon_round, beacon_value):
+        raise IngestRefused("bad_request")
+    beacon = draw_beacon(beacon_round, beacon_value)
+    key = _key("minted_heldout", subject, claim_hash, hashlib.sha256(beacon.encode()).hexdigest())
+    done = _done(vault, key)
+    if done is not None:
+        return done
+    if any(e.body.get("frozen_hash") == claim_hash for e in vault.ledger.entries("mint")):
+        raise IngestRefused("already_registered")  # minted before (another beacon): beacon shopping
+    from ..research.suite import MintRefused, require_anchored
+    try:
+        anchor = require_anchored(claim_hash, vault.ledger.entries(), Path(anchor_file))
+    except MintRefused:
+        raise IngestRefused("not_anchored") from None
+    files = minted_files(family, claim_hash, beacon, n_train, n_test)
+    canary = f"CHH-MINT-CANARY-{subject}"
+    _precheck(vault, [(train_id, DatasetRole.DEV, {"train.csv": files.train}, {}),
+                      (subject, DatasetRole.FUTURE, {"test_X.csv": files.test_x},
+                       {"test_y.csv": files.test_y, "mint.json": files.record})])
+    try:
+        vault.register_dataset(train_id, DatasetRole.DEV, public={"train.csv": files.train}, private={})
+        vault.register_dataset(subject, DatasetRole.FUTURE, public={"test_X.csv": files.test_x},
+                               private={"test_y.csv": files.test_y, "mint.json": files.record}, canary=canary)
+        mint = Kernel(vault.store).record_mint(subject, claim_hash, beacon, files.task_id)
+    except (VaultError, KernelError):  # pre-checked above; a race still fails closed
+        raise IngestRefused("ingest_refused") from None
+    return _publish(vault, key, run_id, "minted_heldout", subject, [train_id, subject],
+                    {"n_train": files.n_train, "n_test": files.n_test, "task_id": files.task_id,
+                     "mint_seq": mint.seq, "anchor_length": int(anchor["length"])})
 
 
 # ------------------------------------------------------------------------------------------- returned measurements

@@ -113,8 +113,10 @@ class TokenTable:
         self.run_id(run_cap)
         if kind not in INGEST_KINDS or not subject:
             raise TokenError("bad_request")
-        if kind == "openml_split" and (claim_hash is None or not self.vault.registered(claim_hash)):
+        if kind in ("openml_split", "minted_heldout") and (claim_hash is None or not self.vault.registered(claim_hash)):
             raise TokenError("not_registered")
+        if kind == "minted_heldout" and subject in self.vault.datasets():
+            raise TokenError("already_registered")
         if kind == "returned_measurements":
             if claim_hash is None:  # the claim the measurements answer is bound here, not taken from the ingest call
                 raise TokenError("bad_request")

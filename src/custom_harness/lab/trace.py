@@ -242,6 +242,8 @@ class PromoteEv(_M):
     spec_hash: Sha | None = None
     audit_id: str | None = None
     released_label: str | None = None  # verdict_released only: the label the ledgered release carried
+    # verdict_released only (int18): the verification level (court/levels.py) its own ledgered `count` release carried
+    released_level: Annotated[str, Field(max_length=40)] | None = None
 
 
 PAYLOADS: dict[str, type[_M]] = {"session": SessionEv, "idea": IdeaEv, "run": RunEv, "file": FileEv,
@@ -275,8 +277,9 @@ def guard_problems(kind: str, payload: dict[str, Any], *, store: EvidenceStore |
                 problems.append(f"{path}: secret-like field holds a long value")
     if kind == "promote" and payload.get("op") == "verdict_released" and source != "manager":
         problems.append("only promote.release_verdict may record a released verdict label")
-    if kind == "promote" and payload.get("released_label") is not None and payload.get("op") != "verdict_released":
-        problems.append("a verdict label appears outside a verdict_released event")
+    released = payload.get("released_label") is not None or payload.get("released_level") is not None
+    if kind == "promote" and released and payload.get("op") != "verdict_released":
+        problems.append("a verdict label or level appears outside a verdict_released event")
     if store is not None:
         problems += _truth_problems(kind, payload, store, private)
     return problems

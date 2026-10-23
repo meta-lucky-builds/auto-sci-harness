@@ -248,6 +248,16 @@ class RunHandle:
                            spec=dict(spec))
         return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"])}
 
+    def ingest_minted_heldout(self, claim_hash: str, target: str, *, family: str, n_train: int, n_test: int,
+                              beacon_round: str, beacon_value: str, anchor_file: Path | str) -> dict[str, Any]:
+        """Mint a Court case's held-out target IN kerneld after its claim is frozen and anchored (kerneld/mint.py).
+        The labels never enter this process. Returns {n_train, n_test, task_id, mint_seq, anchor_length}."""
+        res = self._ingest("minted_heldout", target, bind_claim=claim_hash, family=family, n_train=int(n_train),
+                           n_test=int(n_test), beacon_round=beacon_round, beacon_value=beacon_value,
+                           anchor_file=str(Path(anchor_file).resolve()))
+        return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"]), "task_id": str(res["task_id"]),
+                "mint_seq": int(res["mint_seq"]), "anchor_length": int(res["anchor_length"])}
+
     def ingest_returned_measurements(self, dataset_id: str, file: Path | str, protocol: dict[str, Any], *,
                                      claim_hash: str, attestation: str, approved_protocol_seq: int) -> str:
         """Register measurements humans returned (`chh return-data`) as a FUTURE dataset; kerneld reads the file and

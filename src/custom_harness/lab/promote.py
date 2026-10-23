@@ -25,14 +25,18 @@
    the network-free candidate sandbox (`chh audit run --docker`), K0-K9 with re-execution, certificate or rejection.
 3. Feedback (`release_verdict`). The Lab sees nothing of the Court by default. A human may release the verdict LABEL
    (a finite alphabet) to the session workspace; it goes through the release ledger (`kerneld.releases.Releases`,
-   channel `prompt`, alphabet `verdict_bit`, one release per held-out target), which K4 counts. Failed checks,
-   reasons, effects and intervals are never released here.
+   channel `prompt`, alphabet `verdict_bit`, one release per held-out target), which K4 counts. Since int18 the
+   verification LEVEL (court/levels.py, GOAL §17.1) goes with it, as a second release (alphabet `count`), and into
+   the discovery trace (`promote/verdict_released.released_level`). Failed checks, reasons, effects and intervals
+   are never released here.
 
-Not wired (stated): the minted-data route (GOAL §16.2) for a Lab promotion. The research loop's minted targets are
-reached only through a run's `research.claim` / `research.confirm` nodes, which take a candidate from run state; a
-Court entry point that accepts an externally frozen candidate needs a research-loop change (docs/lab.md, "next").
-Retrospective OpenML targets are what the audit route offers today, and a networked Lab can download them: hence the
-freeze-then-name order, the deny-only screen, and the assumption listed on every such certificate.
+Two Court routes per freeze (exactly one may be taken):
+  - the MINTED route (int18, stage-a; court/minted.py, `chh court register PROMOTION --family F ...`): the claim is
+    pre-registered first, then kerneld mints fresh held-out truth after the freeze (GOAL §16.2): eligible for
+    VALIDATED (court/levels.py);
+  - the RETROSPECTIVE route (`handoff`, below): fixed public OpenML targets, which a networked Lab can download:
+    hence the freeze-then-name order, the deny-only screen and the assumption on every such certificate; its level
+    is capped at REPLICATED and labelled RETROSPECTIVE (GOAL §17.1).
 
 Built, NOT test-verified.
 """
@@ -310,33 +314,48 @@ def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCL
     hand = [r for r in rows if r.get("event") == "handed_off"]
     if not hand:
         raise PromoteError(f"promotion {pid} has no Court spec yet (chh lab handoff)")
-    from ..audit.claim_audit import latest_outcome
-    outcome = latest_outcome(store, hand[-1]["audit_id"])
+    if hand[-1].get("route") == "minted":  # int18: the minted Court route (court/minted.py)
+        from ..court.minted import latest
+        outcome = latest(store, str(hand[-1]["case_id"]), "outcome")
+    else:
+        from ..audit.claim_audit import latest_outcome
+        outcome = latest_outcome(store, hand[-1]["audit_id"])
     if outcome is None:
         raise PromoteError(f"the Court has no outcome for promotion {pid} yet")
     session_id = rows[0]["session_id"]
+    level: str | None = None
     if outcome.get("cert_hash"):
+        from ..court.levels import level as level_of
         from ..kerneld.releases import Releases
         from ..kerneld.scope import ScopedKernel
         cert = ScopedKernel(store).certificate(outcome["cert_hash"])
         label = cert.label.value
         targets = list(cert.claim.get("generalization_targets") or hand[-1]["targets"])
-        Releases.live(store).emit(label, targets=targets, channel="prompt", alphabet="verdict_bit",
-                                  note="lab:promotion_verdict", key=f"lab:{pid}")
-        payload: dict[str, Any] = {"promotion_id": pid, "label": label}
+        rel = Releases.live(store)
+        rel.emit(label, targets=targets, channel="prompt", alphabet="verdict_bit", note="lab:promotion_verdict",
+                 key=f"lab:{pid}")
+        # the verification level (GOAL §17.1; court/levels.py, code only) is a small closed alphabet (NONE /
+        # REPRODUCIBLE / REPLICATED / VALIDATED, +RETROSPECTIVE): released as a COUNT, which K4 counts as such
+        level = level_of(store, str(outcome["cert_hash"])).badge
+        rel.emit(level, targets=targets, channel="prompt", alphabet="count", note="lab:promotion_level",
+                 key=f"lab:{pid}")
+        payload: dict[str, Any] = {"promotion_id": pid, "label": label, "level": level}
     elif not outcome.get("labels_read"):
         targets, label = [], "COULD NOT RUN"
         payload = {"promotion_id": pid, "status": "COULD NOT RUN (no held-out label was read)"}
     else:
         raise PromoteError("the Court read labels but issued no certificate: releasing anything needs a review")
-    payload["notice"] = "verdict label only; reasons, effects and intervals stay with the Court (GOAL §17)"
+    payload["notice"] = ("verdict label and verification level only; reasons, effects and intervals stay with the "
+                         "Court (GOAL §17)")
     _write_into_workspace(session_id, f".court/verdict-{pid}.json", json.dumps(payload, sort_keys=True), docker)
     body = {"promotion_id": pid, "event": "verdict_released", "label": EXPLORATORY, "released_label": label,
-            "targets": targets, "by": by, "at": time.time(),
+            "released_level": level, "targets": targets, "by": by, "at": time.time(),
             "released_on": date.today().isoformat()}
     store.append_record(RECORD_KIND, body)
-    T.record(store, session_id, "promote", {"op": "verdict_released", "promotion_id": pid, "released_label": label},
-             actor=T.human(by))
+    ev: dict[str, Any] = {"op": "verdict_released", "promotion_id": pid, "released_label": label}
+    if level is not None:
+        ev["released_level"] = level
+    T.record(store, session_id, "promote", ev, actor=T.human(by))
     return body
 
 

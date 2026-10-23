@@ -14,6 +14,7 @@ import yaml
 
 from .audit import cli as audit_cli
 from .config import data_dir
+from .court import cli as court_cli
 from .gateway import Backend, MockBackend
 from .human import cli as human_cli
 from .kerneld.hoststore import open_host_store
@@ -444,12 +445,16 @@ def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
+    """Every certificate with its verification level (GOAL §17.1, court/levels.py: computed by code, never a model;
+    the meaning of each badge: `chh court level CERT`)."""
+    from .court.levels import level
     from .kerneld.scope import ScopedKernel
     k = ScopedKernel(store)
     for e in k.ledger.entries("certificate"):
         cert = k.certificate(e.body["cert_hash"])
+        badge = level(store, e.body["cert_hash"]).badge
         print(f"{e.body['cert_hash'][:16]}  {cert.label.value:<20} {k.status(e.body['cert_hash']):<9} "
-              f"failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")
+              f"level={badge:<27} failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")
     return 0
 
 
@@ -1029,6 +1034,7 @@ def main(argv: list[str] | None = None) -> int:
     from .research.station import cli as station_cli  # `chh research multi ...` (L4 multi-agent mode)
     station_cli.add_parsers(sub)
     lab_cli.add_parsers(sub)
+    court_cli.add_parsers(sub)
     human_cli.add_parsers(sub)  # after the others: it adds hash flags to older human commands
     a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
@@ -1053,7 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
                 "verify-registry": cmd_verify_registry,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
                 **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
-                **station_cli.COMMANDS, **lab_cli.COMMANDS, **human_cli.COMMANDS}[a.cmd](a, store)
+                **station_cli.COMMANDS, **lab_cli.COMMANDS, **court_cli.COMMANDS,
+                **human_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 
