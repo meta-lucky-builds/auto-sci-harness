@@ -34,13 +34,11 @@ Built, NOT test-verified.
 from __future__ import annotations
 
 import hashlib
-import importlib
 import os
 import re
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any
 
 from ..config import data_dir
 
@@ -63,20 +61,25 @@ class LabWallError(PermissionError):
 
 
 # ---------------------------------------------------------------- paths
+# int18 (stage-c): containment is decided by pathsafe (s4-integrity), which also sees aliases (8.3 short names,
+# junctions, extended-length prefixes, file identity) that a canonical-path prefix test misses; lab-agents was
+# written before s4-integrity was merged (test_pathsafe::test_no_containment_check_bypasses_pathsafe flagged it).
 def canon(p: Path | str) -> Path:
-    """Resolved, case-folded (Windows) absolute path."""
-    return Path(os.path.normcase(str(Path(p).expanduser().resolve())))
+    """Resolved, case-folded (Windows) absolute path (pathsafe.canon)."""
+    from ..pathsafe import canon as _canon
+    return _canon(Path(p).expanduser())
 
 
 def overlaps(a: Path | str, b: Path | str) -> bool:
-    """True when a and b are the same path or one lies inside the other (canonical paths)."""
-    ca, cb = canon(a), canon(b)
-    return ca == cb or ca.is_relative_to(cb) or cb.is_relative_to(ca)
+    """True when a and b are the same path or one lies inside the other (pathsafe.overlaps, alias-safe)."""
+    from ..pathsafe import overlaps as _overlaps
+    return _overlaps(Path(a).expanduser(), Path(b).expanduser())
 
 
 def contains(outer: Path | str, inner: Path | str) -> bool:
-    co, ci = canon(outer), canon(inner)
-    return ci == co or ci.is_relative_to(co)
+    """True when inner is outer or lies inside it (pathsafe.is_within, alias-safe)."""
+    from ..pathsafe import is_within
+    return is_within(Path(inner).expanduser(), Path(outer).expanduser())
 
 
 def _link_like(p: Path) -> bool:
@@ -91,21 +94,10 @@ def lab_root() -> Path:
 
 
 def truth_locations() -> list[Path]:
-    """Every held-out truth location. Uses s4-integrity's truth_layout when it is merged (its truth root and mapped
-    truth dirs); until then the same default it uses ($CHH_TRUTH_ROOT, else `<data>/private`)."""
-    tl = _truth_layout()
-    if tl is None:
-        env = os.environ.get(TRUTH_ROOT_ENV)
-        return [Path(env) if env else data_dir() / "private"]
+    """Every held-out truth location: s4-integrity's truth root and its mapped truth dirs (truth_layout, the one
+    module that builds truth locations; int18 stage-c removed the pre-merge fallback that joined `<data>/private`)."""
+    from .. import truth_layout as tl
     return [Path(tl.truth_root()), *(Path(p) for p in tl.protected_truth_dirs())]
-
-
-def _truth_layout() -> Any:
-    """s4-integrity's truth_layout module once it is merged, else None (looked up at call time)."""
-    try:
-        return importlib.import_module("custom_harness.truth_layout")
-    except ImportError:
-        return None
 
 
 def _repo_root() -> Path:
@@ -158,8 +150,7 @@ def workspace_problems(workspace: Path | str, root: Path | None = None) -> list[
     r = Path(root) if root is not None else lab_root()
     ws = Path(workspace)
     problems = lab_root_problems(r)
-    cr, cw = canon(r), canon(ws)
-    if cw == cr or not cw.is_relative_to(cr):
+    if not contains(r, ws) or contains(ws, r):  # strictly inside (pathsafe, alias-safe)
         problems.append(f"workspace {ws} is not strictly inside the lab root {r}")
         return problems
     cur = Path(os.path.abspath(r))
@@ -360,21 +351,19 @@ def recipe_problems(text: str) -> list[str]:
 
 
 def static_problems(recipe: Path | None = None) -> list[str]:
-    """Every static Lab wall problem (empty = clean): the lab root, the recipe, and (when s4-integrity's
-    truth_layout is merged) its layout check run with the lab root added to the agent-readable roots."""
+    """Every static Lab wall problem (empty = clean): the lab root, the recipe, no truth location overlapping the lab
+    root, and s4-integrity's truth-layout check run with the lab root added to the agent-readable roots."""
     problems = lab_root_problems()
     path = recipe if recipe is not None else _repo_root() / "docker" / "lab.Dockerfile"
     try:
         problems += recipe_problems(path.read_text(encoding="utf-8"))
     except OSError as e:
         problems.append(f"lab recipe {path} unreadable: {e}")
-    tl = _truth_layout()
-    if tl is None:
-        for t in truth_locations():
-            if overlaps(t, lab_root()):
-                problems.append(f"truth location {t} overlaps the lab root {lab_root()}")
-    else:
-        from ..commitment import default_agent_readable_roots
-        roots = [*default_agent_readable_roots(), lab_root()]
-        problems += [str(x) for x in tl.truth_layout_problems(roots)]
+    from .. import truth_layout as tl
+    from ..commitment import default_agent_readable_roots
+    for loc in truth_locations():
+        if overlaps(loc, lab_root()):
+            problems.append(f"truth location {loc} overlaps the lab root {lab_root()}")
+    roots = [*default_agent_readable_roots(), lab_root()]
+    problems += [str(x) for x in tl.truth_layout_problems(roots)]
     return problems
