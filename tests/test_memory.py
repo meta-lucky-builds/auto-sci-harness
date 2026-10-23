@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -626,13 +627,16 @@ def test_memory_package_has_no_model_path_and_only_trusted_code_writes():
     assert r.returncode == 0, r.stdout + r.stderr
     # research/memory_wiring.py: the research loop's reader (recall into the hypothesize prompt) and its trusted
     # writer (harvest_negatives + record_outcome after certify); research/claims.py only calls it after certify
-    allowed = {"cli.py", "research/memory_wiring.py", "research/claims.py"}
+    # research/station/archive.py: the multi-agent mode's archive (its only writer is trusted code publishing Kernel
+    # certificates of a turn's ledger window; docs/multi_agent_mode.md)
+    allowed = {"cli.py", "research/memory_wiring.py", "research/claims.py", "research/station/archive.py"}
+    # any relative depth (`from ...memory` was missed by the earlier substring check), and `import ... memory`
+    pattern = re.compile(r"custom_harness\.memory\b|from\s+\.+memory\b|from\s+\.+\s+import\s+[^\n]*\bmemory\b")
     importers = []
     for p in (SRC / "custom_harness").rglob("*.py"):
         rel = p.relative_to(SRC / "custom_harness").as_posix()
         if rel.startswith("memory/") or rel in allowed:
             continue
-        t = p.read_text(encoding="utf-8")
-        if "custom_harness.memory" in t or "from .memory" in t or "from ..memory" in t:
+        if pattern.search(p.read_text(encoding="utf-8")):
             importers.append(rel)
     assert importers == []

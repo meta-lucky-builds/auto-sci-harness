@@ -1059,6 +1059,8 @@ def main(argv: list[str] | None = None) -> int:
     scorecard_cli.add_parsers(sub)
     timesplit_cli.add_parsers(sub)
     studio_cli.add_parsers(sub)
+    from .research.station import cli as station_cli  # `chh research multi ...` (L4 multi-agent mode)
+    station_cli.add_parsers(sub)
     a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
         from .sandbox.local import TEST_MODE_ENV
@@ -1080,7 +1082,8 @@ def main(argv: list[str] | None = None) -> int:
                 "preflight-suite": cmd_preflight_suite, "salts-reveal": cmd_salts_reveal,
                 "verify-registry": cmd_verify_registry,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
-                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS}[a.cmd](a, store)
+                **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
+                **station_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 

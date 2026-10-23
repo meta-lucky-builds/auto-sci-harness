@@ -1,0 +1,24 @@
+# L4 multi-agent research mode (docs/multi_agent_mode.md): `chh research multi run examples/station.yaml --docker`
+# Three research-loop agents on two ML tasks, coordinating only through the shared archive. Every number below is
+# UNCALIBRATED (owner decision, GOAL §13.8). Agent roles bind model backends as `chh run --role` does; a judge from the
+# proposer's family violates invariant 5 and is refused unless allow_same_family: true (then recorded NOT MET).
+spec: research_v2.yaml
+mode:
+  mode_id: station-demo
+  # task_dir: a task directory written by `chh build-suite` (these paths are PLACEHOLDERS: replace them)
+  problems:
+    - {id: task-a, task_dir: SUITE_DIR/task_a}
+    - {id: task-b, task_dir: SUITE_DIR/task_b}
+  agents:
+    - {id: a1, roles: {proposer: "codex", executor: "codex", judge: "ollama:qwen2.5:7b", replicator: "ollama:qwen2.5:7b"}}
+    - {id: a2, roles: {proposer: "codex", executor: "codex", judge: "ollama:qwen2.5:7b", replicator: "ollama:qwen2.5:7b"}}
+    - {id: a3, roles: {proposer: "ollama:qwen2.5:7b", executor: "ollama:qwen2.5:7b", judge: "codex", replicator: "codex"}}
+  rounds: 6
+  seed: 0
+  budget:
+    unit: quota_units
+    mode: {quota_units: 600, wall_s: 86400}
+    agent: {quota_units: 240}
+  stall_window: 3
+  stall_shrink: 0.5
+  isolation_rounds: 1
