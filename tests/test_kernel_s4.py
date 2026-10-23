@@ -477,6 +477,8 @@ def test_a_private_file_given_as_a_program_input_is_a_coded_k9_finding(world):
     eid = world.kernel.record_evaluation(rec)
     cx = K.Context(claim=claim, claim_hash=claim.claim_hash(), store=world.store, vault=world.vault,
                    ledger=world.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=(eid,))
+    K.k0_provenance(cx)  # K0 resolves the records K9 scans (certify runs it first)
+    assert [e for e, _ in cx.records] == [eid]
     res = K.k9_leaks(cx)
     assert Code.K9_PRIVATE_CODE in res.codes and Code.CHECK_RAISED not in res.codes
     assert any("program input" in r and "IS a private file (test/test_y.csv)" in r for r in res.reasons), res.reasons
