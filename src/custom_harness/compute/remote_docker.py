@@ -56,7 +56,7 @@ from .jobs import (
     infra_error,
     policy_exit,
 )
-from .pinned_ssh import PinnedSSH
+from .pinned_ssh import PinnedSSH, fetch_file_script
 from .ssh import UploadEntry, check_rel, check_remote_root, collect_upload
 
 DIGEST_IMAGE = re.compile(r"[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}")
@@ -243,12 +243,7 @@ class RemoteDockerBackend(AsyncComputeBackend):
         self.ssh.checked("cancel", f"sh -c {q(cmd)}", timeout_s=60)
 
     def fetch_script(self, job_key: str, rel: str) -> str:
-        q, w = shlex.quote, posixpath.join(self.run_dir(job_key), "work")
-        target = posixpath.join(w, check_rel(rel))
-        return (f"w=$(realpath -e -- {q(w)}) && f=$(realpath -e -- {q(target)}) && "
-                f'case "$f" in "$w"/*) ;; *) echo "refusing: outside the run" >&2; exit 4;; esac && '
-                f'[ ! -L {q(target)} ] && [ -f "$f" ] && '
-                f'[ "$(stat -c %s -- "$f")" -le {FETCH_MAX_BYTES} ] && base64 -- "$f"')
+        return fetch_file_script(posixpath.join(self.run_dir(job_key), "work"), rel, FETCH_MAX_BYTES)
 
     def _fetch(self, handle: JobHandle, rel: str) -> bytes:
         r = self.ssh.checked("fetch", f"sh -c {shlex.quote(self.fetch_script(handle.job_key, rel))}",

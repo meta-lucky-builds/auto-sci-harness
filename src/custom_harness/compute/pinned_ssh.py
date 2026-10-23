@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import posixpath
 import re
+import shlex
 from pathlib import Path
 
 from .jobs import CommandResult, RemoteError, Runner, subprocess_runner
+from .ssh import check_rel
 
 _HOST = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+")
 _KEY = re.compile(r"(ssh-ed25519|ecdsa-sha2-nistp(?:256|384|521)|rsa-sha2-(?:256|512)|ssh-rsa) [A-Za-z0-9+/]+={0,3}")
@@ -94,3 +97,21 @@ class PinnedSSH:
             raise RemoteError(f"ssh {self.host}: {what} failed (rc={r.returncode}, timed_out={r.timed_out}): "
                               f"{r.stderr.strip()[-1000:]}", transient=True)
         return r
+
+
+def fetch_file_script(base_dir: str, rel: str, max_bytes: int) -> str:
+    """POSIX sh that prints one regular file under `base_dir` as base64. The path is resolved with `realpath -e` and
+    refused (exit 4) if it leaves `base_dir`; the final component must not be a symlink; the file must be at most
+    `max_bytes`. Used only on FINISHED jobs, so the run can no longer swap the file between check and read."""
+    q = shlex.quote
+    target = posixpath.join(base_dir, check_rel(rel))
+    return (f"w=$(realpath -e -- {q(base_dir)}) && f=$(realpath -e -- {q(target)}) && "
+            f'case "$f" in "$w"/*) ;; *) echo "refusing: outside the run" >&2; exit 4;; esac && '
+            f'[ ! -L {q(target)} ] && [ -f "$f" ] && '
+            f'[ "$(stat -c %s -- "$f")" -le {int(max_bytes)} ] && base64 -- "$f"')
+
+
+def log_slice_script(path: str, cursor: int, max_bytes: int) -> str:
+    """POSIX sh printing bytes [cursor, cursor+max_bytes) of a log file as base64 (nothing if it does not exist)."""
+    return (f"if [ -f {shlex.quote(path)} ]; then tail -c +{int(cursor) + 1} -- {shlex.quote(path)} | "
+            f"head -c {int(max_bytes)} | base64; fi")
