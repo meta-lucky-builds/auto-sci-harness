@@ -213,3 +213,20 @@ load); do not read a faulthandler dump as a hang.
   deviation, cooling-off not observed), on top of s3-kernel's 8dc2497e and s3-domain's 59e42223 records.
 - `chh approve-adapter ml` (hash changed by the split) and `chh approve-adapter circuit`: human only.
 - I1 decision; emergence allowlist decision; the assure/corpus.py ratchet listing (R16).
+
+## 8. Results (branch `int17-fix`, from int17 916bc5d)
+
+**2026-10-23, section 1 (fast gate), Windows laptop, run alone.**
+- First run on 916bc5d: everything OK up to the Kernel tests, then 6 failed / 232 passed and coverage 98.71% (40 min).
+- All 6 failures were stale TESTS, not product bugs (details in commit ac3dbbf):
+  - encoding utf-8-sig: false precondition;
+  - nullbound: the 15-row target is NOT insensitive (11/11 plantings detected), so it was shrunk to 5 rows;
+  - two bundle tests: the missing-blob problem was reworded by the artifact listing;
+  - lp provenance: K1's scope-statement rule refuses free-text statements;
+  - lp adapter hash: the "procedures" key was added by the split.
+- After that: 238 passed, coverage 99.77%. Five untested Kernel branches (sim BOM, other-target truth copy, crashing
+  counterfactual replay, artifact-list mismatch, unreadable bundled ledger entry) got tests in d1121b1. Each new
+  assertion was shown to fail when its guarded line is mutated.
+- **Fast gate on d1121b1: all steps OK; Kernel 240 passed, 100.00% line+branch coverage** (48.5 min).
+
+Not run yet: sections 2–5 and the full gate.
