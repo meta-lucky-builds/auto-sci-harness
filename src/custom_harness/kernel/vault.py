@@ -12,8 +12,12 @@ that is why private files live outside every agent mount (invariant 2) and the l
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import hmac
+import secrets
 from enum import StrEnum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -87,10 +91,14 @@ class VaultError(ValueError):
     pass
 
 
+KEYED = "hmac-sha256:"  # s4-kerneld review #7: how a ledger entry names a private file's bytes (never their sha256)
+
+
 class Vault:
     def __init__(self, store: EvidenceStore, ledger: Ledger | None = None):
         self.store = store
         self.ledger = ledger or Ledger(store)
+        self._index: dict[str, str] = {}
 
     # ------------------------------------------------------------ registration
     def register_dataset(self, dataset_id: str, role: DatasetRole, public: dict[str, bytes],
@@ -100,11 +108,12 @@ class Vault:
             raise VaultError(f"file(s) both public and private: {sorted(overlap)}")
         files = {name: FileRef(blob=self.store.blobs.put(data), private=False) for name, data in public.items()}
         files |= {name: FileRef(blob=self.store.blobs.put(data), private=True) for name, data in private.items()}
-        h = dataset_hash(files)
+        sealed = files | {n: FileRef(blob=self._seal(private[n], files[n].blob), private=True) for n in private}
+        h = dataset_hash(sealed)  # the record names private bytes by keyed digest only (an offline guess cannot match)
         known = self.datasets()
         existing = known.get(dataset_id)
         if existing is not None:
-            if existing.hash != h or existing.role != role:
+            if existing.hash not in (h, dataset_hash(files)) or existing.role != role:  # (or registered before s4)
                 raise VaultError(f"dataset {dataset_id!r} already registered with different content or role")
             return existing
         # laundering: private bytes of one dataset must never become a public file of another (or vice versa)
@@ -114,10 +123,37 @@ class Vault:
                     if ref.blob == oref.blob and ref.private != oref.private:
                         raise VaultError(f"{dataset_id}/{name} has the same bytes as {other.dataset_id}/{oname}, which "
                                          f"is {'private' if oref.private else 'public'} there")
-        rec = DatasetRecord(dataset_id=dataset_id, role=role, files=files, hash=h,
+        rec = DatasetRecord(dataset_id=dataset_id, role=role, files=sealed, hash=h,
                             canary_ref=self.store.blobs.put(canary.encode()) if canary else None)
         entry = self.ledger.append("register_dataset", rec.model_dump(mode="json", exclude={"seq"}))
-        return rec.model_copy(update={"seq": entry.seq})
+        return rec.model_copy(update={"seq": entry.seq, "files": files})
+
+    def _seal(self, data: bytes, blob: str) -> str:
+        """HMAC-SHA256 of a private file under the Vault's key, <store>/private/vault.key (created on first use; in no
+        ledger entry, export or bundle manifest), indexed to its content address in <store>/private/index (s4-kerneld
+        review #7). Residual (stated): whoever holds the key (the Vault/kerneld process, the store's owner) can still
+        confirm a guessed label file; the key's custody is the store directory's."""
+        key = Path(self.store.root) / "private" / "vault.key"
+        key.parent.joinpath("index").mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(FileExistsError), key.open("xb") as f:
+            f.write(secrets.token_bytes(32))
+        digest = hmac.new(key.read_bytes(), data, hashlib.sha256).hexdigest()
+        key.parent.joinpath("index", digest).write_text(blob, encoding="ascii")
+        return KEYED + digest
+
+    def resolve(self, ref: FileRef) -> FileRef:
+        """A keyed private file's content address from the Vault's index; unresolvable: left keyed (reads fail)."""
+        idx = Path(self.store.root) / "private" / "index" / ref.blob.removeprefix(KEYED)
+        if ref.blob.startswith(KEYED) and ref.blob not in self._index and idx.is_file():
+            self._index[ref.blob] = idx.read_text(encoding="ascii").strip()  # immutable: cached per Vault
+        return FileRef(blob=self._index.get(ref.blob, ref.blob), private=ref.private)
+
+    def import_index(self, index: dict[str, str]) -> None:
+        """Re-create index entries (digest hex -> content address) shipped in a bundle manifest (reproduce)."""
+        for digest, blob in index.items():
+            if digest.isalnum() and blob.isalnum():  # hex names only: no path out of the index directory
+                (Path(self.store.root) / "private" / "index").mkdir(parents=True, exist_ok=True)
+                (Path(self.store.root) / "private" / "index" / digest).write_text(blob, encoding="ascii")
 
     def approve_role(self, dataset_id: str, approver: str, note: str = "") -> Entry:
         """HUMAN action (CLI: `chh approve-role`): attest that a dataset registered as external/future really is data
@@ -154,7 +190,8 @@ class Vault:
     def datasets(self) -> dict[str, DatasetRecord]:
         out = {}
         for e in self.ledger.entries("register_dataset"):
-            out[e.body["dataset_id"]] = DatasetRecord.model_validate({**e.body, "seq": e.seq})
+            rec = DatasetRecord.model_validate({**e.body, "seq": e.seq})
+            out[rec.dataset_id] = rec.model_copy(update={"files": {n: self.resolve(f) for n, f in rec.files.items()}})
         return out
 
     def artifacts(self) -> dict[str, ArtifactRecord]:

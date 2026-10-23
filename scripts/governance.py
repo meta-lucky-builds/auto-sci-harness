@@ -9,6 +9,14 @@ of the core fingerprint.
     python scripts/governance.py --fingerprint       # print the current fingerprint
     python scripts/governance.py --record --kind window --proposed 2026-10-07 --approver NAME --note "..."
     python scripts/governance.py --record --kind tighten --approver NAME --note "..."
+    python scripts/governance.py --record --kind delegated --approver NAME --delegated-by OWNER --basis "GOAL §..." \
+        --change "..." [--change "..."] --note "..."
+
+A `delegated` record (s3-kernel suggestion, added by s4-kernel) is an owner-DELEGATED core change made without the
+cooling-off: it satisfies the current fingerprint's requirement but always states `cooling_off_observed: false`, who
+delegated (`delegated_by`), the `basis` and the `changes`, so it is never mistaken for a tightening or a window (the
+earlier tighten-plus-deviation pattern classed such changes wrongly first). The owner reviews it and may replace it by
+a window record.
 
 Records live in `redteam/kernel_core_changes.yaml`. A `deviation` record (appended, never edited in place)
 corrects an earlier misclassified record and states whether the cooling-off was observed; it never satisfies the
@@ -93,6 +101,19 @@ def _deviation_problems(recs: list[dict]) -> list[str]:
     return out
 
 
+def _delegated_problems(r: dict, fp: str) -> list[str]:
+    """A `delegated` record names who delegated, a basis and a non-empty list of changes, and admits the cooling-off
+    was not observed (it cannot claim otherwise)."""
+    out = [f"record {fp[:16]}: a delegated record names no {k}" for k in ("delegated_by", "basis")
+           if not str(r.get(k, "")).strip()]
+    changes = r.get("changes")
+    if not isinstance(changes, list) or not changes or not all(isinstance(c, str) and c.strip() for c in changes):
+        out.append(f"record {fp[:16]}: a delegated record needs a non-empty 'changes' list")
+    if r.get("cooling_off_observed") is not False:
+        out.append(f"record {fp[:16]}: a delegated record must state cooling_off_observed: false")
+    return out
+
+
 def problems(root: Path = ROOT, today: dt.date | None = None) -> list[str]:
     path = root / RECORDS
     recs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {}).get("changes", []) if path.exists() else []
@@ -121,8 +142,10 @@ def problems(root: Path = ROOT, today: dt.date | None = None) -> list[str]:
                 out.append(f"record {fp[:16]}: recorded in the future ({merged})")
         elif r.get("kind") == "baseline" and recs.index(r) != 0:
             out.append(f"record {fp[:16]}: only the first record may be the 'baseline'")
+        elif r.get("kind") == "delegated":
+            out += _delegated_problems(r, fp)
         elif r.get("kind") not in ("tighten", "baseline"):
-            out.append(f"record {fp[:16]}: kind {r.get('kind')!r} is neither 'window' nor 'tighten'")
+            out.append(f"record {fp[:16]}: kind {r.get('kind')!r} is not 'window', 'tighten' or 'delegated'")
     return out
 
 
@@ -130,7 +153,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fingerprint", action="store_true")
     ap.add_argument("--record", action="store_true")
-    ap.add_argument("--kind", choices=("window", "tighten"))
+    ap.add_argument("--kind", choices=("window", "tighten", "delegated"))
+    ap.add_argument("--delegated-by", default="")
+    ap.add_argument("--basis", default="")
+    ap.add_argument("--change", action="append", default=[])
     ap.add_argument("--proposed")
     ap.add_argument("--approver", default="")
     ap.add_argument("--note", default="")
@@ -149,8 +175,19 @@ def main(argv: list[str] | None = None) -> int:
                "recorded": dt.date.today().isoformat()}
         if a.proposed:
             rec["proposed"] = a.proposed
-        doc["changes"].append(rec)
-        path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8", newline="")
+        if a.kind == "delegated":
+            rec |= {"delegated_by": a.delegated_by, "basis": a.basis, "changes": a.change,
+                    "cooling_off_observed": False}
+            bad = _delegated_problems(rec, rec["fingerprint"])
+            if bad:
+                print("governance: " + "; ".join(bad), flush=True)
+                return 1
+        if path.exists() and doc["changes"]:  # append only: earlier records keep their bytes (history not rewritten)
+            with path.open("a", encoding="utf-8", newline="") as f:
+                f.write(yaml.safe_dump([rec], sort_keys=False, width=120))
+        else:
+            doc["changes"].append(rec)
+            path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8", newline="")
         print(f"governance: recorded {rec}", flush=True)
         return 0
     found = problems(today=dt.date.today())

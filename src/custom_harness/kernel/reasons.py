@@ -45,6 +45,7 @@ class Code(StrEnum):
     K1_STATEMENT = "K1_STATEMENT"
     K1_SCOPE = "K1_SCOPE"
     K1_UNREADABLE = "K1_UNREADABLE"
+    K1_TOLERANCE = "K1_TOLERANCE"  # s4: reproduce_tolerance > 0 without a noise-floor record that justifies it
     # K2 pre-registered
     K2_CHAIN = "K2_CHAIN"
     K2_NOT_REGISTERED = "K2_NOT_REGISTERED"

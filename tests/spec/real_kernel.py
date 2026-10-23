@@ -36,6 +36,7 @@ from custom_harness.kernel import (
     MetricRef,
     Scope,
     VaultError,
+    ml,
 )
 from custom_harness.records import Run, StepKind, TraceStep
 from custom_harness.store import EvidenceStore
@@ -85,7 +86,7 @@ class StoredReplayer:
 
 def to_claim(spec: ClaimSpec, refs: dict[str, ArtifactRef]) -> Claim:
     missing = ArtifactRef(artifact_id="missing", hash="0" * 64)
-    return Claim(kind=ClaimKind(spec.kind), statement=f"claim {spec.key}", subject=refs.get(spec.subject, missing),
+    c = Claim(kind=ClaimKind(spec.kind), statement=f"claim {spec.key}", subject=refs.get(spec.subject, missing),
                  comparator=refs.get(spec.comparator, missing), metric=MetricRef(id="accuracy", higher_is_better=True),
                  effect=Effect(min_effect=spec.min_effect, predicted_lo=spec.min_effect, predicted_hi=0.95,
                                probability=0.7),
@@ -93,7 +94,8 @@ def to_claim(spec: ClaimSpec, refs: dict[str, ArtifactRef]) -> Claim:
                  generalization_targets=spec.targets,
                  analysis_plan=AnalysisPlan(seeds=spec.seeds, alpha=spec.alpha, n_comparisons=spec.n_comparisons,
                                             n_boot=1000, reproduce="all"),
-                 resolve_by=RESOLVE_BY)
+                 resolve_by=RESOLVE_BY, assumptions=(f"spec claim {spec.key}",))  # the key keeps equal specs distinct
+    return c.model_copy(update={"statement": ml.scope_phrase(c)})  # s4-kernel: K1 takes only this rendering
 
 
 def verdict_of(cert: Any) -> Verdict:

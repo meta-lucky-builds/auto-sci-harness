@@ -20,7 +20,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from ..kernel import AnalysisPlan, ArtifactRef, Claim, ClaimKind, Effect, MetricRef, Risk, Scope, canonical_json
+from ..kernel import AnalysisPlan, ArtifactRef, Claim, ClaimKind, Effect, MetricRef, Risk, Scope, canonical_json, ml
 from ..verify import metrics as M
 from . import wrapper
 
@@ -165,8 +165,8 @@ class LoadedSpec(BaseModel):
                       "budget_timeout_s": repr(s.budget.timeout_s), "wrapper_sha256": wrapper.wrapper_hash(),
                       "protocol": f"{FORMAT} fresh OpenML data, identical contract for both arms",
                       "licences": "; ".join(f"openml:{d.openml_id}={d.licence}" for d in s.datasets)}
-        return Claim(
-            kind=ClaimKind.IMPROVEMENT, statement=f"[audit of {s.paper.doi}] {s.paper.sentence}",
+        claim = Claim(
+            kind=ClaimKind.IMPROVEMENT, statement="",
             subject=ArtifactRef(artifact_id=mid, hash=hashlib.sha256(self.method_code).hexdigest()),
             comparator=ArtifactRef(artifact_id=bid, hash=hashlib.sha256(self.baseline_code).hexdigest()),
             metric=MetricRef(id=c.metric, higher_is_better=M.HIGHER_IS_BETTER[c.metric]),
@@ -185,6 +185,9 @@ class LoadedSpec(BaseModel):
                          "mean a narrower scope than claimed, not a wrong result"),
             risk=Risk(),
             resolve_by=datetime.combine(c.resolve_by, time(0, 0), tzinfo=UTC).timestamp())
+        # K1 (s4-kernel): a data claim's statement is exactly the ML adapter's scope rendering; the audited sentence
+        # stays a provenance note (scope.conditions["paper_sentence"]), quoted by the report, never the statement
+        return claim.model_copy(update={"statement": ml.scope_phrase(claim)})
 
 
 class SpecError(ValueError):

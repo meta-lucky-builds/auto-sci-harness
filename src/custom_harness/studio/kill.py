@@ -148,6 +148,8 @@ class RunGuardedKernel(Kernel):
     """The Kernel bound to one run (what `ModuleContext.kernel()` returns): refuses every claim-making call once the
     run is killed, and retracts a certificate that was recorded after the kill."""
 
+    run_id: str  # the binding (narrower than Kernel.run_id); recorded on prereg/certificate entries (s4-kernel)
+
     def __init__(self, store: EvidenceStore, *, run_id: str, **kw: Any):
         super().__init__(store, **kw)
         from ..kernel.vault import Vault

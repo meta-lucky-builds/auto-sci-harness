@@ -46,7 +46,7 @@ from .claim import Claim, canonical_json, strict_json
 from .execution import ExecRecord
 from .kernel import Kernel
 from .ledger import Entry, verify_chain
-from .vault import CertificateRecord
+from .vault import KEYED, CertificateRecord, FileRef, Vault
 
 FORMAT = "chh-bundle/2"
 LEGACY_FORMATS = frozenset({"chh-bundle/1"})  # ledger excerpt only: re-checked, labelled "EXCERPT ONLY"
@@ -100,6 +100,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path, large_bytes: in
     evidence: list[dict[str, Any]] = []
     run_ids: set[str] = set()
     data_blobs: set[str] = set()
+    index: dict[str, str] = {}  # s4: keyed digest -> content address of the bundled private files
     preds: set[str] = set()
     dataset_ids = set(claim.generalization_targets) | set(claim.development) | set(claim.scope.datasets)
     for eid in cert.evidence_ids:
@@ -129,7 +130,10 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path, large_bytes: in
     for e in entries:
         b = e.body
         if e.kind == "register_dataset":  # private files only of the claim's datasets; public files of all
-            files = {f["blob"] for f in b["files"].values() if b.get("dataset_id") in dataset_ids or not f["private"]}
+            sel = [f for f in b["files"].values() if b.get("dataset_id") in dataset_ids or not f["private"]]
+            res = {str(f["blob"]): kernel.vault.resolve(FileRef.model_validate(f)).blob for f in sel}
+            index |= {k.removeprefix(KEYED): v for k, v in res.items() if k.startswith(KEYED)}  # s4: keyed private
+            files = set(res.values())
             blobs |= files
             data_blobs |= files
             if b.get("canary_ref"):
@@ -150,7 +154,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path, large_bytes: in
         "format": FORMAT, "cert_hash": cert_hash, "claim_hash": cert.claim_hash, "label": cert.label.value,
         "kernel_config": cert.config, "ledger": [list(e.row()) for e in entries], "ledger_head": entries[-1].hash,
         "evidence": evidence,
-        "runs": runs, "blobs": sorted(blobs), "artifacts": artifacts,
+        "runs": runs, "blobs": sorted(blobs), "artifacts": artifacts, **({"vault_index": index} if index else {}),
         "environment": {"python": sys.version.split()[0], "platform": platform.platform()},
     }
     data = canonical_json(manifest)
@@ -282,6 +286,7 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                         f"order; NOT an unbroken chain from genesis, so omitted entries cannot be detected")
         for e in entries:
             store.ledger_import(e.row())
+        Vault(store).import_index({str(k): str(v) for k, v in (manifest.get("vault_index") or {}).items()})
         for item in manifest["runs"]:
             store.add_run(Run.model_validate(item["run"]))
             for s in item["steps"]:

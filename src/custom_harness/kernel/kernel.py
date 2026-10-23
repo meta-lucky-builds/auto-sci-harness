@@ -7,10 +7,12 @@ runtime engine, the research loop or the evolver.
 
 from __future__ import annotations
 
+import csv
+import io
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from ..errors import InfraError
 from ..records import Evidence, EvidenceKind
@@ -19,6 +21,8 @@ from ..tiers import Tier
 from . import adapters, alpha
 from .certificate import CHECK_IDS, VG_LADDER, Assumption, Certificate, CheckResult, Label
 from .checks import (
+    NOISE_FLOOR,
+    NOISE_SOURCES,
     Context,
     KernelConfig,
     Replayer,
@@ -29,7 +33,7 @@ from .checks import (
     related_targets,
     slot_charge,
 )
-from .claim import Claim, EvidenceClass, strict_json
+from .claim import Claim, EvidenceClass, canonical_json, strict_json
 from .execution import ExecRecord
 from .ledger import AsOfLedger, Entry, Ledger
 from .reasons import Code, UncodedReason, exception_name
@@ -70,6 +74,14 @@ RELEASE_ASSUMPTION = Assumption(
          "ledgered release counted by K4 (side channels such as timing are not logged)", tested_by=None)
 
 
+# the exact classes: certified label, tier (simulated: T2, conservative, UNCALIBRATED: T1 allowed by §4.7), verifier id
+# prefix and standard assumptions; every other class is certified as data
+EXACT_CLASSES: dict[EvidenceClass, tuple[Label, Tier, str, tuple[Assumption, ...]]] = {
+    EvidenceClass.COMPUTATIONAL: (Label.CERTIFIED_EXACT, Tier.T1_EXECUTABLE, "exact", COMPUTATIONAL_ASSUMPTIONS),
+    EvidenceClass.SIMULATED: (Label.CERTIFIED_SIMULATED, Tier.T2_STATISTICAL, "sim", SIMULATED_ASSUMPTIONS),
+    EvidenceClass.FORMAL: (Label.CERTIFIED_FORMAL, Tier.T0_FORMAL, "lean", FORMAL_ASSUMPTIONS)}
+
+
 class KernelError(RuntimeError):
     pass
 
@@ -94,6 +106,9 @@ class Kernel:
         self.config = config or KernelConfig()
         self.replayer = replayer
         self.clock = clock
+        # s4-station: the run this Kernel is BOUND to (set only by a run-bound subclass, studio/kill.RunGuardedKernel,
+        # from ModuleContext.run_id; never a call argument). Recorded on prereg and certificate entries when set
+        self.run_id: str | None = None
 
     # ------------------------------------------------------------------ pre-registration
     def approve_adapter(self, name: str, approver: str) -> Entry:
@@ -127,7 +142,8 @@ class Kernel:
         if short:  # releases made this claim cost more slots than remain: refused, never tested at a looser level
             raise KernelError(f"the alpha-account of target(s) {short} cannot pay this claim's slot charge (releases "
                               f"since it opened): register on fresh data")
-        entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms})
+        entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms,
+                                              **self._bound()})
         for a in sorted(accounts.values(), key=lambda a: a.seq):
             n = len(alpha.reservations(self.ledger, a)) + 1
             self.ledger.append("alpha_reserve", {"account": a.seq, "dataset_id": a.dataset_id, "claim_hash": h,
@@ -192,15 +208,25 @@ class Kernel:
     def declare_truth_copy(self, target: str, dataset_id: str, file: str, column: str, declarer: str) -> Entry:
         """Trusted host code (task registration) declares that public file `dataset_id/file`, column `column`, carries
         a copy of `target`'s held-out truth (possibly encoded) that a program could receive. K3 then requires the
-        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks."""
+        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks.
+        The public hook for task registration, IDEMPOTENT; declare before the task's first claim (docs/kernel_s4.md)."""
         rec = self.vault.dataset(dataset_id)
         if target not in self.vault.datasets() or file not in rec.files or rec.files[file].private:
             raise KernelError("a truth copy is a PUBLIC file of a registered dataset, for a registered target")
-        header = self.store.blobs.get(rec.files[file].blob).decode("utf-8", errors="replace").splitlines()[:1]
-        if not declarer.strip() or not header or column not in header[0].split(","):
+        header = next(csv.reader(io.StringIO(self.store.blobs.get(rec.files[file].blob).decode("utf-8", "replace"))),
+                      [])
+        if not declarer.strip() or column not in header:
             raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
-        return self.ledger.append("truth_copy", {"target": target, "dataset_id": dataset_id, "file": file,
-                                                 "column": column, "declarer": declarer})
+        body = {"target": target, "dataset_id": dataset_id, "file": file, "column": column}
+        old = [e for e in self.ledger.entries("truth_copy") if {k: e.body.get(k) for k in body} == body]
+        return old[0] if old else self.ledger.append("truth_copy", {**body, "blob": rec.files[file].blob,
+                                                                    "declarer": declarer})
+
+    def record_noise_floor(self, floor: Any) -> str:
+        """Store a NoiseFloor as a chh-noise-floor/1 record: its hash is what a claim cites (K1 re-checks it)."""
+        runs = {k: [float(v) for v in getattr(floor, k)] for k in NOISE_SOURCES}
+        doc = {"format": NOISE_FLOOR, "reference": float(floor.reference), **runs}
+        return self.store.blobs.put(canonical_json(doc))
 
     def releases(self, target_dataset_id: str) -> list[Entry]:
         """Releases on the target and on every target sharing its held-out examples (the K4 family)."""
@@ -254,9 +280,7 @@ class Kernel:
         results: dict[str, CheckResult] = {}
         registered = vault.registered(ctx.claim_hash)
         table, impl = applicability(claim.evidence_class), checks_for(claim.evidence_class)
-        computational = claim.evidence_class == EvidenceClass.COMPUTATIONAL
-        simulated = claim.evidence_class == EvidenceClass.SIMULATED
-        formal = claim.evidence_class == EvidenceClass.FORMAL
+        exact = EXACT_CLASSES.get(claim.evidence_class)  # (label, tier, verifier prefix, assumptions) or data
         for kid in CHECK_IDS:
             na = table[kid]
             if na is not None:  # the human-owned table says this check does not apply to the class: record why
@@ -282,19 +306,12 @@ class Kernel:
                                            reasons=(f"check raised {exception_name(e)}",))
         # fail closed: only an explicit pass counts, or an n/a where the TABLE (not the check) says it does not apply
         ok = all(r.status == "pass" or (r.status == "n/a" and table[k] is not None) for k, r in results.items())
-        if not ok:
-            label = Label.REJECTED
-        elif computational:
-            label = Label.CERTIFIED_EXACT
-        elif simulated:  # holds in the named simulator only; T2 (conservative, UNCALIBRATED: T1 allowed by §4.7)
-            label = Label.CERTIFIED_SIMULATED
-        elif formal:
-            label = Label.CERTIFIED_FORMAL
-        else:
-            label = Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL
+        label = (Label.REJECTED if not ok else exact[0] if exact else
+                 Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL)
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
                     for o in results[kid].observations if "seed-invariant" in o]
-        if formal and ok:  # the certificate lists every axiom the theorem relies on (untested, GOAL §4.7)
+        # a formal certificate lists every axiom the theorem relies on (untested, GOAL §4.7)
+        if claim.evidence_class == EvidenceClass.FORMAL and ok:
             observed += [Assumption(text=f"K3: {o}", tested_by=None) for o in results["K3"].observations
                          if o.startswith("relies on axiom ")]
         stats = {t: {"estimate": s.example.estimate, "lo": s.example.lo, "hi": s.example.hi, "met": s.met,
@@ -304,24 +321,20 @@ class Kernel:
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
         if ok and ctx.exclusion is not None:  # §16.10: the bounded-null statement (absent otherwise: old bytes kept)
             resolution["exclusion"] = ctx.exclusion
-        tier = (Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T0_FORMAL if formal
-                else Tier.T2_STATISTICAL)
+        tier = Tier.T6_NONE if not ok else exact[1] if exact else Tier.T2_STATISTICAL
         # §16.7: a field only the claimant's pipeline reported (no human approved it) caps the tier
         self_reported = tuple(sorted(
             f"role {d.role.value!r} of target {t!r} is not human-approved" for t, d in vault.datasets().items()
             if t in claim.generalization_targets and d.role in EXTERNAL_ROLES and vault.role_approval(t) is None))
         if ok and self_reported:
             tier = Tier(max(int(tier), self.config.self_reported_tier_cap))
-        verifiers = (("kernel:K0-K9", f"exact:{claim.metric.id}") if computational else
-                     ("kernel:K0-K9", f"sim:{claim.metric.id}") if simulated else
-                     ("kernel:K0-K9", f"lean:{claim.metric.id}") if formal else
+        verifiers = (("kernel:K0-K9", f"{exact[2]}:{claim.metric.id}") if exact else
                      ("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
                       "stats:paired-t-seeds", "stats:bca-examples"))
         cert = Certificate(
             kernel_version=self.config.version, claim_hash=ctx.claim_hash, claim=claim.model_dump(mode="json"),
             label=label, tier=int(tier), checks=results,
-            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else SIMULATED_ASSUMPTIONS if simulated
-                           else FORMAL_ASSUMPTIONS if formal else (*STANDARD_ASSUMPTIONS, RELEASE_ASSUMPTION)),
+            assumptions=(*(exact[3] if exact else (*STANDARD_ASSUMPTIONS, RELEASE_ASSUMPTION)),
                          *observed,
                          *(Assumption(text=a, tested_by=None) for a in claim.assumptions)),
             evidence_ids=tuple(evidence_ids), verifier_ids=verifiers,
@@ -332,7 +345,8 @@ class Kernel:
             return cert
         blob = self.store.blobs.put_json(cert.model_dump(mode="json"))
         self.ledger.append("certificate", {"cert_hash": cert.cert_hash(), "claim_hash": ctx.claim_hash,
-                                           "label": label.value, "blob": blob, "resolution": resolution})
+                                           "label": label.value, "blob": blob, "resolution": resolution,
+                                           **self._bound()})
         return cert
 
     def _ablated_runs(self, evidence_ids: list[str] | tuple[str, ...]) -> list[str]:
@@ -348,6 +362,10 @@ class Kernel:
             except KeyError:
                 continue
         return out
+
+    def _bound(self) -> dict[str, str]:
+        """{"run_id": ...} for a run-bound Kernel, else {} (older entries keep their bytes and hashes)."""
+        return {} if self.run_id is None else {"run_id": str(self.run_id)}
 
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:

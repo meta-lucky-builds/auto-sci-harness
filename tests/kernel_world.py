@@ -28,6 +28,7 @@ from custom_harness.kernel import (
     Risk,
     SandboxReplayer,
     Scope,
+    ml,
     run_program,
 )
 from custom_harness.records import Run, StepKind, TraceStep
@@ -98,6 +99,12 @@ write([maj if rng.random() > 0.05 else rng.choice(["0", "1", "2"]) for _ in trow
 }
 
 
+def render(claim: Claim) -> Claim:
+    """The claim with its statement rendered by the ML adapter's scope vocabulary (K1 accepts nothing else, s4-kernel).
+    Call it again after any change to a field the statement renders (kind, arms, metric, min_effect, targets)."""
+    return claim.model_copy(update={"statement": ml.scope_phrase(claim)})
+
+
 def _sample(rng: random.Random) -> list[str]:
     label = rng.randrange(3)
     radius = 1.0 + 1.2 * label + rng.gauss(0, 0.55)
@@ -160,12 +167,13 @@ class World:
     def claim(self, subject: ArtifactRef, comparator: ArtifactRef, *, kind: ClaimKind = ClaimKind.IMPROVEMENT,
               delta: float = 0.2, seeds: tuple[int, ...] = (0, 1, 2), targets: tuple[str, ...] = ("test",),
               development: tuple[str, ...] = ("train",), probability: float = 0.8, **plan: object) -> Claim:
-        return Claim(kind=kind, statement=f"{subject.artifact_id} vs {comparator.artifact_id}", subject=subject,
+        claim = Claim(kind=kind, statement="", subject=subject,
                      comparator=comparator, metric=MetricRef(id="accuracy", higher_is_better=True),
                      effect=Effect(min_effect=delta, predicted_lo=delta, predicted_hi=0.8, probability=probability),
                      scope=Scope(datasets=("train", *targets)), development=development,
                      generalization_targets=targets,
                      analysis_plan=AnalysisPlan(seeds=seeds, **plan), risk=Risk(), resolve_by=time.time() + 86400)
+        return render(claim)
 
     # ---------------------------------------------------------------- execution
     def run(self, code_hash: str, train_ds: str, target: str, seed: int) -> list[str] | None:

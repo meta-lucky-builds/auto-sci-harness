@@ -19,7 +19,7 @@ from typing import Any
 
 from . import adapters
 from .certificate import Assumption, CheckResult
-from .claim import AnalysisPlan, ClaimKind, exact_value
+from .claim import ClaimKind, exact_value
 from .reasons import Code, R, coded, codes_of, exception_name
 
 SIMULATED_ASSUMPTIONS = (
@@ -50,11 +50,10 @@ def k1_simulated(ctx: Any) -> CheckResult:
     if value is None:
         reasons.append(R(Code.K1_VALUE,
             f"value {c.value!r} must be an exact rational in lowest terms, 'p' or 'p/q' (no decimals)"))
-    ctx.adapter, why = adapters.resolve(ctx.ledger, c.evidence_class, c.metric.id)
-    reasons += coded(Code.K1_ADAPTER, why)
+    from .checks import exact_form, p0_reasons  # checks imports this module: resolved at call time
+    reasons += exact_form(ctx, "simulated value (the simulation config)", "the convergence study replaces it",
+                          "simulator module")
     module = _module(ctx)
-    if ctx.adapter is not None and module is None:
-        reasons.append(R(Code.K1_ADAPTER, f"adapter {ctx.adapter['name']!r} declares no simulator module"))
     if module is not None:
         want = {"simulator": module.SIMULATOR, "version": module.VERSION, "config": c.subject.hash}
         got = dict(c.scope.conditions)
@@ -75,41 +74,13 @@ def k1_simulated(ctx: Any) -> CheckResult:
                     f"the statement must be exactly the simulator's scope rendering {phrase!r}"))
         except (OSError, ValueError) as err:
             reasons.append(R(Code.K1_UNREADABLE, f"config unreadable: {exception_name(err)}"))
-    if c.comparator != c.subject:
-        reasons.append(R(Code.K1_COMPARATOR,
-            "a simulated value has no comparator: by convention the comparator must be the subject (the "
-                       "simulation config)"))
-    if c.development or c.generalization_targets or c.scope.datasets:
-        reasons.append(R(Code.K1_DATASETS,
-            "a simulated claim uses no datasets: development, generalization targets and scope datasets "
-                       "must be empty"))
-    if c.analysis_plan != AnalysisPlan(seeds=()):
-        reasons.append(R(Code.K1_PLAN,
-            "the analysis plan must be empty (no seeds, defaults): the convergence study replaces it"))
-    e = c.effect
-    if (e.min_effect, e.predicted_lo, e.predicted_hi) != (0.0, 0.0, 0.0):
-        reasons.append(R(Code.K1_EFFECT,
-            "effect fields other than the declared probability must be 0 (the claimed value is `value`)"))
-    if not 0 < e.probability < 1:
-        reasons.append(R(Code.K1_PROBABILITY, "declared probability must be strictly between 0 and 1"))
-    if c.risk.prior_probability is not None:
-        reasons.append(R(Code.K1_RISK_PRIOR, "risk prior must be unset: K7 does not apply to simulated claims"))
-    from .checks import p0_reasons  # checks imports this module: resolved at call time
     return _result(reasons + p0_reasons(ctx))
 
 
-def _inputs(ctx: Any) -> tuple[Any, bytes, bytes, Fraction] | list[str]:
-    module, value = _module(ctx), exact_value(ctx.claim.value)
-    reasons = []
-    if module is None:
-        reasons.append(R(Code.K3_INPUTS, "no approved simulator adapter module (see K1)"))
-    if value is None:
-        reasons.append(R(Code.K3_INPUTS, "the claimed value is not an exact rational (see K1)"))
-    if len(ctx.certificates) != 1:
-        reasons.append(R(Code.K3_INPUTS, "no single resolved simulation result (see K0)"))
-    if reasons or value is None:
-        return reasons
-    return module, ctx.store.blobs.get(ctx.claim.subject.hash), ctx.store.blobs.get(ctx.certificates[0].hash), value
+def _inputs(ctx: Any) -> tuple[Any, ...] | list[str]:
+    from .checks import _exact_inputs  # checks imports this module: resolved at call time
+    got: tuple[Any, ...] | list[str] = _exact_inputs(ctx, "a simulator module", "simulation result")
+    return got
 
 
 def k3_simulated(ctx: Any) -> CheckResult:
