@@ -1,12 +1,21 @@
 """Lab discovery-trace events from compute, literature and output builds (GOAL §17 Lab; orchestrator requirement
 2026-10-23: every backend emits its lifecycle into the Lab discovery trace).
 
-lab-agents owns the trace SCHEMA (docs/lab.md on origin/lab-agents). It was not pushed when this was built, so the
-events are defined here behind a small adapter interface: producers call `TraceSink.emit(TraceEvent)`; the default
-sink appends to an append-only, hash-chained JSONL file in the evidence store; `CallableSink` re-points the same
-events at lab-agents' writer later without touching the producers.
+ONE trace (int18, stage-a): lab-agents owns the schema (`custom_harness/lab/trace.py`, `chh-lab-trace/1`, record
+kind `lab_trace`, one hash chain per session, docs/lab.md §9). Producers keep calling
+`safe_emit(sink, kind, subject, fields)` with the vocabulary below; the default sink `LabTraceSink` maps each event
+onto chh-lab-trace/1 (`lab_payload`) and writes it with `lab.trace.record` (source `backend`), so the lab trace's
+schema and guards (no held-out truth, no verdict details, no secrets, private-blob hash check) apply on top of the
+field guard here. lab-compute's separate hash-chained JSONL file (`JsonlTraceSink`) is removed: no duplicate chains.
+Mapping (only new OPTIONAL fields were added to chh-lab-trace/1, a minor change by its versioning rule):
+  compute.*            -> `run` (run_id = job key, op = the lifecycle step; command by sha256, env by names only,
+                          log cursors as pointers, collected outputs as {path, sha256}, wall_s, usd None = unknown)
+  literature.retrieval -> `literature` (source, query, window, as_of, envelopes, ids, n_records, complete, errors)
+  output.*             -> `action` (tool court_paper / latex:<driver> / figure, outcome, output content hashes). The
+                          Court paper's certificate list is NOT copied into the Lab trace (no verdict details there).
+Events of producers without a Lab session go to the session id `UNATTACHED` (its own chain, same schema).
 
-Event kinds (each with the fields listed; every event also carries `kind`, `subject`, `at`):
+Producer event kinds (each with the fields listed; every event also carries `kind`, `subject`, `at`):
   compute.submitted   backend, job_key, isolation_class, origin, item_hash, revision {kind, ref}, command_sha256,
                       env_names (names only, never values)
   compute.started     backend, job_key
@@ -120,55 +129,90 @@ class MemorySink:
         self.events.append(event)
 
 
-def _canon(obj: Any) -> str:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+UNATTACHED = "unattached"  # the session id of Lab trace events that belong to no Lab session
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
-class JsonlTraceSink:
-    """Append-only, hash-chained JSONL (each line's hash covers seq, event and the previous hash)."""
+def _sha(v: Any) -> str | None:
+    return v if isinstance(v, str) and _HEX64.fullmatch(v) else None
 
-    def __init__(self, path: Path):
-        self.path = Path(path)
+
+def lab_payload(event: TraceEvent) -> tuple[str, dict[str, Any]]:
+    """(chh-lab-trace/1 kind, payload) for a producer event (module docstring). Fields not mapped are dropped."""
+    f = dict(event.fields)
+    k = event.kind
+    if k.startswith("compute."):
+        cost = f.get("cost") if isinstance(f.get("cost"), Mapping) else {}
+        p: dict[str, Any] = {"run_id": str(f.get("job_key") or event.subject)[:80], "command": "",
+                             "backend": str(f.get("backend") or "")[:80], "op": k.split(".", 1)[1],
+                             "job_key": f.get("job_key")}
+        for key in ("isolation_class", "origin", "item_hash", "stage", "failure", "oom", "exit_code", "duration_s"):
+            if f.get(key) is not None:
+                p[key] = f[key]
+        if f.get("message"):
+            p["message"] = str(f["message"])
+        rev = f.get("revision")
+        if isinstance(rev, Mapping):
+            p["revision"] = {"kind": str(rev.get("kind", "")), "ref": str(rev.get("ref", ""))}
+        if _sha(f.get("command_sha256")):
+            p["command_sha256"] = f["command_sha256"]
+        if f.get("env_names"):
+            p["env_names"] = [str(n) for n in f["env_names"]]
+        for src, dst in (("cursor", "log_cursor"), ("next_cursor", "log_next_cursor"), ("eof", "log_eof")):
+            if f.get(src) is not None:
+                p[dst] = f[src]
+        if cost:
+            p["wall_s"], p["usd"] = cost.get("wall_s"), cost.get("usd")
+        if isinstance(f.get("outputs"), Mapping):
+            p["outputs"] = [{"path": str(rel), "sha256": h} for rel, h in sorted(f["outputs"].items())]
+        return "run", {key: v for key, v in p.items() if v is not None}
+    if k == "literature.retrieval":
+        lit = {"retrieval_session": f"lab-search:{f.get('source') or event.subject}"[:64],
+               "source": f.get("source"), "query": str(f.get("query") or ""),
+               "window": [str(x) for x in f.get("window") or [] if x is not None],
+               "as_of": None if f.get("as_of") is None else str(f["as_of"]),
+               "envelopes": [str(x) for x in f.get("envelopes") or [] if x],
+               "ids": [str(x) for x in f.get("record_ids") or []], "n_records": f.get("n_records"),
+               "complete": f.get("complete"), "errors": [str(x) for x in f.get("errors") or [] if x]}
+        return "literature", {key: v for key, v in lit.items() if v is not None}
+    if k == "output.paper_built":
+        outs = [{"path": n, "sha256": h} for n, h in (("paper.tex", f.get("tex_sha256")),
+                                                       ("manifest.json", f.get("manifest_sha256"))) if _sha(h)]
+        return "action", {"tool": "court_paper", "target": event.subject, "outcome": "ok", "outputs": outs}
+    if k == "output.compiled":
+        pdf = _sha(f.get("pdf_sha256"))
+        return "action", {"tool": f"latex:{f.get('driver')}", "target": event.subject,
+                          "outcome": "ok" if f.get("ok") else "error",
+                          "outputs": [{"path": f"{event.subject}.pdf", "sha256": pdf}] if pdf else [],
+                          "problems": [str(x) for x in f.get("problems") or []]}
+    if k == "output.figure_built":
+        outs = [{"path": n, "sha256": f[n]} for n in ("script_sha256", "svg_sha256", "renderer_sha256")
+                if _sha(f.get(n))]
+        return "action", {"tool": "figure", "target": str(f.get("figure") or event.subject), "outcome": "ok",
+                          "outputs": outs}
+    raise TraceRefused(f"no chh-lab-trace/1 mapping for {k!r}")
+
+
+class LabTraceSink:
+    """The default sink: each event becomes one chh-lab-trace/1 event (lab/trace.record, source `backend`) of
+    `session_id` (UNATTACHED when the producer has no Lab session). The lab trace's guards apply; a refusal there
+    raises lab.trace.TraceRefused (a producer bug, like TraceRefused here). One writer per session at a time (the
+    lab trace's rule); the lock serialises this sink's own threads."""
+
+    def __init__(self, store: Any, session_id: str = UNATTACHED, *, actor_id: str = "lab-compute"):
+        self.store, self.session_id, self.actor_id = store, session_id, actor_id
         self._lock = threading.Lock()
 
     @classmethod
-    def for_store(cls, store: Any) -> JsonlTraceSink:
-        return cls(Path(store.root) / "lab_trace" / "events.jsonl")
-
-    def _tail(self) -> tuple[int, str]:
-        if not self.path.exists():
-            return 0, ""
-        lines = [ln for ln in self.path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        if not lines:
-            return 0, ""
-        last = json.loads(lines[-1])
-        return int(last["seq"]) + 1, str(last["hash"])
+    def for_store(cls, store: Any, session_id: str = UNATTACHED) -> LabTraceSink:
+        return cls(store, session_id)
 
     def emit(self, event: TraceEvent) -> None:
+        from .lab import trace as T
+        kind, payload = lab_payload(event)
+        actor = T.Actor(type="backend", id=(str(payload.get("backend") or "") or self.actor_id)[:120])
         with self._lock:
-            seq, prev = self._tail()
-            core = {"seq": seq, "event": event.to_json(), "prev": prev}
-            line = {**core, "hash": hashlib.sha256(_canon(core).encode()).hexdigest()}
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.path, "a", encoding="utf-8", newline="") as f:
-                f.write(_canon(line) + "\n")
-
-    def verify(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        prev = ""
-        if not self.path.exists():
-            return out
-        for n, ln in enumerate(self.path.read_text(encoding="utf-8").splitlines()):
-            if not ln.strip():
-                continue
-            e = json.loads(ln)
-            core = {"seq": e.get("seq"), "event": e.get("event"), "prev": e.get("prev")}
-            if e.get("hash") != hashlib.sha256(_canon(core).encode()).hexdigest() or e["prev"] != prev or \
-                    e["seq"] != len(out):
-                raise ValueError(f"trace line {n + 1} does not verify")
-            out.append(e)
-            prev = e["hash"]
-        return out
+            T.record(self.store, self.session_id, kind, payload, actor=actor, source="backend", at=event.at)
 
 
 def sha256_text(text: str) -> str:

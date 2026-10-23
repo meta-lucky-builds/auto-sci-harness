@@ -41,7 +41,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from ..discovery_trace import JsonlTraceSink, TraceSink, safe_emit, sha256_text
+from ..discovery_trace import LabTraceSink, TraceSink, safe_emit, sha256_text
 from ..errors import InfraError
 from ..sandbox.base import DEFAULT_MAX_OUTPUT_BYTES, LIMIT_RETURNCODE, ExecResult, Sandbox, run_bounded
 from ..store import EvidenceStore
@@ -281,7 +281,7 @@ class AsyncComputeBackend(ComputeBackend):
                  trace: TraceSink | None = None):
         super().__init__(store, runs_root)
         self.journal = journal or JobJournal.for_store(store)
-        self.trace: TraceSink = trace if trace is not None else JsonlTraceSink.for_store(store)
+        self.trace: TraceSink = trace if trace is not None else LabTraceSink.for_store(store)
         self._sleep, self._clock = sleep, clock
         self._run_dirs: dict[str, Path] = {}  # job key -> the local materialised revision (this process only)
 

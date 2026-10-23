@@ -38,6 +38,10 @@ Agent-agnostic intake:
   the manager ingests them after each headless prompt and at promotion, with the box paused. They are untrusted:
   validated against the same schema and guards, tagged `source: agent-reported`, de-duplicated by `client_id`;
 - compute backends (the parallel `lab-compute` work) and humans add events through `record()` / `chh lab trace-add`.
+  On int18 (stage-a) every lab-compute producer (compute jobs, Lab literature search, LaTeX / Court paper / figure
+  builds) writes HERE through `discovery_trace.LabTraceSink` (source `backend`): compute lifecycle -> `run` events
+  with the optional lifecycle fields, literature search -> `literature`, builds -> `action` with output hashes. One
+  schema, one record kind, one chain per session; lab-compute's separate JSONL chain is gone.
 
 The story of a discovery (`story`): a Court certificate's claim names the promotion (`paper_doi = lab:<session>:
 <promotion>` in its scope conditions, written by promote.handoff), and the `promote/handed_off` event names the claim
@@ -135,6 +139,14 @@ class Output(_M):
     size: int | None = None
 
 
+class Revision(_M):
+    kind: Annotated[str, Field(max_length=40)]
+    ref: Annotated[str, Field(max_length=300)]
+
+
+Short = Annotated[str, Field(max_length=200)]
+
+
 class RunEv(_M):
     run_id: Ident
     command: Annotated[str, Field(max_length=MAX_TEXT)]
@@ -146,6 +158,25 @@ class RunEv(_M):
     cost_event: Ident | None = None
     outputs: Annotated[tuple[Output, ...], Field(max_length=MAX_LIST)] = ()
     metrics: Annotated[tuple[Metric, ...], Field(max_length=MAX_LIST)] = ()
+    # optional compute-backend lifecycle fields (lab-compute's producers through discovery_trace.LabTraceSink; int18
+    # stage-a: one schema for every Lab event). Minor change within chh-lab-trace/1 (new OPTIONAL fields only).
+    op: Literal["submitted", "started", "log", "finished", "failed", "cancelled", "collected"] | None = None
+    job_key: Short | None = None
+    isolation_class: Short | None = None
+    origin: Short | None = None
+    item_hash: Short | None = None
+    revision: Revision | None = None
+    command_sha256: Sha | None = None  # the command by hash (backend events)
+    env_names: Annotated[tuple[Short, ...], Field(max_length=MAX_LIST)] = ()  # names only, never values
+    log_cursor: int | None = None  # a POINTER into the job's log, never its content
+    log_next_cursor: int | None = None
+    log_eof: bool | None = None
+    stage: Short | None = None
+    failure: Short | None = None
+    oom: bool | None = None
+    message: Text = ""
+    wall_s: float | None = None
+    usd: float | None = None  # None = unknown (never a silent 0)
 
 
 class FileEv(_M):
@@ -163,6 +194,15 @@ class LiteratureEv(_M):
     entry_digests: Annotated[tuple[Sha, ...], Field(max_length=MAX_LIST)] = ()
     ids: Annotated[tuple[Annotated[str, Field(max_length=200)], ...], Field(max_length=MAX_LIST)] = ()
     idea_id: Ident | None = None
+    # optional per-source search fields (literature/lab.lab_search through discovery_trace.LabTraceSink; int18)
+    source: Short | None = None
+    query: Text = ""
+    window: Annotated[tuple[Short, ...], Field(max_length=4)] = ()
+    as_of: Short | None = None
+    n_records: int | None = None
+    complete: bool | None = None
+    envelopes: Annotated[tuple[Short, ...], Field(max_length=MAX_LIST)] = ()  # stored response digests
+    errors: Annotated[tuple[Short, ...], Field(max_length=MAX_LIST)] = ()
 
 
 class ActionEv(_M):
@@ -170,6 +210,10 @@ class ActionEv(_M):
     target: Annotated[str, Field(max_length=500)] = ""
     outcome: Literal["ok", "error", "refused", "unknown"] = "unknown"
     step: int | None = None
+    # optional build outputs (Lab paper / LaTeX / figure builds through discovery_trace.LabTraceSink; int18): content
+    # hashes only, guarded like run outputs; problems are short machine-written strings
+    outputs: Annotated[tuple[Output, ...], Field(max_length=MAX_LIST)] = ()
+    problems: Annotated[tuple[Short, ...], Field(max_length=MAX_LIST)] = ()
 
 
 class HumanEv(_M):
@@ -259,6 +303,8 @@ def _truth_problems(kind: str, payload: dict[str, Any], store: EvidenceStore,
                 problems.append(f"metric {m.get('name')!r} is on dataset {d!r} with role {ds[d].role.value}: DEV only")
     elif kind == "file":
         hashes = [h for h in (payload.get("sha256_before"), payload.get("sha256_after")) if h]
+    elif kind == "action":  # build outputs (int18): a hash equal to a private vault file is refused like a run output
+        hashes = [o.get("sha256", "") for o in payload.get("outputs") or []]
     if hashes:
         priv = private if private is not None else private_hashes(store)
         problems += [f"content hash {h[:12]}... is a PRIVATE vault file" for h in hashes if h in priv]

@@ -96,7 +96,7 @@ Trusted code on a TRUSTED_ONLY backend still needs the existing per-request huma
 | C17 | Court papers: the author supplies a body only; a fixed preamble; every number is `\chhnum{ref}` to a certificate; any other digit and any number-making command is refused; the audit re-renders byte-for-byte | Invariant 8 applied to papers; raw evidence refs are refused (the Court reports certified results). |
 | C18 | Lab figures use OR's matplotlib style assets inside the sandbox; Court figures keep the trusted SVG renderer and `figures/audit.py` | OR only asks for real evidence; our audit checks it. |
 | C19 | The no-phone-home scanner lives in `tests/`, not `src/` | `tests/test_telemetry.py` fails if any `src/*.py` even names the analytics clients. |
-| C20 | Discovery-trace events behind an adapter (`TraceSink`), default sink a hash-chained JSONL in the store | lab-agents' schema (docs/lab.md) has no trace section yet; `CallableSink` re-points producers later. Cost is `{wall_s, usd: null}`: provider billing is not read, and unknown is never 0. |
+| C20 | Discovery-trace events behind an adapter (`TraceSink`); default sink `LabTraceSink` (int18, stage-a) writes them into lab-agents' ONE discovery trace (`lab/trace.py`, `chh-lab-trace/1`): compute -> `run`, literature -> `literature`, builds -> `action`; the old JSONL chain is removed | One schema, no duplicate chains (docs/lab.md section 9). Cost is `{wall_s, usd: null}`: provider billing is not read, and unknown is never 0. The Court paper's certificate list is not copied into the Lab trace. |
 | C21 | `tests/test_telemetry.py`: `compute/rest.py` added to NETWORK_MODULES | Ray/HF REST calls, only on an owner-configured submit; httpx imported inside the call. |
 | C22 | Merged origin/lab-agents into lab-compute (merge, not rebase) to append to its `THIRD_PARTY_NOTICES.md` | The brief asked to coordinate by merging. The notices sentence "nothing copied verbatim" was corrected: four figure assets are copied verbatim. |
 
@@ -111,7 +111,8 @@ Trusted code on a TRUSTED_ONLY backend still needs the existing per-request huma
 | `discovery_trace.figure_built` | `output.figure_built` (script/svg/renderer hashes from figure.json) |
 
 Guard: field names that look like secrets or held-out truth are refused (`TraceRefused`); a sink I/O failure never
-changes the producer's result.
+changes the producer's result. Since int18 every event is stored as a `chh-lab-trace/1` event (source `backend`;
+session `unattached` when the producer has no Lab session) and also passes the lab trace's guards.
 
 ## 6. TeX image (owner decision)
 
