@@ -972,3 +972,38 @@ hard-verifier problem per domain.
 - Side channels.
 - About alpha*N false certificates in aggregate.
 - If honest pipelines cannot be made byte-deterministic, the strongest checks fall back to bounded-margin statistics.
+
+---
+
+## 17. Lab and Court (owner decision 2026-10-23)
+
+**Principle: generous when exploring, strict when claiming.** The harness must never feel like it restricts a
+model's capabilities; a frontier model must be able to use all of its reasoning and tools. Integrity is enforced at
+the point of claiming, not by limiting exploration. Nothing built so far is deleted; existing work becomes the Court.
+
+**The Lab (exploration).**
+- Any coding agent (Claude Code, Codex, OpenCode, ACP agents, local models) runs with ALL its native tools (shell,
+  editor, web) inside a full-power lab environment (container, devbox or remote VM), not on the owner's host.
+- Network, package installs, GPUs, long runs, literature, notebooks, figures, drafts, multiple agents: allowed.
+- Any compute backend, each with an isolation class: isolated backends may run agent-written code; trusted-only
+  backends (plain SSH, Slurm, Ray, HF Jobs) run only human-approved code.
+- Agents use scoped, spend-capped credentials inside the lab box; no owner secrets fan out to agents or runs.
+- Lab outputs are labelled EXPLORATORY and are never findings.
+- The one hard wall: held-out truth, sealed data and verdicts never exist inside the Lab. They live with the Court
+  (kerneld, a separate OS user, later possibly a separate machine).
+
+**The Court (certification).** The Evidence Kernel exactly as specified in §4 and §10, uncompromised.
+- A researcher "promotes" a Lab idea: the claim is pre-registered, its code and environment are frozen (pinned
+  packages, snapshot), and the Court re-executes it offline in a network-free sandbox on held-out data, preferably
+  freshly minted after the freeze (§16.2), sized by the certifiability preflight so a real effect can pass.
+- Result: a certificate with a one-command Reproducibility Bundle, or an honest rejection with reasons.
+
+**Product rules.**
+- No telemetry by default (opt-in only, clearly described); no auto-update (an "update available" notice instead;
+  certificates name exact versions).
+- Track two numbers from now on: discovery yield (certified claims per budget) and false certifications.
+- New security work is frozen except fixes for high-severity, reachable findings, until the first Lab discovery is
+  certified by the Court.
+- OpenResearch (MIT, alphaXiv) components are ported selectively to Python behind Lab isolation and the Court, per
+  `META/openresearch_portmap/PORTMAP.md` (kept outside the repo); its copyright and MIT notice are kept in a
+  third-party notices file. Telemetry, agent feedback and auto-update from it are dropped.
