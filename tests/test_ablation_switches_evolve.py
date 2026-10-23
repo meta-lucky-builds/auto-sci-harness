@@ -277,6 +277,33 @@ def test_minibatch_prefilter_switch(tmp_path):
 
 
 # ===================================================================== harnessx: novelty-gate
+def test_an_ablated_generation_refuses_a_durable_proposal_log(tmp_path):
+    """int17 test plan R2 (incompatibility I2, never tested before stage-c): an ablated generation given a durable
+    ProposalLog raises ValueError BEFORE any proposer call, run or record (the log writes the production
+    PROPOSAL_KIND, which an ablated arm must never enter). Control: the same call in production runs."""
+    from custom_harness.evolve.durable import ProposalLog
+    for off, refused in (({"novelty-gate"}, True), (set(), False)):
+        abl = ablation_set(off) if off else NO_ABLATION
+        st = _store(tmp_path, f"r2-{bool(off)}")
+        tasks, parent = _tasks(tmp_path), seed_spec()
+        ev = _Table(st, tasks, parent.spec_hash(), ablation=abl)
+        proposer = MockBackend([_proposal(EDIT0)])
+        ledger_before = len(st.ledger_rows())
+        kw = {"evaluator": ev, "proposer": proposer, "store": st, "cfg": EvolveConfig(**CFG), "ablation": abl,
+              "proposals": ProposalLog(st, "c", 0)}
+        try:
+            if refused:
+                with pytest.raises(ValueError, match="cannot use a durable proposal log"):
+                    evolve_generation(parent, tasks, **kw)
+                assert ev.calls == 0 and proposer.requests == [] and len(st.ledger_rows()) == ledger_before
+                assert st.records("evolve_proposal") == [] and st.records("lineage:" + MARKER) == []
+            else:
+                evolve_generation(parent, tasks, **kw)
+                assert ev.calls > 0 and len(proposer.requests) == 1 and len(st.records("evolve_proposal")) == 1
+        finally:
+            st.close()
+
+
 def test_novelty_gate_switch(tmp_path):
     """Off: an edit identical to a previously REJECTED one is evaluated instead of refused unevaluated."""
     sig = edit_signature(Edit(type=EditType.CONTROL_FLOW, rationale="x",
