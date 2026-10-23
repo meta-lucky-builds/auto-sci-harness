@@ -22,7 +22,7 @@ from kernel_world import World
 @pytest.fixture(scope="module")
 def world(tmp_path_factory):
     w = World(tmp_path_factory.mktemp("nullbound"), seed=11)
-    w.register_target("tiny", DatasetRole.TEST, n=15)
+    w.register_target("tiny", DatasetRole.TEST, n=5)
     yield w
     w.close()
 
@@ -65,7 +65,9 @@ def test_vacuous_delta_is_refused_by_the_plasmode(world):
 
 
 def test_insensitive_target_is_refused_by_the_plasmode(world):
-    cert = certify(world, negative(world, 0.15, targets=("tiny",), power=0.8))  # 15 examples cannot see 0.15
+    # 5 examples: a planted 0.15 is one corrected prediction, which a bootstrap resample of 5 cannot separate from no
+    # effect. (15 examples CAN see it: 3 corrected predictions were detected in 11/11 plantings, 2026-10-23.)
+    cert = certify(world, negative(world, 0.15, targets=("tiny",), power=0.8))
     assert "K7" in cert.failed() and cert.checks["K7"].codes == (Code.K7_INSENSITIVE,)
     assert "not detected in planting" in cert.checks["K7"].reasons[0] and "exclusion" not in cert.resolution
 

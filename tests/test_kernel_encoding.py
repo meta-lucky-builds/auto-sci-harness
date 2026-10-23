@@ -61,7 +61,9 @@ def world(tmp_path):
 @pytest.mark.parametrize("encode", ["utf-16", "utf-32", "utf-8-sig"])
 def test_a_canary_in_a_non_utf8_certificate_is_not_certified(world, encode):
     data = json.dumps(_cert(CANARY)).encode(encode)
-    assert CANARY not in data.decode("utf-8", errors="ignore")  # the old K9 byte scan could not see it
+    # UTF-16/32 hid the canary from the old K9 byte scan; UTF-8 with a BOM did not (the bytes after the BOM are plain
+    # UTF-8). The BOM case stays because the reader must refuse it (K3) while K9 still flags the canary.
+    assert (CANARY in data.decode("utf-8", errors="ignore")) == (encode == "utf-8-sig")
     cert = _certify(world, data)
     assert cert.label == Label.REJECTED and "K9" in cert.failed() and "K3" in cert.failed(), cert.failed()
 

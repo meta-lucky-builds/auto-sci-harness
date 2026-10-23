@@ -488,7 +488,9 @@ def test_bundle_edge_paths(tmp_path, base):
                 if n != f"blobs/{drop}":
                     zout.writestr(n, zin.read(n))
         rep = reproduce_bundle(tmp_path / name, fresh)  # must report, never crash, whichever blob is missing
-        assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems), rep.problems
+        assert not rep.reproduced and [a["sha256"] for a in rep.missing_artifacts] == [drop], rep.missing_artifacts
+        assert any(p.startswith(f"artifact {drop[:12]} ") and "not in the bundle and not found locally" in p
+                   for p in rep.problems), rep.problems
         assert (name == "nocertblob.zip") == ("certificate content missing from the bundle" in rep.problems), name
     with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / "nocert.zip", "w") as zout:
         m = json.loads(zin.read("manifest.json"))
@@ -539,7 +541,9 @@ def test_bundle_is_a_snapshot_and_reports_missing_bytes(tmp_path, base):
     build_bundle(w.kernel, cert.cert_hash(), tmp_path / "three.zip")
     fresh = lambda: SandboxReplayer(lambda key: LocalSandbox(tmp_path / "rp" / key, i_understand_no_isolation=True))  # noqa: E731
     rep = reproduce_bundle(tmp_path / "three.zip", fresh)
-    assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems)
+    assert not rep.reproduced and rep.missing_artifacts == [  # listed as referenced, reported, never skipped
+        {"sha256": rec.preds_ref, "status": "referenced", "bytes": -1, "kind": "output"}], rep.missing_artifacts
+    assert any("not in the bundle and not found locally" in p for p in rep.problems), rep.problems
     payload = w.store.get_evidence(ids[0]).payload_ref
     with zipfile.ZipFile(tmp_path / "one.zip") as zin, zipfile.ZipFile(tmp_path / "nopayload.zip", "w") as zout:
         for n in zin.namelist():
@@ -836,12 +840,12 @@ def test_lp_provenance_order_and_leak_faults(lpw):
     claim = lp_claim(lpw)
     lpw.kernel.preregister(claim)
     assert lpw.kernel.certify(claim, []).failed() == ["K0", "K3", "K8"]  # no certificate at all
-    early = lp_claim(lpw, statement="registered after its certificate")
+    early = lp_claim(lpw, effect__probability=0.81)
     aid = lp_cert_artifact(lpw, early)  # the certificate exists BEFORE the claim is pre-registered
     lpw.kernel.preregister(early)
     cert = lpw.kernel.certify(early, [lpw.kernel.record_certificate(early, aid)])
     assert cert.failed() == ["K2"] and "registered before the pre-registration" in reasons(cert.checks["K2"])
-    other = lp_claim(lpw, statement="another claim")
+    other = lp_claim(lpw, effect__probability=0.82)
     foreign = lpw.kernel.record_certificate(other, lp_cert_artifact(lpw, other))
     cert = lpw.kernel.certify(claim, [foreign])
     assert "K0" in cert.failed() and "different claim" in reasons(cert.checks["K0"])
@@ -858,7 +862,7 @@ def test_lp_provenance_order_and_leak_faults(lpw):
         assert why in reasons(lpw.kernel.certify(claim, [eid]).checks["K0"]), why
     with pytest.raises(KernelError, match="not registered"):
         lpw.kernel.record_certificate(claim, "no-such-artifact")
-    lost = lp_claim(lpw, statement="its certificate bytes are lost")
+    lost = lp_claim(lpw, effect__probability=0.83)
     lpw.kernel.preregister(lost)
     lost_aid = lp_cert_artifact(lpw, lost, {"comment": "lost"})
     lost_id = lpw.kernel.record_certificate(lost, lost_aid)
@@ -875,12 +879,12 @@ def test_lp_provenance_order_and_leak_faults(lpw):
     lpw.kernel.preregister(gone)
     assert "problem instance bytes missing or corrupted" in reasons(lpw.kernel.certify(gone, [gone_id]).checks["K0"])
     canary = lpw.vault.canary("test")
-    leaky = lp_certify(lpw, lp_claim(lpw, statement="leaky"), {"comment": f"solved with {canary}"})
+    leaky = lp_certify(lpw, lp_claim(lpw, effect__probability=0.84), {"comment": f"solved with {canary}"})
     assert leaky.failed() == ["K9"] and "canary token found in certificate" in reasons(leaky.checks["K9"])
     labels = lpw.store.blobs.get(lpw.vault.dataset("test").files["test_y.csv"].blob)
-    stolen = lp_certify(lpw, lp_claim(lpw, statement="stolen"), raw=labels)
+    stolen = lp_certify(lpw, lp_claim(lpw, effect__probability=0.85), raw=labels)
     assert "certificate IS a private file (test/test_y.csv)" in reasons(stolen.checks["K9"])
-    unregistered = lp_claim(lpw, statement="never registered")
+    unregistered = lp_claim(lpw, effect__probability=0.86)
     cert = lpw.kernel.certify(unregistered, [lpw.kernel.record_certificate(unregistered, aid)])
     assert cert.failed() == ["K2", "K3", "K8", "K9"] and cert.checks["K4"].status == "n/a"
 
@@ -953,10 +957,19 @@ def test_lp_adapter_validation_and_checker(lpw):
     # adding the field invalidated no approval. (A pinned hex value lived here; since R1-F5 the hash covers every
     # project module the adapter imports, so any edit to them changes it by design and needs a new approval.)
     import hashlib
-    legacy = {"name": "ml", "version": "1", "classes": ["data"], "metrics": sorted(A.ML.metrics),
-              "modules": {m: hashlib.sha256(p.read_bytes()).hexdigest() for m, p in A.covered_modules(A.ML).items()}}
-    assert A.ML.exact_module is None
-    assert A.adapter_hash(A.ML) == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
+    # Since the core/adapter split (ee0ef1d) the ML adapter names its procedures module (kernel/ml.py), adding a
+    # "procedures" key: the ML hash changed by design, so an ML approval made before the split needs a new HUMAN
+    # approval. An adapter without procedures (lp) still hashes without that key.
+    def digest(spec, **extra):
+        parts = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
+                 "metrics": sorted(spec.metrics), **extra,
+                 "modules": {m: hashlib.sha256(p.read_bytes()).hexdigest() for m, p in A.covered_modules(spec).items()}}
+        return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+    assert A.ML.exact_module is None and A.ML.procedures == "custom_harness.kernel.ml"
+    assert A.adapter_hash(A.ML) == digest(A.ML, procedures="custom_harness.kernel.ml")
+    lp_spec = A.REGISTRY["lp"][0]
+    assert lp_spec.procedures is None
+    assert A.adapter_hash(lp_spec) == digest(lp_spec, exact_module=lp_spec.exact_module)
     p, cert = canonical_json(LP_PROBLEM), canonical_json(LP_CERT)
     assert lp.check(p, cert, Fraction(13, 5)) == [] and lp.bounds(p, cert, Fraction(13, 5)) == []
     no_b = {k: v for k, v in LP_PROBLEM.items() if k != "b"}
