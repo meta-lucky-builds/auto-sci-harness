@@ -168,11 +168,13 @@ def load_secret(path: Path | None = None) -> bytes:
     return raw
 
 
-AGENT_READABLE_DATA_SUBDIRS = ("sandboxes", "repos", "suites", "tasks")
+# "lab": the Lab session workspaces (<data>/lab, lab/walls.lab_root; GOAL §17): agents run there with full tools, so
+# every secret and truth scan walks them too (docs/lab.md D15). <data>/lab_court (promotion intake) is NOT listed.
+AGENT_READABLE_DATA_SUBDIRS = ("sandboxes", "repos", "suites", "tasks", "lab")
 
 
 def default_agent_readable_roots(repo_root: Path | None = None, *, existing_only: bool = True) -> list[Path]:
-    """Every place an agent can read, by default: the repo checkout, the data dir's sandboxes/repos/suites/tasks
+    """Every place an agent can read, by default: the repo checkout, the data dir's sandboxes/repos/suites/tasks/lab
     (agents read public task files and their own workspaces) and the agent scratchpads under the system temp dir.
     $CHH_AGENT_READABLE replaces this list. Held-out truth is NOT under any of them: it lives under
     truth_layout.truth_root() (`<data>/private/...`), and truth_layout.truth_layout_problems() checks that statically.

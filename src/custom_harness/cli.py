@@ -17,6 +17,7 @@ from .config import data_dir
 from .gateway import Backend, MockBackend
 from .human import cli as human_cli
 from .kerneld.hoststore import open_host_store
+from .lab import cli as lab_cli
 from .literature import cli as lit_cli
 from .records import Cost
 from .runtime import Engine, HarnessSpec
@@ -1027,6 +1028,7 @@ def main(argv: list[str] | None = None) -> int:
     studio_cli.add_parsers(sub)
     from .research.station import cli as station_cli  # `chh research multi ...` (L4 multi-agent mode)
     station_cli.add_parsers(sub)
+    lab_cli.add_parsers(sub)
     human_cli.add_parsers(sub)  # after the others: it adds hash flags to older human commands
     a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
@@ -1051,7 +1053,7 @@ def main(argv: list[str] | None = None) -> int:
                 "verify-registry": cmd_verify_registry,
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
                 **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
-                **station_cli.COMMANDS, **human_cli.COMMANDS}[a.cmd](a, store)
+                **station_cli.COMMANDS, **lab_cli.COMMANDS, **human_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 

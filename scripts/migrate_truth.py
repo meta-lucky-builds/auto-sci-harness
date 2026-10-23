@@ -8,7 +8,7 @@ only in the run phase, by the owner or with the owner's go-ahead. Archives, neve
 
 What it finds (truth_layout.legacy_truth_paths): every directory named `private` that holds a test_y.csv, canary.txt or
 mint.json, under every agent-readable root (commitment.default_agent_readable_roots: the repo checkout, <data>/
-{sandboxes,repos,suites,tasks}, %TEMP%\\claude) plus each --extra-root. That includes the live suite's
+{sandboxes,repos,suites,tasks,lab}, %TEMP%\\claude) plus each --extra-root. That includes the live suite's
 `<data>/suites/m2/<task>/private/`, the old `<data>/tasks/rings-v1/private/test_y.csv`, and old copies in agent
 scratchpads such as `%TEMP%\\claude\\...\\d7fa1cf8...\\scratchpad\\salts-tmp\\e\\<task>\\private\\test_y.csv`.
 
