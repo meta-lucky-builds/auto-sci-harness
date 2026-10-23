@@ -75,16 +75,22 @@ class IsolationProperties:
     #: False when the environment itself holds hidden data (e.g. an image shipping bundled datasets). Invariant 2:
     #: agent code never runs there, and no approval changes that.
     hidden_data_free: bool = True
+    #: False when the properties above are what the backend is CONFIGURED to give but nobody has shown the provider
+    #: actually enforces them (Modal's rootfs/user semantics, a Kubernetes cluster's NetworkPolicy enforcement).
+    #: An unverified backend never meets invariant 1 (fail closed: "isolation UNVERIFIED", docs/lab_compute.md).
+    verified: bool = True
 
     @property
     def meets_invariant_1(self) -> bool:
         return (self.container and self.no_secrets and self.network_policy in ("off", "allowlist")
-                and self.read_only_root and self.non_root)
+                and self.read_only_root and self.non_root and self.verified)
 
     def unmet(self) -> list[str]:
         out = [name for name in ("container", "no_secrets", "read_only_root", "non_root") if not getattr(self, name)]
         if self.network_policy not in ("off", "allowlist"):
             out.append(f"network_policy={self.network_policy}")
+        if not self.verified:
+            out.append("isolation UNVERIFIED")
         return out
 
 

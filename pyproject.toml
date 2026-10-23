@@ -25,7 +25,8 @@ chh = "custom_harness.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-custom_harness = ["gateway/providers.yaml", "scorecard/benchmarks.yaml", "scorecard/capabilities.yaml"]
+custom_harness = ["gateway/providers.yaml", "scorecard/benchmarks.yaml", "scorecard/capabilities.yaml",
+                  "outputs/assets/openresearch/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -34,6 +35,8 @@ testpaths = ["tests"]
 line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
+# vendored third-party assets (MIT, kept byte-identical below their provenance header): not our code style
+extend-exclude = ["src/custom_harness/outputs/assets"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF", "BLE", "S110", "PLW1510"]
@@ -48,6 +51,7 @@ python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
 strict = false
+exclude = ["src/custom_harness/outputs/assets/"]
 disallow_untyped_defs = false
 disallow_untyped_calls = false
 disallow_any_generics = false

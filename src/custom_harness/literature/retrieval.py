@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -24,7 +24,7 @@ from .client import Deduper, LiteratureClient, SearchResult
 from .http import LiteratureError
 from .records import PaperRecord, in_window
 from .snapshot import SnapshotStore
-from .sources import ALL_SOURCES
+from .sources import ALL_SOURCES, Source
 
 _SESSION = re.compile(r"^[A-Za-z0-9_.-]{1,64}\Z")
 
@@ -39,10 +39,14 @@ def _d(s: str | None) -> date | None:
 
 
 class RetrievalLog:
-    def __init__(self, store: SnapshotStore, session: str):
+    def __init__(self, store: SnapshotStore, session: str, *, sources: Mapping[str, Source] | None = None):
+        """`sources`: the parsers entries are re-derived with (default ALL_SOURCES). A Lab session that used a
+        gated source (literature/lab.py) passes the same mapping it searched with; an entry naming a source that is
+        not in the mapping is an integrity error, as before."""
         if not _SESSION.match(session or "") or session in (".", ".."):
             raise ValueError(f"bad session id {session!r} (ASCII letters, digits, '_', '.', '-'; at most 64)")
         self.store, self.session = store, session
+        self._sources = ALL_SOURCES if sources is None else sources
         self.path = store.root / "retrievals" / f"{session}.jsonl"
 
     def record_search(self, result: SearchResult) -> list[str]:
@@ -69,7 +73,7 @@ class RetrievalLog:
         try:
             env = self.store.blobs.get_json(envelope)
             resp = self.store.load(envelope, str(env.get("key")))
-            src = ALL_SOURCES[source]
+            src = self._sources[source]
             recs = src.parse_search(resp)
         except (OSError, ValueError, KeyError, AttributeError, LiteratureError) as e:
             raise LiteratureError(f"retrieval log integrity: envelope {envelope[:12]} is not a {source!r} search "
