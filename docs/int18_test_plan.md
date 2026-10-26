@@ -171,3 +171,19 @@ tests (lab-compute).
 3. I1: account targets still get the campaign's runs-based declaration requirement in check_campaign (stricter).
 4. Minted route: beacon value typed by a human (no drand verifier); the frozen lock is recorded, not installed.
 5. Emergence: station archive listed as a BUDGET_PATHS module.
+
+## 8. Stage C findings (stage-c2, 2026-10-26; agent_worklogs/stage-c2)
+
+The 22 targeted failures of the interrupted full gate (37) were stale tests, none a product regression of int18
+(verified per item in the worklog; D, E and F fail identically on int17-fix e24421f):
+- circuit red team: 10 XPASS (Kernel K1 statement/scope rule 74f354b and the K9/lp encoding fix d3feabd closed the
+  holes): markers removed, each test asserts its check and closed code; 8 tests had stopped attacking (JSON escapes
+  refused by the reader before the number/unit checks): now literal UTF-8. Fail-first per test (worklog run 05).
+- circuit adapter: the forged-witness claim carried a free-text statement, a legitimate K1_STATEMENT refusal.
+- branch LOFO targets: Script's run ids are unknown to the store, so reads are attributed fail closed (bd1acbb).
+- figures report: the research_v1 report node renders its own audited figure since d656a84.
+- cassette replay (owner, coverage limit): a replay of a CERTIFIED research run is REJECTED at K0
+  (K0_REPLAYED_EVIDENCE, invariant 21), so certify routes to the report and the replication branch is never replayed:
+  GOAL 16.5.5's "any decision change" signal cannot cover nodes after certify in a research-run replay. The test now
+  pins this contract. Pinning the certify route in replay mode (as Releases pins verdict bits) would close the gap;
+  that is a design decision for the owner.

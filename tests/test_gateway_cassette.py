@@ -212,16 +212,29 @@ def test_recorded_research_run_replays_with_zero_model_calls(store, tmp_path, ri
         rbs = replay_backends(path, roles=ROLES)
         rep = _run(scratch, tmp_path / "ws", rings_task, rbs)
         assert len(llm.requests) == n_calls  # zero new calls reached the scripted model
-        assert sum(rb.served for rb in rbs.values()) == n_calls
         assert [rb.misses for rb in rbs.values()] == [[], [], [], []]
         assert rep.status == rec.status and rep.detail == rec.detail
-        rep_trace = scratch.trace(rep.run_id)
-        assert [s.node_id for s in rep_trace] == [s.node_id for s in rec_trace]
-        for k in ("certificate", "replica_certificate"):
-            assert (rep.state.get(k) or {}).get("label") == (rec.state.get(k) or {}).get("label")
         assert rep.state["model_policy"] == rec.state["model_policy"]
+        # Invariant 21 (replayed model output is never evidence; Kernel K0, 2778d48): the recorded run certified and
+        # replicated, the replay's certificate is REJECTED at K0 with K0_REPLAYED_EVIDENCE, so certify routes to the
+        # report and the replication branch is not taken. Everything up to certify replays call for call; the
+        # recorded calls left unserved are exactly the replicator's (the branch after certify). Coverage limit, for
+        # the owner: a replay of a certified run cannot exercise the nodes after certify (docs/int18_test_plan.md).
+        assert (rec.state.get("certificate") or {}).get("label") != "REJECTED"
+        assert rec.state.get("replica_certificate") is not None
+        assert (rep.state.get("certificate") or {}).get("label") == "REJECTED"
+        refused = Kernel(scratch).certificate(rep.state["certificate"]["hash"])
+        assert "K0" in refused.failed() and "K0_REPLAYED_EVIDENCE" in refused.checks["K0"].codes, refused.checks["K0"]
+        assert rep.state.get("replica_certificate") is None
+        rec_nodes, rep_nodes = [s.node_id for s in rec_trace], [s.node_id for s in scratch.trace(rep.run_id)]
+        cut = rec_nodes.index("certify") + 1
+        assert rep_nodes == rec_nodes[:cut] + ["report", "audit"] and rec_nodes[cut] == "replicate", rep_nodes
+        after = [d for d in records if d["role"] == "replicator"]
+        assert after and {r: rb.served for r, rb in rbs.items()} == {
+            r: sum(d["role"] == r for d in records) - (len(after) if r == "replicator" else 0) for r in ROLES}
         rep_prov = _llm_provenances(scratch, rep.run_id)
-        assert len(rep_prov) == len(rec_prov) == n_calls
+        assert [n for n, _ in rep_prov] == [n for n, _ in rec_prov if n != "replicate"]
+        assert len(rep_prov) == sum(rb.served for rb in rbs.values()) == n_calls - len(after)
         assert all(p.get("replayed") is True for _, p in rep_prov), rep_prov
     finally:
         scratch.close()
