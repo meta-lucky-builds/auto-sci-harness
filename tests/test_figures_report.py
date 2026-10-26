@@ -53,7 +53,16 @@ def _arm_refs(state, store):
 def test_figures_in_the_audit(finished):
     from custom_harness.research.claims import audit
     state, ctx, store, tmp_path = finished
-    plain = audit(state, {}, ctx)["audit"]
+    from custom_harness.research.claims import render_report
+    # Since d656a84 the research_v1 report node renders its own audited figure (params.figure: true), so the finished
+    # run already has one figure, audited True. The no-figure case ("n/a") is that run with its figure list emptied
+    # and its report re-rendered accordingly (else I4 would fail on the stale "## Figures" section).
+    assert len(state["figures"]) == 1, state.get("figures")
+    own = audit(state, {}, ctx)["audit"]
+    assert own["I6"] is True and own["passed"], own
+    bare = {**state, "figures": []}
+    bare["report"] = render_report(bare, ctx)
+    plain = audit(bare, {}, ctx)["audit"]
     s, d, meta = _with_figure(state, ctx, store, tmp_path, _arm_refs(state, store))
     good = audit(s, {}, ctx)["audit"]
 
