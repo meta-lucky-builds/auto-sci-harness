@@ -330,6 +330,11 @@ def test_a_canary_hidden_in_a_certificate_comment_is_not_certified(cw, how):
     data = _smuggle(S.certify(DIV)[1], token, how)
     cert = circuit_certify(cw, circuit_claim(cw), data)
     assert cert.label == Label.REJECTED, cert.failed()
+    # both layers, each required (stage-c2): the adapter's reader (dec7562; K3) and K9 scanning what a reader sees
+    # (d3feabd; K9_LEAK), so removing either one fails this test
+    assert "K9_LEAK" in cert.checks["K9"].codes, cert.checks["K9"]
+    why = "backslash escapes are refused" if how == "escaped" else "not plain UTF-8"
+    assert why in reasons(cert.checks["K3"]), cert.checks["K3"]
 
 
 @pytest.mark.parametrize("how", ["utf-16", "escaped"])

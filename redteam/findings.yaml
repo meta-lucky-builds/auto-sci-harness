@@ -487,7 +487,10 @@ findings:
     capability: A0
     tests: ["tests/test_kernel_scope_statement.py::test_lp_claim_worded_as_a_physical_claim_is_not_certified",
             "tests/test_kernel_scope_statement.py::test_circuit_shaped_claim_worded_as_a_physical_claim_is_not_certified",
-            "tests/test_kernel_scope_statement.py::test_an_adapter_without_a_scope_rendering_fails_k1"]
+            "tests/test_kernel_scope_statement.py::test_an_adapter_without_a_scope_rendering_fails_k1",
+            "tests/test_circuit_redteam.py::test_a_physical_statement_on_a_true_circuit_value_is_refused_at_k1",
+            "tests/test_circuit_redteam.py::test_physical_scope_conditions_on_a_circuit_claim_are_refused_at_k1",
+            "tests/test_circuit_redteam.py::test_generalised_lp_claim_with_physical_statement_and_conditions_is_refused_at_k1"]
     museum: redteam/museum/SCOPE-STATEMENT.patch
     status: fixed
   - id: K9-ENCODING
@@ -497,6 +500,8 @@ findings:
     invariant: "§10 inv. 2 (no hidden label/canary in an agent-visible artifact); §4.3 K9"
     capability: A2
     tests: ["tests/test_kernel_encoding.py::test_a_unicode_escaped_canary_is_found_by_k9",
-            "tests/test_kernel_encoding.py::test_a_canary_in_a_non_utf8_certificate_is_not_certified"]
+            "tests/test_kernel_encoding.py::test_a_canary_in_a_non_utf8_certificate_is_not_certified",
+            "tests/test_circuit_redteam.py::test_a_canary_hidden_in_a_certificate_comment_is_not_certified",
+            "tests/test_circuit_redteam.py::test_a_canary_hidden_in_the_netlist_comment_is_not_certified"]
     museum: redteam/museum/K9-ENCODING.patch
     status: fixed
