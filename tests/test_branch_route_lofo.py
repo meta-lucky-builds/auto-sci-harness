@@ -18,7 +18,7 @@ from custom_harness.evolve.branches import BRANCH_KIND, BranchConfig, BranchRefu
 from custom_harness.evolve.router import RouteRefused, build_router
 from custom_harness.gateway import MockBackend
 from custom_harness.kerneld.releases import Releases, released
-from test_router import CA, NAMES, SEEDS, TRUNK, Script, _branches, _gate_tasks
+from test_router import CA, NAMES, SEEDS, TRUNK, Script, _branches, _gate_tasks, tid
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,9 +69,14 @@ def test_the_same_domain_win_without_the_regression_is_routed_and_carries_its_lo
     lofo = rec["lofo"]
     assert lofo["passed"] is True
     assert lofo["note"] == lofo_note(TRUNK.spec_hash(), CA.spec_hash(), {"ml": CA.spec_hash()}, True)
-    # the bit is ledgered on every held-out group's target (H, and domain bio = family B)
+    # the bit is ledgered on every target attributed to the held-out groups' runs (H, and domain bio = family B)
     assert {b["dataset_id"] for b in released(store) if b["note"] == lofo["note"]} == set(lofo["targets"])
-    assert len(lofo["targets"]) == 5  # gH0, gH1, gB0, gB1, gB2
+    held_out = {tid(f"gH{i}") for i in range(2)} | {tid(f"gB{i}") for i in range(3)}
+    assert held_out <= set(lofo["targets"])
+    # ... and, fail closed, on the gE targets too: Script's run ids name no run the store knows, and a read naming an
+    # unknown run is attributed to every run (kerneld/releases.attributed_read_log, rule of bd1acbb). With real runs
+    # the set would be the 5 held-out targets; a LOFO bit is never released on fewer targets than its runs read.
+    assert sorted(lofo["targets"]) == sorted(held_out | {tid(f"gE{i}") for i in range(4)})
     assert dict(build_router(store, TRUNK, cluster_key="domain").routes) == {"ml": CA.spec_hash()}
 
 
