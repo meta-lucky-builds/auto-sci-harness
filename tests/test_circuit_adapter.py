@@ -305,8 +305,9 @@ def test_false_claims_are_rejected_by_the_right_check(cw):
     off = circuit_certify(cw, circuit_claim(cw, value="7"))
     assert off.failed() == ["K3"] and "differs from the claimed value 7" in reasons(off.checks["K3"])
     _, good = V.solved(DIV)
-    forged = circuit_certify(cw, circuit_claim(cw, statement="forged x"),
-                             json.dumps({**good, "x": ["10", "61/10", "-2"]}).encode())
+    # the claim is well formed (its statement is the adapter's scope rendering, K1 since 74f354b), so only the forged
+    # certificate can be what fails: a free-text statement such as "forged x" would add a K1_STATEMENT refusal
+    forged = circuit_certify(cw, circuit_claim(cw), json.dumps({**good, "x": ["10", "61/10", "-2"]}).encode())
     assert set(forged.failed()) == {"K3", "K8"} and "A x != b" in reasons(forged.checks["K3"])
     assert "KCL violated" in reasons(forged.checks["K8"]) and "Tellegen" in reasons(forged.checks["K8"])
     volts = V.problem([V.vs("V1", "n1", "0", "10"), V.r("R1", "n1", "n2", "2", "V"), V.r("R2", "n2", "0", "3")],
