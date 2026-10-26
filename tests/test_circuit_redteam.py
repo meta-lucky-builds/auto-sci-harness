@@ -12,9 +12,11 @@ not of an independent cross-family review.
 Approval convention (as in tests/test_circuit_adapter.py): Kernel-path tests approve adapters only in a throwaway test
 ledger with approver "test-world" (the repo's test stand-in for the human). Nothing here touches a real store.
 
-Strict xfails: a hole whose fix lies in kernel/checks.py (owned by s3-kernel, editable neither by the red team nor by
-the adapter builder) is a `strict=True` xfail asserting the DESIRED behaviour: it xfails today, and turns into a
-failure (XPASS) the day the Kernel is tightened, so the marker must then be removed.
+Strict xfails (history): the holes whose fix lay in the Kernel (owner s3-kernel) were `strict=True` xfails asserting
+the DESIRED behaviour. The Kernel closed them (K1 statement/scope rule 74f354b; canonical-UTF-8 lp reader and K9
+scanning what a JSON reader sees d3feabd), they turned into XPASS failures, and the markers were removed (stage-c2,
+2026-10-26). Each former xfail now asserts the specific check and closed reason code that refuses its attack, so it
+fails again if that rule is removed (museum SCOPE-STATEMENT and K9-ENCODING patches; invariant 19).
 """
 
 from __future__ import annotations
@@ -47,9 +49,6 @@ from custom_harness.kernel import (
 from custom_harness.kernel import adapters as A
 from custom_harness.kernel.claim import canonical_json
 from kernel_world import World
-
-K1_XFAIL = ("needs Kernel tightening of k1_computational (owner: s3-kernel): it checks neither claim.statement nor "
-            "scope.conditions for computational claims; see docs/redteam_circuit.md")
 
 DIV = V.problem(V.DIVIDER, V.node("n2"))
 F = Fraction
@@ -87,7 +86,10 @@ def circuit_claim(w: World, problem: bytes = DIV, value: str | None = "6", state
                   evidence_class: str = "computational", **changes) -> Claim:
     aid = f"netlist-{hashlib.sha256(problem).hexdigest()[:10]}"
     ref = ArtifactRef(artifact_id=aid, hash=w.vault.register_artifact(aid, problem, "netlist").hash)
-    phrase = C.scope_phrase(problem, Fraction(value or "0"))
+    try:
+        phrase = C.scope_phrase(problem, Fraction(value or "0"))
+    except ValueError:  # an unreadable netlist (the reader refuses it) has no scope phrase: callers pass one
+        phrase = "unreadable netlist"
     doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=statement if statement is not None else phrase, subject=ref,
                 comparator=ref, metric=MetricRef(id=C.METRIC, higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
@@ -119,30 +121,33 @@ PHYSICAL_STATEMENTS = [
 ]
 
 
-@pytest.mark.xfail(strict=True, reason=K1_XFAIL)
 @pytest.mark.parametrize("statement", PHYSICAL_STATEMENTS)
 def test_a_physical_statement_on_a_true_circuit_value_is_refused_at_k1(cw, statement):
-    """SUCCESSFUL ATTACK (fc24df8): a computational claim whose free-text statement is PHYSICAL certifies
-    CERTIFIED-EXACT, because k1_computational never compares the statement with the adapter's scope_phrase. Desired:
-    REJECTED at K1 (statement must equal check.scope_phrase(problem, value))."""
+    """SUCCESSFUL ATTACK on fc24df8: a computational claim whose free-text statement is PHYSICAL certified
+    CERTIFIED-EXACT, because k1_computational never compared the statement with the adapter's scope_phrase. Closed by
+    the Kernel's K1 rule (74f354b, statement_reasons): REJECTED at K1 only, with K1_STATEMENT (the value, netlist and
+    certificate are true, so no other check may be what refuses it)."""
     cert = circuit_certify(cw, circuit_claim(cw, statement=statement))
-    assert cert.label == Label.REJECTED and "K1" in cert.failed()
+    assert cert.label == Label.REJECTED and cert.failed() == ["K1"], cert.failed()
+    assert "K1_STATEMENT" in cert.checks["K1"].codes, cert.checks["K1"]
+    assert "scope rendering" in reasons(cert.checks["K1"])
 
 
-@pytest.mark.xfail(strict=True, reason=K1_XFAIL)
 @pytest.mark.parametrize("conditions", [{"holds_in": "physical world"}, {"rating": "5 W"},
                                         {"model": "real breadboard"}])
 def test_physical_scope_conditions_on_a_circuit_claim_are_refused_at_k1(cw, conditions):
-    """SUCCESSFUL ATTACK (fc24df8): scope.conditions such as {"holds_in": "physical world"} ride along on a certified
-    exact claim. Desired: REJECTED at K1 (a computational claim's scope.conditions must be empty)."""
+    """SUCCESSFUL ATTACK on fc24df8: scope.conditions such as {"holds_in": "physical world"} rode along on a certified
+    exact claim. Closed by the Kernel's K1 rule (74f354b): REJECTED at K1 only, with K1_SCOPE only. The statement is
+    the adapter's own rendering, so the scope rule (not the statement rule) is what refuses it."""
     cert = circuit_certify(cw, circuit_claim(cw, scope__conditions=conditions))
-    assert cert.label == Label.REJECTED and "K1" in cert.failed()
+    assert cert.label == Label.REJECTED and cert.failed() == ["K1"], cert.failed()
+    assert cert.checks["K1"].codes == ("K1_SCOPE",), cert.checks["K1"]
 
 
-@pytest.mark.xfail(strict=True, reason=K1_XFAIL)
 def test_generalised_lp_claim_with_physical_statement_and_conditions_is_refused_at_k1(tmp_path):
     """The same hole in the EXISTING lp adapter (generalisation): an LP claim whose statement and scope conditions
-    speak of a real factory certifies CERTIFIED-EXACT. Desired: REJECTED at K1."""
+    speak of a real factory certified CERTIFIED-EXACT on fc24df8. Closed by 74f354b: REJECTED at K1 only, with both
+    K1_STATEMENT and K1_SCOPE (the optimum 13/5 and its certificate are true)."""
     w = World(tmp_path / "lp-rt", seed=11, n_train=30, n_test=30)
     try:
         w.kernel.approve_adapter("lp", approver="test-world")
@@ -161,7 +166,8 @@ def test_generalised_lp_claim_with_physical_statement_and_conditions_is_refused_
         w.kernel.preregister(claim)
         aid = w.vault.register_artifact("lp-rt-cert", cert, "certificate").artifact_id
         got = w.kernel.certify(claim, [w.kernel.record_certificate(claim, aid)])
-        assert got.label == Label.REJECTED and "K1" in got.failed()
+        assert got.label == Label.REJECTED and got.failed() == ["K1"], got.failed()
+        assert {"K1_STATEMENT", "K1_SCOPE"} <= set(got.checks["K1"].codes), got.checks["K1"]
     finally:
         w.close()
 
@@ -328,11 +334,20 @@ def test_a_canary_hidden_in_a_certificate_comment_is_not_certified(cw, how):
 
 @pytest.mark.parametrize("how", ["utf-16", "escaped"])
 def test_a_canary_hidden_in_the_netlist_comment_is_not_certified(cw, how):
-    """The same smuggling through the PROBLEM (the netlist's `comment`), which K9 also scans as UTF-8 bytes."""
+    """The same smuggling through the PROBLEM (the netlist's `comment`), which K9 scanned as UTF-8 bytes on fc24df8.
+    Two layers refuse it now, and both are required here: the circuit reader (dec7562: plain UTF-8, no escapes; K3)
+    and K9, which scans what a reader sees (d3feabd; K9_LEAK). The attacker states the plain netlist's phrase and
+    supplies the plain netlist's (true) certificate bound to the smuggled bytes' hash: the solver of the fixed reader
+    refuses to build one, so the attacker brings what the old reader would have produced."""
     token = _canary(cw)
     problem = _smuggle(DIV, token, how)
-    cert = circuit_certify(cw, circuit_claim(cw, problem))
+    witness = json.loads(S.certify(DIV)[1]) | {"problem_sha256": hashlib.sha256(problem).hexdigest()}
+    cert = circuit_certify(cw, circuit_claim(cw, problem, statement=C.scope_phrase(DIV, F(6))),
+                           json.dumps(witness).encode())
     assert cert.label == Label.REJECTED, cert.failed()
+    assert "K9_LEAK" in cert.checks["K9"].codes, cert.checks["K9"]
+    why = "not plain UTF-8" if how == "utf-16" else "backslash escapes are refused"
+    assert why in reasons(cert.checks["K3"]), cert.checks["K3"]
 
 
 @pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "utf-16-le", "utf-32"])
@@ -344,25 +359,48 @@ def test_certificates_must_be_plain_utf8_without_bom(encoding):
     assert k3 and k8, encoding
 
 
-@pytest.mark.xfail(strict=True, reason="generalisation: kernel/lp.py reads UTF-16/BOM/escaped documents too, so a "
-                   "canary in its `comment` evades K9 (owner: s3-kernel, kernel/lp.py or K9 scanning parsed strings)")
 def test_generalised_lp_reader_refuses_utf16():
-    """The same class of hole in the lp adapter's reader (it calls json.loads on raw bytes)."""
+    """The same class of hole in the lp adapter's reader (it called json.loads on raw bytes). Closed by d3feabd: the lp
+    reader decodes canonical UTF-8 only. The plain UTF-8 spelling of the same certificate is accepted (control), so
+    the refusal is the encoding's."""
     from custom_harness.kernel import lp
     p = {"format": "chh-lp/1", "sense": "max", "c": ["1", "1"], "A": [["2", "1"], ["1", "3"]], "b": ["4", "5"]}
     c = {"format": "chh-lp-certificate/1", "x": ["7/5", "6/5"], "y": ["2/5", "1/5"], "comment": "x"}
-    assert lp.check(canonical_json(p), json.dumps(c).encode("utf-16"), F(13, 5)) != []
+    assert lp.check(canonical_json(p), json.dumps(c).encode("utf-8"), F(13, 5)) == []
+    got = lp.check(canonical_json(p), json.dumps(c).encode("utf-16"), F(13, 5))
+    assert any("utf-8" in r for r in got), got
 
 
 # ------------------------------------------------------------------ attack 1: number and JSON tricks (refused)
-@pytest.mark.parametrize("text", ["02", "1/02", "+1", " 1", "6 ", "6\n", "١", "６", "−6", "6.",
+@pytest.mark.parametrize("text", ["02", "1/02", "+1", " 1", "6 ", "١", "６", "−6", "6.",
                                   "6e0", "0x6", "6/0", "-", "", "1//2", "6/-1", "-0/1/1"])
 def test_non_canonical_number_spellings_are_refused(text):
+    """Written as literal UTF-8: since dec7562 the reader refuses every backslash escape BEFORE the number check, so
+    json.dumps' default escapes of the non-ASCII digits would never reach it (the test would not attack)."""
     _, cert = V.solved(DIV)
     cert["x"][1] = text
-    k3, k8 = both(DIV, cert, 6)
+    data = json.dumps(cert, ensure_ascii=False).encode("utf-8")
+    assert b"\\" not in data
+    k3, k8 = both(DIV, data, 6)
     assert any("exact rational string" in r for r in k3), (text, k3)
     assert any("exact rational string" in r for r in k8), (text, k8)
+
+
+def test_a_number_with_a_newline_is_refused_before_and_by_the_number_check():
+    """'6' + newline has no literal spelling in strict JSON (a raw control character in a string is not JSON) and its
+    escaped spelling is refused by the reader (dec7562), so in a document it can no longer reach the number check:
+    both spellings are refused by the reader, each for its own reason. The number check itself still refuses it."""
+    _, cert = V.solved(DIV)
+    cert["x"][1] = "6\n"
+    escaped = json.dumps(cert).encode()
+    literal = escaped.replace(b'"6\\n"', b'"6\n"')
+    assert escaped.count(b'"6\\n"') == 1 and literal != escaped
+    for got in both(DIV, escaped, 6):
+        assert any("backslash escapes are refused" in x for x in got), got
+    for got in both(DIV, literal, 6):
+        assert any("not JSON" in x and "control character" in x for x in got), got
+    with pytest.raises(C.CircuitError, match="exact rational string"):
+        C.parse_rational("6\n")
 
 
 @pytest.mark.parametrize("value", [1e400, float("nan"), True, None, 6, ["6"], {"p": "6"}])
@@ -497,9 +535,14 @@ def test_ground_handling():
 @pytest.mark.parametrize("unit", ["kohm", "mV", "mA", "MΩ", "mΩ", "Ω", "Ohm", "OHM", "v", "ohm ",
                                   "Ω"])
 def test_prefixed_and_respelled_units_are_refused(unit):
+    """Written as literal UTF-8: V.problem's json.dumps would escape the ohm signs, and since dec7562 the reader
+    refuses every escape first, so the unit check would never be reached (the test would not attack)."""
     p = V.problem([V.vs("V1", "n1", "0", "10"), V.r("R1", "n1", "n2", "2", unit), V.r("R2", "n2", "0", "3")],
                   V.node("n2"))
+    p = json.dumps(json.loads(p), ensure_ascii=False, sort_keys=True).encode("utf-8")
+    assert b"\\" not in p
     assert any("not a registered SI unit" in r for r in C.check(p, b"{}", F(6)))
+    assert any("not a registered SI unit" in r for r in C.bounds(p, b"{}", F(6)))
 
 
 def test_unit_quantity_mismatches_are_refused_at_k8():
