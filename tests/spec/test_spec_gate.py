@@ -154,8 +154,15 @@ def test_every_sealed_look_is_ledgered_and_an_edited_look_breaks_the_chain(tmp_p
     lines = (root / sealed.LOOKS).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2 and '"kind": "look"' in lines[0] and sealed.check_chain(root) == []
     assert sorted(json.loads(lines[0])["items"]) == sealed.split("museum", root)["sealed"]
-    (root / sealed.LOOKS).write_text(lines[0].replace("milestone check", "nothing to see") + "\n" + lines[1] + "\n",
-                                     encoding="utf-8")
+    raw = (root / sealed.LOOKS).read_bytes()  # byte-exact edits: a text-mode rewrite could change line endings
+
+    def edit(old: bytes, new: bytes) -> None:
+        first, rest = raw.split(b"\n", 1)
+        assert old in first
+        (root / sealed.LOOKS).write_bytes(first.replace(old, new) + b"\n" + rest)
+    edit(b"milestone check", b"milestone check")
+    assert sealed.check_chain(root) == []  # control: the same rewrite without a change keeps the chain intact
+    edit(b"milestone check", b"nothing to see")
     assert any("chain broken" in p for p in sealed.check_chain(root))
 
 

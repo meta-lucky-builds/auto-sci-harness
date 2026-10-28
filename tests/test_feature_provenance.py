@@ -366,7 +366,7 @@ def _write_interim(path: Path, rows: list[dict]) -> list[dict]:
         out.append(e)
         prev = e["hash"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in out), "utf-8")
+    path.write_bytes("".join(json.dumps(e, sort_keys=True) + "\n" for e in out).encode("utf-8"))  # LF on every OS
     return out
 
 
@@ -381,8 +381,7 @@ def test_removed_trailing_ruling_is_detected_through_the_ledger_anchor_not_the_j
     # the interim JSONL: dropping the trailing 'leak' line leaves a chain that still verifies (the old weakness)
     path = tmp_path / "interim" / "rulings.jsonl"
     _write_interim(path, [_interim_row(d, col, "legitimate", "alice", "t1"), _interim_row(d, col, "leak", "bob", "t2")])
-    lines = path.read_text("utf-8").splitlines()
-    path.write_text(lines[0] + "\n", "utf-8")
+    path.write_bytes(path.read_bytes().split(b"\n")[0] + b"\n")  # byte-exact: only the trailing line is dropped
     assert prov.load_interim_rulings(path).chain_ok  # undetectable in the JSONL
     # the ledger: anchor after the leak ruling, then remove it
     prov.record_ruling(d, col, "legitimate", "alice", store=store)

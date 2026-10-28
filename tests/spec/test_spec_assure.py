@@ -61,8 +61,15 @@ def test_a_look_needs_a_name_and_a_reason_and_an_unledgered_receipt_is_refused(t
     with pytest.raises(looks.LookError, match="unledgered"):
         looks.require(forged)
     looks.record_result(look, ran=True)
-    lines = led.read_text(encoding="utf-8").splitlines()
-    led.write_text(lines[0].replace("milestone", "nothing") + "\n" + lines[1] + "\n", encoding="utf-8")
+    raw = led.read_bytes()  # byte-exact edits: a text-mode rewrite could change line endings on Windows
+
+    def edit(old: bytes, new: bytes) -> None:
+        first, rest = raw.split(b"\n", 1)
+        assert old in first
+        led.write_bytes(first.replace(old, new) + b"\n" + rest)
+    edit(b"milestone", b"milestone")
+    looks.require(look)  # control: the same rewrite without a change keeps the chain intact
+    edit(b"milestone", b"nothing")
     with pytest.raises(looks.LookError, match="not intact"):
         looks.require(look)  # an edited earlier look breaks the chain: every later read fails closed
 
@@ -117,16 +124,19 @@ def test_a_tampered_sealed_expected_record_is_refused(built, tmp_path):
     root, _man_path, man = built
     sealed = next(e for e in man["items"] if e["half"] == "sealed")
     path = root / man["version"] / "sealed" / sealed["id"] / "expected.json"
-    original = path.read_text(encoding="utf-8")
+    original = path.read_bytes()  # restored byte-exact: the corpus is shared by the module's other tests
     try:
         doc = json.loads(original)
-        doc["label"] = "REJECTED" if doc["label"] != "REJECTED" else "CERTIFIED-INTERNAL"
-        path.write_text(json.dumps(doc), encoding="utf-8")
         look = corpus.open_sealed("owner", "test", ledger=tmp_path / "l.jsonl", man=man)
+        path.write_bytes(json.dumps(doc).encode("utf-8"))  # control: the same record re-serialized, label unchanged
+        assert corpus.sealed_items(look, root, man)
+        doc["label"] = "REJECTED" if doc["label"] != "REJECTED" else "CERTIFIED-INTERNAL"
+        path.write_bytes(json.dumps(doc).encode("utf-8"))
         with pytest.raises(corpus.CorpusError, match="committed hash"):
             corpus.sealed_items(look, root, man)
     finally:
-        path.write_text(original, encoding="utf-8")
+        path.write_bytes(original)
+    assert path.read_bytes() == original
 
 
 def test_the_build_is_deterministic(built, tmp_path, monkeypatch):
