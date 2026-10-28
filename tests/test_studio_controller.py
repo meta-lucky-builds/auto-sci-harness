@@ -170,11 +170,98 @@ def _calls(name: str) -> dict[str, int]:
     return out
 
 
+# owner decision 2026-10-28: the L7 cap gate (evolve/search.py) and the station's cap change (research/station/mode.py)
+# may build a DowngradeGate too, but only with a kill callback that refuses (no automated path can stop a run there)
+GATE_SITES = {"studio/controller.py": 1, "evolve/search.py": 1, "research/station/mode.py": 1}
+
+
+def _non_refusing_kills(rel: str, source: str) -> list[str]:
+    """Problems with each DowngradeGate(...) construction in one module outside the studio controller: its `kill=` must
+    name a module-level function that is bound nowhere else in the module and whose body (after an optional
+    docstring) is a single `raise <exception>`."""
+    tree = ast.parse(source)
+    defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", None))
+                == "DowngradeGate"):
+            continue
+        kill = next((k.value for k in node.keywords if k.arg == "kill"), None)
+        if not isinstance(kill, ast.Name) or kill.id not in defs:
+            out.append(f"{rel}:{node.lineno}: kill= is not the name of a module-level function")
+            continue
+        fn, name = defs[kill.id], kill.id
+        body = fn.body[1:] if (fn.body and isinstance(fn.body[0], ast.Expr)
+                               and isinstance(fn.body[0].value, ast.Constant)) else fn.body
+        if len(body) != 1 or not isinstance(body[0], ast.Raise) or body[0].exc is None:
+            out.append(f"{rel}:{node.lineno}: kill={name} does not consist of a single raise")
+        rebound = [n for n in ast.walk(tree) if n is not fn and (
+            (isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store | ast.Del))
+            or (isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) and n.name == name)
+            or (isinstance(n, ast.arg) and n.arg == name)
+            or (isinstance(n, ast.alias) and (n.asname or n.name) == name))]
+        if rebound:
+            out.append(f"{rel}:{node.lineno}: kill={name} is rebound elsewhere in the module")
+    return out
+
+
 def test_the_gate_is_the_only_automated_path_and_run_kill_stays_human_only():
     """Ratchet: the human kill (`kill_run`, the only writer of `run_kill`) is called only by the human CLI command;
-    the downgrade gate is constructed only by the studio controller; the controller's kill effect is used only there."""
+    the downgrade gate is constructed only at the allowed sites, and outside the studio controller only with a kill
+    callback that refuses; the controller's kill effect is used only in the controller."""
     assert _calls("kill_run") == {"studio/cli.py": 1}
-    assert _calls("DowngradeGate") == {"studio/controller.py": 1}
+    assert _calls("DowngradeGate") == GATE_SITES
+    for rel in GATE_SITES:
+        if rel != "studio/controller.py":
+            assert _non_refusing_kills(rel, (SRC / rel).read_text(encoding="utf-8")) == [], rel
+    # ... and each of those kill callbacks really refuses when called
+    from custom_harness.evolve.search import _refuse_kill
+    from custom_harness.research.station.mode import _no_kill
+    for kill in (_refuse_kill, _no_kill):
+        with pytest.raises(Exception):  # noqa: B017  any exception: the gate records it as an effect_error rejection
+            kill("r1", "controller_no_progress")
     assert _calls("controller_kill_effect") == {"studio/controller.py": 1}
     src = (SRC / "studio" / "controller.py").read_text(encoding="utf-8")
     assert "KILL_KIND" not in src and "run_kill" not in src.replace("`run_kill`", "")
+
+
+def _gate_module(kill_src: str) -> str:
+    return f"""
+def _ok(run_id, code):
+    \"\"\"refuses\"\"\"
+    raise RuntimeError("no")
+
+
+def _accepts(run_id, code):
+    return None
+
+
+def _refuses_then_rebound(run_id, code):
+    raise RuntimeError("no")
+
+
+def _logs_then_raises(run_id, code):
+    store.set_run_status(run_id, "FAILED", "x")
+    raise RuntimeError("no")
+
+
+_refuses_then_rebound = _accepts
+
+
+def build(store):
+    return DowngradeGate(store, budgets={{}}, admissions=AdmissionRegister(), {kill_src})
+"""
+
+
+@pytest.mark.parametrize("kill_src", [
+    "kill=controller_kill_effect(store)",  # the controller's real kill effect
+    "kill=lambda run_id, code: None",  # a lambda that accepts
+    "kill=_accepts",  # a module function that returns
+    "kill=_refuses_then_rebound",  # a refusing function that is later replaced
+    "kill=_logs_then_raises",  # a function that does something before refusing
+    "",  # no kill given
+])
+def test_the_ratchet_flags_a_gate_built_with_a_kill_that_does_not_refuse(kill_src):
+    """The check above must fail on a new construction whose kill callback does not simply refuse."""
+    assert _non_refusing_kills("x/new.py", _gate_module(kill_src)) != []
+    assert _non_refusing_kills("x/new.py", _gate_module("kill=_ok")) == []  # control: a single-raise kill passes
