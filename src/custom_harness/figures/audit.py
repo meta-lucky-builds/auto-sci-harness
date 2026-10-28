@@ -345,10 +345,13 @@ def make_figure(fig_dir: Path, script: str, refs: dict[str, dict[str, str]], sto
                 allowed_evidence: set[str] | None = None, *, certificate_of: Certificates | None = None,
                 allowed_certificates: set[str] | None = None) -> str:
     """Render a figure (script in the sandbox), refuse it unless it passes F3, write the three files; return the
-    sha256 of figure.json (record it: the audit compares it)."""
+    sha256 of figure.json (record it: the audit compares it). With a store, the script's bytes are stored as a blob
+    before they run (GOAL §5 L0: every program run executes a recorded revision; figure.json names its sha256)."""
     fig_dir = Path(fig_dir)
     values = resolve_refs(refs, store, allowed_evidence, certificate_of=certificate_of,
                           allowed_certificates=allowed_certificates)
+    if store is not None:
+        store.blobs.put(script.encode())
     data = run_script(script.encode(), inputs_json(refs, values), sandbox)
     problems = check_svg(data, values)
     if problems:
