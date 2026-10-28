@@ -60,6 +60,9 @@ def test_k9_sees_a_canary_inside_a_zipapp_code_artifact(method):
     assert _seen(data)
 
 
+# owner decision 2026-10-28 (stage-c4): open findings are strict xfails until fixed; the attack below is unchanged
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="open red-team finding RT-S4-6 (low): the K9 source "
+                   "scan does not join canary fragments separated by another literal")
 def test_k9_sees_a_canary_split_by_an_unrelated_literal():
     """RT-S4-6 (low, verified by probe). reader_texts joins literals in source order, so 'a' 'b' adjacency is caught,
     but ANY literal in between defeats the join (the program concatenates at runtime). Stated limit: runtime

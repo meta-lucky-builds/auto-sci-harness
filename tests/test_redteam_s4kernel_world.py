@@ -48,6 +48,9 @@ def test_reservations_with_zero_or_negative_charges_do_not_hide_an_overdraft(tmp
 
 
 # ------------------------------------------------------------------ RT-S4-4: fixed terms are trusted as written
+# owner decision 2026-10-28 (stage-c4): open findings are strict xfails until fixed; the attack below is unchanged
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="open red-team finding RT-S4-4 (medium): K2 does not "
+                   "re-derive the stored prereg fixed terms, so terms written around preregister weaken K3")
 def test_prereg_fixed_terms_written_around_preregister_cannot_weaken_k3(tmp_path):
     """RT-S4-4 (medium, inferred). checks.fixed() returns prereg.body['fixed'] verbatim when it is a dict; nothing
     compares it with fixed_terms() re-derived as of the entry's seq. A prereg entry appended directly with
@@ -132,6 +135,10 @@ def test_a_declared_truth_copy_given_under_another_name_is_still_checked(tmp_pat
 
 
 # ------------------------------------------------------------------ RT-S4-10: noise floor not bound to the claim
+# owner decision 2026-10-28 (stage-c4): open findings are strict xfails until fixed; the attack below is unchanged
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason="open red-team finding RT-S4-10 (medium, needs owner "
+                   "decision): a noise-floor record is not bound to the claim's program, metric or data, so K1 accepts "
+                   "any stored floor")
 def test_a_noise_floor_record_must_be_bound_to_the_claims_program(tmp_path):
     """RT-S4-10 (medium, inferred; NEEDS OWNER DECISION). A chh-noise-floor/1 record holds only numbers: nothing names
     the program, metric or data it was measured on, so a claim may cite ANY stored floor (another, noisier
