@@ -35,7 +35,7 @@ from custom_harness.evolve.router import (
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel import DatasetRole, Kernel
 from custom_harness.kerneld.releases import Releases, released
-from custom_harness.records import Cost
+from custom_harness.records import Cost, Run
 from custom_harness.runtime import HarnessSpec
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.store import EvidenceStore
@@ -89,6 +89,13 @@ class Script:
             name = self.names.get(spec.spec_hash(), "?")
             rid = f"run-{name}-{unit[0]}-{unit[1]}"
             if t.split == "gate":
+                # the run is registered before its read, as a real run is: a read naming a run the store does not
+                # know is attributed to every run (kerneld/releases.attributed_read_log, rule of bd1acbb)
+                try:
+                    self.store.get_run(rid)
+                except KeyError:
+                    self.store.add_run(Run(id=rid, harness_id=name, harness_hash=spec.spec_hash(), task_id=unit[0],
+                                           seed=unit[1]))
                 self.vault.read(tid(t.task_id), "y.csv", purpose="leakscan", run_id=rid)
             self.cache[key] = RunOutcome(unit[0], rid, unit[1], self.score(name, t.family, unit[0], unit[1]), True,
                                          "completed", Cost(prompt_tokens=100), [])

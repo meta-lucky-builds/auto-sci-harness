@@ -73,10 +73,10 @@ def test_the_same_domain_win_without_the_regression_is_routed_and_carries_its_lo
     assert {b["dataset_id"] for b in released(store) if b["note"] == lofo["note"]} == set(lofo["targets"])
     held_out = {tid(f"gH{i}") for i in range(2)} | {tid(f"gB{i}") for i in range(3)}
     assert held_out <= set(lofo["targets"])
-    # ... and, fail closed, on the gE targets too: Script's run ids name no run the store knows, and a read naming an
-    # unknown run is attributed to every run (kerneld/releases.attributed_read_log, rule of bd1acbb). With real runs
-    # the set would be the 5 held-out targets; a LOFO bit is never released on fewer targets than its runs read.
-    assert sorted(lofo["targets"]) == sorted(held_out | {tid(f"gE{i}") for i in range(4)})
+    # ... and on nothing else: Script registers each gate run before its read, so attributed_read_log attributes the
+    # reads to their own runs (a read naming an unknown run would be attributed to every run, rule of bd1acbb, and
+    # the gE targets would appear here too)
+    assert sorted(lofo["targets"]) == sorted(held_out)
     assert dict(build_router(store, TRUNK, cluster_key="domain").routes) == {"ml": CA.spec_hash()}
 
 
