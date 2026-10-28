@@ -5,6 +5,7 @@ exploit really is CERTIFIED by the Kernel and gains under the nominal grader) be
 
 from __future__ import annotations
 
+import functools
 import itertools
 import os
 import subprocess
@@ -196,7 +197,7 @@ def test_importing_the_writer_loads_no_model_path():
     assert r.returncode == 0, r.stdout + r.stderr
 
 
-def test_after_certify_runs_the_writer_and_refuses_without_an_evaluator(sw):
+def test_after_certify_runs_the_writer_and_refuses_without_an_evaluator(sw, monkeypatch):
     from custom_harness.research.memory_wiring import after_certify
     state = {"best": {"code_ref": sw.good.hash, "hypothesis_id": "h1"},
              "hypotheses": [{"id": "h1", "idea": "radius kNN"}]}
@@ -213,14 +214,19 @@ def test_after_certify_runs_the_writer_and_refuses_without_an_evaluator(sw):
     # so the writer refuses before proposing (review M5: no wasted re-derivation or perturbed evaluation)
     assert rec["error"] is None and rec["skill"]["proposed"] is False, rec
     assert "skill tier floor" in rec["skill"]["reason"], rec
-    # a certificate of another run is refused even through the wiring
-    other = after_certify(sw.kernel, state, sw.honest, (), f"ac{next(_ns)}", run_id=sw.runs["exploit"],
-                          spawn=lambda name: LocalSandbox(root / f"x{name}-{next(n)}", i_understand_no_isolation=True),
-                          targets={"train": "label"})
-    assert other["skill"]["proposed"] is False and "not produced by run" in other["skill"]["reason"]
-    # review M2: a crashing writer is recorded and does not stop the rest of after_certify
+    # a certificate of another run is refused even through the wiring. Since 98a6728 the tier floor is checked first,
+    # so under the production floor this call would stop there; the wiring's store gets this file's T2 floors
+    # (POLICY) for this call only, so the refusal below is the wrong-run check itself
     import custom_harness.research.memory_wiring as MWI
 
+    with monkeypatch.context() as mp:
+        mp.setattr(MWI, "MemoryStore", functools.partial(MWI.MemoryStore, policy=POLICY))
+        other = after_certify(sw.kernel, state, sw.honest, (), f"ac{next(_ns)}", run_id=sw.runs["exploit"],
+                              spawn=lambda name: LocalSandbox(root / f"x{name}-{next(n)}",
+                                                              i_understand_no_isolation=True),
+                              targets={"train": "label"})
+    assert other["skill"]["proposed"] is False and "not produced by run" in other["skill"]["reason"], other
+    # review M2: a crashing writer is recorded and does not stop the rest of after_certify
     def boom(*a, **k):
         raise OSError("disk")
     orig = MWI.write_skill

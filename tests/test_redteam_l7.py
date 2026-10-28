@@ -27,6 +27,8 @@ def _window(orch, y_of_position, report=lambda arm, iid: True):
     t = orch.trial
     for _ in range(2 * t.decl.n_pairs):
         orch.step()
+        if orch.trial is not t:  # the trial closed (a void round) before its window completed
+            break
         i, arm = t.index(orch.round), t.arm(orch.round)
         y = y_of_position(i)
         for j, iid in enumerate(sorted(orch.islands)):

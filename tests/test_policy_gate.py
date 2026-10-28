@@ -212,6 +212,9 @@ def test_an_unfinished_window_is_never_accepted(store):
     orch.declare_trial(_challenger(), order_seed="s", n_pairs=5)
     for _ in range(3):
         orch.step()
+        for iid in sorted(orch.islands):
+            orch.observe({"island": iid, "generation": orch.round, "accepted": False, "proposed": 1, "gated": 1,
+                          "rejected_on": ["held_out_gate"], "edit_types": ["contract"]})
     dec = orch.abandon_trial()
     assert dec["complete"] is False and dec["accepted"] is False and "not completed" in dec["reason"]
     assert store.records("policy_trial_decision") == [dec] and orch.trial is None

@@ -202,7 +202,10 @@ def test_cli_lists_branches_and_routes_tasks(store, tmp_path, monkeypatch, capsy
         dirs[name] = tmp_path / "t" / name
     suite.write_text(yaml.safe_dump({"tasks": [
         {"id": n, "dir": str(d), "split": "sealed", "family": n[1]} for n, d in dirs.items()]}), encoding="utf-8")
-    monkeypatch.setattr(cli, "EvidenceStore", lambda *_: store)
+    from custom_harness.kerneld.hoststore import HostStore
+    hs = HostStore(store)
+    monkeypatch.setattr(hs, "close", lambda: None)  # the test's store stays open across the two CLI calls
+    monkeypatch.setattr(cli, "open_host_store", lambda *_: hs)
     monkeypatch.setattr(store, "close", lambda: None)
     assert cli.main(["evolve", "branches", str(spec)]) == 0
     listed = json.loads(capsys.readouterr().out)

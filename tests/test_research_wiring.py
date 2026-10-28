@@ -203,7 +203,8 @@ def test_v1_planted_memory_entry_with_a_run_secret_never_reaches_a_prompt(store,
 @register("test.wiring_state")
 def _wiring_state(state, params, ctx):
     return {"task": {"description": "rings", "metric": "accuracy", "target_column": "label",
-                     "allowed_libraries": ["stdlib"]}, "baseline_dev": 0.4, "profile": {"rows": 10}}
+                     "allowed_libraries": ["stdlib"]}, "baseline_dev": 0.4, "profile": {"rows": 10},
+            "key_graph_quoted": "(no key graph)"}  # the hypothesis prompt quotes it since f8f8e5d
 
 
 def _mini_spec() -> HarnessSpec:

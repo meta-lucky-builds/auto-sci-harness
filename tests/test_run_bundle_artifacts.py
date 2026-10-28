@@ -296,10 +296,16 @@ def test_reproduce_reports_artifacts_when_present(store, tmp_path, monkeypatch, 
     f.write_bytes(b"w" * 10)
     entry = {"path": str(f), "bytes": 10, "sha256": _sha(b"w" * 10), "status": "available_locally",
              "kind": "weights", "required": True}
-    _rewrite_manifest(path, lambda m: m.__setitem__("artifacts", [entry]))
+    # since 311c3e1 the Kernel bundle lists its own artifacts and the list must match its blob list: the new entry is
+    # added to both, and this machine's store holds the listed, unbundled artifact
+    _rewrite_manifest(path, lambda m: m.update(artifacts=[*m["artifacts"], entry],
+                                               blobs=[*m["blobs"], entry["sha256"]]))
+    store.blobs.put(b"w" * 10)
     code, out = _reproduce(path, store, capsys)
     assert code == 0 and out["reproduced"] is True, out
-    assert out["artifacts"]["rows"][0]["result"] == "present"
+    rows = {r["path"]: r for r in out["artifacts"]["rows"]}
+    assert rows[str(f)]["result"] == "present", rows
+    assert all(r["result"] == "present" for r in rows.values()), rows
 
 
 def test_attack_bundled_blob_removed_from_the_zip_is_fatal_even_if_optional(store, tmp_path, task):

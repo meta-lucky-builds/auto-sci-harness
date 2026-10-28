@@ -173,7 +173,7 @@ def test_unknown_usd_is_never_summed_as_zero(tmp_path):
     s.add_run(r)
     _step(s, r.id, 0, cost=Cost(prompt_tokens=5, quota_units=1.0, usd=0.0, estimated=True), mode="byos")
     from custom_harness.scorecard import axes
-    assert axes.axis_g(extract(s))["total_cost"]["value"]["usd"] == 0.0  # the shared axis: unknown shown as 0
+    assert axes.axis_g(extract(s))["total_cost"]["value"]["usd"] is None  # the shared axis: unknown, not 0
     (tmp_path / "redteam").mkdir()
     (tmp_path / "redteam" / "findings.yaml").write_text("findings: []\n", encoding="utf-8")
     g = axis_g(extract_local(s, tmp_path, use_git=False))
@@ -228,7 +228,8 @@ def test_a_deleted_run_bundle_is_caught_by_the_source_check(store, tmp_path):
     from custom_harness.store.run_bundle import build_run_bundle
     (tmp_path / "redteam").mkdir()
     (tmp_path / "redteam" / "findings.yaml").write_text("findings: []\n", encoding="utf-8")
-    r = Run(harness_id="x", harness_hash="h", task_id="t")
+    h = store.add_harness_version("x", {"id": "x", "entry": "a", "nodes": {}}, None)
+    r = Run(harness_id="x", harness_hash=h, task_id="t")
     store.add_run(r)
     _step(store, r.id, 0, cost=Cost(wall_s=1.0), mode=None)
     zp = tmp_path / "rb.zip"
