@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import random
 import time
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from custom_harness.gateway import MockBackend
 from custom_harness.kernel import ArtifactRef, Claim, ClaimKind, Effect, MetricRef, Scope, canonical_json
 from custom_harness.kernel.certificate import Label
 from custom_harness.kernel.claim import AnalysisPlan, EvidenceClass
+from custom_harness.kernel.lp import scope_phrase
 from custom_harness.records import RunStatus
 from custom_harness.research.noise_floor import _shuffled_rows
 from custom_harness.runtime import Engine, HarnessSpec
@@ -81,26 +83,82 @@ def test_shuffled_rows_keep_header_rows_and_terminators():
     assert _shuffled_rows(b"a,b\n1,2\n3,4\n5,6\n7,8\n9,0\n", 1) != b"a,b\n1,2\n3,4\n5,6\n7,8\n9,0\n"
 
 
+class DriftingReplayer:
+    """The attack's program: it reproduces its recorded predictions except that `flips` of the subject's correct
+    predictions come out wrong, so the replay's score is exactly flips / n below the RECORDED score. The recorded
+    evaluation itself stays honest (its score is what its stored predictions give), so K3's recompute passes and only
+    the replay comparison against the claim's tolerance can catch the drift."""
+
+    def __init__(self, inner, labels: dict[str, list[str]]):
+        self.inner, self.labels, self.flips = inner, labels, 0
+
+    def replay(self, record, vault):
+        preds = self.inner.replay(record, vault)
+        if preds is None or record.arm != "subject" or not self.flips:
+            return preds
+        labels, out, left = self.labels[record.target], list(preds), self.flips
+        classes = sorted(set(labels))
+        for i, (p, y) in enumerate(zip(out, labels, strict=True)):
+            if left and p == y:
+                out[i], left = classes[(classes.index(y) + 1) % len(classes)], left - 1
+        assert left == 0, "not enough correct predictions to plant the drift"
+        return out
+
+    def __getattr__(self, name):  # non-interference re-runs (run_inputs) and counters go to the real replayer
+        return getattr(self.inner, name)
+
+
+def _failing(cert) -> dict[str, tuple[str, ...]]:
+    return {k: tuple(str(c) for c in v.codes) for k, v in cert.checks.items() if v.status == "fail"}
+
+
 def test_planted_drift_is_rejected_by_k3_and_honest_reruns_pass(tmp_path):
-    tol = T.claim_tolerance(EvidenceClass.DATA, honest_floor()).value
-    assert tol is not None and 0.0 < tol < 0.01
-    w = World(tmp_path / "w", seed=2)
+    """Invariant 19 (an attack test must exercise its attack): the claims cite a RECORDED noise floor
+    (record_noise_floor -> tolerance_evidence, re-calibrated by K1), the recorded evaluations are honest, and the
+    drift is planted in what the program reproduces on replay. n_test = 1200, so one changed prediction moves the
+    score by 1/1200 (inside the calibrated tolerance) and the planted drift of 12 predictions is exactly 0.01."""
+    floor = honest_floor()
+    tol = T.claim_tolerance(EvidenceClass.DATA, floor).value
+    assert tol is not None and 1 / 1200 < tol < 0.01  # one flip is inside the measured noise, the drift is not
+    loose = honest_floor(sd=0.004)  # a noisier (recorded, honest) floor whose calibrated tolerance exceeds 0.01
+    loose_tol = T.claim_tolerance(EvidenceClass.DATA, loose).value
+    assert loose_tol is not None and 0.01 < loose_tol < C.TOL_CEILING
+    w = World(tmp_path / "w", seed=2, n_test=1200)
+    drifting = DriftingReplayer(w.replayer, w.labels)
+    w.kernel.replayer = drifting
     try:
         good, base = w.artifact("good"), w.artifact("baseline", "baseline")
+        floor_ref, loose_ref = w.kernel.record_noise_floor(floor), w.kernel.record_noise_floor(loose)
 
-        def k3(delta: float, tolerance: float, offset: float) -> str:
-            c = w.claim(good, base, delta=delta, reproduce_tolerance=tolerance)
+        def certify(delta: float, tolerance: float, evidence: str | None, flips: int):
+            c = w.claim(good, base, delta=delta, reproduce_tolerance=tolerance, tolerance_evidence=evidence)
             w.kernel.preregister(c)
-            cert = w.kernel.certify(c, w.evaluate_all(c, score_offset=offset))
-            return cert.checks["K3"].status
+            evidence_ids = w.evaluate_all(c)  # honest recorded evaluations (no score offset)
+            drifting.flips = flips
+            try:
+                return w.kernel.certify(c, evidence_ids)
+            finally:
+                drifting.flips = 0
 
         # each call is a DIFFERENT claim (delta): re-certifying one claim hash is subject to the Kernel's own rules
         # for earlier certificates of that claim, which this test is not about
-        assert k3(0.2, tol, 0.0) == "pass"  # honest: the replay reproduces the recorded score
-        assert k3(0.19, tol, tol / 2) == "pass"  # an honest re-run inside the measured noise passes
-        # the attack: a 0.01 drift between the recorded score and what the program reproduces ...
-        assert k3(0.21, C.TOL_CEILING, 0.01) == "pass"  # ... passes the Kernel's hand-set ceiling (0.02)
-        assert k3(0.22, tol, 0.01) == "fail"  # ... and is rejected by the calibrated tolerance
+        honest = certify(0.2, tol, floor_ref, 0)  # the replay reproduces the recorded predictions
+        assert honest.label == Label.CERTIFIED_INTERNAL and _failing(honest) == {}, _failing(honest)
+        noisy = certify(0.19, tol, floor_ref, 1)  # an honest re-run inside the measured noise (1/1200 < tol)
+        assert noisy.label == Label.CERTIFIED_INTERNAL and _failing(noisy) == {}, _failing(noisy)
+        # the attack: the program reproduces a score 0.01 below the recorded one ...
+        attacked = certify(0.22, tol, floor_ref, 12)  # ... and the calibrated tolerance rejects it at K3
+        assert attacked.label == Label.REJECTED, _failing(attacked)
+        assert _failing(attacked) == {"K3": ("K3_REPLAY_DIFFERS",)}, _failing(attacked)
+        # ... a hand-set tolerance at the Kernel's ceiling (0.02) would pass K3, so K1 refuses it: it exceeds what
+        # the cited noise-floor record gives on re-calibration
+        ceiling = certify(0.21, C.TOL_CEILING, floor_ref, 12)
+        assert ceiling.label == Label.REJECTED and _failing(ceiling) == {"K1": ("K1_TOLERANCE",)}, _failing(ceiling)
+        # positive control: the same drift is inside the tolerance of a noisier recorded floor, so the rejection
+        # above comes from the calibrated value, not from some other difference between the replay and the record
+        tolerated = certify(0.23, loose_tol, loose_ref, 12)
+        assert tolerated.label == Label.CERTIFIED_INTERNAL and _failing(tolerated) == {}, _failing(tolerated)
+        assert drifting.inner.calls > 0  # the replays really ran the program
     finally:
         w.close()
 
@@ -156,7 +214,9 @@ def _claim_for(w: World):
     def build(cid: str, cand: G.LPCandidate) -> Claim:
         ref = ArtifactRef(artifact_id=f"tiny-{cid}",
                           hash=w.vault.register_artifact(f"tiny-{cid}", canonical_json(TINY), "problem").hash)
-        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of tiny-{cid} is {cand.value}", subject=ref,
+        # K1 requires the LP claim's statement to be the adapter's scope rendering (74f354b)
+        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=scope_phrase(canonical_json(TINY), Fraction(cand.value)),
+                    subject=ref,
                     comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                     effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                     scope=Scope(datasets=()), development=(), generalization_targets=(),
