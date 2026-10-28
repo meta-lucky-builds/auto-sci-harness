@@ -35,6 +35,9 @@ refused by that backend's `from_config` via `check_keys`, so a typo cannot silen
         default: {namespace: "owner", token_file: "...", python: "C:/.../hf-venv/python.exe"}
     literature:
       alphaxiv: {enabled: false, tos_status: "unknown"}
+      # enabled only by the owner, with written permission: {enabled: true, tos_status: "permitted",
+      # permission_note: "...", recorded_by: "...", api_base: "https://...", web_base: "https://..."}; the alphaXiv
+      # endpoints are named here, never in code (literature/alphaxiv.py)
 """
 
 from __future__ import annotations

@@ -21,6 +21,11 @@ HITS = [{"paperId": "2401.12345v2", "title": "A  Paper", "abstract": "x", "publi
          "votes": 3, "snippets": [{"pageNumber": 2, "snippet": "the match"}]}]
 
 
+# the owner's permission record names the endpoints (no alphaXiv URL is written in the code); test hosts only
+ENDPOINTS = {"api_base": "https://api.example.test", "web_base": "https://web.example.test"}
+RECORD = {"enabled": True, "tos_status": "permitted", "permission_note": "email 2026-11-01", "recorded_by": "owner"}
+
+
 def _cfg(section):
     return OwnerConfig(None, {"literature": {"alphaxiv": section}})
 
@@ -36,7 +41,13 @@ def test_alphaxiv_is_off_by_default_and_no_url_is_formed():
 @pytest.mark.parametrize("section", [{}, {"enabled": True}, {"enabled": True, "tos_status": "unknown"},
                                      {"enabled": True, "tos_status": "permitted"},
                                      {"enabled": "yes", "tos_status": "permitted", "permission_note": "n",
-                                      "recorded_by": "o"}])
+                                      "recorded_by": "o"} | ENDPOINTS,
+                                     RECORD,  # a full permission record that names no endpoints
+                                     RECORD | {"api_base": "https://api.example.test"},
+                                     RECORD | ENDPOINTS | {"api_base": "http://api.example.test"},  # not https
+                                     RECORD | ENDPOINTS | {"web_base": "https://web.example.test/x?y=1"},  # a path
+                                     {"tos_status": "permitted", "permission_note": "n", "recorded_by": "o"}
+                                     | ENDPOINTS])  # endpoints without enabled: true
 def test_only_an_explicit_owner_permission_record_enables_alphaxiv(section):
     with pytest.raises(ConnectorDisabled):
         AlphaXivPermission.from_owner_config(section)
@@ -50,13 +61,17 @@ def test_lab_sources_without_permission_exclude_alphaxiv():
 
 
 def test_with_permission_the_hits_parse_into_records():
-    perm = AlphaXivPermission.from_owner_config({"enabled": True, "tos_status": "permitted",
-                                                 "permission_note": "email 2026-11-01", "recorded_by": "owner"})
+    perm = AlphaXivPermission.from_owner_config(RECORD | ENDPOINTS)
     src = AlphaXivSource(perm)
     url, params = src.search_request("q", 5)
-    assert url.endswith("/search/v2/paper/discover/keyword") and params == {"q": "q", "prioritize": "relevance"}
+    assert url == "https://api.example.test/search/v2/paper/discover/keyword"  # the owner's base, not a code default
+    assert params == {"q": "q", "prioritize": "relevance"}
+    assert src.full_text_request("2401.12345v2") == ("https://web.example.test/abs/2401.12345.md", {})
     rec = src.parse_search(HttpResponse(200, json.dumps(HITS)))[0]
     assert rec.arxiv_id == "2401.12345" and rec.published == "2024-01-20" and rec.snippets == ("the match",)
+    assert rec.url == "https://web.example.test/abs/2401.12345"
+    with pytest.raises(ConnectorDisabled):  # without the permission record nothing is parsed into a link either
+        AlphaXivSource(None).parse_search(HttpResponse(200, json.dumps(HITS)))
     assert versionless_id("2401.12345v2") == "2401.12345"
 
 

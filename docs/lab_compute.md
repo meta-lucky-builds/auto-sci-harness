@@ -176,7 +176,10 @@ found only the OpenCode `"autoupdate": False` off switch, now exempt.
 4. **Slurm / Ray / HF Jobs:** accounts; pinned host key for the Slurm login node; HF token file (and a paid plan if
    Jobs needs one [U]); a Python with `huggingface_hub>=1.22`.
 5. **alphaXiv:** read its terms or obtain written permission; only then set `literature.alphaxiv` to `enabled: true`,
-   `tos_status: permitted`, `permission_note`, `recorded_by`.
+   `tos_status: permitted`, `permission_note`, `recorded_by`, and the endpoints `api_base` and `web_base` (https base
+   URLs, no path). Since 2026-10-28 no alphaXiv endpoint is written in the code: without both base URLs in the owner
+   record the client stays OFF. OpenResearch at fe36f74 used the API host api.alphaxiv.org and the web host
+   www.alphaxiv.org (src/config.rs).
 6. **TeX image:** choose an option (§6), fill in the tectonic checksum, then build.
 7. **Overleaf:** decide on premium; the design is in §7.
 
