@@ -77,17 +77,22 @@ def test_an_injected_fake_value_is_blocked(tmp_path, sb):
     fig = make_report_figure({"certificate": {"hash": H}}, _Kernel({H: CERT}), None, sb, tmp_path / "fig")
     assert fig is not None
     svg_path = tmp_path / "fig/figure.svg"
-    good = svg_path.read_text()
+    meta_path = tmp_path / "fig/figure.json"
+    good = svg_path.read_bytes().decode("utf-8")  # byte-exact edits: a text-mode write could change line endings
+    import hashlib
+
+    def plant(svg: str) -> None:  # the figure and its stored hash rewritten together, byte-exact
+        svg_path.write_bytes(svg.encode("utf-8"))
+        meta = json.loads(meta_path.read_bytes())
+        meta["svg_sha256"] = hashlib.sha256(svg.encode("utf-8")).hexdigest()
+        meta_path.write_bytes(json.dumps(meta, sort_keys=True, indent=1).encode("utf-8"))
+    plant(good)
+    assert _audit(tmp_path / "fig", sb, {H: CERT}, None).ok  # control: the same rewrite without a change passes
     # the attack: the effect's lower bound is drawn higher than the certificate says, and the stored hashes are
     # rewritten to match, so only the re-resolution and re-render can catch it
     fake = good.replace(f'data-v="{S.data_v(0.07)}"', f'data-v="{S.data_v(0.10)}"')
     assert fake != good
-    svg_path.write_text(fake)
-    meta_path = tmp_path / "fig/figure.json"
-    meta = json.loads(meta_path.read_text())
-    import hashlib
-    meta["svg_sha256"] = hashlib.sha256(fake.encode()).hexdigest()
-    meta_path.write_text(json.dumps(meta, sort_keys=True, indent=1))
+    plant(fake)
     res = _audit(tmp_path / "fig", sb, {H: CERT}, None)
     assert not res.ok
     assert any(p.startswith("F3") for p in res.problems) and any(p.startswith("F4") for p in res.problems)
@@ -155,11 +160,11 @@ def test_v1_report_renders_an_audited_figure_and_a_tampered_one_fails_i6(store, 
     kernel = Kernel(store)
     certs = {s["certificate"]["hash"], *([s["replica_certificate"]["hash"]] if s.get("replica_certificate") else [])}
     svg_path = Path(fig["dir"]) / "figure.svg"
-    good = svg_path.read_text(encoding="utf-8")
+    good = svg_path.read_bytes().decode("utf-8")
     m = re.search(r'<circle class="mark" data-ref="([^"]+)" data-v="([^"]+)"', good)
     assert m
     fake = good.replace(f'data-v="{m.group(2)}"', f'data-v="{S.data_v(float(m.group(2)) + 0.05)}"', 1)
-    svg_path.write_text(fake, encoding="utf-8")  # the attack: one plotted value inflated after the run
+    svg_path.write_bytes(fake.encode("utf-8"))  # the attack: one plotted value inflated after the run
 
     def again():
         return audit_figures(s["figures"], store, lambda i: LocalSandbox(tmp_path / f"re{i}",
@@ -170,5 +175,5 @@ def test_v1_report_renders_an_audited_figure_and_a_tampered_one_fails_i6(store, 
 
     bad = again()
     assert bad["I6"] is False and bad["problems"], bad
-    svg_path.write_text(good, encoding="utf-8")
+    svg_path.write_bytes(good.encode("utf-8"))
     assert again()["I6"] is True
