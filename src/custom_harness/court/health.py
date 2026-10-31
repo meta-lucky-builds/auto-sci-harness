@@ -69,7 +69,8 @@ class Snoop:
     def fit(self, X, y):
         self.top = max(sorted(set(y)), key=y.count)
         import glob
-        self.found = [p for p in glob.glob("../**/test_y.csv", recursive=True)]
+        roots = ("..", "../..", "/workspace", "/data", "/store", "/home", "/tmp")
+        self.found = [p for r in roots for p in glob.glob(r + "/*/test_y.csv") + glob.glob(r + "/*/*/test_y.csv")]
     def predict(self, X):
         if self.found:
             rows = open(self.found[0]).read().split()[1:]
@@ -118,7 +119,7 @@ class Plant:
     min_effect: float
     certifies: bool  # the right answer
     what: str
-    refused_by: str | None = None  # text of the COULD NOT RUN reason that is the right answer, for a plant stopped early
+    refused_by: str | None = None  # text of the COULD NOT RUN reason that is the right answer for a stopped plant
 
 
 PLANTS = (
@@ -167,7 +168,8 @@ def run_plant(plant: Plant, root: Path, sandbox_factory: Any) -> dict[str, Any]:
                                beacon_round="health", sizing={"n_test": 800}, n_train=400,
                                anchor_file=root / "anchors" / "a.jsonl")
         C.mint(store, body["case_id"], BEACON)
-        ScopedKernel(store).approve_role(body["target"], approver=SCRATCH_APPROVER, note="health run: scratch store only")
+        ScopedKernel(store).approve_role(body["target"], approver=SCRATCH_APPROVER,
+                                         note="health run: scratch store only")
         out = C.run(store, body["case_id"], sandbox_factory(root), bundle_root=root / "bundles")
         certified = str(out.get("label", "")).startswith("CERTIFIED")
         badge = level(store, str(out["cert_hash"])).badge if out.get("cert_hash") else "NONE"
