@@ -39,6 +39,9 @@ grant. The ratchet makes each named bypass a test failure; reading blob files di
 A real OS boundary needs the private blobs in a location only a different OS user (the kerneld process) can read, and
 the Kernel behind RPC. Not done.
 
+Stage-p0 added the ingest kind `sealed_split` (kerneld/ingest.sealed_split, kerneld/seal.py): the host names a file and
+kerneld reads it, draws the split and registers the parts; no sealed label crosses the pipe.
+
 ## Fail closed
 - kerneld unavailable: `KernelDUnavailable` (an InfraError, not transient). No caller falls back to an in-process
   private read: the HostStore refuses them, and `register_task`, the audit's `prepare` and `chh return-data` call

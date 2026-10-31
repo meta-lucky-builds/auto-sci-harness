@@ -143,6 +143,13 @@ def test_could_not_run_after_a_read_hides_the_detail(tmp_path, monkeypatch):
         c.close()
 
 
+def test_an_audit_report_view_is_one_continuous_release(won):
+    D.record_report_view(won.store, "audit-1", [won.target])
+    D.record_report_view(won.store, "audit-1", [won.target])
+    rows = [r for r in released(won.store, won.target) if r["note"] == "court:audit_report"]
+    assert len(rows) == 1 and rows[0]["alphabet"] == "continuous"
+
+
 def test_a_view_needs_a_viewer(won):
     with pytest.raises(D.DisplayRefused):
         D.view(won.store, won.case_id, " ")

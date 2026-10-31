@@ -101,14 +101,14 @@ class Project:
         S.bind_session(self.store, self.project, sid)
 
     def freeze(self, sid: str = SESSION, contract: str = "build_model", method: bytes | None = None,
-               baseline: bytes | None = None) -> str:
+               baseline: bytes | None = None, metric: str = "accuracy") -> str:
         """The stored form of `lab.promote.freeze` (the box and workspace parts are covered by test_lab_promote)."""
         put = self.store.blobs.put
         self.n += 1
         pid = f"p{self.n}"
         req = {"format": "chh-lab-promote/1", "title": "fixture", "sentence": "the fixture method beats the baseline",
                "method": "m.py", "baseline": "b.py", "lock": "r.lock", "contract": contract,
-               "claim": ClaimPart(metric="accuracy", min_effect=0.1, probability=0.6, seeds=(0, 1, 2), n_boot=1000,
+               "claim": ClaimPart(metric=metric, min_effect=0.1, probability=0.6, seeds=(0, 1, 2), n_boot=1000,
                                   resolve_by=date(2030, 1, 1)).model_dump(mode="json"),
                "budget": Budget(timeout_s=120).model_dump(mode="json")}
         self.store.append_record(LP.RECORD_KIND, {
@@ -251,6 +251,14 @@ def test_a_session_outside_the_project_cannot_use_its_seal(pj):
         C.register_sealed(pj.store, pj.freeze(sid="s-elsewhere"), pj.project, anchor_file=pj.anchor())
     k = ScopedKernel(pj.store)
     assert "not a session" in S.seal_fact(pj.store, k, pj.seal["targets"][0], "s-elsewhere")["why"]
+
+
+def test_sessions_of_another_project_do_not_count(pj):
+    S.seal_project(pj.store, "other-project", pj.data, label_column="outcome", rows=100, parts=1, beacon_round="r2",
+                   beacon_value=BEACON)
+    S.bind_session(pj.store, "other-project", "s-other")
+    fact = S.seal_fact(pj.store, ScopedKernel(pj.store), pj.seal["targets"][0], None)
+    assert "no Lab session" in fact["why"]
 
 
 def test_seal_fact_without_a_seal_or_sessions(pj):

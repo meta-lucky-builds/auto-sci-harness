@@ -63,6 +63,12 @@ def test_a_failing_rehearsal_names_the_failure(pj, tmp_path):
     assert rep["readiness"]["verdict"] == "not run"
 
 
+def test_a_metric_the_power_check_cannot_simulate_still_rehearses(pj, tmp_path):
+    rep = R.rehearse(pj.store, pj.freeze(metric="f1_macro"), _lab_file(tmp_path), label_column="outcome", rows=300,
+                     sandbox_factory=_factory)
+    assert rep["state"] == "RAN" and rep["readiness"]["verdict"] == "not run"
+
+
 def test_a_rehearsal_refuses_private_data(pj, tmp_path):
     f = tmp_path / "copy.csv"
     k = Kernel(pj.store)

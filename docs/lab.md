@@ -386,6 +386,14 @@ population is the family (§16.2).
 The badges reach the Lab only through `chh lab release-verdict` (`LevelResult.release_value`: at most 16 values, no
 families or reasons; a ledgered `count` release; field `released_level` of `promote/verdict_released`).
 
+### Court routes added by stage-p0
+
+- Sealed: `chh lab seal`, then `chh lab start --project` and `chh court register-sealed` (docs/sealed_projects.md). Eligible
+  for VALIDATED and RE-VALIDATED; "sealed" is a ledger fact.
+- `contract: program` in a promotion request widens what can be promoted (docs/sealed_projects.md).
+- Every registration needs a passing Court health run for the current Court version (docs/court_rehearsal.md).
+- `chh court rehearse` and `chh court readiness` run before promotion. Court output is read with `chh court status`.
+
 ## 11. The network rule (GOAL 18.6; `lab/egress.py`, `lab/egress_proxy.py`)
 
 Internet allowed; LAN and host blocked; web traffic recorded into the Story. Tools are not limited, only where the box

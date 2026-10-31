@@ -328,3 +328,13 @@ The `int16` full suite has not run, so more may exist.
   takes about 40 minutes, and an out-of-memory crash happened under parallel load.
 - **Model access:** Codex CLI only, so one family.
 - **Docker:** Docker Desktop 29.8.1 with images `custom-harness-sandbox:py312` and `…:py312-candidate`. No GPU.
+
+## Stage-p0 (2026-10-31): P0 Court follow-ups, on branch `p0-build`
+
+Reported by the stage-p0 agent; ran on this Windows PC only. Details: `META/agent_worklogs/stage-p0/`.
+- Failures never spend truth: all three routes; `labels_read` comes from the ledger (docs/court_failures.md).
+- Lab network rule: internal network per session, recording gateway (docs/lab.md section 11). Checked on real Docker Desktop.
+- Seal at project start and the program contract (docs/sealed_projects.md).
+- One display path, feedback split, rehearsal, readiness, Court health run, strawman check (docs/court_rehearsal.md).
+- First-discovery plan (docs/first_discovery_plan.md).
+- Open: `TRUTH_INDEPENDENT` needs the owner's review. Nothing has run with a real agent in a real Lab box.
