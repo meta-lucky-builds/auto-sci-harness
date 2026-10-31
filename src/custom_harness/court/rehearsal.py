@@ -14,7 +14,9 @@ data), it is labelled UNCALIBRATED, and it can only deny or warn (invariant 21).
 
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import shutil
 import tempfile
 import time
@@ -81,6 +83,34 @@ def _private_copy(store: EvidenceStore, data: bytes) -> bool:
     return hashlib.sha256(data).hexdigest() in set().union(*private_blob_index(store).values())
 
 
+def _feature_rows(data: bytes) -> tuple[list[str], list[list[str]]]:
+    table = [r for r in csv.reader(io.StringIO(data.decode("utf-8", "replace"))) if r]
+    return (table[0], table[1:]) if table else ([], [])
+
+
+def sealed_rows_problem(store: EvidenceStore, data: bytes, label_column: str) -> str | None:
+    """Why `data` may not be rehearsed on: it is the file a project sealed, or it holds a row of a sealed part. Either
+    would show scores computed from sealed labels. Rows are compared on the part's feature columns, value by value;
+    a file without those columns is not compared."""
+    sha = hashlib.sha256(data).hexdigest()
+    head, rows = _feature_rows(data)
+    vault = ScopedKernel(store).vault
+    for seal in store.records(S.RECORD_KIND):
+        if seal.get("event") != "sealed":
+            continue
+        if seal.get("data_sha256") == sha:
+            return f"this is the file sealed for project {seal['project']!r}: use the Lab's part"
+        for target in seal.get("targets") or []:
+            part_head, part_rows = _feature_rows(vault.read_public(target, "test_X.csv"))
+            if not set(part_head) <= set(head) - {label_column}:
+                continue
+            at = [head.index(c) for c in part_head]
+            sealed = {tuple(r) for r in part_rows}
+            if any(tuple(r[i] for i in at) in sealed for r in rows if len(r) == len(head)):
+                return f"this file holds rows sealed in project {seal['project']!r}: use the Lab's part"
+    return None
+
+
 def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: str, rows: int,
              sandbox_factory: Any) -> dict[str, Any]:
     """One mock trial of frozen promotion `pid` on the researcher's Lab data. `sandbox_factory(scratch_root)` gives the
@@ -89,6 +119,9 @@ def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: s
     data = Path(data_file).read_bytes()
     if _private_copy(store, data):
         raise RehearsalRefused("this file is a private vault file: a rehearsal runs on Lab data only")
+    problem = sealed_rows_problem(store, data, label_column)
+    if problem:
+        raise RehearsalRefused(problem)
     frozen = _promotion(store, pid)[0]
     req = PromoteRequest.model_validate(frozen["request"])
     root = Path(tempfile.mkdtemp(prefix="chh-rehearsal-"))
@@ -115,10 +148,20 @@ def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: s
     finally:
         scratch.close()
         shutil.rmtree(root, ignore_errors=True)
-    report.update(readiness=readiness(req.claim, report.pop("dev_pairs")), label=NOT_EVIDENCE)
+    pairs = report.pop("dev_pairs")
+    report.update(readiness=readiness(req.claim, pairs), label=NOT_EVIDENCE)
     store.append_record(RECORD_KIND, {"promotion_id": pid, "label": NOT_EVIDENCE, "state": report["state"],
-                                      "data_sha256": hashlib.sha256(data).hexdigest(), "at": time.time()})
+                                      "data_sha256": hashlib.sha256(data).hexdigest(), "dev_pairs": pairs,
+                                      "scores": report.get("scores"), "readiness": report["readiness"],
+                                      "would_label": report.get("would_label"), "checks": report.get("checks"),
+                                      "at": time.time()})
     return report
+
+
+def latest(store: EvidenceStore, pid: str) -> dict[str, Any] | None:
+    """The last rehearsal of a promotion: Lab data only."""
+    rows = store.records_where(RECORD_KIND, "promotion_id", pid)
+    return rows[-1] if rows else None
 
 
 def _report(scratch: EvidenceStore, data: bytes, label_column: str, rows: int, out: dict[str, Any], part: Any

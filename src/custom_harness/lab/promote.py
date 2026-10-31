@@ -332,8 +332,11 @@ def handoff(store: EvidenceStore, pid: str, targets_path: Path) -> dict[str, Any
 def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCLI | None = None) -> dict[str, Any]:
     """HUMAN: write the Court's verdict LABEL for promotion `pid` into its session workspace, as a ledgered release
     (one per held-out target, alphabet verdict_bit). Nothing else of the Court reaches the Lab."""
-    if not by.strip():
-        raise PromoteError("name the human releasing the verdict (--by)")
+    from ..human.guard import HumanActionRefused, require_human
+    try:
+        by = require_human(by, what="the human releasing the verdict (--by)")
+    except HumanActionRefused as e:
+        raise PromoteError(str(e)) from None
     rows = _promotion(store, pid)
     hand = [r for r in rows if r.get("event") == "handed_off"]
     if not hand:

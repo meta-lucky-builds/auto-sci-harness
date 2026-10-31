@@ -393,6 +393,7 @@ families or reasons; a ledgered `count` release; field `released_level` of `prom
 - `contract: program` in a promotion request widens what can be promoted (docs/sealed_projects.md).
 - Every registration needs a passing Court health run for the current Court version (docs/court_rehearsal.md).
 - `chh court rehearse` and `chh court readiness` run before promotion. Court output is read with `chh court status`.
+- `chh exp ...` is the same route in the researcher's words (docs/experience_api.md).
 
 ## 11. The network rule (GOAL 18.6; `lab/egress.py`, `lab/egress_proxy.py`)
 

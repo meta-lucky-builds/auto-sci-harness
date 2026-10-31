@@ -70,8 +70,9 @@ def kernel_step(root: Path = ROOT) -> list[str]:
 # Trusted code outside the Kernel core (GOAL 18.4 item 1): new checks a verdict or a certificate depends on, with the
 # same 100% line and branch coverage. Older adapters and Court plumbing are not on this list yet (docs/kernel.md).
 TRUSTED_MODULES = ("audit.program", "court.comparator", "court.display", "court.health", "court.rehearsal",
-                   "court.sealed", "kerneld.seal")
-TRUSTED_TESTS = ("tests/test_court_display.py", "tests/test_court_rehearsal_health.py", "tests/test_sealed_project.py")
+                   "court.sealed", "experience.api", "experience.schemas", "experience.words", "kerneld.seal")
+TRUSTED_TESTS = ("tests/test_court_display.py", "tests/test_court_rehearsal_health.py", "tests/test_experience_api.py",
+                 "tests/test_experience_redteam.py", "tests/test_sealed_project.py")
 
 
 def trusted_step() -> list[str]:

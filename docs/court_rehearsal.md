@@ -12,7 +12,9 @@ a label is read.
 | K3, K4, K6, K7, K9 | nothing but the verdict label and one closed reason class |
 | The whole certificate | only after `chh court retire TARGET --by NAME` (human); recorded as a continuous release, so the target is exposed |
 | COULD NOT RUN, no label read | the full technical reason |
-| COULD NOT RUN after a label read | that it happened, not the detail |
+| COULD NOT RUN after a label read | that it happened, not the detail; one verdict bit is released |
+| Badges that changed because a replica or second test finished | shown, with a `count` release on that case's target |
+| The rerun command | only with the whole certificate: the bundle holds the labels |
 
 The table is a proposal: GOAL 18.5 and UPGRADES N14 ask for a human decision on each check.
 
@@ -20,16 +22,21 @@ Other surfaces: `chh lab release-verdict` uses the same emitter on the `prompt` 
 report on public data and counts as a continuous release. `chh certificates` points Court cases to `chh court status`.
 A second case on a sealed part is refused unless a human opened an alpha-account for it before its first case.
 
+`chh explain` and `chh bundle` refuse a Court case until its target is retired. `chh graph`, `chh predictions` and the
+scorecard facts leave out what nobody was shown. docs/experience_api.md has the table, and
+tests/test_experience_ratchet.py keeps a closed list of every reader of a certificate.
+
 Not routed: `chh court level` on a certificate with no Court case (research-loop certificates, which have their own
-embargo), the certificate file inside a bundle, and direct reads of the store by the owner. A person with the store can
+embargo), a bundle file already on disk, and direct reads of the store by the owner. A person with the store can
 read everything; this path counts what the product shows.
 
 ## Rehearsal (`chh court rehearse PROMOTION --data FILE --label-column C --rows N --docker`)
 
 The frozen arms go through the real route (seal, register, K0-K9, re-execution) on Lab data, in a throwaway store deleted
 afterwards. Every check and number is returned, labelled "Lab data, not evidence". The real ledger gains no entry. The
-only record in the real store is `court_rehearsal`. A file equal to a private vault file is refused. Rehearsal numbers
-can be better than fresh data: the Lab may have tuned on this very data.
+only record in the real store is `court_rehearsal`. A file equal to a private vault file is refused, and so is the file a
+project sealed or any file holding a row of a sealed part (exact values on the part's feature columns). Rehearsal
+numbers can be better than fresh data: the Lab may have tuned on this very data.
 
 ## Readiness (`chh court readiness PROMOTION --dev-pairs a,b,c,d`)
 

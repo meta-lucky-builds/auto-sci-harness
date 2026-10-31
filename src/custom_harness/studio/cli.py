@@ -58,9 +58,16 @@ def cmd_tier_policy(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 def cmd_explain(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Explain a certificate from the store; every value carries the artifact it resolves to (invariant 8)."""
+    import getpass
+
+    from ..court.display import DisplayRefused, require_autopsy
     from ..kernel import SandboxReplayer
     from ..kerneld.scope import ScopedKernel
     from .explain import ExplainError, explain, render_text
+    try:  # every value of a certificate: one display path (GOAL 18.5)
+        require_autopsy(store, a.cert, getpass.getuser())
+    except DisplayRefused as e:
+        raise SystemExit(f"refused: {e}") from None
     replayer = None
     if a.docker or a.dev_sandbox:
         import time

@@ -15,6 +15,7 @@ import yaml
 from .audit import cli as audit_cli
 from .config import data_dir
 from .court import cli as court_cli
+from .experience import cli as experience_cli
 from .gateway import Backend, MockBackend
 from .human import cli as human_cli
 from .kerneld.hoststore import open_host_store
@@ -438,7 +439,14 @@ def _headline(cert: Any) -> dict[str, Any] | None:
 
 
 def cmd_bundle(a: argparse.Namespace, store: EvidenceStore) -> int:
+    import getpass
+
+    from .court.display import DisplayRefused, require_autopsy
     from .kerneld.scope import ScopedKernel
+    try:  # a bundle carries the labels: one display path (GOAL 18.5)
+        require_autopsy(store, a.cert_hash, getpass.getuser())
+    except DisplayRefused as e:
+        raise SystemExit(f"refused: {e}") from None
     out = Path(a.out or (data_dir() / "bundles" / f"{a.cert_hash[:16]}.zip"))
     print(json.dumps({"bundle": str(out), "bundle_hash": ScopedKernel(store).bundle(a.cert_hash, out)}))
     return 0
@@ -536,9 +544,10 @@ def cmd_alpha(a: argparse.Namespace, store: EvidenceStore) -> int:
 
 
 def cmd_predictions(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .court.display import released_scores
     from .kernel import Ledger
     from .kernel.predictions import calibration, score_predictions, vds
-    scores = score_predictions(Ledger(store), time.time())
+    scores = released_scores(store, score_predictions(Ledger(store), time.time()))
     print(json.dumps({"predictions": len(scores), "vds_bits": vds(scores), "calibration": calibration(scores)},
                      indent=1))
     return 0
@@ -1039,6 +1048,7 @@ def main(argv: list[str] | None = None) -> int:
     station_cli.add_parsers(sub)
     lab_cli.add_parsers(sub)
     court_cli.add_parsers(sub)
+    experience_cli.add_parsers(sub)
     human_cli.add_parsers(sub)  # after the others: it adds hash flags to older human commands
     a = None if views else p.parse_args(args)
     if getattr(a, "dev_sandbox", False):  # no production path may select the unisolated sandbox
@@ -1064,7 +1074,7 @@ def main(argv: list[str] | None = None) -> int:
                 **lit_cli.COMMANDS, **provenance_cli.COMMANDS, **audit_cli.COMMANDS,
                 **scorecard_cli.COMMANDS, **timesplit_cli.COMMANDS, **studio_cli.COMMANDS,
                 **station_cli.COMMANDS, **lab_cli.COMMANDS, **court_cli.COMMANDS,
-                **human_cli.COMMANDS}[a.cmd](a, store)
+                **experience_cli.COMMANDS, **human_cli.COMMANDS}[a.cmd](a, store)
     finally:
         store.close()
 

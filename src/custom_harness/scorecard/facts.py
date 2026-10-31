@@ -56,6 +56,7 @@ def _evidence_problems(store: EvidenceStore, ids: list[str] | tuple[str, ...]) -
 
 
 def _certificates(store: EvidenceStore, kernel: Kernel) -> list[dict[str, Any]]:
+    from ..court.display import exposure
     entries = kernel.ledger.entries()
     retracted = {e.body.get("cert_hash") for e in entries if e.kind == "retraction"}
     bundles: dict[str, list[dict[str, Any]]] = {}
@@ -72,6 +73,8 @@ def _certificates(store: EvidenceStore, kernel: Kernel) -> list[dict[str, Any]]:
         if e.kind != "certificate":
             continue
         h = str(e.body.get("cert_hash"))
+        if exposure(store, str(e.body.get("claim_hash"))) == "none":  # one display path (GOAL 18.5)
+            continue
         try:
             cert = kernel.certificate(h)
             ids, label, problem = list(cert.evidence_ids), cert.label.value, None

@@ -13,6 +13,7 @@ can start now.
 - Name it "first certified result (simulator-scoped)". It is never called a discovery.
 - Route: `chh court health`, `chh lab start`, `chh lab promote`, `chh court rehearse`, `chh court register`,
   `chh court mint`, `chh approve-role`, `chh court run --docker`, `chh court status`.
+  The same route in the researcher's words: `chh exp ...` (docs/experience_api.md).
 - What it proves: that the real route runs from a Lab session to a certificate with a real agent in a real box. Today
   that has been run only with scripted programs on a local sandbox (see Status).
 - Done when: one claim is VALIDATED, a reviewer reruns its bundle, and the two scorecard numbers are recorded.

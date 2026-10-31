@@ -36,7 +36,7 @@ OLD_PATH_STORE_OPENS: dict[str, int] = {}
 OLD_PATH_PRIVATE_INGEST: dict[str, int] = {}
 OLD_PATH_CANARY_READS: dict[str, int] = {}
 COVERED = ["evolve", "runtime", "kerneld/client.py", "kerneld/releases.py", "kerneld/campaign.py", "research",
-           "audit", "cli.py", "memory", "studio", "scorecard"]
+           "audit", "cli.py", "memory", "studio", "scorecard", "experience"]
 # NOT old-path sites, exempt with a stated reason (2026-10-08): research/preflight.py (GOAL §16.8 zero-call preflight)
 # builds a SCRATCH store in a temporary directory holding only SIMULATED labels it generated itself, registers them,
 # and makes one logged read of them so the real K4 sees logged = reported evaluations. It never opens the real store

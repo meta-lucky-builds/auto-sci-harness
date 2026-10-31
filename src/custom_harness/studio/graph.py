@@ -41,7 +41,8 @@ def research_graph(store: EvidenceStore, findings_path: Any = None) -> dict[str,
         node(f"artifact:{art_id}", kind="artifact", artifact_kind=art.kind, hash=art.hash, ledger_seq=art.seq)
 
     # claim graph + prediction ledger
-    scores = {s.claim_hash: s for s in score_predictions(kernel.ledger, time.time())}
+    from ..court.display import exposure, released_scores
+    scores = {s.claim_hash: s for s in released_scores(store, score_predictions(kernel.ledger, time.time()))}
     for e in kernel.ledger.entries("prereg"):
         h, c = e.body["claim_hash"], e.body["claim"]
         cid = f"claim:{h}"
@@ -61,9 +62,13 @@ def research_graph(store: EvidenceStore, findings_path: Any = None) -> dict[str,
     for e in kernel.ledger.entries("certificate"):
         h = e.body["cert_hash"]
         nid = f"cert:{h}"
-        node(nid, kind="certificate", label_recorded=e.body.get("label"), ledger_seq=e.seq,
-             retracted_seq=retracted.get(h))
+        shown = exposure(store, str(e.body.get("claim_hash")))  # one display path (GOAL 18.5)
+        node(nid, kind="certificate", label_recorded=e.body.get("label") if shown != "none" else None,
+             ledger_seq=e.seq, retracted_seq=retracted.get(h))
         edge(nid, "certifies", f"claim:{e.body.get('claim_hash')}")
+        if shown != "open":
+            nodes[nid]["withheld"] = "a Court case: `chh court status CASE`"
+            continue
         try:
             cert = kernel.certificate(h)
         except (KernelError, OSError, ValueError) as err:
