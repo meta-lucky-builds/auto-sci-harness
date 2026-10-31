@@ -62,7 +62,8 @@ class AlphaXivPermission:
     @staticmethod
     def from_owner_config(section: Mapping[str, Any]) -> AlphaXivPermission:
         if section.get("enabled") is not True:
-            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the owner checks")
+            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the "
+                                    "owner checks")
         if section.get("tos_status") != "permitted":
             raise ConnectorDisabled(f"alphaXiv is OFF: tos_status is {section.get('tos_status', TOS_STATUS)!r}, "
                                     "not 'permitted' (owner permission required)")
@@ -106,7 +107,8 @@ class AlphaXivSource(Source):
 
     def _gate(self) -> AlphaXivPermission:
         if not isinstance(self.permission, AlphaXivPermission) or self.permission.tos_status != "permitted":
-            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the owner checks")
+            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the "
+                                    "owner checks")
         return self.permission
 
     def lookup_request(self, ident: Identifier) -> tuple[str, dict[str, str]]:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 OR_SOURCE = "github.com/alphaXiv/OpenResearch@fe36f7424855d7218e64812c5fec6f7db955586f (MIT)"
 BOX_HOME = "/home/lab"
@@ -72,6 +73,7 @@ class Plan:
     headless: list[str] | None  # with the literal "{prompt}" where the prompt goes; None = driven by acp_client
     acp: list[str] | None = None  # ACP agents: the stdio command acp_client drives
     host_gateway: bool = False
+    host_port: int | None = None  # with host_gateway: the one host port the gateway lets through
     box_env: str | None = None  # where the session credential goes inside the box (None = no credential)
     notes: list[str] = field(default_factory=list)
 
@@ -244,9 +246,10 @@ class OpenCode(AgentAdapter):
         m = ["--model", model] if model else []
         return Plan(adapter=self.name, env=env, config_files={path: json.dumps(cfg, indent=2, sort_keys=True)},
                     setup=[], interactive=["opencode", *m], headless=["opencode", "run", *m, "{prompt}"],
-                    host_gateway=local and "host.docker.internal" in base, box_env=self.box_env(o),
-                    notes=["local models: no credential; the box reaches the host's model server through "
-                           "host.docker.internal (see docs/lab.md residual risks)"] if local else [])
+                    host_gateway=local and "host.docker.internal" in base,
+                    host_port=(urlsplit(base).port or 80) if local else None, box_env=self.box_env(o),
+                    notes=["local models: no credential; the gateway lets the box reach this one host port, and "
+                           "nothing else on the host (docs/lab.md section 11)"] if local else [])
 
 
 # ---------------------------------------------------------------- ACP agents

@@ -32,8 +32,9 @@ from . import EXPLORATORY, NOT_A_FINDING
 from . import trace as T
 from .acp_client import AcpClient, AcpError, allow_once
 from .agents import AgentOptions, Plan, adapter, fill_prompt
-from .box import BoxSpec, DockerCLI, LabBox
+from .box import BoxSpec, DockerCLI, LabBox, network_record
 from .credentials import CredentialRefused, CredentialSpec, SessionCredential, require_live, resolve
+from .egress import collect_web
 from .walls import (
     CONTAINER_WORKSPACE,
     LabWallError,
@@ -113,7 +114,7 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
         raise LabWallError("workspace refused: " + "; ".join(scan))
     lb = LabBox(sid, docker)
     base = {"agent": agent, "plan": asdict(plan), "box": spec.record(), "workspace": str(ws),
-            "container": lb.name, "credential": cred.record() if cred else None,
+            "network": network_record(sid, spec, plan), "container": lb.name, "credential": cred.record() if cred else None,
             "options": {k: v for k, v in asdict(options).items() if v not in (None, (), "")},
             "walls": {"workspace": "clean", "content_scan": "clean",
                       "secret_scan": "clean" if secret is not None else "no secret configured"}}
@@ -168,7 +169,7 @@ def collect_trace(store: EvidenceStore, session_id: str, rec: dict[str, Any], lb
     finally:
         if paused:
             lb.unpause()
-    return {"agent_events": ingest, "file_events": len(files)}
+    return {"agent_events": ingest, "file_events": len(files), **collect_web(store, session_id, lb.docker)}
 
 
 def attach(store: EvidenceStore, session_id: str, *, docker: DockerCLI | None = None) -> int:
@@ -282,7 +283,9 @@ def status(store: EvidenceStore, session_id: str | None = None, *, docker: Docke
 def stop(store: EvidenceStore, session_id: str, *, docker: DockerCLI | None = None) -> dict[str, Any]:
     rec = started(store, session_id)
     T.record(store, session_id, "human", {"op": "stop"}, actor=T.human())
-    ok = LabBox(session_id, docker).stop()
+    lb = LabBox(session_id, docker)
+    collect_web(store, session_id, lb.docker)  # the gateway's log goes with the gateway
+    ok = lb.stop()
     ws = workspace_of(session_id)
     require_workspace(ws)  # the box is gone: no agent runs, the workspace can be read without a pause
     T.ingest_agent_events(store, session_id, ws, _agent_actor(rec))

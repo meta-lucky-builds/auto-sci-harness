@@ -11,7 +11,7 @@ GOAL §17: "generous when exploring, strict when claiming".
 
 - **The Lab.** One coding agent per session (Claude Code, Codex, OpenCode with API or local models, ACP agents)
   runs with ALL its native tools inside a **lab box**. The box is a Docker container with:
-  - network on;
+  - internet through a recording gateway; LAN and host blocked (section 11);
   - a writable root filesystem (pip, npm, uv and conda installs work);
   - the session workspace bind-mounted at `/workspace` and kept across stops;
   - optional GPUs (`--gpus`);
@@ -128,12 +128,11 @@ Assume it is capable and, at worst, adversarial. It may want to:
    - The box uses Docker's default runtime (no gVisor), so a kernel or runtime bug is a host compromise.
    - `--root` widens this (Docker's default capability set). On Windows, the Docker Desktop VM sits between the
      box and the host.
-4. **Host services reachable over the network.**
-   - With network on, the box can reach the LAN. On Docker Desktop it can also reach the host through
-     `host.docker.internal`, including, I believe, services bound to the host's loopback [I, not verified].
+4. **Host services reachable over the network (closed by the network rule, section 11).**
+   - On Docker's default bridge a box reached this machine's LAN router (verified, stage-p0 probe). A box now sits on
+     an internal network and reaches neither the LAN nor the host.
+   - What is left: the one host port of a local model server, when the researcher configures one.
    - kerneld speaks over a pipe only (verified by reading `kerneld/server.py`), so the Court has no socket.
-   - Any other host service (a local model server, a database, a future Studio UI bound to an interface) is
-     reachable.
    - Owner rule: no unauthenticated service holding private data on this host.
 5. **Retrospective targets are downloadable from the Lab.**
    - The only Court route wired today is the Claim Audit: fresh, but public, OpenML datasets. A networked Lab can
@@ -386,3 +385,54 @@ population is the family (§16.2).
   label of the first test was read; one per case). A failed one is shown ("validated once, failed re-validation").
 The badges reach the Lab only through `chh lab release-verdict` (`LevelResult.release_value`: at most 16 values, no
 families or reasons; a ledgered `count` release; field `released_level` of `promote/verdict_released`).
+
+## 11. The network rule (GOAL 18.6; `lab/egress.py`, `lab/egress_proxy.py`)
+
+Internet allowed; LAN and host blocked; web traffic recorded into the Story. Tools are not limited, only where the box
+can reach.
+
+**How it is enforced.** Each session gets its own Docker network created `--internal`, which has no default route. The
+box has one interface, on that network. The session's gateway container is the only other member; it also sits on the
+default bridge and runs a small forward proxy. The box gets `HTTP_PROXY` and `HTTPS_PROXY`, but those are a
+convenience: a program that ignores them reaches nothing, because no route exists. Before the box starts, Docker is
+asked whether the network really is internal, and `walls.docker_argv_problems` refuses a box on any other network, and
+any published port, host alias, link or DNS override.
+
+**What the gateway refuses.** Every destination that resolves to a non-public address: private ranges, loopback,
+link-local (including the cloud metadata address), carrier NAT, reserved, multicast, and IPv6 forms that carry an IPv4
+address. If a name answers with any such address it is refused whole, and the connection goes to the exact address that
+was checked.
+
+**What is recorded (`web` events in the trace, written by the manager, never by an agent).**
+
+| Traffic | Recorded |
+|---|---|
+| HTTPS | host, port, address, bytes each way, times. No path, no content hash: the tunnel is encrypted and the gateway does not open it |
+| Plain HTTP | also the method, the URL without user info or query, a sha256 of the query, a sha256 of the response |
+| Refused | the destination and the reason |
+
+Records are numbered: a lost one appears as a `gap` event, and an unreadable log as `log_unavailable`. A host or path that
+looks like a key is stored by hash. Records are collected after each prompt, at promotion and at stop.
+
+**What this does not cover (stated plainly).**
+- It is not a data-loss barrier: anything in the box can send anything to any public host. The walls keep truth and
+  owner secrets out of the box; this rule does not.
+- HTTPS content is not recorded, so a recovery test cannot replay it (UPGRADES N6 asks for URLs and hashes; this delivers
+  them for plain HTTP only). Reading HTTPS would need a certificate installed in the box.
+- Only TCP through the proxy works. UDP, ping, and tools that cannot use an HTTP proxy (for example `git` over `ssh://`
+  without a proxy command) fail. That is a real loss of convenience.
+- Whether each agent CLI honours the proxy settings has not been tested: the Lab image is not built yet [inferred from
+  their documentation]. A CLI that ignores them gets no network; it does not get around the rule.
+- A local model server: `opencode` with a local model makes the gateway let through exactly one `host.docker.internal`
+  port. Everything in the box can reach that port, without authentication. UPGRADES N5 suggested an authenticated
+  allow-list; authentication is not built. The allowed pair is in the session record.
+- Addresses a public name resolves to are checked; traffic to a public address the owner's router forwards back to the
+  LAN is not detected.
+- Docker's log rotation can drop old records in a very long session (4 files of 64 MB; shown as a gap).
+- `--root` boxes keep Docker's default capabilities. That set has no NET_ADMIN, so the route cannot be added, but it
+  does include raw sockets on the session's own network. Only the gateway is on it.
+- Compute backends (SSH, Slurm and others) are outside this rule.
+- Checked on Docker Desktop for Windows. Linux and other Docker setups are not checked: run
+  `tests/test_lab_network_real.py` on each.
+
+The gateway uses the existing image `custom-harness-sandbox:py312`; it needs only Python. No image was built for this.

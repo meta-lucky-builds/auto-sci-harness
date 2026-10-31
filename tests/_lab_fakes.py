@@ -19,11 +19,20 @@ class FakeDocker:
         self.run_rc = run_rc
         self.setup_rc = setup_rc
         self.files: dict[str, str] = {}
+        self.internal = "true"  # what `docker network inspect` says
+        self.log = ""  # the gateway's stdout
+        self.log_rc = 0
 
     def __call__(self, argv: list[str], env: dict[str, str] | None, stdin: bytes | None,
                  timeout: float | None) -> Result:
         self.calls.append((list(argv), dict(env) if env is not None else None, stdin))
         sub = argv[1]
+        if sub == "network" and argv[2] == "inspect":
+            return Result(0, self.internal + "\n", "")
+        if sub == "logs":
+            return Result(self.log_rc, self.log, "")
+        if sub == "run" and "chh-lab-gw-" in " ".join(argv[:8]):
+            return Result(0, "gw0123\n", "")
         if sub == "run":
             if self.run_rc:
                 return Result(self.run_rc, "", "Unable to find image")
@@ -55,7 +64,7 @@ class FakeDocker:
         return [c[0][1] for c in self.calls]
 
     def run_call(self) -> tuple[list[str], dict[str, str] | None, bytes | None]:
-        return next(c for c in self.calls if c[0][1] == "run")
+        return next(c for c in self.calls if c[0][1] == "run" and "chh-lab-gw-" not in " ".join(c[0][:8]))
 
 
 def docker(fake: FakeDocker) -> DockerCLI:

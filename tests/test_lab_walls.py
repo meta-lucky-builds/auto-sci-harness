@@ -125,13 +125,14 @@ def test_scan_fails_closed_on_huge_trees():
 
 
 def _good_argv(ws: Path) -> list[str]:
-    return ["docker", "run", "-d", "--init", "--name", "chh-lab-s", "--network", "bridge", "--security-opt",
+    return ["docker", "run", "-d", "--init", "--name", "chh-lab-s", "--network", "chh-lab-net-s", "--security-opt",
             "no-new-privileges", "--cap-drop", "ALL", "--user", "1000:1000", "-v", f"{ws}:/workspace", "-w",
             "/workspace", "-e", "DISABLE_TELEMETRY=1", "-e", "ANTHROPIC_API_KEY", "img", "sleep", "infinity"]
 
 
 @pytest.mark.parametrize("mutation", ["sock", "privileged", "host-net", "second-mount", "cred-value", "other-secret",
-                                      "cap-add", "device", "pid-host", "env-file", "unlisted-env"])
+                                      "cap-add", "device", "pid-host", "env-file", "unlisted-env", "add-host",
+                                      "publish", "publish-all", "link", "dns", "second-net"])
 def test_argv_check_kills_each_escape(mutation, tmp_path):
     """Each mutation of a good argv is one way out of the box; each must be refused."""
     ws = tmp_path / "ws"
@@ -141,9 +142,13 @@ def test_argv_check_kills_each_escape(mutation, tmp_path):
              "host-net": ["--network", "host"], "second-mount": ["-v", f"{tmp_path}:/host"],
              "cred-value": ["-e", "ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxxxxx"], "other-secret": ["-e", "GH_TOKEN"],
              "cap-add": ["--cap-add", "SYS_ADMIN"], "device": ["--device", "/dev/kvm"], "pid-host": ["--pid", "host"],
-             "env-file": ["--env-file", "x.env"], "unlisted-env": ["-e", "FOO=1"]}[mutation]
+             "env-file": ["--env-file", "x.env"], "unlisted-env": ["-e", "FOO=1"],
+             "add-host": ["--add-host", "host.docker.internal:host-gateway"], "publish": ["-p", "8080:8080"],
+             "publish-all": ["-P"], "link": ["--link", "other"], "dns": ["--dns", "8.8.8.8"],
+             "second-net": ["--network", "bridge"]}[mutation]
     bad = a[:i] + extra + a[i:]
-    kw = {"workspace": ws, "credential_env": ["ANTHROPIC_API_KEY"], "allowed_env": ["DISABLE_TELEMETRY"]}
+    kw = {"workspace": ws, "credential_env": ["ANTHROPIC_API_KEY"], "allowed_env": ["DISABLE_TELEMETRY"],
+          "network": "chh-lab-net-s"}
     assert W.docker_argv_problems(a, **kw) == []
     assert W.docker_argv_problems(bad, **kw), mutation
 

@@ -26,7 +26,8 @@ is that the truth is never reachable from the box in the first place (mounts, ne
 a pipe only, no socket).
 
 The final `docker run` argv is checked too (`docker_argv_problems`): one bind mount (the workspace), no privileged
-mode, no host namespaces, no added capabilities or devices, no Docker socket, and only the allowed environment names.
+mode, no host namespaces, no added capabilities or devices, no Docker socket, only the allowed environment names, the
+session's internal network and nothing else (GOAL 18.6; lab/egress.py), no published ports, no host aliases.
 
 Built, NOT test-verified.
 """
@@ -270,13 +271,13 @@ def configured_secret() -> tuple[bytes | None, Path | None]:
 # ---------------------------------------------------------------- the docker run argv
 _FORBIDDEN_FLAGS = ("--privileged", "--cap-add", "--device", "--device-cgroup-rule", "--pid", "--ipc", "--uts",
                     "--userns", "--cgroupns", "--volumes-from", "--security-opt=seccomp=unconfined", "--env-file",
-                    "--mount")
+                    "--mount", "--add-host", "--publish", "-p", "--publish-all", "-P", "--link", "--dns")
 _HOST_NETWORK = re.compile(r"^(--network|--net)(=|$)")
 _SECRET_NAME = re.compile(r"(?i)(key|token|secret|passw|credential|auth|cookie|session)")
 
 
 def docker_argv_problems(argv: Sequence[str], *, workspace: Path | str, credential_env: Iterable[str] = (),
-                         allowed_env: Iterable[str] = ()) -> list[str]:
+                         allowed_env: Iterable[str] = (), network: str) -> list[str]:
     """Static check of the final `docker run` argv for a lab box (empty = clean)."""
     a = list(argv)
     problems: list[str] = []
@@ -285,6 +286,7 @@ def docker_argv_problems(argv: Sequence[str], *, workspace: Path | str, credenti
     cred = set(credential_env)
     allowed = set(allowed_env) | cred
     mounts: list[str] = []
+    networks: list[str] = []
     i = 2
     while i < len(a):
         t = a[i]
@@ -296,6 +298,7 @@ def docker_argv_problems(argv: Sequence[str], *, workspace: Path | str, credenti
             problems.append(f"forbidden docker flag {t!r}")
         if _HOST_NETWORK.match(t):
             val = t.split("=", 1)[1] if "=" in t else nxt
+            networks.append(val)
             if val == "host" or val.startswith("container:"):
                 problems.append(f"host / shared network namespace refused ({val!r})")
         if name in ("-v", "--volume"):
@@ -314,6 +317,8 @@ def docker_argv_problems(argv: Sequence[str], *, workspace: Path | str, credenti
         if name in ("--security-opt",) and "unconfined" in nxt:
             problems.append(f"unconfined security profile refused ({nxt!r})")
         i += 2 if (name == t and t not in _BOOLEAN_FLAGS) else 1
+    if networks != [network]:
+        problems.append(f"a lab box runs only on its session's internal network {network!r}; got {networks}")
     want = f"{Path(workspace)}:{CONTAINER_WORKSPACE}"
     if mounts != [want] and mounts != [want + ":rw"]:
         problems.append(f"a lab box has exactly one bind mount, the workspace ({want}); got {mounts}")
@@ -321,7 +326,7 @@ def docker_argv_problems(argv: Sequence[str], *, workspace: Path | str, credenti
 
 
 _BOOLEAN_FLAGS = frozenset({"-d", "--detach", "--init", "--rm", "-i", "-t", "-it", "--interactive", "--tty",
-                            "--privileged", "--read-only"})
+                            "--privileged", "--read-only", "-P", "--publish-all"})
 
 
 # ---------------------------------------------------------------- static checks (recipe + layout)

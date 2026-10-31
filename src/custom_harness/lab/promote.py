@@ -62,6 +62,7 @@ from ..store import EvidenceStore
 from . import EXPLORATORY
 from . import trace as T
 from .box import DockerCLI, LabBox
+from .egress import collect_web
 from .session import _record, started, workspace_of
 from .walls import (
     LabWallError,
@@ -193,6 +194,8 @@ def freeze(store: EvidenceStore, session_id: str, request_path: Path, *, docker:
                         model=(rec.get("options") or {}).get("model"))
         T.ingest_agent_events(store, session_id, ws, agent)
         T.record_workspace_diff(store, session_id, ws, T.system())
+        if lb.state() != "absent":  # a stopped session's gateway went with it, and stop() collected its log
+            collect_web(store, session_id, lb.docker)
         if req.idea is not None and req.idea not in T.idea_tree(store, session_id):
             raise PromoteError(f"idea {req.idea!r} is not in the session's discovery trace")
         manifest = _manifest(ws)

@@ -21,6 +21,7 @@ Kinds and their payloads (pydantic models below, `extra="forbid"`):
   human       steer / edit / stop / redirect / prompt / attach, with the human's identity; prompt text by hash
   cost        per call or per prompt: agent, model, usd (None = unknown, never 0), tokens, who reported it
   promote     frozen / handed_off / verdict_released: links the frozen snapshot to the pre-registered claim
+  web         one connection through the Lab gateway (lab/egress.py), or a recorded gap; manager only
 
 Guards (fail closed, `TraceRefused`), applied to every event whatever its source:
 - no held-out truth: run metrics may name only splits `dev` or `train`; a metric whose dataset is a vault dataset
@@ -247,9 +248,32 @@ class PromoteEv(_M):
     released_level: Annotated[str, Field(max_length=80, pattern=r"^[A-Z+-]{1,80}$")] | None = None
 
 
+class WebEv(_M):
+    """One connection through the Lab gateway (lab/egress.py), written by the manager only. HTTPS gives host, port and
+    counts; only plain HTTP gives a URL and a response hash (docs/lab.md section 11)."""
+
+    op: Literal["connection", "gap", "log_unavailable"]
+    seq: int | None = None
+    method: Annotated[str, Field(max_length=16)] | None = None
+    host: Annotated[str, Field(max_length=1000)] | None = None
+    port: int | None = None
+    ip: Annotated[str, Field(max_length=64)] | None = None
+    url: Annotated[str, Field(max_length=1100)] | None = None
+    url_sha256: Sha | None = None
+    query_sha256: Sha | None = None
+    status: Literal["ok", "denied", "failed"] | None = None
+    reason: Annotated[str, Field(max_length=300)] | None = None
+    up: int | None = None
+    down: int | None = None
+    response_sha256: Sha | None = None
+    at: float | None = None
+    ended: float | None = None
+    missing: int | None = None  # gap: how many records were lost
+
+
 PAYLOADS: dict[str, type[_M]] = {"session": SessionEv, "idea": IdeaEv, "run": RunEv, "file": FileEv,
                                  "literature": LiteratureEv, "action": ActionEv, "human": HumanEv, "cost": CostEv,
-                                 "promote": PromoteEv}
+                                 "promote": PromoteEv, "web": WebEv}
 Source = Literal["manager", "agent-reported", "human", "backend"]
 
 
@@ -276,6 +300,8 @@ def guard_problems(kind: str, payload: dict[str, Any], *, store: EvidenceStore |
                 problems.append(f"{path}: value looks like a key or token")
             if key is not None and _SECRET_KEY.search(key) and len(value) >= 16:
                 problems.append(f"{path}: secret-like field holds a long value")
+    if kind == "web" and source != "manager":
+        problems.append("web events come from the Lab gateway through the manager, never from an agent or a backend")
     if kind == "promote" and payload.get("op") == "verdict_released" and source != "manager":
         problems.append("only promote.release_verdict may record a released verdict label")
     released = payload.get("released_label") is not None or payload.get("released_level") is not None

@@ -1,6 +1,7 @@
 """The lab box: one long-lived Docker container per Lab session (GOAL §17).
 
-Full power inside: network on (Docker's default bridge), a writable root filesystem (pip / npm / uv / conda
+Full power inside: internet through the session's recording gateway, with the LAN and the host out of reach (GOAL
+18.6, lab/egress.py), a writable root filesystem (pip / npm / uv / conda
 installs work; apt needs the `--root` opt-in), the persistent workspace bind-mounted at /workspace, optional GPUs,
 no time limit. The container runs `sleep infinity` under `--init`; agents and shells are started in it with
 `docker exec`, so the credential set at `docker run` reaches every process in the box and nothing is written to disk.
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from .agents import BOX_HOME, Plan
+from .egress import GATEWAY_IMAGE, HOST_NAME, Network, gateway_sha256, network_name, proxy_env
 from .walls import CONTAINER_WORKSPACE, LabWallError, docker_argv_problems
 
 LAB_IMAGE = "custom-harness-lab:py312"  # built by the owner from docker/lab.Dockerfile
@@ -42,6 +44,7 @@ class BoxSpec:
     pids: int = 8192  # UNCALIBRATED (owner decision, GOAL §13.8): a fork bomb stays inside the box
     shm_size: str = "2g"  # PyTorch data loaders need more than Docker's 64 MB default
     root: bool = False  # opt-in: root in the box with Docker's default capabilities (system package installs)
+    gateway_image: str = GATEWAY_IMAGE
 
     def record(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,7 +87,7 @@ def run_argv(exe: str, session_id: str, workspace: Path, spec: BoxSpec, plan: Pl
     """The `docker run` argv of a lab box (checked by walls.docker_argv_problems before use)."""
     a = [exe, "run", "-d", "--init", "--name", container_name(session_id), "--hostname", "lab",
          "--label", f"{LAB_LABEL}=EXPLORATORY", "--label", f"{LAB_LABEL}.session={session_id}",
-         "--network", "bridge", "--security-opt", "no-new-privileges", "--pids-limit", str(spec.pids),
+         "--network", network_name(session_id), "--security-opt", "no-new-privileges", "--pids-limit", str(spec.pids),
          "--shm-size", spec.shm_size]
     if spec.memory:
         a += ["--memory", spec.memory]
@@ -96,10 +99,8 @@ def run_argv(exe: str, session_id: str, workspace: Path, spec: BoxSpec, plan: Pl
         a += ["--user", "0:0"]
     if spec.gpus:
         a += ["--gpus", spec.gpus]
-    if plan.host_gateway:
-        a += ["--add-host", "host.docker.internal:host-gateway"]
     a += ["-v", f"{workspace}:{CONTAINER_WORKSPACE}", "-w", CONTAINER_WORKSPACE]
-    for k, v in sorted(plan.env.items()):
+    for k, v in sorted({**plan.env, **proxy_env(session_id)}.items()):
         a += ["-e", f"{k}={v}"]
     if plan.box_env:
         a += ["-e", plan.box_env]  # name only: the value is in the docker CLI's environment, never in argv
@@ -107,10 +108,23 @@ def run_argv(exe: str, session_id: str, workspace: Path, spec: BoxSpec, plan: Pl
     return a
 
 
-def check_argv(argv: list[str], workspace: Path, plan: Plan) -> None:
+def host_allow(plan: Plan) -> tuple[str, ...]:
+    """The one host service a box may reach: the local model server the researcher named in the agent's options."""
+    return (f"{HOST_NAME}:{plan.host_port}",) if plan.host_gateway else ()
+
+
+def network_record(session_id: str, spec: BoxSpec, plan: Plan) -> dict[str, Any]:
+    """What the session record says about the network rule."""
+    return {"rule": "internet through the gateway; LAN and host blocked", "network": network_name(session_id),
+            "gateway_image": spec.gateway_image, "gateway_sha256": gateway_sha256(),
+            "host_allow": list(host_allow(plan))}
+
+
+def check_argv(argv: list[str], workspace: Path, plan: Plan, session_id: str) -> None:
     problems = docker_argv_problems(argv, workspace=workspace,
                                     credential_env=[plan.box_env] if plan.box_env else [],
-                                    allowed_env=plan.env)
+                                    allowed_env={**plan.env, **proxy_env(session_id)},
+                                    network=network_name(session_id))
     if problems:
         raise LabWallError("lab box argv refused: " + "; ".join(problems))
 
@@ -132,9 +146,10 @@ class LabBox:
     def start(self, workspace: Path, spec: BoxSpec, plan: Plan, credential_env: dict[str, str] | None) -> str:
         """`docker run -d` the box; returns the container id. Raises LabWallError (argv refused) or RuntimeError."""
         argv = run_argv(self.docker.exe, self.session_id, workspace, spec, plan)
-        check_argv(argv, workspace, plan)
+        check_argv(argv, workspace, plan, self.session_id)
         if plan.box_env and set(credential_env or {}) != {plan.box_env}:
             raise LabWallError("the credential handed to docker must be exactly the plan's in-box variable")
+        Network(self.session_id, self.docker).up(spec.gateway_image, host_allow(plan))  # before the box exists
         r = self.docker.runner(argv, _docker_env(credential_env), None, 300)
         if r.returncode != 0:
             raise RuntimeError(f"docker run failed (rc={r.returncode}): {r.stderr[-800:]}")
@@ -174,4 +189,6 @@ class LabBox:
     def stop(self) -> bool:
         """Stop and remove the box (the workspace on the host is kept; the box's HOME, with the CLI logins, goes)."""
         self.docker.call(["stop", "-t", "30", self.name], timeout=120)
-        return self.docker.call(["rm", "-f", self.name], timeout=120).returncode == 0
+        removed = self.docker.call(["rm", "-f", self.name], timeout=120).returncode == 0
+        Network(self.session_id, self.docker).down()  # box first: the network cannot go while a member is on it
+        return removed
