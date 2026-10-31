@@ -138,11 +138,20 @@ def test_label_derived_value_in_a_prompt_is_flagged(tmp_path):
 
 
 def test_continuous_held_out_score_term_is_flagged(tmp_path, monkeypatch):
-    """Re-introduce the pre-embargo term: the score depends on the held-out subject mean, unreleased."""
+    """Re-introduce the pre-embargo term: the score depends on the held-out subject mean, unreleased.
+
+    Since d060173 a second layer stops this term before the replay sees it: finish_run withholds the dev term of an
+    evolve-split run that read a private file (evaluate.dev_withheld, invariant 18), so with that layer in place the
+    re-introduced term reaches no score and the replay has nothing to flag. The pre-embargo harness had neither the
+    term's removal nor the withholding, so the attack re-introduces both; the withholding layer is checked on its
+    own first (its removal is what gives the term a channel)."""
     real = ev_mod.dev_term
     monkeypatch.setattr(ev_mod, "dev_term", lambda st: real(st) + float((st.get("certificate") or {})
                                                                          .get("subject_mean") or 0.0))
-    report = _record_and_replay(tmp_path, leak=False)
+    withheld = _record_and_replay(tmp_path / "withheld", leak=False)
+    assert not withheld.flagged, withheld  # the withholding layer alone keeps the term out of every score
+    monkeypatch.setattr(ev_mod, "dev_withheld", lambda store, run_id: False)
+    report = _record_and_replay(tmp_path / "pre_embargo", leak=False)
     assert report.flagged and (report.decision_changes or report.cassette_misses), report
 
 
