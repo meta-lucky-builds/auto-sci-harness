@@ -51,7 +51,8 @@ THROUGH = """
 import json, os, socket
 gw = os.environ["HTTP_PROXY"].split("//")[1].split(":")[0]
 out = {}
-for target in ("192.168.1.1:80", "192.168.65.254:53", "host.docker.internal:80", "169.254.169.254:80", "127.0.0.1:3128"):
+for target in ("192.168.1.1:80", "192.168.65.254:53", "host.docker.internal:80", "169.254.169.254:80",
+               "127.0.0.1:3128"):
     s = socket.create_connection((gw, 3128), timeout=20)
     s.sendall(f"CONNECT {target} HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n".encode())
     out[target] = s.recv(200).decode("latin-1").split("\\r\\n")[0]

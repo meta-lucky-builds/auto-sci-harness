@@ -114,7 +114,8 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
         raise LabWallError("workspace refused: " + "; ".join(scan))
     lb = LabBox(sid, docker)
     base = {"agent": agent, "plan": asdict(plan), "box": spec.record(), "workspace": str(ws),
-            "network": network_record(sid, spec, plan), "container": lb.name, "credential": cred.record() if cred else None,
+            "network": network_record(sid, spec, plan), "container": lb.name,
+            "credential": cred.record() if cred else None,
             "options": {k: v for k, v in asdict(options).items() if v not in (None, (), "")},
             "walls": {"workspace": "clean", "content_scan": "clean",
                       "secret_scan": "clean" if secret is not None else "no secret configured"}}

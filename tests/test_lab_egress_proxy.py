@@ -11,6 +11,7 @@ import io
 import json
 import socket
 import threading
+from typing import ClassVar
 
 import pytest
 
@@ -65,7 +66,7 @@ def test_connect_target_forms():
 
 
 class _Origin(http.server.BaseHTTPRequestHandler):
-    seen: list[tuple[str, str, bytes, dict]] = []
+    seen: ClassVar[list[tuple[str, str, bytes, dict]]] = []
 
     def _reply(self, body: bytes) -> None:
         n = int(self.headers.get("Content-Length") or 0)

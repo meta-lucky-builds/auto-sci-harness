@@ -1,8 +1,8 @@
 """alphaXiv full-text (BM25) and semantic (embedding) search, plus the per-paper full text and overview: GATED OFF.
 
 STATUS: terms of service unknown, treated as forbidden until the owner checks (GOAL §17; PORTMAP §5). OpenResearch's
-MIT licence covers its CODE, not the right to call alphaXiv's API or to store its full text in our snapshots. Until the owner records
-written permission in the human-owned config (`literature.alphaxiv` in <data>/human/lab_compute.yaml:
+MIT licence covers its CODE, not the right to call alphaXiv's API or to store its full text in our snapshots. Until the
+owner records written permission in the human-owned config (`literature.alphaxiv` in <data>/human/lab_compute.yaml:
 `enabled: true`, `tos_status: permitted`, `permission_note: <where the permission is written>`, `recorded_by: <the
 human>`, `api_base: <https URL>`, `web_base: <https URL>`), every request builder here raises ConnectorDisabled before
 a URL is even formed (fail closed, like the gateway registry's "unknown" BYOS providers). No agent and no builder may
