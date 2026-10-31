@@ -158,7 +158,7 @@ def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: s
     return report
 
 
-def latest(store: EvidenceStore, pid: str) -> dict[str, Any] | None:
+def last_rehearsal(store: EvidenceStore, pid: str) -> dict[str, Any] | None:
     """The last rehearsal of a promotion: Lab data only."""
     rows = store.records_where(RECORD_KIND, "promotion_id", pid)
     return rows[-1] if rows else None

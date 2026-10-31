@@ -61,8 +61,7 @@ def test_every_reader_of_a_certificate_is_on_the_closed_list():
         for c in _calls(ast.parse(p.read_text(encoding="utf-8"))):
             if isinstance(c.func, ast.Attribute) and c.func.attr == "certificate":
                 found.add(rel)
-    assert found - set(CERTIFICATE_READERS) == set()
-    assert set(CERTIFICATE_READERS) - found <= {"assure/corpus.py"} or set(CERTIFICATE_READERS) - found == set()
+    assert found == set(CERTIFICATE_READERS)
 
 
 def test_only_the_display_module_uses_the_outcome_of_a_case():

@@ -18,7 +18,8 @@ _JARGON = re.compile(
 # fields that hold no sentence of ours: identifiers, links, commands and the researcher's own words
 NOT_SENTENCES = frozenset({"case_id", "promotion_id", "session_id", "project", "link", "id", "command", "researcher",
                            "os_user", "title", "sentence", "name", "idea_id", "reason", "reply", "path", "family",
-                           "agent", "workspace", "rerun", "text", "query", "audit_id", "event_id", "of_case", "kind"})
+                           "agent", "workspace", "rerun", "text", "query", "audit_id", "event_id", "of_case", "kind",
+                           "idea_path"})
 
 VERDICTS = {"CERTIFIED": "Certified.", "NOT CERTIFIED": "Not certified.", "COULD NOT RUN": "The trial could not run."}
 REASONS = {
@@ -56,6 +57,7 @@ PROMOTE_STEPS = {
                "A person reviews the claim, then it is tested on public data.",
                "The answer cannot be a finding: the Lab could have seen this data.")}
 RESTS_ON = {"case": "What was fixed for this case before any answer was read.",
+            "audit": "One audit is one look. Its test data is public, so it has no sealed count of rows here.",
             "seal": "The record of the seal, written by the Court before any Lab session.",
             "session": "The session's Story.", "promotion": "The frozen list of the workspace's files.",
             "rehearsal": "The last rehearsal, on Lab data.",

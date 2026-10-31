@@ -279,11 +279,16 @@ def _rerun(store: EvidenceStore, cert_hash: str) -> str | None:
 
 
 def autopsy(store: EvidenceStore, case_id: str, viewer: str) -> dict[str, Any]:
-    """The whole certificate of a case with a retired target (recorded by `view`); refused otherwise."""
+    """The whole certificate of a case with a retired target (recorded by `view`). A refusal opens nothing: it records
+    no view and no release."""
+    from .minted import case
+    target = str(case(store, case_id)["target"])
+    if not retired(store, target):
+        raise DisplayRefused(f"case {case_id}: the whole certificate opens when its target is retired "
+                             f"(`chh court retire {target} --by NAME`, human)")
     out = view(store, case_id, viewer)
     if "autopsy" not in out:
-        raise DisplayRefused(f"case {case_id}: the whole certificate opens when its target is retired "
-                             f"(`chh court retire {out['target']} --by NAME`, human)")
+        raise DisplayRefused(f"case {case_id} has no certificate")
     return out
 
 
@@ -306,8 +311,9 @@ def view_audit(store: EvidenceStore, audit_id: str, viewer: str) -> dict[str, An
     o = latest_outcome(store, audit_id)
     if o is None:
         return None
-    out = {"audit_id": audit_id, "verdict": o.get("verdict"), "report": current_report(store, o), "badges": [],
-           "held": [], "claim": _claim_text(store, str(o["claim_hash"]))}
+    out = {"audit_id": audit_id, "claim_hash": o["claim_hash"], "verdict": o.get("verdict"),
+           "report": current_report(store, o), "badges": [], "held": [],
+           "claim": _claim_text(store, str(o["claim_hash"]))}
     if o.get("cert_hash"):
         cert = ScopedKernel(store).certificate(str(o["cert_hash"]))
         record_report_view(store, audit_id, list(cert.claim.get("generalization_targets") or []), viewer)

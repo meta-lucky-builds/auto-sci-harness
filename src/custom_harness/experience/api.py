@@ -307,7 +307,8 @@ class Experience:
         elif raw["verdict"] == "no objection":
             sentence = f"No objection at {raw['smallest_size_with_no_objection']} test rows."
         else:
-            sentence = str(raw["verdict"]).capitalize() + "."
+            text = str(raw["verdict"])
+            sentence = f"{text[0].upper()}{text[1:]}."
         return M.Readiness(sentence=sentence, notice=W.READINESS_NOTICE, rows=rows)
 
     @refusing
@@ -346,7 +347,7 @@ class Experience:
     def _pairs(self, req: M.PromoteIn) -> tuple[int, int, int, int] | None:
         if req.dev_pairs is not None:
             return req.dev_pairs
-        pairs = (R.latest(self.store, req.promotion_id) or {}).get("dev_pairs")
+        pairs = (R.last_rehearsal(self.store, req.promotion_id) or {}).get("dev_pairs")
         return None if pairs is None else (int(pairs[0]), int(pairs[1]), int(pairs[2]), int(pairs[3]))
 
     def _route_looks(self, req: M.PromoteIn) -> M.Number:
@@ -422,6 +423,7 @@ class Experience:
                    reason: str | None) -> M.Case:
         cid, claim = str(pub["case_id"]), v["claim"]
         route = str(v["route"])
+        kind = "audit" if "audit_id" in v else "case"
         retro = route == "retrospective" or bool(v.get("retrospective"))
         scope = W.scope_sentence(claim, family=pub.get("family"), route="retrospective" if retro else route)
         verdict = v["verdict"] if "verdict" in v else W.verdict_of(v.get("label"), str(v["state"]))
@@ -434,8 +436,8 @@ class Experience:
             second_test=W.SECOND_TEST.get(str(v.get("revalidation"))),
             checks_in_full=tuple(M.CheckRow(name=W.CHECK_PLAIN[k], status=str(c["status"]))
                                  for k, c in v.get("checks", {}).items()),
-            looks_remaining=num("case", cid, "looks_remaining", v.get("looks_remaining")),
-            test_rows=num("case", cid, "test_rows", rows), next_step=step[0] if step else None,
+            looks_remaining=num(kind, cid, "looks_remaining", v.get("looks_remaining")),
+            test_rows=num(kind, cid, "test_rows", rows), next_step=step[0] if step else None,
             command=step[1] if step else None, rerun=v.get("rerun"), story=self._story(str(pub["claim_hash"])),
             technical=link("case", cid, "technical"))
 
@@ -476,7 +478,7 @@ class Experience:
 
     def rehearsal_details(self, promotion_id: str) -> M.TechnicalView:
         """Everything the last rehearsal recorded: Lab data, nothing held back."""
-        return M.TechnicalView(case_id=promotion_id, details=R.latest(self.store, promotion_id) or {})
+        return M.TechnicalView(case_id=promotion_id, details=R.last_rehearsal(self.store, promotion_id) or {})
 
     def cases(self) -> M.Cases:
         """This researcher's cases and where each stands. It opens none of them."""
@@ -575,6 +577,8 @@ class Experience:
         if kind == "case":
             pub = D.public_case(self.store, ident)
             return {**pub, "looks_remaining": D.looks_remaining(self.store, pub), "test_rows": pub["n_test"]}
+        if kind == "audit":
+            return {"looks_remaining": 0, "test_rows": None}
         if kind == "seal":
             seal = Z.sealed_record(self.store, ident) or {}
             parts = {f"part{i}": n for i, n in enumerate(seal.get("n_parts", ()), 1)}
@@ -585,7 +589,7 @@ class Experience:
         if kind == "promotion":
             return {"files": P._promotion(self.store, ident)[0]["n_files"]}
         if kind == "rehearsal":
-            scores = (R.latest(self.store, ident) or {}).get("scores") or {}
+            scores = (R.last_rehearsal(self.store, ident) or {}).get("scores") or {}
             return {f"score:{a}:{s}": v for a, by in scores.items() for s, v in by.items()}
         if kind == "readiness":
             rows = self.store.records_where(READINESS_KIND, "promotion_id", ident)

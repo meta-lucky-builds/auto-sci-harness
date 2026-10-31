@@ -262,10 +262,31 @@ def test_an_opened_verdict_shows_its_label_elsewhere_and_a_retired_one_shows_all
     capsys.readouterr()
 
 
-def test_a_certificate_with_no_court_case_is_not_gated(won):
+def test_a_refused_gate_opens_nothing(won):
+    before = len(released(won.store, won.target))
+    with pytest.raises(D.DisplayRefused):
+        D.require_autopsy(won.store, "", "owner")
+    assert len(released(won.store, won.target)) == before and D.exposure(won.store, won.claim_hash) == "none"
+
+
+def test_a_certificate_with_no_court_case_is_not_gated(won, monkeypatch):
     assert D.require_autopsy(won.store, "f" * 64, "owner") is None
+    with monkeypatch.context() as m:
+        m.setattr(C, "case_of_claim", lambda *_: None)
+        D.require_autopsy(won.store, "", "owner")
+        assert D.exposure(won.store, won.claim_hash) == "open"
     D.retire(won.store, won.target, "owner")
     D.require_autopsy(won.store, "", "owner")
+
+
+def test_a_retired_target_with_no_outcome_has_no_certificate_to_open(tmp_path):
+    c = Case(tmp_path / "c", approve=False)
+    try:
+        D.retire(c.store, c.target, "owner")
+        with pytest.raises(D.DisplayRefused, match="no certificate"):
+            D.autopsy(c.store, c.case_id, "owner")
+    finally:
+        c.close()
 
 
 def test_a_living_paper_needs_a_retired_target(won):
