@@ -37,6 +37,8 @@ NETWORK_MODULES = {
     "pathsafe.py": "socket.gethostname() to recognise \\\\<this host>\\C$ path aliases (s4-integrity; no connection)",
     "research/station/mode.py": "socket.gethostname() for the station lock's holder note (s4-station; no "
                                 "connection)",
+    # stage-p0 (GOAL 18.6): runs only inside a Lab session's gateway container, never imported for use on the host
+    "lab/egress_proxy.py": "the Lab egress gateway program, run in its container by `chh lab start`",
 }
 
 
