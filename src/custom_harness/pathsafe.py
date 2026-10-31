@@ -143,7 +143,7 @@ def _plain_chain(p: Path, memo: dict[Path, tuple[_FileId, ...] | None]) -> tuple
             st = os.lstat(p)
         except (OSError, ValueError):
             st = None
-        if st is not None and not stat.S_ISLNK(st.st_mode)                 and not getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+        if st is not None and not (stat.S_ISLNK(st.st_mode) or getattr(st, "st_file_attributes", 0) & _REPARSE_POINT):
             chain = ((st.st_dev, st.st_ino), *up)
     memo[p] = chain
     return chain

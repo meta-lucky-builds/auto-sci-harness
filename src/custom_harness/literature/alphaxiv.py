@@ -1,7 +1,7 @@
 """alphaXiv full-text (BM25) and semantic (embedding) search, plus the per-paper full text and overview: GATED OFF.
 
-STATUS: terms of service UNKNOWN; needs owner permission (GOAL §17; PORTMAP §5). OpenResearch's MIT licence covers
-its CODE, not the right to call alphaXiv's API or to store its full text in our snapshots. Until the owner records
+STATUS: terms of service unknown, treated as forbidden until the owner checks (GOAL §17; PORTMAP §5). OpenResearch's
+MIT licence covers its CODE, not the right to call alphaXiv's API or to store its full text in our snapshots. Until the owner records
 written permission in the human-owned config (`literature.alphaxiv` in <data>/human/lab_compute.yaml:
 `enabled: true`, `tos_status: permitted`, `permission_note: <where the permission is written>`, `recorded_by: <the
 human>`, `api_base: <https URL>`, `web_base: <https URL>`), every request builder here raises ConnectorDisabled before
@@ -62,7 +62,7 @@ class AlphaXivPermission:
     @staticmethod
     def from_owner_config(section: Mapping[str, Any]) -> AlphaXivPermission:
         if section.get("enabled") is not True:
-            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown; needs owner permission")
+            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the owner checks")
         if section.get("tos_status") != "permitted":
             raise ConnectorDisabled(f"alphaXiv is OFF: tos_status is {section.get('tos_status', TOS_STATUS)!r}, "
                                     "not 'permitted' (owner permission required)")
@@ -106,7 +106,7 @@ class AlphaXivSource(Source):
 
     def _gate(self) -> AlphaXivPermission:
         if not isinstance(self.permission, AlphaXivPermission) or self.permission.tos_status != "permitted":
-            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown; needs owner permission")
+            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the owner checks")
         return self.permission
 
     def lookup_request(self, ident: Identifier) -> tuple[str, dict[str, str]]:

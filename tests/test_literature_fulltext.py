@@ -1,5 +1,5 @@
-"""Full-text keyword retrieval with match snippets (OR uses alphaXiv full text; alphaXiv's terms forbid automated
-use by third parties, so the real connector is Europe PMC's open-access subset). Offline only: hand-written
+"""Full-text keyword retrieval with match snippets (OR uses alphaXiv full text; alphaXiv's terms are unknown,
+treated as forbidden until the owner checks, so the real connector is Europe PMC's open-access subset). Offline only: hand-written
 fixtures behind a router that raises on any unrouted request.
 
 Checked: pacing host, the fixed retrieval window (no full text is even fetched for a paper outside it), as-of-T
@@ -246,7 +246,7 @@ def test_cite_rechecks_the_text_date_of_a_record_from_anywhere():
 
 
 def test_no_alphaxiv_endpoint_is_wired():
-    """alphaXiv's terms forbid automated access by third parties (reviewed 2026-10-07): never call it."""
+    """alphaXiv's terms are unknown, treated as forbidden until the owner checks: never call it."""
     from pathlib import Path
 
     import custom_harness.literature as lit

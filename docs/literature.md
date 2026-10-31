@@ -99,8 +99,9 @@ Rules, all enforced in code:
 - a full text is attached only if it states one of the record's ids and contradicts none (`same_paper`);
 - each record keeps the article's licence (`full_text_license`): only permissively licensed texts may go into a
   shared bundle (not enforced: no bundle code reads it yet).
-Terms (read 2026-10-07): **alphaXiv** (OR's full-text source) forbids automated access and copying in its terms, so
-it is not wired. **Europe PMC**: EMBL-EBI allows automated use at a reasonable load and expects attribution; each
+Terms (read 2026-10-07): **alphaXiv** (OR's full-text source): terms of service **unknown, treated as forbidden until the
+owner checks** (a 2026-10-07 reading said they forbid automated access; PORTMAP records them as unread, and nobody
+has confirmed either). The client stays OFF behind the owner's permission record. **Europe PMC**: EMBL-EBI allows automated use at a reasonable load and expects attribution; each
 article's own licence governs reuse. The Europe PMC pages returned HTTP 403 to our reader, so endpoint shapes are
 inferred from EBI material. Never exercised live in this build. **arXiv** (no full-text search API; PDFs for
 research use, not redistribution) and **NCBI BioC** (retrieval by id) are possible fetch-by-id fallbacks, not built.
