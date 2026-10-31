@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from ..pathsafe import canon, is_within, overlaps
+from ..pathsafe import canon, is_within, root_overlapping
 from .hermetic import WITNESS_CONTENDED_RATIO, EntropyPin, parse_supervisor, split_record
 
 
@@ -259,10 +259,10 @@ def check_mount(workspace: Path | str) -> None:
     """Refuse a workspace that is, is inside, or contains a protected path. Alias-safe (pathsafe.overlaps): a
     `\\\\?\\` or `\\\\.\\` prefix, an admin share, an 8.3 short name or other case of the same directory is the same
     directory (s3-evolve red team, 2026-10-14: the `\\\\?\\` alias of the evidence store was accepted)."""
-    for p in protected_paths():
-        if overlaps(workspace, p):
-            raise ProtectedMount(f"sandbox workspace {workspace} overlaps the protected path {p} "
-                                 "(evidence store, bundles or a task's private files must never be agent-visible)")
+    p = root_overlapping(workspace, protected_paths())
+    if p is not None:
+        raise ProtectedMount(f"sandbox workspace {workspace} overlaps the protected path {p} "
+                             "(evidence store, bundles or a task's private files must never be agent-visible)")
 
 
 class Sandbox(ABC):

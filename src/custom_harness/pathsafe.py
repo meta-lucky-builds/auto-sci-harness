@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import re
 import socket
+import stat
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -115,9 +116,55 @@ def root_containing(p: Path | str, roots: Iterable[Path | str]) -> Path | None:
     return None
 
 
+_REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT (Windows symlinks, junctions, mount points)
+_FileId = tuple[int, int]
+
+
+def _file_id(p: Path) -> _FileId | None:
+    try:
+        st = os.stat(p)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def _plain_chain(p: Path, memo: dict[Path, tuple[_FileId, ...] | None]) -> tuple[_FileId, ...] | None:
+    """File ids of `p` and all its ancestors, IF `p` is provably its own canonical form right now: every component
+    exists and none is a link, junction or other reparse point, and its root is canonical (not, say, a subst drive).
+    Then its spelled ancestors are its real ancestors. None otherwise. Read from the file system on every call, so a
+    path whose identity changed since it was registered is seen; `memo` only shares ancestors within one call."""
+    if p in memo:
+        return memo[p]
+    parent = p.parent
+    up = () if parent == p else _plain_chain(parent, memo)
+    chain: tuple[_FileId, ...] | None = None
+    if up is not None and (parent != p or canon(p) == p):
+        try:
+            st = os.lstat(p)
+        except (OSError, ValueError):
+            st = None
+        if st is not None and not stat.S_ISLNK(st.st_mode)                 and not getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+            chain = ((st.st_dev, st.st_ino), *up)
+    memo[p] = chain
+    return chain
+
+
 def root_overlapping(p: Path | str, roots: Iterable[Path | str]) -> Path | None:
-    """The first of `roots` that `p` is, lies under, or contains (alias-safe), else None."""
+    """The first of `roots` that `p` is, lies under, or contains: the same answer as `overlaps(p, r)` for each root
+    in turn, at one or two file-system calls per root instead of hundreds. `p` is measured once. A root that is
+    provably canonical (`_plain_chain`) is compared by the file identity of it and its ancestors, which is what
+    `overlaps` falls back to; any other root (missing, or a link anywhere on its path) takes `overlaps` itself."""
+    cp = canon(p)
+    raw = Path(os.fspath(p))
+    around = {i for i in map(_file_id, (cp, *cp.parents, raw, *raw.parents)) if i is not None}
+    own = {i for i in map(_file_id, (cp, raw)) if i is not None}
+    memo: dict[Path, tuple[_FileId, ...] | None] = {}
     for r in roots:
-        if overlaps(p, r):
-            return Path(r)
+        root = Path(r)
+        chain = _plain_chain(root, memo)
+        if chain is None:
+            if overlaps(p, r):
+                return root
+        elif chain[0] in around or not own.isdisjoint(chain) or cp == root or root in cp.parents or cp in root.parents:
+            return root
     return None
