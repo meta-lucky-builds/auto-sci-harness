@@ -3,7 +3,7 @@
 The Lab searches broadly: OpenAlex, PubMed, bioRxiv and Semantic Scholar (all already implemented in sources.py)
 plus arXiv and Crossref, each asked SEPARATELY so a Lab session sees every source's answer rather than the first
 one that responds (the Court's citation path keeps its own fallback order, client.SEARCH_ORDER). alphaXiv is added
-only when the owner has recorded permission (alphaxiv.py; default OFF: "ToS unknown, needs owner permission").
+only when the owner has recorded permission (alphaxiv.py; default OFF: "ToS unknown, treated as forbidden until the owner checks").
 
 Every rule of the existing module still applies, because the Lab goes through the same LiteratureClient:
 - the publication window can be narrowed but never widened past the as-of date T (client.window);
@@ -69,7 +69,7 @@ def lab_search(client: LiteratureClient, query: str, *, limit: int = 10, sources
     if unknown:
         disabled = [s for s in unknown if s in ALPHAXIV_SOURCES]
         if disabled:
-            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown; needs owner permission")
+            raise ConnectorDisabled("alphaXiv is OFF: terms of service unknown, treated as forbidden until the owner checks")
         raise LiteratureError(f"unknown sources {unknown}", infra=False)
     out = []
     for name in sources:

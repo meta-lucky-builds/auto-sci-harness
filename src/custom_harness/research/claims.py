@@ -281,8 +281,9 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                           seed=seed, timeout_s=task.solution_timeout_s,
                                           cpu_s=float(task.solution_timeout_s))  # §16.8: load is infra, not policy
                 # validate the shape BEFORE touching the labels: an unusable output never causes a label read
-                if preds is None or len(preds) != n_rows:
-                    failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
+                problem = None if preds is None else M.predictions_problem(task.metric, preds)
+                if preds is None or len(preds) != n_rows or problem:
+                    failures.append(f"{arm} seed {seed}: no valid predictions ({problem or diag[-300:]})")
                     continue
                 # the held-out score comes from kerneld (one single-use 'evaluate' token for this claim, arm and
                 # seed); no label enters this process (GOAL §16.5.2)

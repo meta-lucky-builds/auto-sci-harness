@@ -381,6 +381,8 @@ def mint(store: EvidenceStore, case_id: str, beacon_value: str) -> dict[str, Any
                 run.close()
     except KernelDError as e:
         raise CourtRefused(f"kerneld refused the mint ({e.code})") from None
+    except InfraError as e:  # no truth was read; the same beacon finishes the mint (kerneld/ingest.minted_heldout)
+        raise CourtRefused(f"could not reach kerneld ({e}): nothing was spent, repeat this command") from None
     body = {"case_id": case_id, "event": "minted", "claim_hash": c["claim_hash"], **res,
             "approve": f"chh approve-role {c['target']} --approver <you>", "at": time.time()}
     store.append_record(RECORD_KIND, body)
@@ -416,9 +418,13 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
            "court_route": "minted", "lock_sha256": str(c.get("lock_sha256"))}
     limits = {"timeout_s": timeout}
 
-    def could_not_run(reason: str, labels_read: bool = False) -> dict[str, Any]:
+    def labels_read() -> bool:
+        """A fact from the ledger (kerneld logs each read before using it), not a guess at the failure site."""
+        return any(a.body.get("claim_hash") == ch and a.body.get("purpose") == "evaluate" for a in vault.accesses())
+
+    def could_not_run(reason: str) -> dict[str, Any]:
         body = {"case_id": case_id, "event": "outcome", "claim_hash": ch, "verdict": Verdict.COULD_NOT_RUN.value,
-                "reason": reason, "cert_hash": None, "labels_read": labels_read,
+                "reason": reason, "cert_hash": None, "labels_read": labels_read(),
                 "report_hash": hashlib.sha256(render_could_not_run(case_id, ch, reason, False).encode()).hexdigest(),
                 "at": time.time()}
         store.append_record(RECORD_KIND, body)
@@ -439,10 +445,13 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
                     return could_not_run(f"the {arm} arm failed on seed {seed}: {diag[:400]}")
                 if len(p) != n_test:
                     return could_not_run(f"the {arm} arm wrote {len(p)} predictions for {n_test} rows")
+                problem = M.predictions_problem(claim.metric.id, p)
+                if problem:
+                    return could_not_run(f"the {arm} arm on seed {seed}: {problem}")
                 preds[(arm, seed)] = p
-    except InfraError as e:
+    except (InfraError, OSError) as e:
         return could_not_run(f"infrastructure: {e}")
-    from ..kerneld.client import KernelD
+    from ..kerneld.client import KernelD, KernelDError
     refs = {"train": InputRef(dataset_id=train_id, file="train.csv",
                               blob=vault.dataset(train_id).files["train.csv"].blob),
             "test": InputRef(dataset_id=target, file="test_X.csv", blob=vault.dataset(target).files["test_X.csv"].blob)}
@@ -471,12 +480,12 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
                                      score=score, run_id=run_rec.id)
                     ids.append(kernel.record_evaluation(rec))
                     write_run_bundle(store, run_rec.id, environment=env)  # invariant 9
-    except InfraError as e:
-        return could_not_run(f"infrastructure: {e}", labels_read=True)
+    except (InfraError, KernelDError, OSError) as e:
+        return could_not_run(f"infrastructure: kerneld: {e}")
     try:  # 3. the Kernel decides
         cert = kernel.certify(claim, ids)
     except InfraError as e:
-        return could_not_run(f"infrastructure during certification: {e}", labels_read=True)
+        return could_not_run(f"infrastructure during certification: {e}")
     h = cert.cert_hash()
     bundle_hash = None
     if cert.label.value.startswith("CERTIFIED"):  # the one-command Reproducibility Bundle (REPRODUCIBLE needs it)

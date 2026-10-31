@@ -270,7 +270,8 @@ def minted_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, fam
     done = _done(vault, key)
     if done is not None:
         return done
-    if any(e.body.get("frozen_hash") == claim_hash for e in vault.ledger.entries("mint")):
+    earlier = [e for e in vault.ledger.entries("mint") if e.body.get("frozen_hash") == claim_hash]
+    if earlier and earlier[0].body.get("beacon") != beacon:
         raise IngestRefused("already_registered")  # minted before (another beacon): beacon shopping
     from ..research.suite import MintRefused, require_anchored
     try:
@@ -286,7 +287,8 @@ def minted_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, fam
         vault.register_dataset(train_id, DatasetRole.DEV, public={"train.csv": files.train}, private={})
         vault.register_dataset(subject, DatasetRole.FUTURE, public={"test_X.csv": files.test_x},
                                private={"test_y.csv": files.test_y, "mint.json": files.record}, canary=canary)
-        mint = Kernel(vault.store).record_mint(subject, claim_hash, beacon, files.task_id)
+        # the same beacon again after a crash before _publish: the same bytes, no new entry, nothing lost (GOAL 18.6)
+        mint = earlier[0] if earlier else Kernel(vault.store).record_mint(subject, claim_hash, beacon, files.task_id)
     except (VaultError, KernelError):  # pre-checked above; a race still fails closed
         raise IngestRefused("ingest_refused") from None
     return _publish(vault, key, run_id, "minted_heldout", subject, [train_id, subject],

@@ -78,7 +78,8 @@ def process_started_at(pid: int) -> int | None:
         try:
             created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
             code = wintypes.DWORD()
-            if not k32.GetProcessTimes(handle, created, exited, kernel, user)                     or not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            times = k32.GetProcessTimes(handle, created, exited, kernel, user)
+            if not times or not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
                 return None
             return (created.dwHighDateTime << 32) | created.dwLowDateTime
         finally:

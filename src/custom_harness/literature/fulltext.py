@@ -5,8 +5,8 @@ Source: the Europe PMC REST API, open-access subset (search, then `/{PMCID}/full
 Terms (reviewed 2026-10-07, see the report): EMBL-EBI allows automated access at a load that does not stop it
 serving others, expects attribution, and puts no extra restriction on the content beyond each article's own
 licence. We therefore record every article's licence; a Reproducibility Bundle may include a full text only if its
-licence allows redistribution (not enforced here: there is no bundle code in this module). alphaXiv's terms forbid
-automated access ("data mining, robots, scraping") and copying, so it is NOT wired, although its API returns
+licence allows redistribution (not enforced here: there is no bundle code in this module). alphaXiv's terms are unknown,
+treated as forbidden until the owner checks, so it is NOT wired, although its API returns
 snippets. Endpoint shapes and query fields below are INFERRED from Europe PMC's public documentation as quoted in
 EBI material; the Europe PMC pages themselves refused our reader (HTTP 403) and no live request was made.
 

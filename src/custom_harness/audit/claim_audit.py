@@ -47,6 +47,7 @@ from ..records import Run, StepKind, TraceStep
 from ..sandbox.base import Sandbox
 from ..store import EvidenceStore
 from ..store.run_bundle import write_run_bundle
+from ..verify.metrics import predictions_problem
 from . import data, gate, wrapper
 from .spec import LoadedSpec
 
@@ -267,11 +268,15 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
     arms = {"subject": (claim.subject.hash, loaded.method_code), "comparator": (claim.comparator.hash,
                                                                                 loaded.baseline_code)}
 
-    def could_not_run(reason: str, needs_owner: bool = False, labels_read: bool = False) -> dict[str, Any]:
+    def labels_read() -> bool:
+        """A fact from the ledger (kerneld logs each read before using it), not a guess at the failure site."""
+        return any(a.body.get("claim_hash") == ch and a.body.get("purpose") == "evaluate" for a in vault.accesses())
+
+    def could_not_run(reason: str, needs_owner: bool = False) -> dict[str, Any]:
         report = render_could_not_run(loaded.audit_id, ch, reason, needs_owner)
         return _record(store, {"audit_id": loaded.audit_id, "claim_hash": ch, "verdict": Verdict.COULD_NOT_RUN.value,
                                "reason": reason, "needs_owner": needs_owner, "cert_hash": None,
-                               "labels_read": labels_read,
+                               "labels_read": labels_read(),
                                "report_hash": hashlib.sha256(report.encode()).hexdigest(), "at": time.time()})
 
     # 1. every program runs before any label is read
@@ -291,22 +296,25 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
                         return could_not_run(f"the {arm} arm failed on {ds.dataset_id} seed {seed}: {diag[:400]}")
                     if len(p) != n_test:
                         return could_not_run(f"the {arm} arm wrote {len(p)} predictions for {n_test} rows")
+                    problem = predictions_problem(claim.metric.id, p)
+                    if problem:
+                        return could_not_run(f"the {arm} arm on {ds.dataset_id} seed {seed}: {problem}")
                     preds[(arm, ds.dataset_id, seed)] = p
-    except InfraError as e:
+    except (InfraError, OSError) as e:
         return could_not_run(f"infrastructure: {e}", needs_owner=type(e).__name__ == "CandidateImageMissing")
     # 2. labels stay behind the kerneld boundary (GOAL §16.5.2): the kerneld process makes the one logged 'evaluate'
     # read per (arm, seed, target) and returns only the score; one evaluation record each
-    from ..kerneld.client import KernelD
+    from ..kerneld.client import KernelD, KernelDError
     try:
         with KernelD(store.root) as kd:
             ids = _evaluate_arms(store, kernel, kd, loaded, claim, arms, preds, env, limits)
-    except InfraError as e:  # kerneld unavailable mid-way: some labels may have been read (one look per claim)
-        return could_not_run(f"infrastructure: {e}", labels_read=True)
+    except (InfraError, KernelDError, OSError) as e:  # read or not, the ledger says (one look per claim)
+        return could_not_run(f"infrastructure: kerneld: {e}")
     # 3. the Kernel decides
     try:
         cert = kernel.certify(claim, ids)
     except InfraError as e:
-        return could_not_run(f"infrastructure during certification: {e}", labels_read=True)
+        return could_not_run(f"infrastructure during certification: {e}")
     report = render_report(cert)
     v, named = verdict(cert)
     return _record(store, {"audit_id": loaded.audit_id, "claim_hash": ch, "verdict": v.value, "checks": named,
