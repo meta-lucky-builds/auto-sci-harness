@@ -60,6 +60,35 @@ def _wire_safe(v: Any) -> Any:
     return v
 
 
+def process_started_at(pid: int) -> int | None:
+    """A process's creation time in the OS's own units, or None if it does not exist or cannot be queried. With the
+    pid it identifies one process: a pid can be reused, a (pid, creation time) pair cannot."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.GetProcessTimes.argtypes = (wintypes.HANDLE, *([ctypes.POINTER(wintypes.FILETIME)] * 4))
+        k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return None
+        try:
+            created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+            code = wintypes.DWORD()
+            if not k32.GetProcessTimes(handle, created, exited, kernel, user)                     or not k32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+                return None
+            return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            k32.CloseHandle(handle)
+    try:  # field 22 of /proc/<pid>/stat, counted after the command name (which may hold spaces)
+        return int(Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _package_parent() -> str:
     return str(Path(custom_harness.__file__).resolve().parent.parent)
 
@@ -71,6 +100,7 @@ class KernelD:
         self._next = 0
         self._secret = secrets.token_hex(32)
         self.last_reply: str | None = None  # the raw last reply line (diagnostics and tests)
+        self._server: tuple[int, int | None] | None = None  # (pid, creation time) of the server, taken at hello
         env = dict(os.environ)
         parent = _package_parent()
         env["PYTHONPATH"] = parent + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
@@ -83,6 +113,7 @@ class KernelD:
         try:
             self._write(P.encode_launch(self._secret))
             self.hello = self._call("hello", {})
+            self._server = (self.pid, process_started_at(self.pid))  # identity, while the server is known to be alive
         except BaseException:
             self.kill()
             raise
@@ -119,14 +150,20 @@ class KernelD:
     def kill(self) -> None:
         if self.alive():
             server_pid = getattr(self, "hello", {}).get("pid")
-            if isinstance(server_pid, int) and server_pid != self._proc.pid:  # the launcher's child (Windows venv)
-                try:
+            if isinstance(server_pid, int) and server_pid != self._proc.pid and self._is_server(server_pid):
+                try:  # the launcher's child (Windows venv)
                     os.kill(server_pid, signal.SIGTERM)
                 except OSError:
                     pass
             self._proc.kill()
             self._proc.wait(timeout=self.timeout_s)
         self._cleanup()
+
+    def _is_server(self, pid: int) -> bool:
+        """Still the process that answered hello? Unknown counts as no: never signal a process that may be another's
+        (a reused pid). The launcher's death below ends the server anyway: closing stdin ends its serve loop."""
+        known = self._server
+        return known is not None and known[0] == pid and known[1] is not None and process_started_at(pid) == known[1]
 
     def _cleanup(self) -> None:
         for f in (self._proc.stdin, self._proc.stdout):

@@ -7,6 +7,9 @@ import ast
 import json
 import os
 import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -287,3 +290,57 @@ def test_kerneld_death_is_unavailable(world):
         assert ei.value.transient is False
     finally:
         k.kill()
+
+
+def _pid_gone(pid: int, timeout_s: float = 10.0) -> bool:
+    from custom_harness.kerneld.client import process_started_at
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout_s:
+        if process_started_at(pid) is None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_kill_never_terminates_a_process_that_reused_the_server_pid(tmp_path):
+    """The server pid is captured at hello. If that pid is later owned by another process, kill() must leave it alone
+    (on Windows os.kill with SIGTERM is TerminateProcess: nothing asks the process)."""
+    (tmp_path / "s").mkdir()
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    k = KernelD(tmp_path / "s")
+    real = k.pid
+    try:
+        k.hello = {**k.hello, "pid": sentinel.pid}  # the pid k holds now names an unrelated process
+        k.kill()
+        assert sentinel.poll() is None, "kill() terminated a process that is not the server"
+        time.sleep(0.5)
+        assert sentinel.poll() is None, "kill() terminated a process that is not the server"
+    finally:
+        sentinel.kill()
+        sentinel.wait(timeout=10)
+    assert _pid_gone(real), "the launcher's death must still take the real server down"
+
+
+def test_kill_still_terminates_the_real_server(tmp_path):
+    (tmp_path / "s").mkdir()
+    k = KernelD(tmp_path / "s")
+    pid = k.pid
+    k.kill()
+    assert _pid_gone(pid)
+
+
+def test_kill_refuses_a_pid_whose_creation_time_changed(tmp_path):
+    """Same pid, another process: only the creation time tells them apart."""
+    from custom_harness.kerneld.client import process_started_at
+    (tmp_path / "s").mkdir()
+    sentinel = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    k = KernelD(tmp_path / "s")
+    try:
+        k.hello = {**k.hello, "pid": sentinel.pid}
+        k._server = (sentinel.pid, process_started_at(sentinel.pid) + 1)
+        k.kill()
+        time.sleep(0.5)
+        assert sentinel.poll() is None
+    finally:
+        sentinel.kill()
+        sentinel.wait(timeout=10)
