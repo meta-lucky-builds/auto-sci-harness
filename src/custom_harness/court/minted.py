@@ -31,8 +31,9 @@ Stated limits (not solved here):
   - the frozen package lock is recorded and bound (its sha256 is in every evaluation record's environment), NOT
     installed: the Court sandbox is the network-free candidate image, which must already satisfy it (building a
     per-lock image from an offline wheelhouse is an owner step);
-  - the arms use the audit contract wrapper (build_model(seed) -> fit/predict on float features): a Lab method with
-    another interface is refused at run time as a crashed arm (COULD NOT RUN), never certified.
+  - an arm uses the audit contract wrapper (build_model(seed) -> fit/predict on float features) or the wider program
+    contract (audit/program.py); an arm that does not meet its contract is a crashed arm (COULD NOT RUN), never
+    certified. A sealed route exists too (`register_sealed`, court/sealed.py).
 Built, NOT test-verified.
 """
 
@@ -48,7 +49,7 @@ from datetime import time as dtime
 from pathlib import Path
 from typing import Any
 
-from ..audit import wrapper
+from ..audit import program, wrapper
 from ..audit.claim_audit import SandboxFactory, Verdict, render_could_not_run, render_report, verdict
 from ..audit.spec import Budget, ClaimPart
 from ..config import data_dir
@@ -74,6 +75,7 @@ from ..kernel import (
 from ..kernel.claim import Effect
 from ..kerneld.mint import MINTED_FORMAT, MintSpecError, beacon_value_problems, mintable_families, minted_protocol
 from ..kerneld.scope import ScopedKernel
+from ..kerneld.seal import SEALED_FORMAT
 from ..records import Run, StepKind, TraceStep
 from ..store import EvidenceStore
 from ..store.run_bundle import write_run_bundle
@@ -154,23 +156,35 @@ def case_of_claim(store: EvidenceStore, claim_hash: str) -> dict[str, Any] | Non
 
 
 # ---------------------------------------------------------------- the claim
+def contract_of(name: str) -> tuple[Any, Any, Any]:
+    """(compose, hash, spec_ref) of a run contract: `build_model` (audit/wrapper.py) or `program` (audit/program.py)."""
+    if name == "program":
+        return program.compose, program.shim_hash, program.shim_spec_ref
+    return wrapper.compose, wrapper.wrapper_hash, wrapper.wrapper_spec_ref
+
+
 def case_claim(*, case_id: str, link: str, title: str, sentence: str, part: ClaimPart, budget: Budget,
                method_code: bytes, baseline_code: bytes, family: str, n_train: int, n_test: int,
-               beacon_round: str) -> Claim:
+               beacon_round: str, contract: str = "build_model", sealed: dict[str, Any] | None = None) -> Claim:
     """The typed Kernel claim of a minted case (deterministic). `method_code` / `baseline_code` are the COMPOSED
     programs (arm + audit wrapper). Scope conditions are only the ML adapter's provenance notes (K1, s4-kernel):
     `paper_doi` carries the Lab link (lab:<session>:<promotion>[:replica]) the discovery story follows, `protocol`
     the minted protocol kerneld checks before minting."""
     from ..research.suite import FAMILIES
-    target = f"lab-mint-{case_id}"
-    train_id = f"{target}-train"
-    if part.metric != FAMILIES[family].metric:
+    target = sealed["target"] if sealed else f"lab-mint-{case_id}"
+    train_id = sealed["train_id"] if sealed else f"{target}-train"
+    if not sealed and part.metric != FAMILIES[family].metric:
         raise CourtRefused(f"family {family!r} is scored by {FAMILIES[family].metric!r}, not {part.metric!r}: a minted "
                            f"claim uses its generator family's metric")
     conditions = {"audit_id": case_id, "paper_doi": link, "paper_title": title, "paper_sentence": sentence,
-                  "budget_timeout_s": repr(budget.timeout_s), "wrapper_sha256": wrapper.wrapper_hash(),
-                  "protocol": minted_protocol(family, n_train, n_test, beacon_round),
-                  "licences": "minted synthetic data (no third-party licence)"}
+                  "budget_timeout_s": repr(budget.timeout_s), "wrapper_sha256": contract_of(contract)[1](),
+                  "protocol": sealed["protocol"] if sealed else minted_protocol(family, n_train, n_test, beacon_round),
+                  "licences": "the researcher's own data, sealed at project start" if sealed
+                  else "minted synthetic data (no third-party licence)"}
+    population = (f"the population is the researcher's sealed dataset sha256={sealed['data_sha256']}; the raw file "
+                  f"reached no Lab by any other route (rests on the researcher, untested)" if sealed else
+                  f"the population is the minted generator family {family!r} (a generator-scoped claim, GOAL "
+                  f"16.2): it says nothing about other data")
     claim = Claim(
         kind=ClaimKind.IMPROVEMENT, statement="",
         subject=ArtifactRef(artifact_id=f"court-{case_id}-method", hash=hashlib.sha256(method_code).hexdigest()),
@@ -184,8 +198,7 @@ def case_claim(*, case_id: str, link: str, title: str, sentence: str, part: Clai
         analysis_plan=AnalysisPlan(seeds=part.seeds, alpha=part.alpha, n_boot=part.n_boot),
         assumptions=("the typed claim is a faithful reading of the researcher's sentence (written and promoted by a "
                      "human; untested)",
-                     f"the population is the minted generator family {family!r} (a generator-scoped claim, GOAL "
-                     f"16.2): it says nothing about other data",
+                     population,
                      "the beacon value is the public randomness of the committed round (typed by a human; not "
                      "verified offline)",
                      "the frozen package lock is satisfied by the Court's candidate image (recorded, not installed)"),
@@ -208,27 +221,29 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
                   part: ClaimPart, budget: Budget, method: bytes, baseline: bytes, lock: bytes | None, family: str,
                   beacon_round: str, sizing: dict[str, Any], n_train: int | None = None,
                   anchor_file: Path | None = None, of_case: str | None = None,
-                  extra: dict[str, Any] | None = None) -> dict[str, Any]:
+                  extra: dict[str, Any] | None = None, contract: str = "build_model",
+                  sealed: dict[str, Any] | None = None) -> dict[str, Any]:
     """Register one minted Court case (module docstring). `method` / `baseline` are the ARM files (raw); they are
     composed with the audit wrapper here. Order: artifacts -> pre-registration -> anchor -> record. Fails closed."""
     from ..kernel.ledger import AnchorError, write_anchor
     from ..research.suite import DELTA_FLOOR, MINT_TRAIN_ROWS
     if role not in ROLES:
         raise CourtRefused(f"unknown case role {role!r}")
-    if family not in mintable_families():
+    if not sealed and family not in mintable_families():
         raise CourtRefused(f"family {family!r} has no generator ({list(mintable_families())} can be minted): a public "
                            f"dataset is a retrospective target (`chh lab handoff`, capped below VALIDATED)")
-    if part.min_effect < DELTA_FLOOR:
+    if not sealed and part.min_effect < DELTA_FLOOR:
         raise CourtRefused(f"min_effect {part.min_effect} is below the minted-target floor {DELTA_FLOOR} (K1 refuses "
                            f"it: a large fresh test set must not make trivial effects certifiable)")
     if method == baseline:
         raise CourtRefused("method and baseline are the same code")
     n_train = MINT_TRAIN_ROWS if n_train is None else int(n_train)
     n_test = int(sizing["n_test"])
-    method_code, baseline_code = wrapper.compose(method), wrapper.compose(baseline)
+    compose = contract_of(contract)[0]
+    method_code, baseline_code = compose(method), compose(baseline)
     link = f"lab:{session_id}:{promotion_id}" + (f":{role}:{of_case}" if role != "promotion" else "")
-    case_id = _case_id({"format": MINTED_FORMAT, "role": role, "link": link, "family": family, "n_train": n_train,
-                        "n_test": n_test, "beacon_round": beacon_round,
+    case_id = _case_id({"format": SEALED_FORMAT if sealed else MINTED_FORMAT, "role": role, "link": link,
+                        "family": family, "n_train": n_train, "n_test": n_test, "beacon_round": beacon_round,
                         "method": hashlib.sha256(method_code).hexdigest(),
                         "baseline": hashlib.sha256(baseline_code).hexdigest()})
     if events(store, case_id):
@@ -236,7 +251,7 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
     try:
         claim = case_claim(case_id=case_id, link=link, title=title, sentence=sentence, part=part, budget=budget,
                            method_code=method_code, baseline_code=baseline_code, family=family, n_train=n_train,
-                           n_test=n_test, beacon_round=beacon_round)
+                           n_test=n_test, beacon_round=beacon_round, contract=contract, sealed=sealed)
     except MintSpecError as e:
         raise CourtRefused(str(e)) from None
     kernel = ScopedKernel(store)
@@ -252,7 +267,8 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
     except AnchorError as e:
         raise CourtRefused(f"could not anchor the pre-registration: {e}") from None
     target = claim.generalization_targets[0]
-    body = {"case_id": case_id, "event": "registered", "format": MINTED_FORMAT, "role": role,
+    body = {"case_id": case_id, "event": "registered", "format": SEALED_FORMAT if sealed else MINTED_FORMAT,
+            "route": "sealed" if sealed else "minted", "contract": contract, "role": role,
             "promotion_id": promotion_id, "session_id": session_id, "of_case": of_case, "link": link,
             "claim_hash": claim.claim_hash(), "prereg_seq": prereg.seq, "target": target,
             "train_id": claim.development[0], "family": family, "n_train": n_train, "n_test": n_test,
@@ -284,7 +300,7 @@ def register_promotion(store: EvidenceStore, pid: str, family: str, *, beacon_ro
     body = register_case(store, role="promotion", promotion_id=pid, session_id=str(frozen["session_id"]),
                          title=req.title, sentence=req.sentence, part=req.claim, budget=req.budget, method=method,
                          baseline=baseline, lock=lock, family=family, beacon_round=beacon_round, sizing=sizing,
-                         n_train=n_train, anchor_file=anchor_file)
+                         n_train=n_train, anchor_file=anchor_file, contract=req.contract)
     store.append_record(PROMOTION_KIND, {
         "promotion_id": pid, "event": "handed_off", "label": "EXPLORATORY", "route": "minted",
         "audit_id": body["case_id"], "case_id": body["case_id"], "claim_hash": body["claim_hash"],
@@ -302,6 +318,61 @@ def register_promotion(store: EvidenceStore, pid: str, family: str, *, beacon_ro
     return body
 
 
+def sealed_route(store: EvidenceStore, project: str, part_no: int) -> dict[str, Any]:
+    """The `sealed` argument of register_case for part `part_no` of a sealed project."""
+    from .sealed import sealed_record
+    seal = sealed_record(store, project)
+    if seal is None:
+        raise CourtRefused(f"project {project!r} is not sealed")
+    if not 1 <= part_no <= len(seal["targets"]):
+        raise CourtRefused(f"project {project!r} has {len(seal['targets'])} sealed part(s), not part {part_no}")
+    return {"project": project, "part": part_no, "target": seal["targets"][part_no - 1], "train_id": seal["train_id"],
+            "data_sha256": seal["data_sha256"], "n_train": seal["n_lab"], "n_test": seal["n_parts"][part_no - 1],
+            "protocol": f"{SEALED_FORMAT} project={project} part={part_no} beacon_round={seal['beacon_round']}: "
+                        f"held-out truth sealed by kerneld before the project's first Lab session (GOAL 18.6); both "
+                        f"arms through one contract", "beacon_round": seal["beacon_round"]}
+
+
+def register_sealed(store: EvidenceStore, pid: str, project: str, *, anchor_file: Path | None = None,
+                    revalidate: bool = False) -> dict[str, Any]:
+    """A frozen Lab promotion -> a Court case on part 1 of a sealed project (HUMAN: the researcher who promoted it).
+    `revalidate` fixes part 2 as the RE-VALIDATED test now, before any label of part 1 is read."""
+    from ..lab import trace as T
+    from ..lab.promote import RECORD_KIND as PROMOTION_KIND
+    from ..lab.promote import PromoteRequest, _promotion
+    from .sealed import project_rows
+    rows = _promotion(store, pid)
+    if any(r.get("event") == "handed_off" for r in rows) or cases_of_promotion(store, pid):
+        raise CourtRefused(f"promotion {pid} already went to the Court (one Court route per freeze)")
+    frozen = rows[0]
+    sid = str(frozen["session_id"])
+    if not any(r.get("event") == "session" and r.get("session_id") == sid for r in project_rows(store, project)):
+        raise CourtRefused(f"session {sid} is not a session of project {project!r}")
+    req = PromoteRequest.model_validate(frozen["request"])
+    route = sealed_route(store, project, 1)
+    body = register_case(store, role="promotion", promotion_id=pid, session_id=sid, title=req.title,
+                         sentence=req.sentence, part=req.claim, budget=req.budget,
+                         method=store.blobs.get(frozen["frozen"]["method"]["blob"]),
+                         baseline=store.blobs.get(frozen["frozen"]["baseline"]["blob"]),
+                         lock=store.blobs.get(frozen["frozen"]["lock"]["blob"]), family=f"sealed:{project}",
+                         beacon_round=route["beacon_round"], sizing={"n_test": route["n_test"], "preflight":
+                                                                     "the sealed part's size, fixed at the seal"},
+                         n_train=route["n_train"], anchor_file=anchor_file, contract=req.contract, sealed=route,
+                         extra={"project": project, "part": 1})
+    store.append_record(PROMOTION_KIND, {
+        "promotion_id": pid, "event": "handed_off", "label": "EXPLORATORY", "route": "minted",
+        "audit_id": body["case_id"], "case_id": body["case_id"], "claim_hash": body["claim_hash"],
+        "targets": [body["target"]], "frozen_at": frozen.get("at"), "at": time.time(),
+        "court_route": f"sealed ({project}, part 1, {body['n_test']} rows sealed before the first session)",
+        "next": [f"chh approve-role {body['target']} --approver NAME   (HUMAN)",
+                 f"chh court run {body['case_id']} --docker", f"chh court level {body['case_id']}"]})
+    T.record(store, sid, "promote", {"op": "handed_off", "promotion_id": pid, "claim_hash": body["claim_hash"],
+                                     "audit_id": body["case_id"], "idea_id": frozen.get("idea_id")}, actor=T.human())
+    if revalidate:
+        body = {**body, "revalidation": declare_revalidation(store, body["case_id"], None, anchor_file=anchor_file)}
+    return body
+
+
 # ---------------------------------------------------------------- re-validation (RE-VALIDATED, court/levels.py)
 def first_test_started(store: EvidenceStore, case_id: str) -> bool:
     """True once any held-out label of the case's test was read: an outcome that read labels, or any `evaluate`
@@ -313,7 +384,7 @@ def first_test_started(store: EvidenceStore, case_id: str) -> bool:
                for a in ScopedKernel(store).vault.accesses())
 
 
-def declare_revalidation(store: EvidenceStore, case_id: str, beacon_round: str, *,
+def declare_revalidation(store: EvidenceStore, case_id: str, beacon_round: str | None, *,
                          anchor_file: Path | None = None) -> dict[str, Any]:
     """Declare the SECOND fresh-data test of a promotion case (RE-VALIDATED): the same claim and the same frozen code
     (both arms, byte for byte), the same family and sizes, on a second minted target under a second beacon round.
@@ -334,7 +405,8 @@ def declare_revalidation(store: EvidenceStore, case_id: str, beacon_round: str, 
         raise CourtRefused("only a promotion case is re-validated (one level deep)")
     if related_cases(store, case_id, "revalidation"):
         raise CourtRefused(f"case {case_id} already has its re-validation (one per case)")
-    if beacon_round == c.get("beacon_round"):
+    is_sealed = c.get("route") == "sealed"
+    if not is_sealed and beacon_round == c.get("beacon_round"):
         raise CourtRefused("the re-validation needs a different beacon round from the first test")
     if first_test_started(store, case_id):
         raise CourtRefused("too late: held-out labels of the first test were already read; a re-validation is "
@@ -345,18 +417,25 @@ def declare_revalidation(store: EvidenceStore, case_id: str, beacon_round: str, 
     claim = next(e.body["claim"] for e in kernel.ledger.entries("prereg")
                  if e.body.get("claim_hash") == c["claim_hash"])
     arts = kernel.vault.artifacts()
-    method = wrapper.arm_part(store.blobs.get(arts[claim["subject"]["artifact_id"]].hash))
-    baseline = wrapper.arm_part(store.blobs.get(arts[claim["comparator"]["artifact_id"]].hash))
-    if method is None or baseline is None:
-        raise CourtRefused("the case's arms are not composed with the audit wrapper")
+    method = store.blobs.get(rows[0]["frozen"]["method"]["blob"])
+    baseline = store.blobs.get(rows[0]["frozen"]["baseline"]["blob"])
+    compose = contract_of(str(c.get("contract", "build_model")))[0]
+    if compose(method) != store.blobs.get(arts[claim["subject"]["artifact_id"]].hash) \
+            or compose(baseline) != store.blobs.get(arts[claim["comparator"]["artifact_id"]].hash):
+        raise CourtRefused("the case's arms are not the frozen code")
     lock = store.blobs.get(rows[0]["frozen"]["lock"]["blob"])
-    sizing = {"n_test": int(c["n_test"]), "preflight": f"the size of case {case_id} (the claim is unchanged)"}
+    route = sealed_route(store, str(c["project"]), 2) if is_sealed else None
+    sizing = {"n_test": int(route["n_test"]) if route else int(c["n_test"]),
+              "preflight": f"the size of case {case_id} (the claim is unchanged)"}
+    extra: dict[str, Any] = {"first_claim_hash": c["claim_hash"], "first_beacon_round": c["beacon_round"]}
+    if route:
+        extra.update(project=c["project"], part=2)
     return register_case(store, role="revalidation", promotion_id=str(c["promotion_id"]),
                          session_id=str(c["session_id"]), title=req.title, sentence=req.sentence, part=req.claim,
                          budget=req.budget, method=method, baseline=baseline, lock=lock, family=str(c["family"]),
-                         beacon_round=beacon_round, sizing=sizing, n_train=int(c["n_train"]),
-                         anchor_file=anchor_file, of_case=case_id,
-                         extra={"first_claim_hash": c["claim_hash"], "first_beacon_round": c["beacon_round"]})
+                         beacon_round=str(route["beacon_round"]) if route else str(beacon_round), sizing=sizing,
+                         n_train=int(c["n_train"]), anchor_file=anchor_file, of_case=case_id, extra=extra,
+                         contract=str(c.get("contract", "build_model")), sealed=route)
 
 
 # ---------------------------------------------------------------- mint (kerneld)
@@ -364,6 +443,8 @@ def mint(store: EvidenceStore, case_id: str, beacon_value: str) -> dict[str, Any
     """kerneld mints the case's target (kerneld/ingest.minted_heldout); the labels never enter this process."""
     from ..kerneld.client import KernelD, KernelDError
     c = case(store, case_id)
+    if c.get("route") == "sealed":
+        raise CourtRefused(f"case {case_id} tests sealed data: nothing is minted")
     if latest(store, case_id, "minted") is not None:
         raise CourtRefused(f"case {case_id} is already minted (one mint per claim)")
     problems = beacon_value_problems(c["beacon_round"], beacon_value)
@@ -394,7 +475,8 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
     """Both frozen arms on the minted data in the Court sandbox, then the Kernel. Refuses (no label read) unless
     minted and the target's FUTURE role is human-approved; one look per claim. Records the outcome."""
     c = case(store, case_id)
-    if latest(store, case_id, "minted") is None:
+    route = str(c.get("route", "minted"))
+    if route == "minted" and latest(store, case_id, "minted") is None:
         raise CourtRefused(f"case {case_id} is not minted yet (`chh court mint`)")
     kernel = ScopedKernel(store, replayer=SandboxReplayer(sandbox_factory))
     vault = kernel.vault
@@ -414,8 +496,9 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
     arms = {"subject": (claim.subject.hash, store.blobs.get(arts[claim.subject.artifact_id].hash)),
             "comparator": (claim.comparator.hash, store.blobs.get(arts[claim.comparator.artifact_id].hash))}
     timeout = float(c["timeout_s"])
-    env = {"sandbox": "court candidate sandbox (network-free)", "audit_wrapper": wrapper.wrapper_hash(),
-           "court_route": "minted", "lock_sha256": str(c.get("lock_sha256"))}
+    _, contract_hash, spec_ref = contract_of(str(c.get("contract", "build_model")))
+    env = {"sandbox": "court candidate sandbox (network-free)", "audit_wrapper": contract_hash(),
+           "court_route": route, "lock_sha256": str(c.get("lock_sha256"))}
     limits = {"timeout_s": timeout}
 
     def labels_read() -> bool:
@@ -460,7 +543,7 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory) -> 
         with KernelD(store.root) as kd:
             for seed in claim.analysis_plan.seeds:
                 for arm, (h, _) in arms.items():
-                    run_rec = Run(harness_id="chh-court", harness_hash=wrapper.wrapper_spec_ref(store, "chh-court"),
+                    run_rec = Run(harness_id="chh-court", harness_hash=spec_ref(store, "chh-court"),
                                   task_id=target, seed=seed)
                     store.add_run(run_rec)
                     now = time.time()

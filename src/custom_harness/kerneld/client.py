@@ -296,6 +296,14 @@ class RunHandle:
         return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"]), "task_id": str(res["task_id"]),
                 "mint_seq": int(res["mint_seq"]), "anchor_length": int(res["anchor_length"])}
 
+    def ingest_sealed_split(self, project: str, file: Path | str, *, label_column: str, n_parts: int,
+                            rows_per_part: int, beacon_round: str, beacon_value: str) -> dict[str, Any]:
+        """Seal part of a project's dataset IN kerneld (kerneld/seal.py): kerneld reads the file, this process only
+        names it. Returns ids, counts, the data's sha256 and the ledger position of the seal."""
+        return self._ingest("sealed_split", project, file=str(Path(file).resolve()), label_column=label_column,
+                            n_parts=int(n_parts), rows_per_part=int(rows_per_part), beacon_round=beacon_round,
+                            beacon_value=beacon_value)
+
     def ingest_returned_measurements(self, dataset_id: str, file: Path | str, protocol: dict[str, Any], *,
                                      claim_hash: str, attestation: str, approved_protocol_seq: int) -> str:
         """Register measurements humans returned (`chh return-data`) as a FUTURE dataset; kerneld reads the file and

@@ -50,11 +50,12 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..audit import program
 from ..audit.spec import Budget, ClaimPart, OpenMLDataset, load_spec
 from ..config import data_dir
 from ..sandbox.base import is_link_like
@@ -101,6 +102,9 @@ class PromoteRequest(_Model):
     claim: ClaimPart
     budget: Budget
     idea: str | None = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$")  # trace idea_id it came from
+    contract: Literal["build_model", "program"] = "build_model"  # program: audit/program.py (minted and sealed routes)
+    method_files: tuple[str, ...] = ()  # program contract: more workspace-relative text files of the method arm
+    baseline_files: tuple[str, ...] = ()
 
 
 class TargetsFile(_Model):
@@ -160,6 +164,20 @@ def _frozen_file(ws: Path, rel: str, manifest: dict[str, Any], what: str) -> byt
     return data
 
 
+def _frozen_arm(ws: Path, req: PromoteRequest, manifest: dict[str, Any], entry: str, more: tuple[str, ...], what: str
+                ) -> bytes:
+    """What is frozen for one arm: its file, or for the program contract its files as one bundle (audit/program.py)."""
+    if req.contract != "program":
+        if more:
+            raise PromoteError(f"{what}: extra files need the program contract")
+        return _frozen_file(ws, entry, manifest, what)
+    files = {Path(r).as_posix(): _frozen_file(ws, r, manifest, what) for r in (entry, *more)}
+    try:
+        return program.bundle(Path(entry).as_posix(), files)
+    except program.ProgramError as e:
+        raise PromoteError(f"{what}: {e}") from None
+
+
 def intake_root() -> Path:
     """Where frozen promotions wait for the Court: `<data>/lab_court`, never inside the lab root."""
     return data_dir() / "lab_court"
@@ -199,8 +217,8 @@ def freeze(store: EvidenceStore, session_id: str, request_path: Path, *, docker:
         if req.idea is not None and req.idea not in T.idea_tree(store, session_id):
             raise PromoteError(f"idea {req.idea!r} is not in the session's discovery trace")
         manifest = _manifest(ws)
-        method = _frozen_file(ws, req.method, manifest, "method")
-        baseline = _frozen_file(ws, req.baseline, manifest, "baseline")
+        method = _frozen_arm(ws, req, manifest, req.method, req.method_files, "method")
+        baseline = _frozen_arm(ws, req, manifest, req.baseline, req.baseline_files, "baseline")
         lock = _frozen_file(ws, req.lock, manifest, "lock")
         if method == baseline:
             raise PromoteError("method and baseline are the same code")
@@ -266,6 +284,8 @@ def handoff(store: EvidenceStore, pid: str, targets_path: Path) -> dict[str, Any
     if any(r.get("event") == "handed_off" for r in rows):
         raise PromoteError(f"promotion {pid} was already handed off (one Court spec per freeze)")
     frozen = rows[0]
+    if PromoteRequest.model_validate(frozen["request"]).contract != "build_model":
+        raise PromoteError("the retrospective Claim Audit route takes the build_model contract only")
     if overlaps(targets_path, lab_root()):
         raise PromoteError("the targets file must be written outside the lab root")
     try:

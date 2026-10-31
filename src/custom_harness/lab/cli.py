@@ -53,8 +53,17 @@ def add_parsers(sub: Any) -> None:
     st.add_argument("--gpus", help="e.g. all (NVIDIA container toolkit on the host)")
     st.add_argument("--memory", default="16g")
     st.add_argument("--cpus", type=float)
+    st.add_argument("--project", help="a sealed project (`chh lab seal`): the Lab's part lands in data/")
     st.add_argument("--root", action="store_true", help="OPT-IN: root in the box with Docker's default capabilities "
                                                          "(system package installs); recorded")
+    se = s.add_parser("seal", help="HUMAN: seal part of a dataset in kerneld, before the project's first session")
+    se.add_argument("project")
+    se.add_argument("--data", required=True, help="the researcher's CSV, outside the lab root")
+    se.add_argument("--label-column", required=True)
+    se.add_argument("--rows", type=int, required=True, help="rows in each sealed part")
+    se.add_argument("--parts", type=int, default=1, help="1, or 2 for RE-VALIDATED")
+    se.add_argument("--beacon-round", required=True)
+    se.add_argument("--beacon", required=True, help="the public value of that round")
     at = s.add_parser("attach", help="open the agent's interactive UI in the box, or run one headless prompt")
     at.add_argument("session")
     g = at.add_mutually_exclusive_group()
@@ -124,7 +133,14 @@ def cmd_lab(a: argparse.Namespace, store: EvidenceStore) -> int:
                                   spend_cap_usd=a.spend_cap_usd, scope=a.scope, source_env=a.credential_env,
                                   source_file=a.credential_file, ttl_s=a.ttl_hours * 3600)
         box = BoxSpec(image=a.image or LAB_IMAGE, gpus=a.gpus, memory=a.memory, cpus=a.cpus, root=a.root)
-        return _out(S.start(store, a.agent, opts, cred, box=box, session_id=a.session))
+        return _out(S.start(store, a.agent, opts, cred, box=box, session_id=a.session, project=a.project))
+    if c == "seal":
+        from ..court.sealed import SealRefused, seal_project
+        try:
+            return _out(seal_project(store, a.project, Path(a.data), label_column=a.label_column, rows=a.rows,
+                                     parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon))
+        except SealRefused as e:
+            raise SystemExit(f"refused: {e}") from None
     if c == "attach":
         if a.prompt is None and a.prompt_file is None:
             return S.attach(store, a.session)

@@ -34,7 +34,7 @@ from ..kernel import DatasetRole, Kernel, KernelError, Vault, VaultError
 from .protocol import INGEST_KINDS, MEASUREMENT_PROBLEMS
 
 __all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "minted_heldout", "openml_split",
-           "research_task", "returned_measurements", "task_private_dir"]
+           "research_task", "returned_measurements", "sealed_split", "task_private_dir"]
 RECORD_KIND = "kerneld_ingest"
 
 
@@ -294,6 +294,43 @@ def minted_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, fam
     return _publish(vault, key, run_id, "minted_heldout", subject, [train_id, subject],
                     {"n_train": files.n_train, "n_test": files.n_test, "task_id": files.task_id,
                      "mint_seq": mint.seq, "anchor_length": int(anchor["length"])})
+
+
+# ------------------------------------------------------------------------------------------- sealed at project start
+def sealed_split(vault: Vault, run_id: str, project: str, file: str, label_column: str, n_parts: int,
+                 rows_per_part: int, beacon_round: str, beacon_value: str) -> dict[str, Any]:
+    """Split a project's dataset and register it BEFORE any Lab session (GOAL 18.6, kerneld/seal.py): the Lab's part as
+    public DEV data, each sealed part as an EXTERNAL target with private labels. Returns ids, counts and sha256 only."""
+    from .mint import beacon_value_problems, draw_beacon
+    from .seal import SealSpecError, seal_files
+    if beacon_value_problems(beacon_round, beacon_value):
+        raise IngestRefused("bad_request")
+    beacon = draw_beacon(beacon_round, beacon_value)
+    raw = _read(Path(file))
+    key = _key("sealed_split", project, None, hashlib.sha256(raw + beacon.encode()).hexdigest())
+    done = _done(vault, key)
+    if done is not None:
+        return done
+    try:
+        files = seal_files(raw, project, label_column, n_parts, rows_per_part, beacon)
+    except SealSpecError:
+        raise IngestRefused("bad_request") from None
+    train_id = f"seal-{project}-train"
+    targets = [f"seal-{project}-{i + 1}" for i in range(len(files.parts))]
+    _precheck(vault, [(train_id, DatasetRole.DEV, {"train.csv": files.lab}, {}),
+                      *((t, DatasetRole.EXTERNAL, {"test_X.csv": p.test_x}, {"test_y.csv": p.test_y})
+                        for t, p in zip(targets, files.parts, strict=True))])
+    try:
+        vault.register_dataset(train_id, DatasetRole.DEV, public={"train.csv": files.lab}, private={})
+        for t, p in zip(targets, files.parts, strict=True):
+            vault.register_dataset(t, DatasetRole.EXTERNAL, public={"test_X.csv": p.test_x},
+                                   private={"test_y.csv": p.test_y}, canary=f"CHH-SEAL-CANARY-{t}")
+    except VaultError:
+        raise IngestRefused("ingest_refused") from None
+    seq = max(e.seq for e in vault.ledger.entries("register_dataset") if e.body.get("dataset_id") in targets)
+    return _publish(vault, key, run_id, "sealed_split", project, [train_id, *targets],
+                    {"train_id": train_id, "targets": targets, "n_lab": files.n_lab,
+                     "n_parts": [p.n for p in files.parts], "data_sha256": files.data_sha256, "seal_seq": seq})
 
 
 # ------------------------------------------------------------------------------------------- returned measurements

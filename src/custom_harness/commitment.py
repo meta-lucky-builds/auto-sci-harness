@@ -55,6 +55,7 @@ PURPOSES: dict[str, Purpose] = {
     "target": Purpose("beacon", True, "which target a pre-registered claim is tested on"),
     "gate_tasks": Purpose("beacon", True, "which tasks form the gate after a candidate is frozen"),
     "heldout_mint": Purpose("beacon", True, "the key of held-out truth minted after the freeze (GOAL §16.2)"),
+    "seal_split": Purpose("beacon", True, "which rows of a project's dataset are sealed at its start (GOAL 18.6)"),
     "check_params": Purpose("beacon", True, "parameters of a check, drawn after the checked object is frozen"),
     "salt_assignment": Purpose("secret+beacon", False, "which tasks carry null salts (GOAL §16.9); must stay "
                                                       "unpredictable to whoever is measured"),

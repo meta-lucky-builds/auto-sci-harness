@@ -27,6 +27,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from ..sandbox.base import safe_path
 from ..store import EvidenceStore
 from . import EXPLORATORY, NOT_A_FINDING
 from . import trace as T
@@ -86,7 +87,7 @@ def _plan_from(rec: dict[str, Any]) -> Plan:
 
 def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: CredentialSpec | None, *,
           box: BoxSpec | None = None, session_id: str | None = None, docker: DockerCLI | None = None,
-          environ: dict[str, str] | None = None) -> dict[str, Any]:
+          environ: dict[str, str] | None = None, project: str | None = None) -> dict[str, Any]:
     """Start a lab box with `agent` configured inside it. Every wall check runs first; any problem refuses."""
     sid = session_id or f"s-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:8]}"
     if not _SID.match(sid):
@@ -112,8 +113,13 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
     scan = scan_workspace(ws, store=store, secret=secret, secret_file=secret_file)
     if scan:
         raise LabWallError("workspace refused: " + "; ".join(scan))
+    if project is not None:  # the session's ledger entry comes before the box and before any data reaches it
+        from ..court.sealed import bind_session, lab_part
+        bind_session(store, project, sid)
+        safe_path(ws, "data").mkdir(exist_ok=True)
+        safe_path(ws, f"data/{project}-lab.csv").write_bytes(lab_part(store, project))
     lb = LabBox(sid, docker)
-    base = {"agent": agent, "plan": asdict(plan), "box": spec.record(), "workspace": str(ws),
+    base = {"project": project, "agent": agent, "plan": asdict(plan), "box": spec.record(), "workspace": str(ws),
             "network": network_record(sid, spec, plan), "container": lb.name,
             "credential": cred.record() if cred else None,
             "options": {k: v for k, v in asdict(options).items() if v not in (None, (), "")},

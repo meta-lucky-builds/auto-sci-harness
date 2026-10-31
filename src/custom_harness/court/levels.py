@@ -20,8 +20,10 @@ names exactly what is missing (an honest rejection names the failing checks).
                 data), every Kernel check K0-K9 passed, and every target is fresh: `minted` (a `mint` ledger entry for
                 this claim hash and target, registered after the pre-registration), `future` (role FUTURE, registered
                 after the pre-registration) or `sealed` (external/future data that is neither: it rests on the human
-                role approval that it was sealed when the Lab worked; listed as an untested assumption). It does NOT
-                require REPLICATED or REPRODUCIBLE. Data claims only.
+                role approval that it was sealed when the Lab worked; listed as an untested assumption) or
+                `sealed-at-start` (court/sealed.py: the ledger shows the seal before every session of the project; a
+                seal that comes after a session is `seal-after-lab` and never fresh). It does NOT require REPLICATED
+                or REPRODUCIBLE. Data claims only.
   RE-VALIDATED  the claim passes the fresh-data test a SECOND time, on a second, independent fresh dataset, with the
                 claim and the frozen code unchanged:
                   - a re-validation case (`court_case`, role `revalidation`, `of_case` = this case) DECLARED (pre-
@@ -55,6 +57,8 @@ from ..kernel.certificate import CHECK_IDS, Certificate, Label
 from ..kernel.vault import DatasetRole
 from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
+from .minted import case_of_claim
+from .sealed import seal_fact as sealed_fact
 
 BADGES = ("REPRODUCIBLE", "REPLICATED", "VALIDATED", "RE-VALIDATED")
 MEANING = {
@@ -108,12 +112,15 @@ def _passed(cert: Certificate, ids: tuple[str, ...]) -> list[str]:
 
 
 def classify_target(ingest_kind: str | None, minted: bool, registered_after_prereg: bool,
-                    role: DatasetRole | None) -> str:
+                    role: DatasetRole | None, sealed_at_start: bool = False) -> str:
     """How a target's data came to exist relative to its claim (pure; module docstring):
-    retrospective (a public-dataset ingest) | minted | future | sealed | internal."""
+    retrospective (a public-dataset ingest) | sealed-at-start (a ledger fact, court/sealed.py) | seal-after-lab | minted
+    | future | sealed | internal."""
     external = role in (DatasetRole.EXTERNAL, DatasetRole.FUTURE)
     if ingest_kind == "openml_split":
         return "retrospective"  # a fixed public dataset a networked Lab could have downloaded
+    if ingest_kind == "sealed_split":
+        return "sealed-at-start" if sealed_at_start else "seal-after-lab"
     if minted and registered_after_prereg:
         return "minted"
     if role == DatasetRole.FUTURE and registered_after_prereg:
@@ -138,6 +145,8 @@ def target_freshness(store: EvidenceStore, kernel: ScopedKernel, cert: Certifica
         for ds in r.get("datasets") or []:
             public_kinds.setdefault(str(ds), str(r.get("kind")))
     datasets = kernel.vault.datasets()
+    own = case_of_claim(store, cert.claim_hash)
+    session = None if own is None else str(own.get("session_id"))
     out: dict[str, dict[str, Any]] = {}
     for t in cert.claim.get("generalization_targets") or []:
         rec = datasets.get(t)
@@ -145,8 +154,11 @@ def target_freshness(store: EvidenceStore, kernel: ScopedKernel, cert: Certifica
         minted = (t, cert.claim_hash) in mints
         after = prereg is not None and reg is not None and reg > prereg
         ingest = public_kinds.get(t)
-        kind = classify_target(ingest, minted, after, rec.role if rec is not None else None)
-        out[t] = {"role": rec.role.value if rec is not None else None, "registered_seq": reg, "prereg_seq": prereg,
+        fact = sealed_fact(store, kernel, t, session) if ingest == "sealed_split" else {}
+        kind = classify_target(ingest, minted, after, rec.role if rec is not None else None,
+                               bool(fact.get("at_start")))
+        out[t] = {"seal": fact, "role": rec.role.value if rec is not None else None, "registered_seq": reg,
+                  "prereg_seq": prereg,
                   "registered_after_prereg": after, "minted_for_this_claim": minted, "ingest_kind": ingest,
                   "freshness": kind, "role_approved": rec is not None and kernel.vault.role_approval(t) is not None}
     return out
@@ -185,7 +197,7 @@ def validated_missing(store: EvidenceStore, kernel: ScopedKernel, cert: Certific
     for t, f in fresh.items():
         if f["freshness"] == "retrospective":
             out.append(f"RETROSPECTIVE: target {t} is a fixed public dataset")
-        elif f["freshness"] not in ("minted", "future", "sealed"):
+        elif f["freshness"] not in ("minted", "future", "sealed", "sealed-at-start"):
             out.append(f"target {t} is {f['freshness']}: not minted after the freeze, future or sealed external data")
         if f["freshness"] == "sealed" and facts is not None:
             facts.setdefault("untested_assumptions", []).append(
@@ -230,7 +242,7 @@ def replication_facts(store: EvidenceStore, cert_hash: str, claim_hash: str) -> 
             "invariant_5": best["invariant_5"] if best else None, "why": why}
 
 
-_ROUND = re.compile(r"\s*beacon_round=\S+")
+_ROUND = re.compile(r"\s*(beacon_round|part)=\S+")
 
 
 def claim_core(claim: dict[str, Any]) -> dict[str, Any]:
@@ -286,8 +298,9 @@ def revalidation_facts(store: EvidenceStore, cert: Certificate) -> dict[str, Any
     if any(mints.get(t) for t in t1 | t2) and \
             len({mints.get(t) for t in t1} | {mints.get(t) for t in t2}) < 2:
         why.append("both datasets were minted under the same frozen hash")
-    if r.get("beacon_round") is not None and r.get("beacon_round") == own.get("beacon_round"):
-        why.append("both mints used the same beacon round")
+    if r.get("route") != "sealed" and r.get("beacon_round") is not None \
+            and r.get("beacon_round") == own.get("beacon_round"):
+        why.append("both mints used the same beacon round")  # sealed parts share one draw and are disjoint by rows
     second_val = validated_missing(store, kernel, second)
     facts["second_cert"] = o["cert_hash"]
     if why:  # not a valid re-validation whatever its outcome: shown as such, never counted

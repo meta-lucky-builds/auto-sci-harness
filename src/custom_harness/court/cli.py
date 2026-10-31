@@ -39,6 +39,11 @@ def add_parsers(sub: Any) -> None:
     r.add_argument("--n-train", type=int, help="minted training rows (default MINT_TRAIN_ROWS)")
     r.add_argument("--anchor", help="anchor file outside the store (default <data>/anchors/court.jsonl)")
     r.add_argument("--revalidation-round", help="a SECOND beacon round, fixed now, for the re-validation test")
+    rs = s.add_parser("register-sealed", help="HUMAN: pre-register a frozen promotion on a sealed part of its project")
+    rs.add_argument("promotion")
+    rs.add_argument("--project", required=True)
+    rs.add_argument("--revalidate", action="store_true", help="fix part 2 as the second test now")
+    rs.add_argument("--anchor")
     rv = s.add_parser("revalidate", help="declare the second fresh-data test of a case (before its first verdict)")
     rv.add_argument("case")
     rv.add_argument("--beacon-round", required=True, help="a beacon round other than the first, committed now")
@@ -88,6 +93,9 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
                                         dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test, n_train=a.n_train,
                                         anchor_file=Path(a.anchor) if a.anchor else None,
                                         revalidation_round=a.revalidation_round))
+        elif a.court_cmd == "register-sealed":
+            _print(C.register_sealed(store, a.promotion, a.project, revalidate=a.revalidate,
+                                     anchor_file=Path(a.anchor) if a.anchor else None))
         elif a.court_cmd == "revalidate":
             _print(C.declare_revalidation(store, a.case, a.beacon_round,
                                           anchor_file=Path(a.anchor) if a.anchor else None))
