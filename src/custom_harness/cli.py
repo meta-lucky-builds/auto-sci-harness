@@ -448,10 +448,14 @@ def cmd_certificates(a: argparse.Namespace, store: EvidenceStore) -> int:
     """Every certificate with its verification badges (GOAL §17.1, court/levels.py: separate badges computed by
     code, never a model; their exact meaning, forms and notes: `chh court level CERT`)."""
     from .court.levels import level
+    from .court.minted import case_of_claim
     from .kerneld.scope import ScopedKernel
     k = ScopedKernel(store)
     for e in k.ledger.entries("certificate"):
         cert = k.certificate(e.body["cert_hash"])
+        if case_of_claim(store, cert.claim_hash) is not None:  # one display path (GOAL 18.5)
+            print(f"{e.body['cert_hash'][:16]}  Court case: `chh court status`")
+            continue
         badge = level(store, e.body["cert_hash"]).badge
         print(f"{e.body['cert_hash'][:16]}  {cert.label.value:<20} {k.status(e.body['cert_hash']):<9} "
               f"badges={badge}  failed={cert.failed() or '-'}  {cert.claim['statement'][:60]}")

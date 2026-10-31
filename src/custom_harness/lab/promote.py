@@ -349,20 +349,17 @@ def release_verdict(store: EvidenceStore, pid: str, by: str, *, docker: DockerCL
     session_id = rows[0]["session_id"]
     level: str | None = None
     if outcome.get("cert_hash"):
+        from ..court.display import emit_outcome
         from ..court.levels import level as level_of
-        from ..kerneld.releases import Releases
         from ..kerneld.scope import ScopedKernel
         cert = ScopedKernel(store).certificate(outcome["cert_hash"])
         label = cert.label.value
         targets = list(cert.claim.get("generalization_targets") or hand[-1]["targets"])
-        rel = Releases.live(store)
-        rel.emit(label, targets=targets, channel="prompt", alphabet="verdict_bit", note="lab:promotion_verdict",
-                 key=f"lab:{pid}")
         # the verification badges (GOAL §17.1; court/levels.py, code only): LevelResult.release_value, a closed
         # alphabet of at most 16 values, released as a COUNT, which K4 counts as such
         level = level_of(store, str(outcome["cert_hash"])).release_value()
-        rel.emit(level, targets=targets, channel="prompt", alphabet="count", note="lab:promotion_level",
-                 key=f"lab:{pid}")
+        emit_outcome(store, label, level, targets, channel="prompt", label_note="lab:promotion_verdict",
+                     extra_note="lab:promotion_level", key=f"lab:{pid}")
         payload: dict[str, Any] = {"promotion_id": pid, "label": label, "level": level}
     elif not outcome.get("labels_read"):
         targets, label = [], "COULD NOT RUN"

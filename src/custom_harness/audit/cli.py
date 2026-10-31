@@ -156,6 +156,8 @@ def _dispatch(a: argparse.Namespace, store: EvidenceStore) -> int:
     out = _outcome(store, loaded)
     report = CA.current_report(store, out)
     if cmd == "report":
+        from ..court.display import record_report_view
+        record_report_view(store, loaded.audit_id, [d.dataset_id for d in loaded.spec.datasets])
         print(report)
         return 0
     if cmd == "reply":

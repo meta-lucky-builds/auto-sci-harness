@@ -293,7 +293,7 @@ def run(store: EvidenceStore, loaded: LoadedSpec, sandbox_factory: SandboxFactor
                                           inputs={"train": ("train.csv", train), "test": ("test_X.csv", test_x)},
                                           seed=seed, timeout_s=timeout)
                     if p is None:
-                        return could_not_run(f"the {arm} arm failed on {ds.dataset_id} seed {seed}: {diag[:400]}")
+                        return could_not_run(f"the {arm} arm failed on {ds.dataset_id} seed {seed}: {diag}")
                     if len(p) != n_test:
                         return could_not_run(f"the {arm} arm wrote {len(p)} predictions for {n_test} rows")
                     problem = predictions_problem(claim.metric.id, p)

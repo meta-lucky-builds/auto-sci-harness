@@ -17,6 +17,7 @@ import pytest
 
 from custom_harness.audit import program as PG
 from custom_harness.audit.spec import Budget, ClaimPart
+from custom_harness.court import health as H
 from custom_harness.court import levels as L
 from custom_harness.court import minted as C
 from custom_harness.court import sealed as S
@@ -73,12 +74,22 @@ def test_bad_seal_requests_are_refused(raw, col, parts, rows):
         seal_files(raw, "pr1", col, parts, rows, "r:" + BEACON)
 
 
+def health_stand_in(store: EvidenceStore) -> None:
+    """A passing health record for this Court version: the fixture's stand-in, so each test need not run the plants
+    (tests/test_court_rehearsal_health.py runs them for real)."""
+    store.append_record(H.RECORD_KIND, {"court_version": H.court_version(), "passed": True, "health_hash": "h" * 64,
+                                        "plants": [p.name for p in H.PLANTS]})
+
+
 class Project:
-    def __init__(self, root: Path, *, parts: int = 2, project: str = "cohort-1", rows: int = 400):
+    def __init__(self, root: Path, *, parts: int = 2, project: str = "cohort-1", rows: int = 400,
+                 health: bool = True):
         self.root = root
         root.mkdir(parents=True, exist_ok=True)
         self.store = EvidenceStore(root / "store")
         Kernel(self.store).approve_adapter("ml", approver="fixture-human")
+        if health:
+            health_stand_in(self.store)
         self.data = root / "private-data.csv"
         self.data.write_bytes(rings_csv())
         self.project = project
