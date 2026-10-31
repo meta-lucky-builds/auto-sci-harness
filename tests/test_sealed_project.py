@@ -1,5 +1,6 @@
 """Seal at project start and the wider run contract (GOAL 18.2, 18.6; kerneld/seal.py, court/sealed.py,
-audit/program.py). Real kerneld, real Kernel, local sandbox on throwaway stores. The human steps (adapter and role approval, the freeze
+audit/program.py). Real kerneld, real Kernel, local sandbox on throwaway stores. The human steps (adapter and role
+approval, the freeze
 inputs) are played by the fixture on those stores only."""
 
 from __future__ import annotations
