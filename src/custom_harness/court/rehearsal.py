@@ -1,7 +1,8 @@
 """Rehearsal and the power check (GOAL 18.6; UPGRADES N13, N9 power part). docs/court_rehearsal.md.
 
 A rehearsal is a mock trial: the frozen arms go through the real Court route (seal, register, Kernel K0-K9,
-re-execution) on Lab data, inside a throwaway store that exists only for this call. Everything is shown: every check, every number.
+re-execution) on Lab data, inside a throwaway store that exists only for this call. Everything is shown: every check,
+every number.
 No fresh truth is spent, because no fresh truth is touched: the case's store is the scratch store, and the only thing
 written to the real store is a `court_rehearsal` record that says what ran. The scratch store's certificate cannot
 become evidence: it is not in the real ledger, and every report says "Lab data, not evidence". The two human steps of
@@ -35,8 +36,8 @@ SCRATCH_APPROVER = "rehearsal-scratch-store"
 SCRATCH_BEACON = "rehearsal-scratch-beacon-not-public"
 SCRATCH_PROJECT = "rehearsal"
 SIZES = (500, 1000, 2000, 4500)  # stops at the first size with no objection
-READINESS_SIMS = 20  # UNCALIBRATED (owner decision, GOAL 13.8): the default 200 takes minutes per size; this is a coarse
-#                      estimate, and the verdict that counts is the registration preflight (court/minted.size_held_out)
+READINESS_SIMS = 20  # UNCALIBRATED (owner decision, GOAL 13.8): the default 200 takes minutes per size. A coarse
+#                      estimate; the verdict that counts is the registration preflight (court/minted.size_held_out)
 
 
 class RehearsalRefused(RuntimeError):
@@ -107,7 +108,8 @@ def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: s
             beacon_round=route["beacon_round"], sizing={"n_test": route["n_test"]}, n_train=route["n_train"],
             anchor_file=root / "anchors" / "a.jsonl", contract=req.contract, sealed=route,
             extra={"project": SCRATCH_PROJECT, "part": 1})
-        ScopedKernel(scratch).approve_role(body["target"], approver=SCRATCH_APPROVER, note="rehearsal: scratch store only")
+        ScopedKernel(scratch).approve_role(body["target"], approver=SCRATCH_APPROVER,
+                                           note="rehearsal: scratch store only")
         out = C.run(scratch, body["case_id"], sandbox_factory(root), bundle_root=root / "bundles")
         report = _report(scratch, data, label_column, rows, out, req.claim)
     finally:

@@ -102,7 +102,10 @@ def test_a_sandbox_that_cannot_start_is_could_not_run(case):
 def test_unscorable_predictions_are_stopped_before_any_label_is_read(tmp_path):
     arm = (b"class M:\n    def fit(self, X, y): pass\n    def predict(self, X): return ['abc'] * len(X)\n"
            b"def build_model(seed):\n    return M()\n")
-    c = Case(tmp_path / "c", method=arm, family="friedman", claim=part("rmse", 0.1))
+    mean = (b"class M:\n    def fit(self, X, y): self.m = sum(map(float, y)) / len(y)\n"
+            b"    def predict(self, X): return [self.m] * len(X)\n"
+            b"def build_model(seed):\n    return M()\n")  # the trivial comparator for an error metric
+    c = Case(tmp_path / "c", method=arm, baseline=mean, family="friedman", claim=part("rmse", 0.1))
     try:
         out = c.run()
         assert out["verdict"] == "COULD NOT RUN" and out["labels_read"] is False and "number" in out["reason"]

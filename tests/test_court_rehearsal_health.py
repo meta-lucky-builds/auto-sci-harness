@@ -133,7 +133,7 @@ def test_comparator_rules():
     assert K.worse_than_trivial("rmse", 2.0, 1.0) and not K.worse_than_trivial("rmse", 1.01, 1.0)
     assert K.trivial_predictions("accuracy", ["a", "b", "b"], 2) == ["b", "b"]
     assert K.trivial_predictions("rmse", ["1", "3"], 1) == ["2.0"]
-    fit, x, y, labels = K.public_split(b"a,label\n" + b"".join(f"{i},{i % 2}\n".encode() for i in range(30)))
+    _, x, y, labels = K.public_split(b"a,label\n" + b"".join(f"{i},{i % 2}\n".encode() for i in range(30)))
     assert len(y) + len(labels) == 30 and y and labels and b"label" not in x.splitlines()[0]
 
 

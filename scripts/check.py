@@ -67,6 +67,19 @@ def kernel_step(root: Path = ROOT) -> list[str]:
             "--cov-branch", "--cov-report=term-missing", "--cov-fail-under=100"]
 
 
+# Trusted code outside the Kernel core (GOAL 18.4 item 1): new checks a verdict or a certificate depends on, with the
+# same 100% line and branch coverage. Older adapters and Court plumbing are not on this list yet (docs/kernel.md).
+TRUSTED_MODULES = ("audit.program", "court.comparator", "court.display", "court.health", "court.rehearsal",
+                   "court.sealed", "kerneld.seal")
+TRUSTED_TESTS = ("tests/test_court_display.py", "tests/test_court_rehearsal_health.py", "tests/test_sealed_project.py")
+
+
+def trusted_step() -> list[str]:
+    return [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", *TRUSTED_TESTS,
+            *(f"--cov=custom_harness.{m}" for m in TRUSTED_MODULES), "--cov-branch", "--cov-report=term-missing",
+            "--cov-fail-under=100"]
+
+
 def run(name: str, cmd: list[str], cwd: Path = ROOT) -> bool:
     print(f"== {name}: {' '.join(cmd)}", flush=True)
     ok = subprocess.run(cmd, cwd=cwd, check=False).returncode == 0
@@ -128,6 +141,7 @@ def main() -> int:
         ("sealed-half look ledger", [PY, "scripts/sealed.py", "--check"]),
         ("human-held check (NOT MET until a human registers one)", [PY, "scripts/human_check.py", "--gate"]),
         ("kernel tests + 100% branch coverage", kernel_step()),
+        ("trusted code outside the core + 100% branch coverage", trusted_step()),
     ]
     if not fast:
         steps.append(("all tests", [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider"]))

@@ -182,7 +182,7 @@ def test_sealed_target_second_case_needs_a_budget(tmp_path):
         t = q.seal["targets"][0]
         Kernel(q.store).open_alpha_account(t, 0.05, 2, "fixture-human")
         C.register_sealed(q.store, q.freeze(), q.project, anchor_file=q.anchor())
-        assert C.sealed_route(q.store, q.project, 1)["target"] == t  # a budget was opened first: a second case may use it
+        assert C.sealed_route(q.store, q.project, 1)["target"] == t  # a budget opened first allows a second case
         D.retire(q.store, t, "owner")
         with pytest.raises(C.CourtRefused, match="retired"):
             C.sealed_route(q.store, q.project, 1)

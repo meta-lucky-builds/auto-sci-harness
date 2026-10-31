@@ -1,5 +1,6 @@
 """Full-text keyword retrieval with match snippets (OR uses alphaXiv full text; alphaXiv's terms are unknown,
-treated as forbidden until the owner checks, so the real connector is Europe PMC's open-access subset). Offline only: hand-written
+treated as forbidden until the owner checks, so the real connector is Europe PMC's open-access subset). Offline only:
+hand-written
 fixtures behind a router that raises on any unrouted request.
 
 Checked: pacing host, the fixed retrieval window (no full text is even fetched for a paper outside it), as-of-T

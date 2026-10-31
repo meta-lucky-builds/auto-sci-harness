@@ -35,7 +35,8 @@ def public_split(train: bytes) -> tuple[bytes, bytes, list[str], list[str]]:
     table = list(csv.reader(io.StringIO(train.decode("utf-8"))))
     head, rows = table[0], [r for r in table[1:] if r]
     li = head.index("label")
-    fit, held = [], []
+    fit: list[list[str]] = []
+    held: list[list[str]] = []
     for i, r in enumerate(rows):
         (held if hashlib.sha256(str(i).encode()).digest()[0] % 3 == 0 else fit).append(r)
     features = [[v for j, v in enumerate(r) if j != li] for r in [head, *held]]
