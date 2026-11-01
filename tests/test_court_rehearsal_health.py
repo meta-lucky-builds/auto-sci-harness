@@ -55,6 +55,44 @@ def test_a_rehearsal_shows_everything_and_spends_nothing(pj, tmp_path):
     assert rep["readiness"]["label"] == "UNCALIBRATED" and rep["readiness"]["can_only"] == "deny or warn"
 
 
+class _Opens:
+    """Records every store a Court module opens, and opens it."""
+
+    def __init__(self):
+        self.roots: list[Path] = []
+
+    def __call__(self, root):
+        self.roots.append(Path(root))
+        return EvidenceStore(root)
+
+
+def _only_scratch(opens: _Opens, real: EvidenceStore, prefix: str) -> None:
+    assert len(opens.roots) == 1  # the site opened a store of its own: it did not simply work on the real one
+    root = opens.roots[0].resolve()
+    assert root.name == "store" and root.parent.name.startswith(prefix)
+    assert root != Path(real.root).resolve() and not root.is_relative_to(Path(real.root).resolve())
+
+
+def test_a_rehearsal_opens_only_its_scratch_store(pj, tmp_path, monkeypatch):
+    bad = b"def build_model(seed):\n    raise ValueError('broken interface')\n"
+    opens = _Opens()
+    monkeypatch.setattr(R, "EvidenceStore", opens)
+    R.rehearse(pj.store, pj.freeze(method=bad), _lab_file(tmp_path), label_column="outcome", rows=300,
+               sandbox_factory=_factory)
+    _only_scratch(opens, pj.store, "chh-rehearsal-")
+    assert not opens.roots[0].exists()  # deleted afterwards
+    assert not pj.store.ledger_rows("prereg")
+
+
+def test_a_health_run_opens_only_its_scratch_stores(pj, monkeypatch):
+    opens = _Opens()
+    monkeypatch.setattr(H, "EvidenceStore", opens)
+    H.run_health(pj.store, _factory, plants=H.PLANTS[:1])
+    _only_scratch(opens, pj.store, "chh-health-")
+    assert not opens.roots[0].exists()
+    assert not pj.store.ledger_rows("prereg")
+
+
 def test_a_failing_rehearsal_names_the_failure(pj, tmp_path):
     bad = b"def build_model(seed):\n    raise ValueError('broken interface')\n"
     rep = R.rehearse(pj.store, pj.freeze(method=bad), _lab_file(tmp_path), label_column="outcome", rows=300,

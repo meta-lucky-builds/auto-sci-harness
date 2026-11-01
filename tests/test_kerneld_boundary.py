@@ -46,7 +46,16 @@ SCRATCH_STORE_SITES = {"research/preflight.py": 1}
 # opens a SCRATCH COPY of a committed corpus item's store, unpacked into a temporary directory, to re-derive the
 # Kernel's verdict on it (through a ScopedKernel); it never opens the real store and makes no private read or ingest
 # of its own. Not in SCRATCH_STORE_SITES, because that list is also the expected private-read and ingest sites.
-SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1}
+SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1, "court/health.py": 1, "court/rehearsal.py": 1}
+# Each site above needs its reason here (test_every_scratch_store_open_states_why), and a court site needs its test in
+# tests/test_court_rehearsal_health.py that fails if it is pointed at the real store.
+SCRATCH_STORE_REASONS = {
+    "assure/corpus.py": "a scratch copy of a committed corpus item's store, unpacked into a temporary directory",
+    "court/health.py": "run_plant opens one throwaway store per plant; its one caller, run_health, makes the root with "
+                       "mkdtemp; nothing from it enters the real ledger, only a court_health record",
+    "court/rehearsal.py": "rehearse opens one throwaway store under its own mkdtemp, deleted afterwards; it runs the "
+                          "route on Lab data; the real store gets only a court_rehearsal record",
+}
 
 _PRIVATE_ATTRS = ("_HostStore__", "_HostBlobs__", "_PrivateIndex__")
 _PRIVATE_NAMES = {"_grant", "_GRANT", "_Grant"}
@@ -201,6 +210,11 @@ def test_private_vault_reads_outside_kerneld_are_only_the_listed_old_path_sites(
 
 def test_store_opens_outside_the_kernel_are_only_the_listed_old_path_sites():
     assert _sites(_store_open) == OLD_PATH_STORE_OPENS | SCRATCH_STORE_SITES | SCRATCH_STORE_OPEN_ONLY
+
+
+def test_every_scratch_store_open_states_why():
+    assert set(SCRATCH_STORE_REASONS) == set(SCRATCH_STORE_OPEN_ONLY)
+    assert all(len(why) > 20 for why in SCRATCH_STORE_REASONS.values())
 
 
 def test_private_ingest_outside_the_kernel_is_only_the_listed_old_path_sites():
