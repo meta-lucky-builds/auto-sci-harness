@@ -338,3 +338,12 @@ Reported by the stage-p0 agent; ran on this Windows PC only. Details: `META/agen
 - One display path, feedback split, rehearsal, readiness, Court health run, strawman check (docs/court_rehearsal.md).
 - First-discovery plan (docs/first_discovery_plan.md).
 - Open: `TRUTH_INDEPENDENT` needs the owner's review. Nothing has run with a real agent in a real Lab box.
+
+## Stage-b (2026-11-01): the Experience API, on branch `stage-b`
+
+Reported by the stage-b agent; ran on this Windows PC only. Details: `META/agent_worklogs/stage-b/`, docs/experience_api.md.
+- `custom_harness/experience` and `chh exp`: whoami, waiting/approve, seal, start, explore, steer, freeze, rehearse, promote with readiness, mint, run, case, share, paper, record, resolve.
+- One full session runs through the API with real kerneld, a fake docker and scripted programs. Nothing has run with a real agent in a real Lab box.
+- Second paths closed: `chh explain`, `bundle`, `graph`, `predictions`, scorecard facts. A closed list of certificate readers is a test.
+- A new Court version: `chh court health --docker` is owed on it.
+- Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement. HTTPS and WebSocket are left to the UI stage.
