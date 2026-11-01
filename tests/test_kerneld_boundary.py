@@ -46,7 +46,9 @@ SCRATCH_STORE_SITES = {"research/preflight.py": 1}
 # opens a SCRATCH COPY of a committed corpus item's store, unpacked into a temporary directory, to re-derive the
 # Kernel's verdict on it (through a ScopedKernel); it never opens the real store and makes no private read or ingest
 # of its own. Not in SCRATCH_STORE_SITES, because that list is also the expected private-read and ingest sites.
-SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1}
+# court/health.py and court/rehearsal.py (stage-p0) open a throwaway store in a temporary directory for one planted claim
+# or one mock trial, and go through kerneld on it; neither opens the real store that way. The P0 gate found them unlisted.
+SCRATCH_STORE_OPEN_ONLY = {"assure/corpus.py": 1, "court/health.py": 1, "court/rehearsal.py": 1}
 
 _PRIVATE_ATTRS = ("_HostStore__", "_HostBlobs__", "_PrivateIndex__")
 _PRIVATE_NAMES = {"_grant", "_GRANT", "_Grant"}

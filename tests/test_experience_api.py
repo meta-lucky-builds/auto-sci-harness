@@ -59,7 +59,7 @@ def test_a_full_session_through_the_api_alone(w):
     assert lab.dropped_ideas.value == 1 and lab.open_ideas.value == 1 and lab.steers.value == 1
     assert lab.cost_usd.value is None and lab.costs_unknown.value >= 1  # unknown stays unknown
 
-    frozen = w.freeze()
+    frozen = x.freeze(M.FreezeIn(session_id="s-exp", request_file=str(w.request)))
     w.clean(frozen)
     pid = frozen.promotion_id
     rehearsal = x.rehearse(M.RehearseIn(promotion_id=pid, rows=200))
@@ -367,7 +367,9 @@ def test_the_command_line_speaks_for_the_same_doorway(w, capsys, monkeypatch):
     assert "Case" in json.loads(capsys.readouterr().out)
     with pytest.raises(SystemExit, match="refused"):
         run("approve", "nothing")
-    assert "exp" in root_cli.__dict__["experience_cli"].COMMANDS
+    monkeypatch.setattr("sys.argv", ["chh", "exp", "whoami"])
+    assert root_cli.main() == 0  # wired into `chh`
+    assert json.loads(capsys.readouterr().out)["chosen"] is False  # the root command opens its own store
 
 
 def test_the_published_schema_is_current():
