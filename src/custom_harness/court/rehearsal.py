@@ -89,17 +89,14 @@ def _feature_rows(data: bytes) -> tuple[list[str], list[list[str]]]:
 
 
 def sealed_rows_problem(store: EvidenceStore, data: bytes, label_column: str) -> str | None:
-    """Why `data` may not be rehearsed on: it is the file a project sealed, or it holds a row of a sealed part. Either
+    """Why `data` may not be rehearsed on: it holds a row of a sealed part, as the file a project sealed does. That
     would show scores computed from sealed labels. Rows are compared on the part's feature columns, value by value;
     a file without those columns is not compared."""
-    sha = hashlib.sha256(data).hexdigest()
     head, rows = _feature_rows(data)
     vault = ScopedKernel(store).vault
     for seal in store.records(S.RECORD_KIND):
         if seal.get("event") != "sealed":
             continue
-        if seal.get("data_sha256") == sha:
-            return f"this is the file sealed for project {seal['project']!r}: use the Lab's part"
         for target in seal.get("targets") or []:
             part_head, part_rows = _feature_rows(vault.read_public(target, "test_X.csv"))
             if not set(part_head) <= set(head) - {label_column}:

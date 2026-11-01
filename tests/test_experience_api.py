@@ -20,6 +20,7 @@ from custom_harness.experience import Experience, Refused
 from custom_harness.experience import cli as exp_cli
 from custom_harness.experience import schemas as M
 from custom_harness.experience import words as W
+from custom_harness.kernel import Kernel
 from custom_harness.kerneld.releases import released
 from custom_harness.lab import session as S
 from custom_harness.lab.agents import AgentOptions
@@ -203,6 +204,19 @@ def test_preview_refuses_an_unsealed_project_and_a_route_without_its_fields(w):
         M.PromoteIn(promotion_id=pid, route="generated")
 
 
+def test_preview_shows_the_looks_a_sealed_target_has(w):
+    target = w.seal()
+    w.session()
+    pid = w.freeze()
+    ask = M.PromoteIn(promotion_id=pid, route="sealed", project="cohort-1")
+    t = Experience(w.store).promote_preview(ask).looks_remaining.link.split("/")[3]
+    Kernel(w.store).open_alpha_account(t, 0.05, 3, "fixture-human")
+    assert w.x.promote_preview(ask).looks_remaining.value == 3
+    D.retire(w.store, t, "owner")
+    assert w.x.promote_preview(ask).looks_remaining.value == 0
+    assert target.project == "cohort-1"
+
+
 def test_whoami_defaults_to_the_os_user_and_owners_are_followed(w):
     me = w.x.whoami()
     assert me.researcher == me.os_user and not me.chosen and "grants nothing" in me.note
@@ -291,6 +305,7 @@ def test_a_claim_audit_is_a_case_with_its_full_report(tmp_path):
         assert "# Claim Audit" in x.technical("a-1").details["report"]
         assert [r["note"] for r in released(c.store, c.target)].count("court:audit_report") == 1
         assert x.case("a-2").verdict == "COULD NOT RUN"
+        assert x.resolve(audit.looks_remaining.link).value == 0
         with pytest.raises(Refused) as e:
             x.case("no-such-case")
         assert e.value.code == "NoCase"

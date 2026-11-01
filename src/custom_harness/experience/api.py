@@ -288,10 +288,10 @@ class Experience:
     def _factories(self, root: Path) -> Any:
         if self.sandbox is not None:
             return self.sandbox(Path(root))
-        from types import SimpleNamespace
+        from argparse import Namespace
 
         from ..audit.cli import _factory
-        return _factory(SimpleNamespace(docker=True, dev_sandbox=False), Path(root) / "sandboxes")
+        return _factory(Namespace(docker=True, dev_sandbox=False), Path(root) / "sandboxes")
 
     def _claim_part(self, pid: str) -> ClaimPart:
         return P.PromoteRequest.model_validate(P._promotion(self.store, pid)[0]["request"]).claim
@@ -426,7 +426,7 @@ class Experience:
         kind = "audit" if "audit_id" in v else "case"
         retro = route == "retrospective" or bool(v.get("retrospective"))
         scope = W.scope_sentence(claim, family=pub.get("family"), route="retrospective" if retro else route)
-        verdict = v["verdict"] if "verdict" in v else W.verdict_of(v.get("label"), str(v["state"]))
+        verdict: Any = v["verdict"] if "verdict" in v else W.verdict_of(v.get("label"), str(v["state"]))
         held = list(v.get("held", []))
         return M.Case(
             case_id=cid, title=str(claim["title"]), sentence=str(claim["sentence"]), scope=scope, verdict=verdict,
