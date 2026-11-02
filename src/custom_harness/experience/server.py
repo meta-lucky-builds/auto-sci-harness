@@ -162,15 +162,16 @@ class Handler(BaseHTTPRequestHandler):
         return self._static(url.path)
 
     def do_POST(self) -> None:  # noqa: N802
+        size = int(self.headers.get("Content-Length") or 0)
+        if size > MAX_BODY:
+            self.close_connection = True
+            return self._refuse(413, "TooLarge", "That request is too large.")
+        raw = self.rfile.read(size)  # read first: a refusal over an unread body is lost as a reset on Windows
         if not self._same_site() or not secrets.compare_digest(self.headers.get("X-CHH-Token", ""), self.app.token):
             return self._refuse(403, "NotThisSite", "This server takes changes from its own page only.")
         name = urllib.parse.urlsplit(self.path).path.removeprefix("/api/")
         if name not in ACTS:
             return self._refuse(404, "NoRoute", f"no action named {name!r}")
-        size = int(self.headers.get("Content-Length") or 0)
-        if size > MAX_BODY:
-            return self._refuse(413, "TooLarge", "That request is too large.")
-        raw = self.rfile.read(size)
         return self._guarded(lambda: self.app.act(name, json.loads(raw or b"{}")))
 
     def _static(self, path: str) -> None:

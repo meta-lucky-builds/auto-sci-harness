@@ -142,7 +142,7 @@ def test_a_real_case_through_the_server_is_the_one_display_path(world, tmp_path)
     pid = world.freeze()
     case_id = world.x.promote(M.PromoteIn(promotion_id=pid, route="sealed", project="cohort-1")).case_id
     world.approve_role(C.case(world.store, case_id)["target"])
-    world.x.run_case(case_id)
+    C.run(world.store, case_id, world.factory)  # the Court alone: `run_case` would open the case
     (tmp_path / "dist").mkdir()
     (tmp_path / "dist" / "index.html").write_text("x", encoding="utf-8")
     srv = V.make_server(lambda: world.x, 0, dist=tmp_path / "dist")
