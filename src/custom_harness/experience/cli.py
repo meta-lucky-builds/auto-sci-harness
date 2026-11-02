@@ -25,12 +25,16 @@
   chh exp doctor [--registry-key K] [--json]   is this machine ready? what is missing and the next step
   chh exp toy [key options] [--beacon-round R] [--beacon VALUE] [--new-freeze]   the minted toy track, one command
   chh exp ui [--port N] [--scripted]           the web interface, on this machine only
+  chh exp setup [--name N] [--spend-limit USD] [--model M]   first-run setup
+  chh exp backup --out DIR --by NAME | verify-backup PATH | restore PATH --to DIR --by NAME   HUMAN: the whole store
+  chh exp upgrade --backup-to DIR --by NAME    HUMAN: back up, then bring the store to this code's format
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -115,6 +119,21 @@ def add_parsers(sub: Any) -> None:
     dr = s.add_parser("doctor", help="is this machine ready for a first session; what is missing; the next step")
     dr.add_argument("--registry-key", default="anthropic-api", help="the provider entry of the key you will use")
     dr.add_argument("--json", action="store_true")
+    su = s.add_parser("setup", help="first-run setup: settings, your name, and what is left to do")
+    su.add_argument("--name", help="a name for the record, on this machine")
+    su.add_argument("--spend-limit", type=float, help="USD one Lab session may reach before prompts stop")
+    su.add_argument("--model", help="the Lab's default model for claude-code")
+    bk = s.add_parser("backup", help="HUMAN: a verified copy of the whole store, sealed answers included")
+    bk.add_argument("--out", required=True, help="a folder no Lab can read")
+    bk.add_argument("--by", required=True)
+    s.add_parser("verify-backup", help="check a backup's files and ledger").add_argument("path")
+    re = s.add_parser("restore", help="HUMAN: copy a verified backup into an empty folder")
+    re.add_argument("path")
+    re.add_argument("--to", required=True)
+    re.add_argument("--by", required=True)
+    up = s.add_parser("upgrade", help="HUMAN: back up, then bring the store to this code's format")
+    up.add_argument("--backup-to", required=True)
+    up.add_argument("--by", required=True)
     ui = s.add_parser("ui", help="the web interface, on this machine only (docs/ui.md)")
     ui.add_argument("--port", type=int, default=8765)
     ui.add_argument("--scripted", action="store_true", help="a scripted example: no store, no agent, no Court")
@@ -210,11 +229,56 @@ def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
     return {"waiting": x.waiting, "cases": x.cases}[c]()
 
 
+def _print_step(step: Any) -> int:
+    from .. import backup as B
+    from ..settings import SettingsRefused
+    try:
+        doc = step(B)
+    except (B.BackupRefused, SettingsRefused) as e:
+        raise SystemExit(f"refused: {e}") from None
+    print(json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=False))
+    return 0
+
+
+def _setup(a: argparse.Namespace, store: EvidenceStore) -> int:
+    from .. import settings
+    from . import doctor as d
+    from .api import Experience, Refused
+    try:
+        doc = settings.save(session_spend_limit_usd=a.spend_limit, lab_default_model=a.model)
+    except settings.SettingsRefused as e:
+        raise SystemExit(f"refused: {e}") from None
+    x = Experience(store)
+    if a.name:
+        try:
+            x.set_researcher(a.name)
+        except Refused as e:
+            raise SystemExit(f"refused: {e}") from None
+    print(f"Settings: {settings.settings_file()}")
+    print(f"  Lab default model: {doc['lab_default_model']}")
+    print(f"  Spending limit per Lab session: ${doc['session_spend_limit_usd']:.2f} (also set a limit at the provider)")
+    print(f"You are recorded as: {x.whoami().researcher}. A name grants nothing.")
+    print("See the screens with no agent and no spending: chh exp ui --scripted")
+    print("What is left before a real session:")
+    print(d.render(d.doctor(x.store, docker=x.docker, environ=x.environ)))
+    return 0
+
+
+STORE_STEPS = {
+    "setup": _setup,
+    "backup": lambda a, s: _print_step(lambda b: b.backup(s, Path(a.out), a.by)),
+    "verify-backup": lambda a, s: _print_step(lambda b: b.verify(Path(a.path))),
+    "restore": lambda a, s: _print_step(lambda b: b.restore(Path(a.path), Path(a.to), a.by)),
+    "upgrade": lambda a, s: _print_step(lambda b: b.upgrade(s, Path(a.backup_to), a.by))}
+
+
 def cmd_exp(a: argparse.Namespace, store: EvidenceStore) -> int:
     from . import schemas as m
     from .api import Experience, Refused
     if a.exp_cmd == "doctor":
         return _doctor(a, Experience(store))
+    if a.exp_cmd in STORE_STEPS:
+        return STORE_STEPS[a.exp_cmd](a, store)
     if a.exp_cmd == "ui":
         from .scripted import ScriptedExperience
         from .server import serve
@@ -224,6 +288,11 @@ def cmd_exp(a: argparse.Namespace, store: EvidenceStore) -> int:
         out = _call(a, Experience(store), m)
     except Refused as e:
         raise SystemExit(f"refused: {e}") from None
+    except (OSError, RuntimeError, ValueError) as e:
+        if os.environ.get("CHH_DEBUG"):
+            raise
+        raise SystemExit(f"Something broke on this machine ({type(e).__name__}). Nothing was decided. Run `chh exp "
+                         "doctor`; set CHH_DEBUG=1 and run this again to see the technical error.") from None
     doc = out.model_dump(mode="json") if isinstance(out, BaseModel) else out
     print(json.dumps(doc, indent=1, sort_keys=True, ensure_ascii=False))
     return 0

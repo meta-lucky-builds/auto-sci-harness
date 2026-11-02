@@ -43,8 +43,10 @@ from ..lab.agents import AdapterRefused, AgentOptions
 from ..lab.box import DockerCLI
 from ..lab.credentials import CredentialRefused, CredentialSpec
 from ..lab.session import LabError
+from ..lab.spending import SpendingRefused, spend
 from ..lab.walls import LabWallError, lab_root, overlaps
 from ..outputs.court_paper import CourtPaperError, audit_court_paper, generate
+from ..settings import SettingsRefused
 from ..store import EvidenceStore
 from ..studio.queue import pending
 from . import doctor as Dr
@@ -64,8 +66,8 @@ OWN_STEPS = {"needs_beacon": "chh exp mint {case} --beacon VALUE", "ready_to_run
 REFUSED: tuple[type[Exception], ...] = (
     AdapterRefused, C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError,
     FileNotFoundError,
-    HumanActionRefused, InfraError, LabError, LabWallError, P.PromoteError, R.RehearsalRefused, T.TraceRefused,
-    Z.SealRefused)
+    HumanActionRefused, InfraError, LabError, LabWallError, P.PromoteError, R.RehearsalRefused, SettingsRefused,
+    SpendingRefused, T.TraceRefused, Z.SealRefused)
 
 
 class Refused(RuntimeError):
@@ -243,7 +245,8 @@ class Experience:
                                                                                       f["dropped_ideas"]),
                          runs=n("runs", f["runs"]), steers=n("steers", f["steers"]),
                          web_connections=n("web_connections", f["web_connections"]),
-                         cost_usd=n("cost_usd", f["cost_usd"]), costs_unknown=n("costs_unknown", f["costs_unknown"]))
+                         cost_usd=n("cost_usd", f["cost_usd"]), costs_unknown=n("costs_unknown", f["costs_unknown"]),
+                         spending=spend(self.store, session_id).sentence)
 
     def _prompt(self, session_id: str, prompt: str) -> tuple[str, bool]:
         rec = S.run_prompt(self.store, session_id, prompt, docker=self.docker)
@@ -254,7 +257,8 @@ class Experience:
         reply, ok = self._prompt(req.session_id, req.prompt)
         return M.Explored(session_id=req.session_id, finished=ok, reply=reply, notice=W.LAB_NOTICE,
                           actions=num("session", req.session_id, "actions",
-                                      self._facts_session(req.session_id)["actions"]))
+                                      self._facts_session(req.session_id)["actions"]),
+                          spending=spend(self.store, req.session_id).sentence)
 
     @refusing
     def steer(self, req: M.SteerIn) -> M.Steered:
@@ -271,7 +275,7 @@ class Experience:
         reply = self._prompt(req.session_id, req.text)[0] if req.send else None
         return M.Steered(session_id=req.session_id, event_id=ev["event_id"], sent=req.send, reply=reply,
                          court_results_seen=num("viewer", name, "court_results", count),
-                         note="Recorded in the Story.")
+                         note="Recorded in the Story.", spending=spend(self.store, req.session_id).sentence)
 
     @refusing
     def stop(self, session_id: str) -> M.Session:

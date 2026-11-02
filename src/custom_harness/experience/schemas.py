@@ -177,6 +177,7 @@ class LabView(Model):
     web_connections: Number
     cost_usd: Number
     costs_unknown: Number
+    spending: str  # said before the next prompt: the recorded spend against the limit
 
 
 class Explored(Model):
@@ -185,6 +186,7 @@ class Explored(Model):
     reply: str
     actions: Number
     notice: str
+    spending: str
 
 
 class Steered(Model):
@@ -194,6 +196,7 @@ class Steered(Model):
     reply: str | None
     court_results_seen: Number
     note: str
+    spending: str
 
 
 class Frozen(Model):

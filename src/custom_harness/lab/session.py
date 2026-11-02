@@ -23,11 +23,12 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from ..sandbox.base import safe_path
+from ..settings import load as load_settings
 from ..store import EvidenceStore
 from . import EXPLORATORY, NOT_A_FINDING
 from . import trace as T
@@ -36,6 +37,7 @@ from .agents import AgentOptions, Plan, adapter, fill_prompt
 from .box import BoxSpec, DockerCLI, LabBox, host_allow, network_record
 from .credentials import CredentialRefused, CredentialSpec, SessionCredential, require_live, resolve
 from .egress import collect_web
+from .spending import require_room
 from .walls import (
     CONTAINER_WORKSPACE,
     LabWallError,
@@ -95,6 +97,8 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
     if any(e.get("event") == "started" for e in events(store, sid)):
         raise LabError(f"Lab session {sid!r} already exists; pick a new id")
     spec = box or BoxSpec()
+    if agent == "claude-code" and options.model is None:  # every route starts here, so the flag cannot be forgotten
+        options = replace(options, model=str(load_settings()["lab_default_model"]))
     plan = adapter(agent).plan(options)
     cred: SessionCredential | None = None
     if plan.box_env:
@@ -205,6 +209,7 @@ def run_prompt(store: EvidenceStore, session_id: str, prompt: str, *, docker: Do
                timeout_s: float = HEADLESS_TIMEOUT_S) -> dict[str, Any]:
     """Run one headless prompt in the box. The transcript is Lab output (EXPLORATORY), kept outside the workspace."""
     rec = started(store, session_id)
+    require_room(store, session_id)  # before anything can reach a model
     if rec.get("credential"):
         require_live(rec["credential"])
     plan = _plan_from(rec)

@@ -88,6 +88,7 @@ export interface Explored {
   notice: string;
   reply: string;
   session_id: string;
+  spending: string;
 }
 
 export interface FreezeIn {
@@ -151,6 +152,7 @@ export interface LabView {
   project: string | null;
   runs: Number;
   session_id: string;
+  spending: string;
   steers: Number;
   web_connections: Number;
 }
@@ -352,6 +354,7 @@ export interface Steered {
   reply: string | null;
   sent: boolean;
   session_id: string;
+  spending: string;
 }
 
 export interface Story {

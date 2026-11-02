@@ -18,6 +18,7 @@ NOTICE = "Scripted example. Nothing on this page came from the Court, and no age
 SID = "s-label-smoothing"
 PID = "f-smoothing-01"
 ME = "you (scripted)"
+SPENDING = "Recorded spend $0.42 of the $5.00 limit for this session, plus 1 call(s) of unknown cost."
 LOG = (("system", "session", "start"),
        ("you", "human", "Try label smoothing against plain cross entropy on the tabular task."),
        ("agent", "idea", "propose: Label smoothing"),
@@ -146,7 +147,7 @@ class ScriptedExperience:
                          open_ideas=self._n("open", 2), dropped_ideas=self._n("dropped", 1),
                          runs=self._n("runs", sum(x[1] == "run" for x in shown)), steers=self._n("steers", 1),
                          web_connections=self._n("web", sum(x[1] == "web" for x in shown)),
-                         cost_usd=self._n("cost", 0.42), costs_unknown=self._n("cost-unknown", 1))
+                         cost_usd=self._n("cost", 0.42), costs_unknown=self._n("cost-unknown", 1), spending=SPENDING)
 
     def lab_log(self, session_id: str) -> M.LabLog:
         self._known(session_id)
@@ -165,12 +166,13 @@ class ScriptedExperience:
         self._known(req.session_id)
         self.steers.append(req.text)
         return M.Steered(session_id=req.session_id, event_id=f"scripted-{len(self.steers)}", sent=False, reply=None,
-                         court_results_seen=self._n("seen", len(self.opened)), note="Recorded in the Story.")
+                         court_results_seen=self._n("seen", len(self.opened)), note="Recorded in the Story.",
+                         spending=SPENDING)
 
     def explore(self, req: M.ExploreIn) -> M.Explored:
         self._known(req.session_id)
         return M.Explored(session_id=req.session_id, finished=True, reply="(a scripted reply: no agent ran)",
-                          actions=self._n("actions", len(LOG)), notice=W.LAB_NOTICE)
+                          actions=self._n("actions", len(LOG)), notice=W.LAB_NOTICE, spending=SPENDING)
 
     def frozen(self) -> M.FrozenIdeas:
         item = M.FrozenIdea(promotion_id=PID, session_id=SID, title="Label smoothing beats plain cross entropy",

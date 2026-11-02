@@ -29,6 +29,9 @@ current, so the UI can be typed end to end.
 | `resolve` | what any number rests on | |
 | `chh exp doctor` | command line only: every prerequisite of a first session, what is missing and the next step. Read-only. It never prints a key | `experience/doctor.py` |
 | `chh exp toy` | command line only: the minted toy track. It runs the route up to the next step that needs a person, and carries on when run again | `experience/toy.py` |
+| `sessions`, `lab_log`, `frozen`, `trust`, `meta` | what the screens list: read-only, they open no case | `lab/trace`, `experience/doctor.py` |
+| `chh exp ui` | the local web server: see docs/ui.md | `experience/server.py` |
+| `chh exp setup`, `backup`, `verify-backup`, `restore`, `upgrade` | command line only: see docs/user_guide.md | `settings.py`, `backup.py` |
 
 Route names are the researcher's: `generated` is the Court's minted route, `public` the retrospective Claim Audit route.
 `case` also opens a Claim Audit by its audit id: that is the "reproduce this paper" output. Its report stays a full
@@ -63,7 +66,7 @@ The other command-line surfaces were second paths and are now gated:
 the other target, so showing it is a `count` release on that target. A COULD NOT RUN after a label was read is a verdict
 bit on the target.
 
-**The feedback split** is `court/display.py`, unchanged: see `docs/court_rehearsal.md`. A case's `checks_in_full` lists the
+**The feedback split** is `court/display.py`: see `docs/court_rehearsal.md`, which also says why K2 and K8 are withheld. A case's `checks_in_full` lists the
 independent checks by plain name; their reasons are in `technical`. The bundle holds the labels, so the rerun command
 appears only with the autopsy. A reviewer's file before retirement has the verdict, badges and Story but no rerun.
 
@@ -97,9 +100,8 @@ that decision would change those tests. Retirement remains `chh court retire TAR
 
 ## Transport
 
-GOAL 18.7 lists HTTPS on localhost and WebSocket under the UI stack, and 18.5 asks for a Python doorway, so the transport
-is left to the UI stage. No web, WebSocket or TLS library is installed. When it is built it must bind to localhost only and
-must call this class and nothing else.
+`experience/server.py`, standard library only: HTTP on 127.0.0.1 and server-sent events, calling this class and nothing else.
+docs/ui.md says why this differs from GOAL 18.7 (HTTPS, WebSocket) and how other websites are kept out.
 
 ## Limits
 

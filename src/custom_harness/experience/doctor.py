@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..backup import upgrade_status
 from ..court import health as H
 from ..court import sealed as Z
 from ..court.display import TRUTH_INDEPENDENT
@@ -120,6 +121,16 @@ def _health(store: EvidenceStore) -> Check:
     return Check("Court health run", OK, "A passing run exists for this Court version.")
 
 
+def _format(store: EvidenceStore) -> Check:
+    state = upgrade_status(Path(store.root))
+    if state == "current":
+        return Check("Stored data", OK, "The store is in the format this code expects.")
+    if state == "older":
+        return Check("Stored data", MISSING, "The store has not been upgraded.",
+                     "chh exp upgrade --backup-to FOLDER --by NAME", WHEN_USED)
+    return Check("Stored data", MISSING, "The store is newer than this code.", "Update the code.")
+
+
 def _dataset(store: EvidenceStore) -> Check:
     if any(r.get("event") == "sealed" for r in store.records(Z.RECORD_KIND)):
         return Check("Sealed dataset", OK, "A project is sealed.", None, SEALED_TRACK)
@@ -150,7 +161,7 @@ def doctor(store: EvidenceStore, *, docker: DockerCLI | None = None, environ: Ma
                   "Read TRUTH_INDEPENDENT in src/custom_harness/court/display.py and decide it is right."),
             Check("Public random source", YOURS, "Typed by a person; code does not check it offline.",
                   "Pick a drand round that has not happened yet: https://drand.love (see the checklist).", WHEN_ASKED),
-            _dataset(store), _os_user(truth_root())]
+            _dataset(store), _os_user(truth_root()), _format(store)]
 
 
 def render(checks: list[Check]) -> str:

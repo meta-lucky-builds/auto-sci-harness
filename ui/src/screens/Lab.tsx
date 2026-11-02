@@ -36,6 +36,7 @@ function Workspace({ sid }: { sid: string }) {
     </div>
     <Loaded state={lab}>{(l) => <>
       <p className="sub">{l.notice}</p>
+      <p className="small muted">{l.spending}</p>
       <div className="row small muted">
         <span>Runs <Num n={l.runs} /></span><span>Steers <Num n={l.steers} /></span>
         <span>Web <Num n={l.web_connections} /></span>

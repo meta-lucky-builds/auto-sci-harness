@@ -535,6 +535,10 @@
    "session_id": {
     "title": "Session Id",
     "type": "string"
+   },
+   "spending": {
+    "title": "Spending",
+    "type": "string"
    }
   },
   "required": [
@@ -542,7 +546,8 @@
    "finished",
    "reply",
    "actions",
-   "notice"
+   "notice",
+   "spending"
   ],
   "title": "Explored",
   "type": "object"
@@ -961,6 +966,10 @@
     "title": "Session Id",
     "type": "string"
    },
+   "spending": {
+    "title": "Spending",
+    "type": "string"
+   },
    "steers": {
     "$ref": "#/$defs/Number"
    },
@@ -979,7 +988,8 @@
    "steers",
    "web_connections",
    "cost_usd",
-   "costs_unknown"
+   "costs_unknown",
+   "spending"
   ],
   "title": "LabView",
   "type": "object"
@@ -2396,6 +2406,10 @@
    "session_id": {
     "title": "Session Id",
     "type": "string"
+   },
+   "spending": {
+    "title": "Spending",
+    "type": "string"
    }
   },
   "required": [
@@ -2404,7 +2418,8 @@
    "sent",
    "reply",
    "court_results_seen",
-   "note"
+   "note",
+   "spending"
   ],
   "title": "Steered",
   "type": "object"
