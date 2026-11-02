@@ -107,7 +107,7 @@ def lab_csv() -> bytes:
 
 
 def _home(session_id: str) -> Path:
-    """The researcher's own copies, outside the lab root: `freeze` refuses a request file an agent could have written."""
+    """The researcher's own copies, outside the lab root: `freeze` refuses a request file an agent could have made."""
     path = data_dir() / "toy" / session_id
     path.mkdir(parents=True, exist_ok=True)
     return path

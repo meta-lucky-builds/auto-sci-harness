@@ -61,7 +61,8 @@ OWN_STEPS = {"needs_beacon": "chh exp mint {case} --beacon VALUE", "ready_to_run
              "outcome_recorded": "chh exp case {case}",
              "needs_role_approval": "chh approve-role {target} --approver NAME"}
 REFUSED: tuple[type[Exception], ...] = (
-    AdapterRefused, C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError, FileNotFoundError,
+    AdapterRefused, C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError,
+    FileNotFoundError,
     HumanActionRefused, InfraError, LabError, LabWallError, P.PromoteError, R.RehearsalRefused, T.TraceRefused,
     Z.SealRefused)
 
