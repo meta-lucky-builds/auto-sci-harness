@@ -53,7 +53,8 @@ export function IdeaGraph({ tree, root, compact, selected, onSelect, onFrame, la
     for (const p of places.values()) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); }
     if (y0 === Infinity) { y0 = 0; y1 = 0; }
     const right = compact ? 150 : 230, pad = compact ? 16 : 44;
-    v.tk = Math.min(compact ? 1.25 : 1.15, (w - pad * 2) / (x1 - x0 + right), (h - pad * 2) / (y1 - y0 + 30 || 1));
+    const room = Math.min(compact ? 1.25 : 1.15, (w - pad * 2) / (x1 - x0 + right), (h - pad * 2) / (y1 - y0 + 30 || 1));
+    v.tk = compact ? room : Math.max(0.6, room); // on a small screen the words stay readable and the tree pans
     v.tx = pad - x0 * v.tk;
     v.ty = h / 2 - ((y0 + y1) / 2) * v.tk;
   };

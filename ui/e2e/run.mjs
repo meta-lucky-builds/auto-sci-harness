@@ -132,8 +132,9 @@ try {
 
   await step("every number is a link", async () => {
     await page.locator("button.num").first().click();
-    await page.getByLabel("What this number rests on").waitFor();
-    await page.getByRole("button", { name: "Close" }).click();
+    const sheet = page.getByLabel("What this number rests on");
+    await sheet.waitFor();
+    await sheet.getByRole("button", { name: "Close" }).click();
   });
 
   await step("Rehearse runs and exports a light figure", async () => {
@@ -202,7 +203,7 @@ try {
   await step("the Record shows only what was opened", async () => {
     await page.goto(`${BASE}/#/record`);
     await page.getByRole("heading", { name: "Record" }).waitFor();
-    await page.getByLabel("Search").fill("mixup");
+    await page.getByLabel("Search").fill("rare columns");
     await page.waitForFunction(() => document.querySelectorAll(".dead li").length === 1);
     await page.getByLabel("Search").fill("");
     await page.locator(".outcomes .state", { hasText: "NOT CERTIFIED" }).waitFor();

@@ -143,25 +143,25 @@ function Workspace({ sid }: { sid: string }) {
             {error ? <Problem error={error} /> : null}
           </section>
         </aside>
+        {drawer && <aside className="drawer" aria-label="Literature">
+          <div className="row spread"><h2>Literature</h2><button type="button" className="copy" onClick={() => setDrawer(false)}>Close</button></div>
+          <Loaded state={log}>{(g) => <>
+            {g.reading.length === 0 && <p className="muted">Nothing searched yet.</p>}
+            <ul className="plain">{g.reading.map((r, i) => <li key={i} className="hair" data-t="kind:web">{r.query}
+              <div className="muted small">{r.source}, <Num n={r.found} /> found</div></li>)}</ul>
+            {g.web.length > 0 && <><h2>Sites reached</h2>
+              <ul className="plain small">{g.web.map((h) => <li key={h} className="hair">{h}</li>)}</ul></>}
+          </>}</Loaded>
+        </aside>}
       </div>
 
-      {drawer && <aside className="drawer" aria-label="Literature">
-        <div className="row spread"><h2>Literature</h2><button type="button" className="copy" onClick={() => setDrawer(false)}>Close</button></div>
-        <Loaded state={log}>{(g) => <>
-          {g.reading.length === 0 && <p className="muted">Nothing searched yet.</p>}
-          <ul className="plain">{g.reading.map((r, i) => <li key={i} className="hair" data-t="kind:web">{r.query}
-            <div className="muted small">{r.source}, <Num n={r.found} /> found</div></li>)}</ul>
-          {g.web.length > 0 && <><h2>Sites reached</h2>
-            <ul className="plain small">{g.web.map((h) => <li key={h} className="hair">{h}</li>)}</ul></>}
-        </>}</Loaded>
-      </aside>}
 
       <footer className="lab-foot">
         <Scrubber lines={lines} at={at} live={!replaying} playing={playing}
           onAt={(n) => { setPlaying(false); setReplay(n >= lines.length ? null : n); }}
           onLive={() => { setPlaying(false); setReplay(null); }}
           onReplay={() => { if (calm()) { setReplay(null); return; } setChosen(null); setReplay(0); setPlaying(true); }} />
-        <p className="spend small muted">{replaying ? "Replaying from the Story. Nothing runs." : lab.data?.spending}</p>
+        <p className={`spend small muted ${replaying ? "replaying" : ""}`}>{replaying ? "Replaying from the Story. Nothing runs." : lab.data?.spending}</p>
       </footer>
     </div>
   );
@@ -181,7 +181,7 @@ function RunList({ lines, keys }: { lines: LabLine[]; keys: string[] }) {
   return (
     <ol className="run-list" ref={box}>{list.map((r) => (
       <li key={r.cmd} data-k={r.cmd} data-line data-t={keys[r.i]} className={r.result ? "" : "running"}>
-        <code title={r.cmd}>{r.cmd.length > 25 ? `...${r.cmd.slice(-22)}` : r.cmd}</code><span>{r.result ?? "running"}</span>
+        <code title={r.cmd}>{r.cmd.length > 22 ? `...${r.cmd.slice(-19)}` : r.cmd}</code><span>{r.result ?? "running"}</span>
       </li>))}</ol>);
 }
 

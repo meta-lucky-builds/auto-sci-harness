@@ -26,8 +26,12 @@ function useHash(): string {
     const on = () => {
       const next = window.location.hash;
       const change = () => flushSync(() => setHash(next));
-      const go = (document as Document & { startViewTransition?: (f: () => void) => unknown }).startViewTransition;
-      if (go && !calm()) go.call(document, change); else change();
+      const go = (document as Document & { startViewTransition?: (f: () => void) => ViewTransition }).startViewTransition;
+      if (go && !calm()) {
+        const moving = go.call(document, change);
+        moving.ready.catch(() => undefined); // a second move in the same moment skips the first; the page has still changed
+        moving.finished.catch(() => undefined);
+      } else change();
     };
     window.addEventListener("hashchange", on);
     return () => window.removeEventListener("hashchange", on);

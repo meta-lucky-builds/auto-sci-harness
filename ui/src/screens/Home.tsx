@@ -67,6 +67,9 @@ export function Home() {
   const empty = sessions.data?.sessions.length === 0 && cases.data?.cases.length === 0 && frozen.data?.items.length === 0;
   const trust = useLoad(() => (empty ? api.trust() : Promise.resolve(null)), [empty]);
   const first = sessions.data?.sessions[0];
+  // Lists follow the session live. They hold only where each case stands: reading them opens nothing.
+  useEffect(() => (first ? watchLab(first.session_id, () => { void waiting.reload(); void cases.reload(); void frozen.reload(); }) : undefined),
+    [first?.session_id, waiting.reload, cases.reload, frozen.reload]); // eslint-disable-line react-hooks/exhaustive-deps
   const need = waiting.data?.total;
 
   if (empty) return <><h1 className="eyebrow">Today</h1><Dark trust={trust.data} /></>;

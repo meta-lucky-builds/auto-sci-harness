@@ -27,7 +27,9 @@ async function answer<R>(res: Promise<Response>): Promise<R> {
 
 function get<R>(name: string, query: Record<string, string | undefined> = {}): Promise<R> {
   const q = new URLSearchParams(Object.entries(query).filter((e): e is [string, string] => e[1] !== undefined));
-  return answer<R>(fetch(`/api/${name}${q.size ? `?${q}` : ""}`));
+  const url = `/api/${name}${q.size ? `?${q}` : ""}`;
+  // A read changes nothing, so one refused connection is tried again: a screen sends several reads at once.
+  return answer<R>(fetch(url).catch(() => new Promise<Response>((ok, no) => { setTimeout(() => fetch(url).then(ok, no), 150); })));
 }
 
 function post<R>(name: string, body: unknown): Promise<R> {

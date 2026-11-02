@@ -206,8 +206,8 @@ label.check input { width: auto; display: inline; accent-color: var(--text); }
 .runs h2, .story-live h2 { margin-bottom: 8px; }
 .run-list { list-style: none; margin: 0; padding: 0; height: 142px; overflow: hidden; }
 .run-list li { display: flex; justify-content: space-between; gap: 14px; font: 400 12px/1.65 var(--mono); }
-.run-list code { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.run-list span { white-space: nowrap; }
+.run-list code { flex: 1; min-width: 0; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.run-list span { white-space: nowrap; flex: none; }
 .run-list .running span, .run-list .running code { color: var(--amber); }
 .story-live { padding: 14px 20px 12px; min-height: 0; display: flex; flex-direction: column; }
 .log { flex: 1; min-height: 0; overflow: auto; font: 400 12px/1.5 var(--mono); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
@@ -239,7 +239,8 @@ label.check input { width: auto; display: inline; accent-color: var(--text); }
 .live-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--line-lit); margin-right: 7px; vertical-align: 1px; }
 .is-live .live-dot { background: var(--amber); animation: beat 1.6s ease-in-out infinite; }
 @keyframes beat { 50% { opacity: .35; } }
-.drawer { position: fixed; right: 0; top: 52px; bottom: 26px; width: min(400px, 100%); z-index: 6; background: var(--court-panel); border-left: 1px solid var(--line); padding: 20px; overflow: auto; animation: slide .3s var(--ease) both; }
+.lab-floor { position: relative; }
+.drawer { position: absolute; right: 0; top: 0; bottom: 0; width: min(400px, 100%); z-index: 6; background: var(--court-panel); border-left: 1px solid var(--line); padding: 20px; overflow: auto; animation: slide .3s var(--ease) both; }
 @keyframes slide { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 .drawer li { padding: 10px 0; }
 .drawer h2 { margin-top: 18px; }
@@ -292,6 +293,7 @@ label.check input { width: auto; display: inline; accent-color: var(--text); }
 .happens { list-style: none; margin: 0 0 18px; padding: 0; font-size: 19px; letter-spacing: -.012em; }
 .happens li { display: grid; grid-template-columns: 34px minmax(0, 1fr); padding: 7px 0; align-items: baseline; }
 .strip, .ready-curve { display: block; width: 100%; height: auto; margin-bottom: 10px; }
+.ready .ready-curve, .ready table { max-width: 780px; }
 .ready table td, .ready table th, .seeds td, .seeds th { text-align: center; padding-right: 0; }
 .ready table th:first-child, .ready table td:first-child, .seeds th:first-child, .seeds td:first-child { text-align: left; font: 400 11px var(--mono); color: var(--text-2); width: 130px; text-transform: none; letter-spacing: 0; }
 .axis { stroke: var(--line); stroke-width: 1; }
@@ -377,7 +379,7 @@ thead th { border-top: 0; }
 .claim { color: var(--text-2); font-size: 14px; margin: 2px 0 7vh; max-width: 70ch; }
 .verdict-sentence { font-family: var(--serif); font-size: clamp(38px, 5.7vw, 92px); line-height: 1.04; letter-spacing: -.014em; margin: 0; max-width: 21em; font-weight: 400; }
 .verdict-line { height: 1px; background: var(--line); margin: 7vh 0 34px; max-width: 100%; }
-.verdict-line.earned { background: var(--earned); box-shadow: 0 0 18px var(--earned); }
+.verdict-line.earned { background: var(--earned); box-shadow: 0 0 1px var(--earned), 0 0 24px var(--earned); }
 .verdict-line.example { background: none; border-top: 1px dashed var(--text-2); }
 .measure { display: flex; gap: 72px; margin: 0 0 30px; }
 .measure dt { font: 400 10px var(--mono); letter-spacing: .07em; text-transform: uppercase; color: var(--text-2); }
@@ -414,7 +416,8 @@ body[data-mood="court"] .nav-mark { opacity: 0 !important; }
 @media (max-width: 1280px) {
   .lab-floor { grid-template-columns: minmax(0, 1fr) 340px; }
   .lab-foot { grid-template-columns: minmax(0, 1fr); }
-  .spend { display: none; }
+  .spend:not(.replaying) { display: none; }
+  .spend { text-align: left; }
   .gauges { gap: 22px; }
   .nav { gap: 16px; }
 }
