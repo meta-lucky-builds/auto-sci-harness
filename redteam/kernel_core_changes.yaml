@@ -186,3 +186,17 @@ changes:
   - run_id on prereg and certificate ledger entries (s4-kernel c648278)
   - ML/LP validation fixtures moved from kernel/ to verify/ (LOC)
   cooling_off_observed: false
+- fingerprint: 3c6702c7d9e40fd40cf6aa7a48ab36bf801bf7cc36bf446c7d37eaadcd75715f
+  kind: delegated
+  approver: owner, 2026-11-02
+  note: 'Typed by the orchestrator agent on the owner''s direct chat approval. The core fingerprint changed only through this
+    GOAL text, which reached the code line at merge c117dcd. Kernel source unchanged since b1ec458. Not a tightening: REPLICATED
+    no longer requires a different model family, and only VALIDATED is a finding. Cooling-off not observed. May be replaced
+    by a window record.'
+  recorded: '2026-11-02'
+  delegated_by: owner
+  basis: GOAL 18.4 item 5; 17.1 and 18.2 (owner decisions 2026-10-23)
+  changes:
+  - 'invariant 5 in GOAL section 10: three added lines state that a replicator must be a different agent, a different model
+    family is the stronger form and never required, and every badge records the families and common-mode risk'
+  cooling_off_observed: false
