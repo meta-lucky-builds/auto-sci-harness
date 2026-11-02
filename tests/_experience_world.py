@@ -27,6 +27,7 @@ lock: requirements.lock
 idea: radius
 claim: {metric: accuracy, min_effect: 0.1, probability: 0.6, seeds: [0, 1, 2], n_boot: 1000, resolve_by: 2030-01-01}
 budget: {timeout_s: 120}
+time_window: {start: 2024-01-01, end: 2025-12-31}
 """
 
 

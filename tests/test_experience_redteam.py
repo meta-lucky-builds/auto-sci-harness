@@ -368,7 +368,33 @@ def test_no_verb_can_grant():
     public = {n for n, _ in inspect.getmembers(Experience, inspect.isfunction) if not n.startswith("_")}
     assert public == {"whoami", "set_researcher", "waiting", "approve", "seal", "start", "lab", "explore", "steer",
                       "stop", "freeze", "rehearse", "rehearsal_details", "promote_preview", "promote", "mint",
-                      "run_case", "case", "technical", "cases", "share", "paper", "record", "resolve"}
+                      "run_case", "case", "technical", "cases", "share", "paper", "record", "resolve",
+                      # the screens' lists: read-only (test_the_lists_of_the_screens_write_nothing)
+                      "meta", "sessions", "lab_log", "frozen", "trust",
+                      # a person's steps, refused for an agent (test_the_new_steps_are_a_persons)
+                      "measure_prior", "future_data"}
+
+
+def test_the_lists_of_the_screens_write_nothing(w):
+    w.seal()
+    w.session()
+    w.freeze()
+    w.x.resolve(w.x.frozen().total.link)
+    rows = {k: len(w.store.records(k)) for k in ("experience_owner", "court_view", "court_case")}
+    ledger = len(w.store.ledger_rows())
+    for read in (w.x.meta, w.x.sessions, w.x.frozen, w.x.trust, lambda: w.x.lab_log("s-exp")):
+        read()
+    assert len(w.store.ledger_rows()) == ledger
+    assert rows == {k: len(w.store.records(k)) for k in rows}
+
+
+@pytest.mark.parametrize("step", ["measure_prior", "future_data"])
+def test_the_new_steps_are_a_persons(w, step, monkeypatch):
+    monkeypatch.setattr(guard, "require_human", lambda *a, **k: (_ for _ in ()).throw(guard.HumanActionRefused("no")))
+    monkeypatch.setattr(API, "require_human", guard.require_human)
+    arg = "p" if step == "measure_prior" else M.FutureDataIn(case_id="c", data_file="f", label_column="y")
+    with pytest.raises(Refused):
+        getattr(w.x, step)(arg)
 
 
 # ---------------------------------------------------------------- a human approval

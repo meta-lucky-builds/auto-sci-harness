@@ -198,14 +198,16 @@ def non_regression(sample: PairedSample, *, non_regression_eps: float = 0.0, max
 
 def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], *,
          non_regression_eps: float = 0.0, require_evolve_ci: bool = True, max_excluded_frac: float = 0.25,
-         min_units: int = 2, n_boot: int = 4000) -> GateDecision:
+         min_units: int = 2, n_boot: int = 4000, same_budget: PairedSample | list[float] | None = None) -> GateDecision:
     """Accept only if:
       0. alignment: each split has >= min_units valid paired units, and at most max_excluded_frac of
          its units were excluded for infrastructure failures (else the decision is not trustworthy:
          reject, fail closed; this also stops a candidate that breaks the environment from winning);
       1. evolve evidence: paired CI lower bound > 0 (if require_evolve_ci) — a real improvement. Pass a
          FRESH re-measurement here, never the race data the winner was selected on (winner's curse);
-      2. gate split (never shown to the proposer): mean diff > 0 and CI lower bound >= -eps — no regression.
+      2. gate split (never shown to the proposer): mean diff > 0 and CI lower bound >= -eps — no regression;
+      3. `same_budget` (GOAL 18.6): candidate minus the PARENT re-run with the candidate's budget (test-time scaling).
+         Its CI lower bound must be > 0, so a win that more compute alone gives is not an improvement.
     With few tasks these CIs are wide, so the gate is conservative by construction."""
     ev_s, gt_s = _as_sample(evolve), _as_sample(gate_)
     for name, smp in (("evolve", ev_s), ("gate", gt_s)):
@@ -229,6 +231,13 @@ def gate(evolve: PairedSample | list[float], gate_: PairedSample | list[float], 
     if not glo >= -non_regression_eps:
         return GateDecision(False, f"possible regression on gate split (CI lo={glo:.4g} < -{non_regression_eps})",
                             ev, gt)
+    if same_budget is not None:
+        sb = _as_sample(same_budget)
+        if len(sb.diffs) < min_units or not all(math.isfinite(d) for d in sb.diffs):
+            return GateDecision(False, f"same-budget baseline: only {len(sb.diffs)} valid paired units", ev, gt)
+        slo = paired_ci(sb.diffs, seed=3, n_boot=n_boot)[1]
+        if not slo > 0:
+            return GateDecision(False, f"no better than the parent at the same budget (CI lo={slo:.4g})", ev, gt)
     return GateDecision(True, "accepted: significant on evolve, non-regressing and positive on gate", ev, gt)
 
 

@@ -1,3 +1,4 @@
+<!-- Lab defaults: lab/defaults.py, docs/user_guide.md. Spending limits: lab/spending.py. -->
 # The Lab: full-capability exploration, walled off from the Court (GOAL §17)
 
 **Status (2026-11-02).** The code passed the full gate at `court-v1`, with a fake docker for the box. The Lab image exists

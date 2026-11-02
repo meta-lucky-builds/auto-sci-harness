@@ -318,7 +318,7 @@ def test_a_claim_audit_is_a_case_with_its_full_report(tmp_path):
 def test_every_waiting_kind_has_words():
     from custom_harness.human.queue import KIND_ORDER
     assert set(KIND_ORDER) <= set(W.WAITING)
-    assert {"needs_beacon", "needs_role_approval", "ready_to_run", "outcome_recorded"} == set(W.STEPS)
+    assert {"needs_beacon", "needs_data", "needs_role_approval", "ready_to_run", "outcome_recorded"} == set(W.STEPS)
 
 
 def test_resolve_refuses_what_is_not_a_link(w):

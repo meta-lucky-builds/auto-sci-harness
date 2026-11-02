@@ -341,6 +341,25 @@ def _noise_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]
     return rows
 
 
+def _gravity_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
+    """A parallel world: pull falls with distance to the power 2.5, not 2. The noise is synthetic: no real residuals."""
+    rows = []
+    for _ in range(n):
+        m1, m2, d = f.uniform(1, 10), f.uniform(1, 10), f.uniform(1, 5)
+        pull = math.log(m1 * m2) - 2.5 * math.log(d) + f.gauss(0, 0.3)
+        rows.append([_f(m1), _f(m2), _f(d), _f(f.gauss(0, 1)), str(int(pull > 0.2))])
+    return rows
+
+
+def _decay_rows(f: random.Random, lab: random.Random, n: int) -> list[list[str]]:
+    """A parallel world: decay with time to the power 1.5, not 1. The noise is synthetic: no real residuals."""
+    rows = []
+    for _ in range(n):
+        a, b, t = f.uniform(1, 10), f.uniform(0.2, 1.5), f.uniform(0, 3)
+        rows.append([_f(a), _f(b), _f(t), _f(f.gauss(0, 1)), _f(a * math.exp(-b * t ** 1.5) + f.gauss(0, 0.1))])
+    return rows
+
+
 @dataclass(frozen=True)
 class Family:
     rows: Rows
@@ -377,6 +396,15 @@ FAMILIES: dict[str, Family] = {
                            "Predict `y` from six Gaussian features; one pairwise interaction and one non-linearity "
                            "matter. Lower MAE is better.", "mae", "y", [*[f"x{i}" for i in range(1, 7)], "y"],
                            _fill(MEAN, "y")),
+    # parallel worlds (GOAL 18.6, UPGRADES N11): a known law changed, so recall from the literature cannot answer them
+    "parallel-gravity": Family(_gravity_rows, "A world with a changed force law (binary)",
+                               "Predict `label` (0/1): whether the pull between two bodies is strong. It depends on "
+                               "m1, m2 and d, by a law that is not the textbook one. n1 is noise.", "accuracy", "label",
+                               ["m1", "m2", "d", "n1", "label"], _fill(CENTROID, "label")),
+    "parallel-decay": Family(_decay_rows, "A world with a changed decay law (MAE)",
+                             "Predict the amount `y` left from a, b and t, by a law that is not the textbook one. n1 "
+                             "is noise. Lower MAE is better.", "mae", "y", ["a", "b", "t", "n1", "y"],
+                             _fill(MEAN, "y")),
     # genuinely null (see _noise_rows). NOT in SYNTHETIC: a suite gets it only with build_suite(null_families=...)
     # (owner decision: adding null tasks to the real pool, GOAL §13.8)
     "noise": Family(_noise_rows, "Binary labels from five features",

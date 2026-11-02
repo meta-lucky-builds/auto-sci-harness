@@ -30,6 +30,7 @@ from ..config import data_dir
 from ..court import display as D
 from ..court import health as H
 from ..court import minted as C
+from ..court import prior as Pr
 from ..court import rehearsal as R
 from ..court import sealed as Z
 from ..errors import InfraError
@@ -37,6 +38,7 @@ from ..figures.audit import FigureError
 from ..human.guard import HumanActionRefused, check_human_name, require_human
 from ..kerneld.hoststore import host_store
 from ..lab import promote as P
+from ..lab import defaults
 from ..lab import session as S
 from ..lab import trace as T
 from ..lab.agents import AdapterRefused, AgentOptions
@@ -61,13 +63,14 @@ SHARE_KIND = "experience_share"
 MAX_REPLY = 8000  # UNCALIBRATED (owner decision, GOAL 13.8): characters of an agent's reply on a view
 PREFIX = "chh://"
 OWN_STEPS = {"needs_beacon": "chh exp mint {case} --beacon VALUE", "ready_to_run": "chh exp run {case}",
+             "needs_data": "chh exp future-data {case} --data FILE --label-column COLUMN",
              "outcome_recorded": "chh exp case {case}",
              "needs_role_approval": "chh approve-role {target} --approver NAME"}
 REFUSED: tuple[type[Exception], ...] = (
     AdapterRefused, C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError,
     FileNotFoundError,
     HumanActionRefused, InfraError, LabError, LabWallError, P.PromoteError, R.RehearsalRefused, SettingsRefused,
-    SpendingRefused, T.TraceRefused, Z.SealRefused)
+    SpendingRefused, T.TraceRefused, Z.SealRefused, Pr.PriorRefused)
 
 
 class Refused(RuntimeError):
@@ -101,11 +104,13 @@ class Experience:
     factory for that root, and the default is the Court's network-free Docker sandbox."""
 
     def __init__(self, store: EvidenceStore, *, docker: DockerCLI | None = None,
-                 sandbox: Callable[[Path], Any] | None = None, environ: dict[str, str] | None = None):
+                 sandbox: Callable[[Path], Any] | None = None, environ: dict[str, str] | None = None,
+                 prior_source: Pr.PriorSource | None = None):
         self.store = host_store(store)
         self.docker = docker
         self.sandbox = sandbox
         self.environ = environ
+        self.prior_source = prior_source
 
     # ---------------------------------------------------------------- whoami
     def whoami(self) -> M.Identity:
@@ -220,7 +225,13 @@ class Experience:
                                                           local_model_server=req.local_model_server),
                       cred, session_id=req.session_id, docker=self.docker, environ=self.environ, project=req.project)
         self._own("session", rec["session_id"], name)
+        if req.lab_defaults:
+            defaults.write(S.workspace_of(rec["session_id"]), self._dead_idea_notes())
         return self._session(rec["session_id"])
+
+    def _dead_idea_notes(self) -> list[dict[str, str]]:
+        """Abandoned Lab ideas only (source `idea`): a verdict never reaches a box this way."""
+        return [{"title": d.title, "reason": d.reason} for d in self._dead_ideas()]
 
     def _facts_session(self, sid: str) -> dict[str, Any]:
         tree = T.idea_tree(self.store, sid)
@@ -358,7 +369,7 @@ class Experience:
         return None if pairs is None else (int(pairs[0]), int(pairs[1]), int(pairs[2]), int(pairs[3]))
 
     def _route_looks(self, req: M.PromoteIn) -> M.Number:
-        if req.route != "sealed":
+        if req.route != "sealed":  # a new target: generated and future data do not exist yet
             return num("target", "new", "looks", 1)
         seal = Z.sealed_record(self.store, str(req.project))
         if seal is None:
@@ -370,9 +381,32 @@ class Experience:
     def promote_preview(self, req: M.PromoteIn) -> M.PromotePreview:
         """What promoting would do: readiness, looks and the steps. Registers nothing."""
         ready = self._readiness(req.promotion_id, R.readiness(self._claim_part(req.promotion_id), self._pairs(req)))
+        prior = Pr.measured(self.store, req.promotion_id)
         return M.PromotePreview(promotion_id=req.promotion_id, route=req.route, finding_possible=req.route != "public",
                                 readiness=ready, looks_remaining=self._route_looks(req),
-                                what_happens=W.PROMOTE_STEPS[req.route])
+                                what_happens=W.PROMOTE_STEPS[req.route],
+                                no_data_prior=None if prior is None else num("prior", req.promotion_id, "prior",
+                                                                             prior["prior"]),
+                                prior_note=W.PRIOR_NOTE if prior else W.NO_PRIOR)
+
+    @refusing
+    def measure_prior(self, promotion_id: str) -> M.Number:
+        """A pinned model's chance for the outcome, from the claim's words alone. It can only make the test harder.
+        No source is wired in by default: nothing here calls a model unless a source is passed to `Experience`."""
+        self._human()
+        if self.prior_source is None:
+            raise Refused("NoPriorSource", "No model is set up to measure this, so nothing was called.")
+        req = P.PromoteRequest.model_validate(P._promotion(self.store, promotion_id)[0]["request"])
+        body = Pr.measure(self.store, promotion_id, self.prior_source, title=req.title, sentence=req.sentence,
+                          metric=req.claim.metric, min_effect=req.claim.min_effect)
+        return num("prior", promotion_id, "prior", body["prior"])
+
+    @refusing
+    def future_data(self, req: M.FutureDataIn) -> M.Case:
+        """Hand over a future-data case's test data, once it exists. kerneld reads the file; this process never does."""
+        self._human()
+        C.arrive(self.store, req.case_id, Path(req.data_file), label_column=req.label_column)
+        return self.case(req.case_id)
 
     @refusing
     def promote(self, req: M.PromoteIn) -> M.Promoted:
@@ -384,7 +418,9 @@ class Experience:
             self._own("audit", hand["audit_id"], name)
             return M.Promoted(promotion_id=pid, case_id=hand["audit_id"], second_case_id=None, route=req.route,
                               next_step=W.PUBLIC_NEXT, command=hand["next"][0])
-        if req.route == "generated":
+        if req.route == "future":
+            body = C.register_future(self.store, pid, str(req.project), n_test=int(str(req.n_test)))
+        elif req.route == "generated":
             body = C.register_promotion(self.store, pid, str(req.family), beacon_round=str(req.beacon_round),
                                         dev_pairs=self._pairs(req), n_test=req.n_test,
                                         revalidation_round=req.second_round)
@@ -432,8 +468,10 @@ class Experience:
         route = str(v["route"])
         kind = "audit" if "audit_id" in v else "case"
         retro = route == "retrospective" or bool(v.get("retrospective"))
-        scope = W.scope_sentence(claim, family=pub.get("family"), route="retrospective" if retro else route)
-        verdict: Any = v["verdict"] if "verdict" in v else W.verdict_of(v.get("label"), str(v["state"]))
+        scope = W.scope_sentence(claim, family=pub.get("family"), route="retrospective" if retro else route,
+                                 window=pub.get("time_window"))
+        verdict: Any = v["verdict"] if "verdict" in v else W.verdict_of(v.get("label"), str(v["state"]),
+                                                                        v.get("reason_class"))
         held = list(v.get("held", []))
         return M.Case(
             case_id=cid, title=str(claim["title"]), sentence=str(claim["sentence"]), scope=scope, verdict=verdict,
@@ -494,7 +532,8 @@ class Experience:
         for c in self._my_cases():
             cid = str(c["case_id"])
             shown = D.seen(self.store, cid, me)
-            state = W.verdict_of(shown["label"], str(shown["label"])) if shown else W.STEPS[D.progress(self.store, cid)]
+            state = W.verdict_of(shown["label"], str(shown["label"]), shown.get("reason_class")) if shown \
+                else W.STEPS[D.progress(self.store, cid)]
             rows.append(M.CaseLine(case_id=cid, title=str(c["claim"]["title"]), state=str(state),
                                    looks_remaining=num("case", cid, "looks_remaining",
                                                        D.looks_remaining(self.store, c))))
@@ -565,7 +604,7 @@ class Experience:
             if shown is None:
                 continue
             title = str(c["claim"]["title"])
-            verdict = str(W.verdict_of(shown["label"], str(shown["label"])))
+            verdict = str(W.verdict_of(shown["label"], str(shown["label"]), shown.get("reason_class")))
             code = shown.get("reason_class")
             outcomes.append(M.Outcome(case_id=c["case_id"], title=title, verdict=verdict,
                                       badges=str(shown.get("badge")), reason_code=code))
@@ -655,6 +694,8 @@ class Experience:
             return {"looks": 1 if ident == "new" else D.looks_on_target(self.store, ident)}
         if kind == "viewer":
             return {"court_results": D.results_seen(self.store, ident)}
+        if kind == "prior":
+            return {"prior": (Pr.measured(self.store, ident) or {}).get("prior")}
         if kind == "record":
             t = D.track_record(self.store, ident)
             return {"claims": t["n"], "mean_squared_error": t["brier"], "evidence_bits": t["evidence_bits"],

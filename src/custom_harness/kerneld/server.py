@@ -202,6 +202,11 @@ class Server:
                                         P.arg(args, "family", str), P.arg(args, "n_train", int),
                                         P.arg(args, "n_test", int), P.arg(args, "beacon_round", str),
                                         P.arg(args, "beacon_value", str), P.arg(args, "anchor_file", str))
+            if kind == "future_heldout":
+                return I.future_heldout(self.vault, run_id, tok.dataset_id, str(tok.claim_hash),
+                                        P.arg(args, "file", str), P.arg(args, "project", str),
+                                        P.arg(args, "label_column", str), P.arg(args, "n_test", int),
+                                        P.arg(args, "anchor_file", str))
             if kind == "sealed_split":
                 return I.sealed_split(self.vault, run_id, tok.dataset_id, P.arg(args, "file", str),
                                       P.arg(args, "label_column", str), P.arg(args, "n_parts", int),

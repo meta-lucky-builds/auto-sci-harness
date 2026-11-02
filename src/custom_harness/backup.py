@@ -14,14 +14,13 @@ import hashlib
 import json
 import shutil
 import sqlite3
-import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .human.guard import HumanActionRefused, require_human
-from .kernel.ledger import Ledger, verify_chain
+from .kernel.ledger import Entry, verify_chain
 from .lab.walls import lab_root, overlaps
 from .store import EvidenceStore
 
@@ -66,22 +65,30 @@ def _safe_place(path: Path, store_root: Path | None = None) -> None:
 
 def _copy_db(src: Path, dst: Path) -> None:
     """SQLite's own backup: a consistent copy, even while another process writes."""
-    with sqlite3.connect(f"file:{src}?mode=ro", uri=True, timeout=30) as a, sqlite3.connect(dst) as b:
+    a, b = _readonly(src), sqlite3.connect(dst)
+    try:
         a.backup(b)
-    a.close()
-    b.close()
+    finally:
+        a.close()
+        b.close()
+
+
+def _readonly(db: Path) -> sqlite3.Connection:
+    return sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
 
 
 def _ledger_problems(db: Path) -> tuple[list[str], int]:
-    """The ledger's chain in a throwaway copy, so opening it cannot change the backup."""
-    with tempfile.TemporaryDirectory(prefix="chh-backup-") as tmp:
-        shutil.copy2(db, Path(tmp) / DB)
-        st = EvidenceStore(Path(tmp))
-        try:
-            entries = Ledger(st).entries()
-            return verify_chain(entries, full=True), len(entries)
-        finally:
-            st.close()
+    """The whole chain, from the rows themselves, read-only: opening a store here would be a second store route."""
+    con = _readonly(db)
+    try:
+        rows = con.execute("SELECT seq, kind, body, prev, hash, at FROM ledger ORDER BY seq").fetchall()
+    finally:
+        con.close()
+    try:
+        entries = [Entry.from_row(r) for r in rows]
+    except ValueError as e:
+        return [f"unreadable ledger row: {type(e).__name__}"], len(rows)
+    return verify_chain(entries, full=True), len(entries)
 
 
 def backup(store: EvidenceStore, out_dir: Path, by: str) -> dict[str, Any]:
@@ -143,10 +150,11 @@ def restore(path: Path, to: Path, by: str) -> dict[str, Any]:
 
 # ---------------------------------------------------------------- safe upgrades of stored data
 def store_format(root: Path) -> int:
-    with sqlite3.connect(f"file:{Path(root) / DB}?mode=ro", uri=True, timeout=30) as c:
-        got = int(c.execute("PRAGMA user_version").fetchone()[0])
-    c.close()
-    return got
+    con = _readonly(Path(root) / DB)
+    try:
+        return int(con.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        con.close()
 
 
 def _mark_format(db: sqlite3.Connection) -> None:

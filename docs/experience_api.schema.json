@@ -711,6 +711,30 @@
   "title": "FrozenIdeas",
   "type": "object"
  },
+ "FutureDataIn": {
+  "additionalProperties": false,
+  "properties": {
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "data_file": {
+    "title": "Data File",
+    "type": "string"
+   },
+   "label_column": {
+    "title": "Label Column",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "data_file",
+   "label_column"
+  ],
+  "title": "FutureDataIn",
+  "type": "object"
+ },
  "Identity": {
   "additionalProperties": false,
   "properties": {
@@ -1204,7 +1228,8 @@
     "enum": [
      "generated",
      "sealed",
-     "public"
+     "public",
+     "future"
     ],
     "title": "Route",
     "type": "string"
@@ -1336,6 +1361,20 @@
    "looks_remaining": {
     "$ref": "#/$defs/Number"
    },
+   "no_data_prior": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/Number"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "prior_note": {
+    "title": "Prior Note",
+    "type": "string"
+   },
    "promotion_id": {
     "title": "Promotion Id",
     "type": "string"
@@ -1361,7 +1400,9 @@
    "finding_possible",
    "readiness",
    "looks_remaining",
-   "what_happens"
+   "what_happens",
+   "no_data_prior",
+   "prior_note"
   ],
   "title": "PromotePreview",
   "type": "object"
@@ -2257,6 +2298,11 @@
      }
     ],
     "default": null
+   },
+   "lab_defaults": {
+    "default": true,
+    "title": "Lab Defaults",
+    "type": "boolean"
    },
    "local_model_server": {
     "default": false,

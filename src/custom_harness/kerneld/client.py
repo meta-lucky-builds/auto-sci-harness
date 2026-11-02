@@ -296,6 +296,15 @@ class RunHandle:
         return {"n_train": int(res["n_train"]), "n_test": int(res["n_test"]), "task_id": str(res["task_id"]),
                 "mint_seq": int(res["mint_seq"]), "anchor_length": int(res["anchor_length"])}
 
+    def ingest_future_heldout(self, claim_hash: str, target: str, *, file: Path | str, project: str, label_column: str,
+                              n_test: int, anchor_file: Path | str) -> dict[str, Any]:
+        """Register a future-data case's target IN kerneld, after its claim is frozen and anchored: kerneld reads the
+        file, this process only names it. Returns {n_test, data_sha256}."""
+        res = self._ingest("future_heldout", target, bind_claim=claim_hash, file=str(Path(file).resolve()),
+                           project=project, label_column=label_column, n_test=int(n_test),
+                           anchor_file=str(Path(anchor_file).resolve()))
+        return {"n_test": int(res["n_test"]), "data_sha256": str(res["data_sha256"])}
+
     def ingest_sealed_split(self, project: str, file: Path | str, *, label_column: str, n_parts: int,
                             rows_per_part: int, beacon_round: str, beacon_value: str) -> dict[str, Any]:
         """Seal part of a project's dataset IN kerneld (kerneld/seal.py): kerneld reads the file, this process only

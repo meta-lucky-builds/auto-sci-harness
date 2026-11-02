@@ -198,7 +198,8 @@ class ScriptedExperience:
     def promote_preview(self, req: M.PromoteIn) -> M.PromotePreview:
         return M.PromotePreview(promotion_id=req.promotion_id, route=req.route, finding_possible=req.route != "public",
                                 readiness=self._readiness(), looks_remaining=self._n("looks-new", 1),
-                                what_happens=W.PROMOTE_STEPS[req.route])
+                                what_happens=W.PROMOTE_STEPS[req.route], no_data_prior=self._n("prior", 0.22),
+                                prior_note=W.PRIOR_NOTE)
 
     def promote(self, req: M.PromoteIn) -> M.Promoted:
         return M.Promoted(promotion_id=req.promotion_id, case_id="c-smoothing", second_case_id=None, route=req.route,

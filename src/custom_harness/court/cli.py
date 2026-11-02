@@ -57,8 +57,8 @@ def add_parsers(sub: Any) -> None:
     ru.add_argument("--dev-sandbox", action="store_true", help="UNISOLATED: trusted test code only")
     rp = s.add_parser("replicate", help="independent re-implementation from the claim text (invariant 5)")
     rp.add_argument("case")
-    rp.add_argument("--replicator", required=True, help="backend kind, as `chh run --role` (codex[:model] | "
-                                                        "openai:<model> | ollama:<model> | mock)")
+    rp.add_argument("--replicator", help="backend kind, as `chh run --role` (codex[:model] | openai:<model> | "
+                                         "ollama:<model> | mock); default: `chh exp setup --replicator`")
     rp.add_argument("--beacon-round", required=True)
     rp.add_argument("--dev-pairs")
     rp.add_argument("--n-test", type=int)
@@ -134,7 +134,11 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
         elif a.court_cmd == "replicate":
             from ..cli import _backend  # local: the root CLI imports this module
             from .replicate import replicate
-            _print(replicate(store, a.case, _backend(a.replicator), beacon_round=a.beacon_round,
+            from ..settings import load
+            kind = a.replicator or load()["replicator"]
+            if not kind:
+                raise SystemExit("Name a replicator: --replicator KIND, or `chh exp setup --replicator KIND`.")
+            _print(replicate(store, a.case, _backend(kind), beacon_round=a.beacon_round,
                              dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test))
         elif a.court_cmd == "level":
             ref = a.ref

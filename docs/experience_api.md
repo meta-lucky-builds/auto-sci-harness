@@ -87,8 +87,11 @@ Identifiers, commands and the researcher's own words are skipped. `technical` is
 the types, and the session test resolves every link and compares the value. An unknown cost is `None`, never zero.
 
 **Verdict words.** CERTIFIED only if the Kernel's label says so; REJECTED reads NOT CERTIFIED with one closed reason code.
-A Court case never reads INCONCLUSIVE yet: the difference from NOT CERTIFIED depends on the interval, which the feedback
-split withholds, and N17 (P1) has not been built. A certified claim that is not VALIDATED says it is not a finding.
+A case reads INCONCLUSIVE when the effect was not shown but the claimed size is still inside the interval, so the test
+could not tell. It is one more closed reason class (`TOO_CLOSE_TO_CALL`): it says on which side of the claimed size the top
+of the interval fell, with no number, released as a `count`. It only ever narrows a failure, and the Kernel's label does not
+change. N17's list of expected units is not built: that is radar item U6, an owner decision. A certified claim that is not
+VALIDATED says it is not a finding.
 
 **One-look targets stay a human step.** The owner asked for a target to retire by itself once its one look was spent, if
 that weakens nothing. It was built and then taken out on 2026-11-02, because it does weaken something: four red-team tests
@@ -111,4 +114,6 @@ docs/ui.md says why this differs from GOAL 18.7 (HTTPS, WebSocket) and how other
   (`court/rehearsal.py`). Noise added, columns added or rounding below three decimals still pass it.
 - A Claim Audit's COULD NOT RUN shows its report with no release: it names no target to release on.
 - `chh reproduce` of a bundle file already on disk is not gated; the file itself holds what it holds (docs/court_rehearsal.md).
-- The measured no-data prior of readiness is P1. Readiness is power only, UNCALIBRATED, and can only warn.
+- The measured no-data prior (`court/prior.py`) is built and tested with a scripted model. No real model is set up, so
+  `measure_prior` refuses until a source is passed to `Experience`. Readiness itself is power only, UNCALIBRATED, and can
+  only warn.

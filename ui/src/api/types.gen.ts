@@ -115,6 +115,12 @@ export interface FrozenIdeas {
   total: Number;
 }
 
+export interface FutureDataIn {
+  case_id: string;
+  data_file: string;
+  label_column: string;
+}
+
 export interface Idea {
   idea_id: string;
   status: string;
@@ -197,7 +203,7 @@ export interface PromoteIn {
   n_test?: number | null;
   project?: string | null;
   promotion_id: string;
-  route: "generated" | "sealed" | "public";
+  route: "generated" | "sealed" | "public" | "future";
   second_part?: boolean;
   second_round?: string | null;
   targets_file?: string | null;
@@ -206,6 +212,8 @@ export interface PromoteIn {
 export interface PromotePreview {
   finding_possible: boolean;
   looks_remaining: Number;
+  no_data_prior: Number | null;
+  prior_note: string;
   promotion_id: string;
   readiness: Readiness;
   route: string;
@@ -334,6 +342,7 @@ export interface StartIn {
   agent: string;
   box_env?: string | null;
   credential?: CredentialIn | null;
+  lab_defaults?: boolean;
   local_model_server?: boolean;
   model?: string | null;
   project?: string | null;

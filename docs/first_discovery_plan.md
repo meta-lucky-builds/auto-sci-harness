@@ -4,7 +4,7 @@ Two tracks, in order. The first proves the route. The second can carry a headlin
 
 UPGRADES N12 lists three tracks (minted, sealed, future). GOAL 18.4 item 4 is the owner's decision and has two: a minted
 toy first, then the headline on sealed real data or future data. This plan follows GOAL, so sealed and future are the two
-options of the second track. No future-data project template exists yet (P1), so sealed data is the only option that
+options of the second track. Future data is now a route (`--route future`), untested with real data, so sealed data remains the option that
 can start now.
 
 ## Track 1: minted toy, to prove the route

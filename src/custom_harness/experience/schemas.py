@@ -52,6 +52,7 @@ class StartIn(Model):
     box_env: str | None = None
     credential: CredentialIn | None = None
     local_model_server: bool = False  # opt-in: the box may reach one port of this machine (docs/lab.md section 11)
+    lab_defaults: bool = True  # optional skills and on-demand dead ends in `.lab/` (lab/defaults.py); nothing is injected
 
 
 class ExploreIn(Model):
@@ -79,7 +80,7 @@ class RehearseIn(Model):
 
 class PromoteIn(Model):
     promotion_id: str
-    route: Literal["generated", "sealed", "public"]
+    route: Literal["generated", "sealed", "public", "future"]
     family: str | None = None  # generated
     beacon_round: str | None = None  # generated
     second_round: str | None = None  # generated: a second fresh test, fixed now
@@ -91,11 +92,18 @@ class PromoteIn(Model):
 
     @model_validator(mode="after")
     def _route_fields(self) -> PromoteIn:
-        need = {"generated": ("family", "beacon_round"), "sealed": ("project",), "public": ("targets_file",)}
+        need = {"generated": ("family", "beacon_round"), "sealed": ("project",), "public": ("targets_file",),
+                "future": ("project", "n_test")}
         missing = [f for f in need[self.route] if getattr(self, f) is None]
         if missing:
             raise ValueError(f"route {self.route!r} needs {missing}")
         return self
+
+
+class FutureDataIn(Model):
+    case_id: str
+    data_file: str
+    label_column: str
 
 
 class ShareIn(Model):
@@ -247,6 +255,8 @@ class PromotePreview(Model):
     readiness: Readiness
     looks_remaining: Number
     what_happens: tuple[str, ...]
+    no_data_prior: Number | None
+    prior_note: str
 
 
 class Promoted(Model):
@@ -437,7 +447,7 @@ MAIN_VIEWS: tuple[type[Model], ...] = (
     Identity, Waiting, Sealed, Session, LabView, Explored, Steered, Frozen, Rehearsal, PromotePreview, Promoted, Case,
     Cases, Shared, Paper, Record, Sessions, LabLog, FrozenIdeas, TrustBoard, Meta)
 REQUESTS: tuple[type[Model], ...] = (SealIn, CredentialIn, StartIn, ExploreIn, SteerIn, FreezeIn, RehearseIn, PromoteIn,
-                                     ShareIn, PaperIn)
+                                     FutureDataIn, ShareIn, PaperIn)
 OTHER_VIEWS: tuple[type[Model], ...] = (ApprovalRoute, Resolved, TechnicalView)
 
 

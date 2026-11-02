@@ -15,7 +15,8 @@ SESSION_SPEND_LIMIT_USD = 5.0  # UNCALIBRATED (owner decision, GOAL §13.8): mod
 SPEND_WARN_SHARE = 0.8  # UNCALIBRATED (owner decision, GOAL §13.8): share of the limit at which a warning starts
 UNKNOWN_COST_CALLS = 10  # UNCALIBRATED (owner decision, GOAL §13.8): calls of unknown cost a session may run up
 DEFAULTS: dict[str, Any] = {"lab_default_model": LAB_DEFAULT_MODEL, "session_spend_limit_usd": SESSION_SPEND_LIMIT_USD,
-                            "unknown_cost_calls": UNKNOWN_COST_CALLS}
+                            "unknown_cost_calls": UNKNOWN_COST_CALLS,
+                            "replicator": ""}  # a backend kind for `chh court replicate`, e.g. ollama:<model>
 
 
 class SettingsRefused(ValueError):
@@ -38,6 +39,8 @@ def _valid(doc: dict[str, Any]) -> dict[str, Any]:
         raise SettingsRefused("the limit on calls of unknown cost must be a whole number, 0 or more")
     if not (isinstance(model, str) and model.strip()):
         raise SettingsRefused("the default model must be a name")
+    if not isinstance(doc.get("replicator", ""), str):
+        raise SettingsRefused("the replicator must be a backend name, such as ollama:<model>")
     return doc
 
 

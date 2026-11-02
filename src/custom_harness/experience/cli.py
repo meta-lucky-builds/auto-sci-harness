@@ -13,6 +13,7 @@
   chh exp rehearse PROMOTION --rows N [--data F --label-column C]
   chh exp preview|promote PROMOTION --route generated|sealed|public [route options]
   chh exp mint CASE --beacon VALUE
+  chh exp future-data CASE --data F --label-column C
   chh exp run CASE
   chh exp case CASE
   chh exp cases
@@ -67,6 +68,7 @@ def add_parsers(sub: Any) -> None:
     st.add_argument("--model")
     st.add_argument("--local-model-server", action="store_true",
                     help="OPT-IN: the box may reach the one host port of a local model server")
+    st.add_argument("--no-lab-defaults", action="store_true", help="leave the optional skills out of the workspace")
     for name in ("lab", "stop"):
         s.add_parser(name, help=f"{name} of a Lab session").add_argument("session")
     ex = s.add_parser("explore", help="one prompt to the session's agent")
@@ -87,7 +89,7 @@ def add_parsers(sub: Any) -> None:
     for name in ("preview", "promote"):
         p = s.add_parser(name, help="readiness and steps" if name == "preview" else "fix the claim for the Court")
         p.add_argument("promotion")
-        p.add_argument("--route", required=True, choices=["generated", "sealed", "public"])
+        p.add_argument("--route", required=True, choices=["generated", "sealed", "public", "future"])
         p.add_argument("--family")
         p.add_argument("--beacon-round")
         p.add_argument("--second-round", help="generated: fix a second fresh test now")
@@ -99,6 +101,10 @@ def add_parsers(sub: Any) -> None:
     mi = s.add_parser("mint", help="give the public random value of the committed round")
     mi.add_argument("case")
     mi.add_argument("--beacon", required=True)
+    fd = s.add_parser("future-data", help="hand over a future-data case's test data, once it exists")
+    fd.add_argument("case")
+    fd.add_argument("--data", required=True)
+    fd.add_argument("--label-column", required=True)
     s.add_parser("run", help="the trial, in the Court's network-free sandbox").add_argument("case")
     s.add_parser("case", help="open a case: this counts as a look").add_argument("case")
     s.add_parser("cases", help="your cases; opens none of them")
@@ -123,6 +129,7 @@ def add_parsers(sub: Any) -> None:
     su.add_argument("--name", help="a name for the record, on this machine")
     su.add_argument("--spend-limit", type=float, help="USD one Lab session may reach before prompts stop")
     su.add_argument("--model", help="the Lab's default model for claude-code")
+    su.add_argument("--replicator", help="a second model family for replicas, e.g. ollama:<model> (open weights)")
     bk = s.add_parser("backup", help="HUMAN: a verified copy of the whole store, sealed answers included")
     bk.add_argument("--out", required=True, help="a folder no Lab can read")
     bk.add_argument("--by", required=True)
@@ -195,7 +202,7 @@ def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
                                parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon))
     if c == "start":
         return x.start(m.StartIn(agent=a.agent, project=a.project, session_id=a.session, model=a.model,
-                                 local_model_server=a.local_model_server))
+                                 local_model_server=a.local_model_server, lab_defaults=not a.no_lab_defaults))
     if c == "explore":
         return x.explore(m.ExploreIn(session_id=a.session, prompt=a.prompt))
     if c == "steer":
@@ -211,6 +218,8 @@ def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
         return x.promote(_promote(a, m))
     if c == "mint":
         return x.mint(a.case, a.beacon)
+    if c == "future-data":
+        return x.future_data(m.FutureDataIn(case_id=a.case, data_file=a.data, label_column=a.label_column))
     if c == "share":
         return x.share(m.ShareIn(case_id=a.case, reviewer=a.reviewer, out_file=a.out))
     if c == "paper":
@@ -245,7 +254,7 @@ def _setup(a: argparse.Namespace, store: EvidenceStore) -> int:
     from . import doctor as d
     from .api import Experience, Refused
     try:
-        doc = settings.save(session_spend_limit_usd=a.spend_limit, lab_default_model=a.model)
+        doc = settings.save(session_spend_limit_usd=a.spend_limit, lab_default_model=a.model, replicator=a.replicator)
     except settings.SettingsRefused as e:
         raise SystemExit(f"refused: {e}") from None
     x = Experience(store)

@@ -22,7 +22,9 @@ NOT_SENTENCES = frozenset({"case_id", "promotion_id", "session_id", "project", "
                            "agent", "workspace", "rerun", "text", "query", "audit_id", "event_id", "of_case", "kind",
                            "idea_path"})
 
-VERDICTS = {"CERTIFIED": "Certified.", "NOT CERTIFIED": "Not certified.", "COULD NOT RUN": "The trial could not run."}
+VERDICTS = {"CERTIFIED": "Certified.", "NOT CERTIFIED": "Not certified.", "INCONCLUSIVE": "Inconclusive.",
+            "COULD NOT RUN": "The trial could not run."}
+TOO_CLOSE = "TOO_CLOSE_TO_CALL"  # court/display.py
 REASONS = {
     "NOT_REPRODUCED": "The result did not repeat when the frozen code was run again.",
     "PROCEDURE_NOT_VALID": "The test could not count as a valid test of this claim.",
@@ -31,6 +33,7 @@ REASONS = {
     "LEAK_FOUND": "Signs of a leak of the answers were found in the run.",
     "NOT_FIXED_FIRST": "The claim was not cleanly fixed before the test data was read.",
     "RULES_OF_THE_RUN_BROKEN": "A file or an output of the run broke the rules of the test.",
+    TOO_CLOSE: "The test could not tell: the effect may or may not reach the claimed size.",
     "FAILED_INDEPENDENT_CHECK": "One of the checks shown in full failed: it is named in the technical details.",
 }
 CHECK_PLAIN = {"K0": "The code and records are all present", "K1": "The claim is well formed",
@@ -56,6 +59,10 @@ PROMOTE_STEPS = {
                "The first sealed part becomes the test. It takes one look.",
                "A person confirms the test data, then the frozen code is tried offline.",
                "The answer can be a finding."),
+    "future": ("The claim and the code are fixed for the Court.",
+               "You wait for data that does not exist yet: this can take days or months.",
+               "When it exists, you hand it over. A person confirms it is what it claims to be.",
+               "The frozen code is tried offline. The answer can be a finding, for the time window you named."),
     "public": ("The claim and the code are fixed for the Court.",
                "A person reviews the claim, then it is tested on public data.",
                "The answer cannot be a finding: the Lab could have seen this data.")}
@@ -69,7 +76,8 @@ RESTS_ON = {"case": "What was fixed for this case before any answer was read.",
             "record": "Verdicts this person opened.", "paper": "The paper's list of numbers.",
             "waiting": "The waiting list.", "cases": "This researcher's cases.",
             "sessions": "This researcher's Lab sessions.", "frozen": "The frozen ideas of this researcher.",
-            "trust": "The checks of this machine, made just now."}
+            "trust": "The checks of this machine, made just now.",
+            "prior": "A pinned model's chance for this outcome, from the claim's words alone, before any test data."}
 BADGES = {
     "REPRODUCIBLE": "Run again from the frozen code, offline, with the same result on every seed. One machine only: "
                     "other machines are not checked yet. Reproducible does not mean true.",
@@ -90,6 +98,7 @@ READINESS_NOTICE = "A rough estimate from Lab numbers, not calibrated. It can wa
 IMPROVEMENT = "Nothing measured yet. This appears once real campaigns have measured evidence."
 HUMAN_ONLY = "Only a person may do this, from a terminal. This doorway lists it and points to it; it never does it."
 STEPS = {"needs_beacon": "The Court is waiting for the public random value of the round you chose.",
+         "needs_data": "The Court is waiting for the future data to exist.",
          "needs_role_approval": "A person must confirm this test data is what it claims to be.",
          "ready_to_run": "Ready for the trial.",
          "outcome_recorded": "The verdict is ready. Opening it counts as one look."}
@@ -111,6 +120,7 @@ WAITING = {
     "human_check_run": ("Run the check only a person holds", "It has not passed on its current file."),
     "queue_error": ("A waiting list could not be read", "Something is broken: this list may be incomplete."),
     "needs_beacon": ("Give the public random value", STEPS["needs_beacon"]),
+    "needs_data": ("Hand over the future data", STEPS["needs_data"]),
     "ready_to_run": ("Start the trial", STEPS["ready_to_run"]),
     "outcome_recorded": ("Open the verdict", STEPS["outcome_recorded"]),
     "health": ("Run the Court's health check", "New cases are refused until this version of the Court passes it."),
@@ -132,6 +142,8 @@ def jargon_problems(view: dict[str, Any], path: str = "") -> list[str]:
     return out
 
 
+PRIOR_NOTE = "A pinned model guessed this from the words alone. It can only make the test harder. Not calibrated."
+NO_PRIOR = "No no-data estimate was measured: nothing checks whether this outcome was predictable from the words alone."
 TRUST_LIMITS = (
     "No agent has run in a real Lab box yet.",
     "No discovery has been certified yet.",
@@ -163,12 +175,16 @@ def lab_line(ev: dict[str, Any]) -> dict[str, str] | None:
     return {"at": time.strftime("%H:%M:%S", time.localtime(float(ev["at"]))), "who": who, "kind": kind, "text": str(text)}
 
 
-def scope_sentence(claim: dict[str, Any], *, family: str | None, route: str) -> str:
+def scope_sentence(claim: dict[str, Any], *, family: str | None, route: str,
+                   window: dict[str, str] | None = None) -> str:
     """One generated sentence: what the claim says and where it holds (UPGRADES N16). Numbers in it are the pre-fixed
-    claim's own."""
+    claim's own. `window`: the time the data covers, a required part of the scope on real data."""
     effect = f"on {claim['metric']} by at least {claim['min_effect']}"
+    span = f", for data from {window['start']} to {window['end']}" if window else ""
+    if route == "future":
+        return f"On data that did not exist when the claim was fixed{span}, the method beats the baseline {effect}."
     if route == "sealed":
-        return f"On your sealed data, the method beats the baseline {effect}."
+        return f"On your sealed data{span}, the method beats the baseline {effect}."
     if route == "retrospective":
         return f"On public data, the method beats the baseline {effect}."
     return f"On data generated by the {family} family, the method beats the baseline {effect}; generator-scoped."
@@ -187,14 +203,16 @@ def badge_text(form: str) -> dict[str, str]:
     return {"name": name, "form": form, "meaning": meaning}
 
 
-def verdict_of(label: str | None, state: str) -> str | None:
+def verdict_of(label: str | None, state: str, reason_class: str | None = None) -> str | None:
     """The researcher's verdict word, from the Kernel's label as the display returned it. Only a label the Kernel issued
-    as certified can read CERTIFIED."""
+    as certified can read CERTIFIED. INCONCLUSIVE is only ever a failed claim: it can never read as a pass."""
     if state == "COULD NOT RUN":
         return "COULD NOT RUN"
     if label is None:
         return None
-    return "CERTIFIED" if label.startswith("CERTIFIED") else "NOT CERTIFIED"
+    if label.startswith("CERTIFIED"):
+        return "CERTIFIED"
+    return "INCONCLUSIVE" if reason_class == TOO_CLOSE else "NOT CERTIFIED"
 
 
 def verdict_sentence(verdict: str | None, held: list[str], scope: str, reason_class: str | None, *,

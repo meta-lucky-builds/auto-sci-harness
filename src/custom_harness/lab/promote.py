@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..audit import program
 from ..audit.spec import Budget, ClaimPart, OpenMLDataset, load_spec
@@ -90,6 +90,19 @@ class _Model(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", allow_inf_nan=False)
 
 
+class TimeWindow(_Model):
+    """What time the data covers. A claim about real data holds for a period, not for all time (GOAL 18.6)."""
+
+    start: date
+    end: date
+
+    @model_validator(mode="after")
+    def _ordered(self) -> TimeWindow:
+        if self.start > self.end:
+            raise ValueError("a time window starts before it ends")
+        return self
+
+
 class PromoteRequest(_Model):
     """chh-lab-promote/1: written by the researcher (a human), not by the Lab agent."""
 
@@ -105,6 +118,7 @@ class PromoteRequest(_Model):
     contract: Literal["build_model", "program"] = "build_model"  # program: audit/program.py (minted and sealed routes)
     method_files: tuple[str, ...] = ()  # program contract: more workspace-relative text files of the method arm
     baseline_files: tuple[str, ...] = ()
+    time_window: TimeWindow | None = None  # required on the sealed and future routes (court/minted.py)
 
 
 class TargetsFile(_Model):

@@ -18,7 +18,7 @@ const answers: Record<string, unknown> = {
   record: { researcher: "r", dead_ends: [{ title: "Mixup", reason: "worse", source: "idea" }], outcomes: [], verdicts_unopened: num(0), harness_improvement: "Nothing measured yet.", calibration: { claims: num(0), mean_squared_error: num(null), evidence_bits: num(null), note: "n" } },
   trust: { rows: [{ name: "Docker", state: "ok", detail: "d", next_step: null, needed_for: "both" }], steps_left: num(0), limits: ["No discovery has been certified yet."] },
   rehearse: { promotion_id: "f1", notice: "Lab data, not evidence.", ran: true, would_certify: true, reason: null, checks: [{ name: "c", status: "pass" }], scores: [{ arm: "method", seed: "0", score: num(0.8) }, { arm: "baseline", seed: "0", score: num(0.7) }], readiness },
-  promote_preview: { promotion_id: "f1", route: "sealed", finding_possible: true, readiness, looks_remaining: num(1), what_happens: ["The claim and the code are fixed for the Court."] },
+  promote_preview: { promotion_id: "f1", route: "sealed", finding_possible: true, readiness, looks_remaining: num(1), what_happens: ["The claim and the code are fixed for the Court."], no_data_prior: num(0.2), prior_note: "It can only make the test harder." },
   promote: { promotion_id: "f1", case_id: "c1", second_case_id: null, route: "sealed", next_step: "Ready for the trial.", command: "chh exp run c1" },
   resolve: { link: "l", value: 2, rests_on: "The session's Story.", source: {} },
 };
@@ -77,6 +77,7 @@ describe("screens", () => {
     const go = await screen.findByRole<HTMLButtonElement>("button", { name: "Promote" });
     expect(go.disabled).toBe(true);
     expect(calls).not.toContain("POST promote");
+    expect(screen.getByText(/It can only make the test harder/)).toBeTruthy();
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(go);
     const done = await screen.findByText("Fixed for the Court");

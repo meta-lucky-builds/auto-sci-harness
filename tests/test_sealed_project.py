@@ -110,7 +110,8 @@ class Project:
                "method": "m.py", "baseline": "b.py", "lock": "r.lock", "contract": contract,
                "claim": ClaimPart(metric=metric, min_effect=0.1, probability=0.6, seeds=(0, 1, 2), n_boot=1000,
                                   resolve_by=date(2030, 1, 1)).model_dump(mode="json"),
-               "budget": Budget(timeout_s=120).model_dump(mode="json")}
+               "budget": Budget(timeout_s=120).model_dump(mode="json"),
+               "time_window": {"start": "2024-01-01", "end": "2025-12-31"}}
         self.store.append_record(LP.RECORD_KIND, {
             "promotion_id": pid, "session_id": sid, "event": "frozen", "request": req,
             "frozen": {"method": {"blob": put(method or (ARMS / "knn_radius.py").read_bytes())},

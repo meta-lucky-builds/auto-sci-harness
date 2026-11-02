@@ -6,7 +6,7 @@ import { ReadinessPanel } from "./Rehearse";
 
 type Route = PromoteIn["route"];
 const ROUTES: [Route, string][] = [["generated", "Fresh generated data"], ["sealed", "My sealed data"],
-  ["public", "Public data (cannot become a finding)"]];
+  ["future", "Data that does not exist yet"], ["public", "Public data (cannot become a finding)"]];
 
 export function Promote({ promotionId }: { promotionId?: string }) {
   const frozen = useLoad(api.frozen, []);
@@ -16,6 +16,7 @@ export function Promote({ promotionId }: { promotionId?: string }) {
   const [round, setRound] = useState("");
   const [project, setProject] = useState("");
   const [targets, setTargets] = useState("");
+  const [rows, setRows] = useState("");
   const [preview, setPreview] = useState<PromotePreview | null>(null);
   const [sure, setSure] = useState(false);
   const [done, setDone] = useState<Promoted | null>(null);
@@ -24,7 +25,7 @@ export function Promote({ promotionId }: { promotionId?: string }) {
 
   const request = (): PromoteIn => ({
     promotion_id: chosen, route, family: family || null, beacon_round: round || null, project: project || null,
-    targets_file: targets || null,
+    targets_file: targets || null, n_test: route === "future" ? Number(rows) : null,
   });
 
   async function look() {
@@ -62,7 +63,8 @@ export function Promote({ promotionId }: { promotionId?: string }) {
           </select></label>
         {route === "generated" && <><Field label="Data family" value={family} onChange={setFamily} />
           <Field label="Round of the public random value" value={round} onChange={setRound} /></>}
-        {route === "sealed" && <Field label="Project" value={project} onChange={setProject} />}
+        {(route === "sealed" || route === "future") && <Field label="Project" value={project} onChange={setProject} />}
+        {route === "future" && <Field label="Rows you will hand over" value={rows} onChange={setRows} />}
         {route === "public" && <Field label="Targets file" value={targets} onChange={setTargets} />}
         <button type="button" className="btn" onClick={() => void look()}>See what will happen</button>
       </>}</Loaded>
@@ -73,6 +75,7 @@ export function Promote({ promotionId }: { promotionId?: string }) {
         <ol>{preview.what_happens.map((s) => <li key={s}>{s}</li>)}</ol>
         <p>Looks remaining on this test data: <Num n={preview.looks_remaining} /></p>
         {!preview.finding_possible && <p>This route cannot become a finding.</p>}
+        <p className="small muted">{preview.no_data_prior && <>Chance from the words alone: <Num n={preview.no_data_prior} digits={2} />. </>}{preview.prior_note}</p>
       </Panel>
       <ReadinessPanel r={preview.readiness} />
       <Panel>

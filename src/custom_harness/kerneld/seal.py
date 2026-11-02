@@ -15,6 +15,7 @@ import io
 from dataclasses import dataclass
 
 SEALED_FORMAT = "chh-court-sealed/1"
+FUTURE_FORMAT = "chh-court-future/1"
 MAX_PARTS = 2  # the second part is for RE-VALIDATED (GOAL 18.2)
 MIN_PART_ROWS = 2
 
@@ -42,6 +43,40 @@ def _csv(rows: list[list[str]]) -> bytes:
     buf = io.StringIO()
     csv.writer(buf, lineterminator="\n").writerows(rows)
     return buf.getvalue().encode()
+
+
+def future_protocol(project: str, n_test: int) -> str:
+    """What a future-data claim freezes: kerneld/ingest.future_heldout takes only the data this names."""
+    return (f"{FUTURE_FORMAT} project={project} n_test={n_test}: held-out truth registered by kerneld after this claim was "
+            f"fixed and anchored (GOAL 18.6); both arms through one contract")
+
+
+def future_files(raw: bytes, label_column: str, n_test: int, lab: bytes) -> SealedPart:
+    """A future target from the file a person hands over. Exactly the promised rows, the Lab's columns, and no row the
+    Lab already has: such a row's label would not be fresh. SealSpecError never names a data value."""
+    try:
+        table = [r for r in csv.reader(io.StringIO(raw.decode("utf-8"))) if r]
+    except UnicodeDecodeError:
+        raise SealSpecError("the data is not UTF-8") from None
+    if not table or label_column not in table[0]:
+        raise SealSpecError("the label column is not in the header")
+    head, rows = table[0], table[1:]
+    li = head.index(label_column)
+    features = [c for j, c in enumerate(head) if j != li]
+    lab_table = [r for r in csv.reader(io.StringIO(lab.decode("utf-8"))) if r]
+    lab_li = lab_table[0].index("label")
+    if features != [c for j, c in enumerate(lab_table[0]) if j != lab_li]:
+        raise SealSpecError("the columns differ from the Lab's data")
+    if len(rows) != n_test or any(len(r) != len(head) for r in rows):
+        raise SealSpecError("the file does not have the promised number of whole rows")
+
+    def x(r: list[str], at: int) -> tuple[str, ...]:
+        return tuple(v for j, v in enumerate(r) if j != at)
+
+    if {x(r, li) for r in rows} & {x(r, lab_li) for r in lab_table[1:]}:
+        raise SealSpecError("a row of this data is in the Lab's part, so its label is not fresh")
+    return SealedPart(_csv([features, *[list(x(r, li)) for r in rows]]), _csv([["label"], *[[r[li]] for r in rows]]),
+                      len(rows))
 
 
 def seal_files(raw: bytes, project: str, label_column: str, n_parts: int, rows_per_part: int, beacon: str

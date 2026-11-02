@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,10 +48,9 @@ def test_the_table_covers_every_check_once():
 
 
 def fake_cert(failed: dict[str, list[str]]):
-    from types import SimpleNamespace
     checks = {k: SimpleNamespace(status="fail" if k in failed else "pass", reasons=tuple(failed.get(k, ())))
               for k in CHECK_IDS}
-    return SimpleNamespace(checks=checks, failed=lambda: list(failed))
+    return SimpleNamespace(checks=checks, failed=lambda: list(failed), resolution={}, claim={})
 
 
 @pytest.mark.parametrize(("check", "reason", "secret"), [
@@ -70,7 +70,8 @@ def test_the_released_index_of_a_reason_class_never_moves():
     """The index is written to the ledger as a `count`: an old row must keep its meaning when a class is added."""
     assert D.REASON_RELEASE[:6] == ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN",
                                     "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND", "FAILED_INDEPENDENT_CHECK")
-    assert set(D.REASON_RELEASE) == {*D.REASON_CLASS.values(), D.OTHER_CLASS} and len(D.REASON_RELEASE) <= 16
+    assert set(D.REASON_RELEASE) == {*D.REASON_CLASS.values(), D.OTHER_CLASS, D.TOO_CLOSE}
+    assert len(D.REASON_RELEASE) <= 16
 
 
 def test_every_reason_class_has_plain_words():

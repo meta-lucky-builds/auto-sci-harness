@@ -25,6 +25,7 @@ from ..lab.box import LAB_IMAGE, DockerCLI
 from ..lab.egress import GATEWAY_IMAGE
 from ..lab.walls import static_problems
 from ..sandbox.docker import CANDIDATE_IMAGE
+from ..settings import load as load_settings
 from ..store import EvidenceStore
 from ..studio.queue import pending
 from ..truth_layout import truth_root
@@ -131,6 +132,14 @@ def _format(store: EvidenceStore) -> Check:
     return Check("Stored data", MISSING, "The store is newer than this code.", "Update the code.")
 
 
+def _second_family() -> Check:
+    kind = load_settings()["replicator"]
+    if kind:
+        return Check("Second model family", OK, f"Replicas use {kind}.", None, WHEN_USED)
+    return Check("Second model family", YOURS, "Not set, so a replica needs a backend named each time.",
+                 "chh exp setup --replicator ollama:<model>  (a local open-weights model costs no API spend)", WHEN_USED)
+
+
 def _dataset(store: EvidenceStore) -> Check:
     if any(r.get("event") == "sealed" for r in store.records(Z.RECORD_KIND)):
         return Check("Sealed dataset", OK, "A project is sealed.", None, SEALED_TRACK)
@@ -161,7 +170,7 @@ def doctor(store: EvidenceStore, *, docker: DockerCLI | None = None, environ: Ma
                   "Read TRUTH_INDEPENDENT in src/custom_harness/court/display.py and decide it is right."),
             Check("Public random source", YOURS, "Typed by a person; code does not check it offline.",
                   "Pick a drand round that has not happened yet: https://drand.love (see the checklist).", WHEN_ASKED),
-            _dataset(store), _os_user(truth_root()), _format(store)]
+            _dataset(store), _os_user(truth_root()), _format(store), _second_family()]
 
 
 def render(checks: list[Check]) -> str:

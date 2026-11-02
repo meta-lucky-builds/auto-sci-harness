@@ -33,7 +33,8 @@ from typing import Any
 from ..kernel import DatasetRole, Kernel, KernelError, Vault, VaultError
 from .protocol import INGEST_KINDS, MEASUREMENT_PROBLEMS
 
-__all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "minted_heldout", "openml_split",
+__all__ = ["INGEST_KINDS", "MEASUREMENT_PROBLEMS", "RECORD_KIND", "IngestRefused", "future_heldout", "minted_heldout",
+           "openml_split",
            "research_task", "returned_measurements", "sealed_split", "task_private_dir"]
 RECORD_KIND = "kerneld_ingest"
 
@@ -294,6 +295,46 @@ def minted_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, fam
     return _publish(vault, key, run_id, "minted_heldout", subject, [train_id, subject],
                     {"n_train": files.n_train, "n_test": files.n_test, "task_id": files.task_id,
                      "mint_seq": mint.seq, "anchor_length": int(anchor["length"])})
+
+
+# ------------------------------------------------------------------------------------------- future data (Court)
+def future_heldout(vault: Vault, run_id: str, subject: str, claim_hash: str, file: str, project: str, label_column: str,
+                   n_test: int, anchor_file: str) -> dict[str, Any]:
+    """Register a future-data case's target AFTER its claim is frozen and anchored (GOAL 18.6): the same conditions as
+    `minted_heldout`, on a file a person hands over. Its role is FUTURE; that the data really is new rests on the human
+    role approval the trial needs. Returns sizes and the data's sha256 only. Refusals are closed codes."""
+    from .seal import SealSpecError, future_files, future_protocol
+    targets = vault.registered_targets(claim_hash)
+    if targets is None:
+        raise IngestRefused("not_registered")
+    if subject not in targets:
+        raise IngestRefused("token_scope")
+    claim = next((e.body.get("claim") or {} for e in vault.ledger.entries("prereg")
+                  if e.body.get("claim_hash") == claim_hash), {})
+    if ((claim.get("scope") or {}).get("conditions") or {}).get("protocol") != future_protocol(project, n_test):
+        raise IngestRefused("token_scope")  # not the protocol this claim froze
+    raw = _read(Path(file))
+    key = _key("future_heldout", subject, claim_hash, hashlib.sha256(raw).hexdigest())
+    done = _done(vault, key)
+    if done is not None:
+        return done
+    from ..research.suite import MintRefused, require_anchored
+    try:
+        require_anchored(claim_hash, vault.ledger.entries(), Path(anchor_file))
+    except MintRefused:
+        raise IngestRefused("not_anchored") from None
+    try:
+        part = future_files(raw, label_column, n_test, vault.read_public(claim["development"][0], "train.csv"))
+    except SealSpecError:
+        raise IngestRefused("bad_request") from None
+    _precheck(vault, [(subject, DatasetRole.FUTURE, {"test_X.csv": part.test_x}, {"test_y.csv": part.test_y})])
+    try:
+        vault.register_dataset(subject, DatasetRole.FUTURE, public={"test_X.csv": part.test_x},
+                               private={"test_y.csv": part.test_y}, canary=f"CHH-FUTURE-CANARY-{subject}")
+    except VaultError:  # pre-checked above; a race still fails closed
+        raise IngestRefused("ingest_refused") from None
+    return _publish(vault, key, run_id, "future_heldout", subject, [subject],
+                    {"n_test": part.n, "data_sha256": hashlib.sha256(raw).hexdigest()})
 
 
 # ------------------------------------------------------------------------------------------- sealed at project start

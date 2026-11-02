@@ -55,6 +55,48 @@ A verdict and its badges are computed by code, never by a model.
 
 Green appears only for those two badges, only on a real store. On a scripted page they are dashed and marked "example".
 
+## Routes to the Court
+
+| Route | Test data | Can be a finding? |
+|---|---|---|
+| `generated` | Fresh synthetic data, made after the freeze. Includes "parallel worlds": known laws changed, so recall cannot answer them. The noise is synthetic, not from real residuals | Yes, about that generator only |
+| `sealed` | Part of your own data, sealed before any Lab work | Yes |
+| `future` | Data that does not exist yet. Needs a sealed project for its training data. You hand it over later: `chh exp future-data CASE --data FILE --label-column C`. A second test is not available on this route yet | Yes, for its time window |
+| `public` | A public dataset the Lab could have read | Never |
+
+On `sealed` and `future`, the promotion request must state a time window, because a claim about real data holds for a
+period and not for all time:
+
+```yaml
+time_window: {start: 2026-11-10, end: 2027-02-10}
+```
+
+A future window may not start before the day of the freeze. The Court takes your word for what the window covers. It
+appears in the claim and in the scope sentence.
+
+## Results
+
+Besides certified and not certified, a case can read **Inconclusive**: the claimed effect was not shown, but the claimed size
+is still inside the range of what the test allows. The test could not tell. It is a failed claim, never a pass.
+
+## Lab defaults
+
+A session gets optional files in `.lab/` in its workspace: three skills (ideation, running experiments, a checklist before
+freezing) and `.lab/dead_ends.md`, the ideas your earlier sessions dropped. Nothing is injected into a prompt, and the agent
+may ignore all of it. Dead ends are only Lab ideas: a verdict never reaches a box this way. Leave it out with
+`--no-lab-defaults`. Context resets are advice in the checklist: the harness does not reset an agent's context.
+
+## A second model family
+
+REPLICATED is weaker when replica and author share a model family. Set a cheap second family once, and `chh court replicate`
+uses it:
+
+```powershell
+chh exp setup --replicator ollama:MODEL
+```
+
+A local open-weights model costs no API spend. Nobody has run this with a real model yet.
+
 ## Looks
 
 Test data can only be looked at a limited number of times, because every look teaches something. Opening a verdict counts

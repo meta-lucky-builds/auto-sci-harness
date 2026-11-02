@@ -52,8 +52,10 @@ REASON_CLASS = {"K2": "NOT_FIXED_FIRST", "K3": "NOT_REPRODUCED", "K4": "PROCEDUR
                 "K7": "OUTCOME_TOO_PREDICTABLE", "K8": "RULES_OF_THE_RUN_BROKEN", "K9": "LEAK_FOUND"}
 OTHER_CLASS = "FAILED_INDEPENDENT_CHECK"  # the failure is one of the checks shown in full
 # The index of a class is released as a `count` and stays in the ledger, so classes are only ever added at the end.
+# TOO_CLOSE_TO_CALL narrows EFFECT_NOT_SHOWN: see `_too_close`. It reads as INCONCLUSIVE.
+TOO_CLOSE = "TOO_CLOSE_TO_CALL"
 REASON_RELEASE = ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN", "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND",
-                  OTHER_CLASS, "NOT_FIXED_FIRST", "RULES_OF_THE_RUN_BROKEN")
+                  OTHER_CLASS, "NOT_FIXED_FIRST", "RULES_OF_THE_RUN_BROKEN", TOO_CLOSE)
 
 
 class DisplayRefused(RuntimeError):
@@ -121,7 +123,15 @@ def split_checks(cert: Certificate) -> tuple[dict[str, Any], str | None]:
     failed = cert.failed()
     if not failed:
         return shown, None
-    return shown, next((REASON_CLASS[k] for k in TRUTH_DEPENDENT if k in failed), OTHER_CLASS)
+    reason = next((REASON_CLASS[k] for k in TRUTH_DEPENDENT if k in failed), OTHER_CLASS)
+    return shown, TOO_CLOSE if reason == REASON_CLASS["K6"] and _too_close(cert) else reason
+
+
+def _too_close(cert: Certificate) -> bool:
+    """The effect was not shown, yet the claimed size is still inside the interval: the test could not tell. A released
+    closed class like any other: it says on which side of the claimed size the top of the interval fell, and no number."""
+    targets = cert.resolution.get("targets") or {}
+    return any(t.get("hi") is not None and t["hi"] >= cert.claim["effect"]["min_effect"] for t in targets.values())
 
 
 def _views(store: EvidenceStore, case_id: str, viewer: str, kind: str) -> list[dict[str, Any]]:
@@ -165,7 +175,7 @@ def public_case(store: EvidenceStore, case_id: str) -> dict[str, Any]:
     from .minted import case
     c = case(store, case_id)
     keys = ("case_id", "role", "route", "contract", "promotion_id", "session_id", "of_case", "claim_hash", "target",
-            "family", "n_train", "n_test", "beacon_round", "project", "part", "at")
+            "family", "n_train", "n_test", "beacon_round", "project", "part", "time_window", "at")
     return {**{k: c.get(k) for k in keys}, "claim": _claim_text(store, str(c["claim_hash"]))}
 
 
@@ -186,7 +196,9 @@ def progress(store: EvidenceStore, case_id: str) -> str:
     c = case(store, case_id)
     if latest(store, case_id, "outcome") is not None:
         return "outcome_recorded"
-    if c.get("route") != "sealed" and latest(store, case_id, "minted") is None:
+    if c.get("route") == "future" and latest(store, case_id, "arrived") is None:
+        return "needs_data"
+    if c.get("route") == "minted" and latest(store, case_id, "minted") is None:
         return "needs_beacon"
     if ScopedKernel(store).vault.role_approval(str(c["target"])) is None:
         return "needs_role_approval"
