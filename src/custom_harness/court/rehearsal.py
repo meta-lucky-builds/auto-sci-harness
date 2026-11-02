@@ -108,20 +108,20 @@ def _loose_copy(head: list[str], rows: list[list[str]], part_rows: list[list[str
 
 def sealed_rows_problem(store: EvidenceStore, data: bytes, label_column: str) -> str | None:
     """Why `data` may not be rehearsed on: it holds a row of a sealed part, as the file a project sealed does. That
-    would show scores computed from sealed labels. Two comparisons. Exact: on the part's feature columns, value by value,
-    any one row. Loose (`_loose`): any columns, numbers at three decimals, at least LOOSE_MATCH_ROWS rows. This check can
-    only refuse (invariant 21). A copy with noise added, columns added or fewer decimals still passes it; the guarantee
-    is that the data never reached the researcher's Lab side, and this check is a second line."""
+    would show scores computed from sealed labels. Two comparisons. Exact: on the part's feature columns, value by
+    value, any one row. Loose (`_loose`): any columns, numbers at three decimals, at least LOOSE_MATCH_ROWS rows. This
+    check can only refuse (invariant 21). A copy with noise added, columns added or fewer decimals still passes it; the
+    guarantee is that the data never reached the researcher's Lab side, and this check is a second line."""
     head, rows = _feature_rows(data)
     vault = ScopedKernel(store).vault
     for seal in store.records(S.RECORD_KIND):
         if seal.get("event") != "sealed":
             continue
-        for target in seal.get("targets") or []:
-            part_head, part_rows = _feature_rows(vault.read_public(target, "test_X.csv"))
-            why = f"this file holds rows sealed in project {seal['project']!r}: use the Lab's part"
-            if _loose_copy(head, rows, part_rows, label_column):
-                return why
+        parts = [_feature_rows(vault.read_public(t, "test_X.csv")) for t in seal.get("targets") or []]
+        why = f"this file holds rows sealed in project {seal['project']!r}: use the Lab's part"
+        if _loose_copy(head, rows, [r for _, part_rows in parts for r in part_rows], label_column):
+            return why
+        for part_head, part_rows in parts:
             if not set(part_head) <= set(head) - {label_column}:
                 continue
             at = [head.index(c) for c in part_head]

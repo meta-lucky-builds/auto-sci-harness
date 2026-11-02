@@ -1,5 +1,5 @@
-"""`chh exp toy` (experience/toy.py): the minted toy track on a throwaway store, real Kernel, scripted agent, fake docker,
-local sandbox. No model is called: the agent's turn is replaced by a function that writes its files."""
+"""`chh exp toy` (experience/toy.py): the minted toy track on a throwaway store, real Kernel, scripted agent, fake
+docker, local sandbox. No model is called: the agent's turn is replaced by a function that writes its files."""
 
 from __future__ import annotations
 
@@ -72,8 +72,11 @@ def test_the_whole_track_stops_only_where_a_person_is_needed(w):
     assert last.done and last.case["verdict"] == "CERTIFIED"
     assert last.stopped_because.startswith("first certified result (simulator-scoped).")
     assert "discovery" not in last.stopped_because.lower()
-    assert last.next_step == f"chh exp case {case_id}"  # the target retired after this first look
+    target = str(D.public_case(w.store, case_id)["target"])
+    assert last.next_step == f"chh court retire {target} --by NAME"  # the full record is a person's decision
 
+    assert go(w).next_step == last.next_step and not D.retired(w.store, target)
+    D.retire(w.store, target, "owner")
     again = go(w)
     assert again.done and again.case["retired"] and again.next_step.startswith(f"chh exp share {case_id}")
     assert len(w.prompts) == 1  # the agent was asked once

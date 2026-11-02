@@ -21,7 +21,6 @@ NOT_SENTENCES = frozenset({"case_id", "promotion_id", "session_id", "project", "
                            "agent", "workspace", "rerun", "text", "query", "audit_id", "event_id", "of_case", "kind",
                            "idea_path"})
 
-OPENS_NEXT = "This test data has had its one use. The full record opens the next time you open this case."
 VERDICTS = {"CERTIFIED": "Certified.", "NOT CERTIFIED": "Not certified.", "COULD NOT RUN": "The trial could not run."}
 REASONS = {
     "NOT_REPRODUCED": "The result did not repeat when the frozen code was run again.",

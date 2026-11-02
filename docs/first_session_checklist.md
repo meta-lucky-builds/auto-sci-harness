@@ -25,6 +25,22 @@ Success: git says "Fast-forward" or "Already up to date", and `chh --help` print
 On failure: if git says your files would be overwritten, run `git status` and sort that out first. The `.claude` folder it
 lists as untracked is expected. If `chh` is not found, the first line did not run.
 
+Then record one Kernel governance item that only you can record. The `court-v1` merge brought your 2026-10-23 rewording of
+invariant 5 into the line the checks run on. GOAL section 10 is part of the Kernel core's fingerprint, so
+`python scripts/check.py --fast` fails its governance step until a person records it. No Kernel code changed.
+
+```powershell
+python scripts/governance.py --record --kind delegated --approver NAME --delegated-by NAME --basis "GOAL 18.4 item 5" --change "invariant 5 reworded in GOAL section 10, reaching the code line at the court-v1 merge; no Kernel source changed" --note "owner rewording of 2026-10-23"
+python scripts/governance.py
+git add redteam/kernel_core_changes.yaml
+git commit -m "governance: record the invariant 5 rewording"
+git push origin HEAD
+```
+
+Success: the second command says `governance: OK`.
+On failure: read what it names. To record it as a scheduled change with the 7-day cooling-off instead, see the top of
+`scripts/governance.py`.
+
 ### 2. See what is missing
 
 ```powershell
@@ -214,15 +230,16 @@ chh exp toy
 ```
 
 Success: `done` is true and `stopped_because` starts with "first certified result (simulator-scoped)".
-On failure: a verdict of "Not certified" is a real outcome, not a fault: the sentence says why in one closed reason, and the
-next look shows the rest. "The trial could not run" says why; if no answer was read, the test data is not spent, and
+On failure: a verdict of "Not certified" is a real outcome, not a fault: the sentence says why in one closed reason. "The trial could not run" says why; if no answer was read, the test data is not spent, and
 `chh exp run CASE` tries again.
 
 ### 16. Read the full record and have it rerun
 
-The test data retires by itself after the first look at its verdict, so the next look shows everything.
+The full record opens only when you retire the test data. That is your decision: once you read the full reasons, you carry
+them into any later work on this generator. Run the command `chh exp toy` printed:
 
 ```powershell
+chh court retire TARGET --by NAME
 chh exp case CASE
 chh exp share CASE --reviewer "REVIEWER NAME" --out C:\Users\mykids\Desktop\case.json
 ```
@@ -268,5 +285,4 @@ chh lab seal PROJECT --data FILE --label-column C --rows N --parts 2 --beacon-ro
 
 Success: it prints the Lab's row count and the sealed row counts.
 From there: `chh lab start --project PROJECT ...`, then the same route, with `chh exp promote PROMOTION --route sealed
---project PROJECT`. On this track the test data does not retire by itself: when you want the full record, you run
-`chh court retire TARGET --by NAME`. Docs: docs/sealed_projects.md.
+--project PROJECT`. Docs: docs/sealed_projects.md.

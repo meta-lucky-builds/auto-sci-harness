@@ -202,14 +202,16 @@ def _trial(x: Experience, o: ToyIn, case_id: str, r: ToyReport) -> ToyReport:
         return r.stop("A person must approve the fresh test data. This is a human-only step: run it yourself, then run "
                       "this command again.", _role_step(x, case_id))
     if D.progress(x.store, case_id) == "ready_to_run":
-        view = x.run_case(case_id)  # the trial's first look: opening the case again would be the second
+        view = x.run_case(case_id)
         r.did.append("ran the trial in the Court's network-free sandbox")
     else:
         view = x.case(case_id)
     r.done, r.case = True, view.model_dump(mode="json")
     validated = view.verdict == "CERTIFIED" and any(b.name == "VALIDATED" for b in view.badges)
+    target = D.public_case(x.store, case_id)["target"]
+    step = f"chh court retire {target} --by NAME" if view.verdict and not view.retired else view.command
     return r.stop(f"{RESULT_NAME}. {view.verdict_sentence}" if validated else view.verdict_sentence,
-                  view.command or f"chh exp share {case_id} --reviewer NAME --out FILE")
+                  step or f"chh exp share {case_id} --reviewer NAME --out FILE")
 
 
 def run(x: Experience, o: ToyIn, *, checks: Callable[..., list[Check]] = doctor) -> ToyReport:

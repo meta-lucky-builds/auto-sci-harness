@@ -67,7 +67,8 @@ def _docker(docker: DockerCLI) -> list[Check]:
     rows = [Check("Docker", OK, "The Docker engine answers.")]
     for name, image, step in IMAGES:
         here = _answers(docker, ["image", "inspect", "--format", "{{.Id}}", image])
-        rows.append(Check(name, OK, f"{image} is here.") if here else Check(name, MISSING, f"{image} is not here.", step))
+        rows.append(Check(name, OK, f"{image} is here.") if here
+                    else Check(name, MISSING, f"{image} is not here.", step))
     return rows
 
 
@@ -161,5 +162,6 @@ def render(checks: list[Check]) -> str:
         if c.next_step:
             lines.append(f"          next: {c.next_step}")
     left = blocking(checks)
-    lines.append(f"{len(left)} step(s) stand before a first session." if left else "Nothing stands before a first session.")
+    lines.append(f"{len(left)} step(s) stand before a first session." if left
+                 else "Nothing stands before a first session.")
     return "\n".join(lines)

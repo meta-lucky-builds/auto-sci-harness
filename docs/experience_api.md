@@ -71,8 +71,7 @@ appears only with the autopsy. A reviewer's file before retirement has the verdi
 part, compared on the part's feature columns. Before this it refused only whole private files, so the raw file or a
 subset gave scores on sealed labels.
 
-**Never grants.** No verb writes an approval, a role or a certificate. The one retirement that happens without a person is
-a spent generated target (below). `approve` has one parameter, the item
+**Never grants.** No verb writes an approval, a role, a retirement or a certificate. `approve` has one parameter, the item
 id. Steps that are the researcher's decision (`seal`, `start`, `steer`, `freeze`, `promote`, `mint`) refuse an agent's name
 and a call from inside a run. `court retire` and `lab release-verdict` now apply the same check. This is accountability,
 not authentication: on one machine the OS user is the trust root, and `human/guard.py` says so. A Lab box cannot reach
@@ -88,19 +87,13 @@ the types, and the session test resolves every link and compares the value. An u
 A Court case never reads INCONCLUSIVE yet: the difference from NOT CERTIFIED depends on the interval, which the feedback
 split withholds, and N17 (P1) has not been built. A certified claim that is not VALIDATED says it is not a finding.
 
-**One-look targets.** `case`, `technical` and `share` go through `display.open_case`: `view`, and then a generated (minted)
-target with no look left retires by itself. So the first look shows the verdict, the closed reason and the checks in full,
-and the next look shows everything, with the rerun command. UPGRADES N14 allows this: a target retires when its slots
-are spent or the owner retires it, and GOAL 16.4 says the same for slots. It does not weaken anything on this route,
-because a generated target can never be used again and holds no real data, and the view is recorded first, so an
-outcome nobody opened stays out of every other surface. The owner decided this on 2026-11-02.
-
-Three cases stay as they were, on purpose:
-- A sealed target needs a person: `chh court retire TARGET --by NAME`. Its certificate and bundle carry labels of real
-  rows, and a second sealed part of the same data may be unopened. Opening them on a look would be an irreversible step
-  nobody chose, and it would give full feedback before a later claim on the same data.
-- A target waits while a replica or second test of the case has no outcome.
-- A COULD NOT RUN never retires a target.
+**One-look targets stay a human step.** The owner asked for a target to retire by itself once its one look was spent, if
+that weakens nothing. It was built and then taken out on 2026-11-02, because it does weaken something: four red-team tests
+of the feedback split failed. The next look at any case would have shown the reasons and numbers of the truth-dependent
+checks with no decision by anyone. A generated target can never be reused, but its family can: fresh data is drawn from
+the same generator, so those reasons would teach the Lab how to pass the next claim. That is what the split exists to stop
+(GOAL 18.1, 18.5). UPGRADES N14 does allow retirement when slots are spent, so the owner may still decide otherwise, but
+that decision would change those tests. Retirement remains `chh court retire TARGET --by NAME`.
 
 ## Transport
 
@@ -111,8 +104,7 @@ must call this class and nothing else.
 ## Limits
 
 - Identity is a name on one machine. A person with the store can read everything; this path counts what the product shows.
-- On sealed data a reviewer's `share` needs a human retirement before it can carry a rerun. On generated data it carries
-  one once the verdict has been opened.
+- A reviewer's `share` needs a human retirement before it can carry a rerun.
 - The rows check catches exact rows on matching columns, and renamed, reordered or rounded copies of at least five rows
   (`court/rehearsal.py`). Noise added, columns added or rounding below three decimals still pass it.
 - A Claim Audit's COULD NOT RUN shows its report with no release: it names no target to release on.

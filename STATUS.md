@@ -41,7 +41,7 @@ runs). Any later change to the Court starts a new Court version, which needs a n
 | Experience API and `chh exp` | Built: one full session runs through it with real kerneld, a fake docker and scripted programs | docs/experience_api.md |
 | Older layers: research loop, memory, evolution, adapters, verifiers, studio, scorecard | Built to varying depth; see the old file and each doc. Not re-assessed here | docs/ |
 
-Stage-launch adds, after `court-v1`: `chh exp doctor`, `chh exp toy`, automatic retirement of a spent generated target, the
+Stage-launch adds, after `court-v1`: `chh exp doctor`, `chh exp toy`, the
 explicit opt-in for a local model server, a wider check for copies of sealed rows, and the Lab image
 (`custom-harness-lab:py312`, sha256:b0a4b697318a; each agent tool in it reports its version, and none has run a task).
 
@@ -53,8 +53,11 @@ WebSocket are left to the UI stage. The UI itself comes after the first real ses
 - **No run with a real agent in a real Lab box.** No model has been called by this route.
 - **Zero Court-certified discoveries**, and no simulator-scoped certified result yet.
 - The owner's real store has no passing health run for the current Court version. One passed on a scratch store at
-  stage-b's version (verified on real Docker, stage-b). Stage-launch changed `court/`, so that version is gone and a new
+  stage-b's version (verified on real Docker, stage-b). Stage-launch changed `court/rehearsal.py`, so that version is gone and a new
   `chh court health --docker` is owed.
+- `python scripts/check.py --fast` fails its governance step on `main` since `court-v1`: the owner's rewording of invariant 5
+  in GOAL section 10 is part of the core fingerprint and has no record yet. No Kernel source changed. Only a person may
+  record it (checklist step 1).
 - Invariant 22 stays NOT MET until a person registers a human-held check.
 - `TRUTH_INDEPENDENT` in `court/display.py` is the orchestrator's proposal until the owner has reviewed it.
 - The readiness settings and the strawman margin are UNCALIBRATED, as are all values marked so in the code.

@@ -130,7 +130,7 @@ def test_the_rows_check_passes_a_file_with_other_columns_and_empty_files(w):
 
 
 def test_a_renamed_or_rounded_copy_of_sealed_rows_is_refused(w):
-    """The check used to compare exact values on matching column names, so a light disguise gave scores on sealed labels."""
+    """It used to compare exact values on matching column names, so a light disguise gave scores on sealed labels."""
     from custom_harness.court.rehearsal import sealed_rows_problem
     w.seal()
     head, *rows = [ln.split(",") for ln in w.data.read_text(encoding="utf-8").splitlines()]

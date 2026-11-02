@@ -10,7 +10,7 @@ a label is read.
 |---|---|
 | K0, K1, K2, K5, K8 (independent of held-out truth) | in full, with reasons |
 | K3, K4, K6, K7, K9 | nothing but the verdict label and one closed reason class |
-| The whole certificate | after the target retires, recorded as a continuous release, so the target is exposed. A generated target retires by itself once its verdict was opened (`display.open_case`); a sealed one needs `chh court retire TARGET --by NAME` (human) |
+| The whole certificate | only after `chh court retire TARGET --by NAME` (human); recorded as a continuous release, so the target is exposed |
 | COULD NOT RUN, no label read | the full technical reason |
 | COULD NOT RUN after a label read | that it happened, not the detail; one verdict bit is released |
 | Badges that changed because a replica or second test finished | shown, with a `count` release on that case's target |

@@ -118,7 +118,8 @@ def test_costs_unknown_stays_unknown(store):
 
 def test_a_headless_prompt_traces_the_human_the_cost_and_the_files_without_inlining_the_prompt(store):
     fake = FakeDocker()
-    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-run", docker=docker(fake))
+    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None,
+            session_id="s-run", docker=docker(fake))
     (S.workspace_of("s-run") / "notes.md").write_text("idea", encoding="utf-8")
     S.run_prompt(store, "s-run", "please try gradient boosting", docker=docker(fake))
     evs = T.events(store, "s-run")
@@ -134,7 +135,8 @@ def test_a_headless_prompt_traces_the_human_the_cost_and_the_files_without_inlin
 
 def test_story_links_a_claim_back_to_the_session_and_its_idea_path(store, tmp_path):
     fake = FakeDocker()
-    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-story", docker=docker(fake))
+    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None,
+            session_id="s-story", docker=docker(fake))
     T.record(store, "s-story", "idea", _idea("root", title="ensembles"), actor=AG)
     T.record(store, "s-story", "idea", _idea("rf", "branch", "root", title="random forest"), actor=AG)
     ws = S.workspace_of("s-story")
@@ -168,7 +170,8 @@ budget: {timeout_s: 60}
 
 def test_promotion_naming_an_unknown_idea_is_refused(store, tmp_path):
     fake = FakeDocker()
-    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-noidea", docker=docker(fake))
+    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None,
+            session_id="s-noidea", docker=docker(fake))
     ws = S.workspace_of("s-noidea")
     ws.joinpath("m.py").write_bytes(b"a = 1\n")
     ws.joinpath("b.py").write_bytes(b"b = 2\n")

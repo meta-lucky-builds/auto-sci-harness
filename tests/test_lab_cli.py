@@ -37,5 +37,5 @@ def test_lab_start_refuses_the_owner_key_variable(monkeypatch):
 
 
 def test_lab_start_refuses_a_local_model_without_the_opt_in():
-    with pytest.raises(SystemExit, match="refused.*--local-model-server"):
+    with pytest.raises(SystemExit, match=r"refused.*--local-model-server"):
         main(["lab", "start", "--agent", "opencode", "--model", "m", "--session", "s-noopt"])
