@@ -60,9 +60,22 @@ export const api = {
   paper: (req: T.PaperIn) => post<T.Paper>("paper", req),
 };
 
-/** Tells `onChange` when a session's Story grew. The event names no content: the page reads the API again. */
+/** Tells `onChange` when a session's Story grew. The event names no content: the page reads the API again.
+ *  One stream per session, however many parts of the page listen: a browser allows few connections to one server. */
+const streams = new Map<string, { es: EventSource; subs: Set<() => void> }>();
 export function watchLab(sessionId: string, onChange: () => void): () => void {
-  const es = new EventSource(`/api/live?session_id=${encodeURIComponent(sessionId)}`);
-  es.addEventListener("lab", onChange);
-  return () => es.close();
+  let s = streams.get(sessionId);
+  if (!s) {
+    const subs = new Set<() => void>();
+    const es = new EventSource(`/api/live?session_id=${encodeURIComponent(sessionId)}`);
+    es.addEventListener("lab", () => subs.forEach((f) => f()));
+    s = { es, subs };
+    streams.set(sessionId, s);
+  }
+  const held = s;
+  held.subs.add(onChange);
+  return () => {
+    held.subs.delete(onChange);
+    if (held.subs.size === 0) { held.es.close(); streams.delete(sessionId); }
+  };
 }

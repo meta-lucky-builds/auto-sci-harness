@@ -18,19 +18,55 @@ NOTICE = "Scripted example. Nothing on this page came from the Court, and no age
 SID = "s-label-smoothing"
 PID = "f-smoothing-01"
 ME = "you (scripted)"
-SPENDING = "Recorded spend $0.42 of the $5.00 limit for this session, plus 1 call(s) of unknown cost."
+CYCLE_S = 1.4  # one more Story line each this many seconds
+HOLD_LINES = 16  # the finished session rests this many steps before the example starts again
+# What a live session looks like, line by line. A run with no result is one that has started. The Lab screen builds its
+# tree, pulses and counters from these lines, as it does from a real Story. Nothing here ran.
 LOG = (("system", "session", "start"),
        ("you", "human", "Try label smoothing against plain cross entropy on the tabular task."),
-       ("agent", "idea", "propose: Label smoothing"),
+       ("agent", "idea", "propose: Plain cross entropy"),
        ("agent", "action", "read data/README.md"),
+       ("agent", "run", "python train.py --baseline"),
+       ("agent", "run", "python train.py --baseline  accuracy 0.8011 (dev)"),
+       ("agent", "idea", "propose: Label smoothing"),
+       ("agent", "run", "python train.py --smooth 0.1"),
        ("agent", "run", "python train.py --smooth 0.1  accuracy 0.8312 (dev)"),
-       ("agent", "idea", "propose: Mixup on tabular rows"),
-       ("agent", "run", "python train.py --mixup 0.2  accuracy 0.7904 (dev)"),
-       ("agent", "idea", "abandon: Mixup on tabular rows (worse than the baseline on every seed)"),
        ("agent", "web", "connection: export.arxiv.org"),
+       ("agent", "idea", "branch: Smoothing at 0.05"),
+       ("agent", "run", "python train.py --smooth 0.05"),
        ("agent", "run", "python train.py --smooth 0.05  accuracy 0.8347 (dev)"),
+       ("agent", "idea", "branch: Smoothing with class weights"),
+       ("agent", "run", "python train.py --smooth 0.05 --weights"),
+       ("agent", "run", "python train.py --smooth 0.05 --weights  accuracy 0.8290 (dev)"),
+       ("agent", "idea", "abandon: Smoothing with class weights (no better than smoothing alone)"),
+       ("agent", "idea", "revisit: Smoothing at 0.05"),
+       ("agent", "idea", "branch: Smoothing with a cosine schedule"),
+       ("agent", "run", "python train.py --smooth 0.05 --cosine"),
+       ("agent", "run", "python train.py --smooth 0.05 --cosine  accuracy 0.8391 (dev)"),
+       ("you", "human", "Keep the baseline fixed. Try mixup before going further."),
+       ("agent", "idea", "propose: Mixup on tabular rows"),
+       ("agent", "run", "python train.py --mixup 0.2"),
+       ("agent", "run", "python train.py --mixup 0.2  accuracy 0.7904 (dev)"),
+       ("agent", "idea", "branch: Stronger mixup"),
+       ("agent", "run", "python train.py --mixup 0.4"),
+       ("agent", "run", "python train.py --mixup 0.4  accuracy 0.7851 (dev)"),
+       ("agent", "idea", "abandon: Stronger mixup (worse as the mixing grows)"),
+       ("agent", "idea", "abandon: Mixup on tabular rows (worse than the baseline on every seed)"),
+       ("agent", "web", "connection: api.semanticscholar.org"),
+       ("agent", "idea", "propose: Feature dropout"),
+       ("agent", "run", "python train.py --feature-dropout 0.1"),
+       ("agent", "run", "python train.py --feature-dropout 0.1  accuracy 0.8122 (dev)"),
+       ("agent", "idea", "branch: Dropout by column group"),
+       ("agent", "run", "python train.py --group-dropout 0.1"),
+       ("agent", "run", "python train.py --group-dropout 0.1  accuracy 0.8207 (dev)"),
+       ("agent", "idea", "branch: Dropout on rare columns only"),
+       ("agent", "run", "python train.py --group-dropout 0.1 --rare"),
+       ("agent", "run", "python train.py --group-dropout 0.1 --rare  accuracy 0.8034 (dev)"),
+       ("agent", "idea", "abandon: Dropout on rare columns only (loses what grouping gained)"),
        ("agent", "action", "write method.py"),
-       ("agent", "run", "python train.py --baseline  accuracy 0.8011 (dev)"))
+       ("agent", "run", "pytest tests/test_method.py"),
+       ("agent", "run", "pytest tests/test_method.py  passed 12 (dev)"),
+       ("agent", "action", "write claim.json"))
 _MEANING = W.BADGES
 
 
@@ -45,7 +81,7 @@ class ScriptedExperience:
         self.started = time.monotonic()
         self.opened: set[str] = set()
         self.facts: dict[str, float | int | None] = {}
-        self.steers: list[str] = []
+        self.steers: list[tuple[int, str]] = []  # the step each steer arrived at, and its words
 
     def _n(self, name: str, value: float | int | None) -> M.Number:
         link = f"chh://scripted/example/{name}"
@@ -76,7 +112,11 @@ class ScriptedExperience:
                         "sentence": "A wider network beats a deeper one by at least 0.02 accuracy.",
                         "verdict": "COULD NOT RUN", "reason_code": None, "looks": 1, "badges": (),
                         "verdict_sentence": W.VERDICTS["COULD NOT RUN"], "second": None, "rerun": None,
-                        "reason": f"The method stopped with an error before reading any answer. {W.RETRY}"}}
+                        "reason": f"The method stopped with an error before reading any answer. {W.RETRY}"},
+            "c-weights": {"title": "Class weights help the rare classes",
+                          "sentence": "Class weights beat no weights by at least 0.03 on macro accuracy.",
+                          "verdict": "INCONCLUSIVE", "reason_code": "TOO_CLOSE_TO_CALL", "looks": 1, "badges": (),
+                          "verdict_sentence": W.VERDICTS["INCONCLUSIVE"], "second": None, "rerun": None}}
 
     # the verbs ---------------------------------------------------------
     def meta(self) -> M.Meta:
@@ -136,28 +176,48 @@ class ScriptedExperience:
         return M.Sessions(sessions=(line,), total=self._n("sessions", 1))
 
     def _shown(self) -> int:
-        return min(len(LOG), 3 + int((time.monotonic() - self.started) / 2))  # the Lab is alive: one more line each 2 s
+        """The Lab is alive: one more line every few seconds, a rest at the end, then the example runs again."""
+        step = int((time.monotonic() - self.started) / CYCLE_S) % (len(LOG) - 3 + HOLD_LINES)
+        return min(len(LOG), 3 + step)
+
+    def _spending(self, runs: int) -> str:
+        return f"Recorded spend ${0.06 * runs:.2f} of the $5.00 limit for this session, plus 1 call(s) of unknown cost."
 
     def lab(self, session_id: str) -> M.LabView:
         self._known(session_id)
         shown = LOG[:self._shown()]
-        titles = [("smoothing", "Label smoothing", "open"), ("mixup", "Mixup on tabular rows", "abandoned"),
-                  ("schedule", "Cosine schedule", "open")]
+        status: dict[str, str] = {}
+        for _, kind, text in shown:
+            if kind == "idea":
+                op, _, rest = text.partition(": ")
+                status[rest.split(" (")[0]] = {"abandon": "abandoned"}.get(op, "open")
+        runs = sum(x[1] == "run" and "  " in x[2] for x in shown)
         return M.LabView(session_id=session_id, project="tabular-rings", notice=W.LAB_NOTICE,
-                         ideas=tuple(M.Idea(idea_id=i, title=t, status=s) for i, t, s in titles),
-                         open_ideas=self._n("open", 2), dropped_ideas=self._n("dropped", 1),
-                         runs=self._n("runs", sum(x[1] == "run" for x in shown)), steers=self._n("steers", 1),
+                         ideas=tuple(M.Idea(idea_id=t.casefold().replace(" ", "-"), title=t, status=s)
+                                     for t, s in status.items()),
+                         open_ideas=self._n("open", sum(s == "open" for s in status.values())),
+                         dropped_ideas=self._n("dropped", sum(s == "abandoned" for s in status.values())),
+                         runs=self._n("runs", runs),
+                         steers=self._n("steers", sum(x[1] == "human" for x in shown) + len(self.steers)),
                          web_connections=self._n("web", sum(x[1] == "web" for x in shown)),
-                         cost_usd=self._n("cost", 0.42), costs_unknown=self._n("cost-unknown", 1), spending=SPENDING)
+                         cost_usd=self._n("cost", round(0.06 * runs, 2)), costs_unknown=self._n("cost-unknown", 1),
+                         spending=self._spending(runs))
 
     def lab_log(self, session_id: str) -> M.LabLog:
         self._known(session_id)
-        lines = [M.LabLine(at=f"10:{i:02d}:00", who=who, kind=kind, text=text)  # type: ignore[arg-type]
-                 for i, (who, kind, text) in enumerate(LOG[:self._shown()])]
-        lines += [M.LabLine(at="10:59:00", who="you", kind="human", text=t) for t in self.steers]
-        return M.LabLog(session_id=session_id, lines=tuple(lines), web=("export.arxiv.org",),
-                        reading=(M.Reading(source="arxiv", query="label smoothing tabular",
-                                           found=self._n("found", 14)),))
+        now = self._shown()
+        at = [f"10:{i // 2:02d}:{(i % 2) * 30:02d}" for i in range(len(LOG))]
+        rows = [(i, who, kind, text) for i, (who, kind, text) in enumerate(LOG[:now])]
+        rows += [(min(i, now) - 1, "you", "human", t) for i, t in self.steers]  # a steer stays through a rerun
+        rows.sort(key=lambda r: r[0])
+        lines = [M.LabLine(at=at[i], who=who, kind=kind, text=text)  # type: ignore[arg-type]
+                 for i, who, kind, text in rows]
+        seen = sum(x[1] == "web" for x in LOG[:now])
+        return M.LabLog(session_id=session_id, lines=tuple(lines),
+                        web=("export.arxiv.org", "api.semanticscholar.org")[:seen],
+                        reading=(M.Reading(source="arxiv", query="label smoothing tabular", found=self._n("found", 14)),
+                                 M.Reading(source="semantic scholar", query="mixup on tabular data",
+                                           found=self._n("found-2", 9))))
 
     def _known(self, session_id: str) -> None:
         if session_id != SID:
@@ -165,29 +225,33 @@ class ScriptedExperience:
 
     def steer(self, req: M.SteerIn) -> M.Steered:
         self._known(req.session_id)
-        self.steers.append(req.text)
+        self.steers.append((self._shown(), req.text))
         return M.Steered(session_id=req.session_id, event_id=f"scripted-{len(self.steers)}", sent=False, reply=None,
                          court_results_seen=self._n("seen", len(self.opened)), note="Recorded in the Story.",
-                         spending=SPENDING)
+                         spending=self._spending(0))
 
     def explore(self, req: M.ExploreIn) -> M.Explored:
         self._known(req.session_id)
         return M.Explored(session_id=req.session_id, finished=True, reply="(a scripted reply: no agent ran)",
-                          actions=self._n("actions", len(LOG)), notice=W.LAB_NOTICE, spending=SPENDING)
+                          actions=self._n("actions", len(LOG)), notice=W.LAB_NOTICE, spending=self._spending(0))
 
     def frozen(self) -> M.FrozenIdeas:
-        item = M.FrozenIdea(promotion_id=PID, session_id=SID, title="Label smoothing beats plain cross entropy",
-                            sentence="Label smoothing beats plain cross entropy by at least 0.02 accuracy.")
-        return M.FrozenIdeas(items=(item,), total=self._n("frozen", 1))
+        items = (M.FrozenIdea(promotion_id=PID, session_id=SID, title="Label smoothing beats plain cross entropy",
+                              sentence="Label smoothing beats plain cross entropy by at least 0.02 accuracy."),
+                 M.FrozenIdea(promotion_id="f-group-dropout-02", session_id=SID, title="Dropout by column group",
+                              sentence="Dropout by column group beats no dropout by at least 0.015 accuracy."))
+        return M.FrozenIdeas(items=items, total=self._n("frozen", len(items)))
 
     def _readiness(self) -> M.Readiness:
         rows = tuple(M.ReadinessRow(test_rows=self._n(f"size-{n}", n), chance=self._n(f"chance-{n}", p), objection=o)
-                     for n, p, o in ((500, 0.41, True), (2000, 0.78, False), (5000, 0.93, False)))
+                     for n, p, o in ((250, 0.22, True), (500, 0.41, True), (1000, 0.63, False), (2000, 0.78, False),
+                                     (5000, 0.93, False)))
         return M.Readiness(sentence="No objection at 2000 test rows.", notice=W.READINESS_NOTICE, rows=rows)
 
     def rehearse(self, req: M.RehearseIn) -> M.Rehearsal:
         scores = tuple(M.ScoreRow(arm=arm, seed=str(s), score=self._n(f"{arm}-{s}", v))  # type: ignore[arg-type]
-                       for arm, vals in (("method", (0.838, 0.834, 0.841)), ("baseline", (0.802, 0.799, 0.806)))
+                       for arm, vals in (("method", (0.838, 0.834, 0.841, 0.829, 0.846, 0.836, 0.833)),
+                                         ("baseline", (0.802, 0.799, 0.806, 0.811, 0.795, 0.804, 0.801)))
                        for s, v in enumerate(vals))
         return M.Rehearsal(promotion_id=req.promotion_id, notice=W.REHEARSAL_NOTICE, ran=True, would_certify=True,
                            reason=None, scores=scores, readiness=self._readiness(),
@@ -218,7 +282,10 @@ class ScriptedExperience:
         outcomes = tuple(M.Outcome(case_id=c, title=facts[c]["title"], verdict=facts[c]["verdict"],
                                    badges="+".join(b.name for b in facts[c]["badges"]) or "NONE",
                                    reason_code=facts[c]["reason_code"]) for c in sorted(self.opened))
-        ends = [M.DeadEnd(title="Mixup on tabular rows", reason="worse than the baseline on every seed", source="idea")]
+        ends = [M.DeadEnd(title="Mixup on tabular rows", reason="worse than the baseline on every seed", source="idea"),
+                M.DeadEnd(title="Stronger mixup", reason="worse as the mixing grows", source="idea"),
+                M.DeadEnd(title="Smoothing with class weights", reason="no better than smoothing alone", source="idea"),
+                M.DeadEnd(title="Dropout on rare columns only", reason="loses what grouping gained", source="idea")]
         ends += [M.DeadEnd(title=o.title, reason=W.REASONS.get(str(o.reason_code), o.verdict), source="verdict")
                  for o in outcomes if o.verdict == "NOT CERTIFIED"]
         if query:
@@ -234,6 +301,12 @@ class ScriptedExperience:
     def trust(self) -> M.TrustBoard:
         rows = (M.TrustRow(name="Docker", state="ok", detail="Scripted example.", next_step=None,
                            needed_for="both tracks"),
+                M.TrustRow(name="Lab box image", state="ok", detail="Scripted example.", next_step=None,
+                           needed_for="the Lab"),
+                M.TrustRow(name="Spending limit", state="ok", detail="Scripted example.", next_step=None,
+                           needed_for="the Lab"),
+                M.TrustRow(name="Public random value", state="ok", detail="Scripted example.", next_step=None,
+                           needed_for="generated data"),
                 M.TrustRow(name="Court health run", state="missing", detail="Scripted example.",
                            next_step="chh court health --docker", needed_for="both tracks"),
                 M.TrustRow(name="Feedback table", state="yours", detail="Scripted example.",
