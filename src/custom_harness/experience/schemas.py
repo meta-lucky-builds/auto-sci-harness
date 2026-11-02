@@ -51,6 +51,7 @@ class StartIn(Model):
     registry_key: str | None = None
     box_env: str | None = None
     credential: CredentialIn | None = None
+    local_model_server: bool = False  # opt-in: the box may reach one port of this machine (docs/lab.md section 11)
 
 
 class ExploreIn(Model):

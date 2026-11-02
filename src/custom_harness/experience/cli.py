@@ -4,7 +4,7 @@
   chh exp waiting
   chh exp approve ITEM                        points to the step; it never takes it
   chh exp seal PROJECT --data F --label-column C --rows N [--parts 2] --beacon-round R --beacon VALUE
-  chh exp start AGENT [--project P] [--session S] [--model M]
+  chh exp start AGENT [--project P] [--session S] [--model M] [--local-model-server]
   chh exp lab SESSION
   chh exp explore SESSION --prompt TEXT
   chh exp steer SESSION --text TEXT [--no-send]
@@ -22,12 +22,15 @@
   chh exp record [--query WORDS]
   chh exp resolve LINK
   chh exp schema
+  chh exp doctor [--registry-key K] [--json]   is this machine ready? what is missing and the next step
+  chh exp toy [key options] [--beacon-round R] [--beacon VALUE] [--new-freeze]   the minted toy track, one command
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +60,8 @@ def add_parsers(sub: Any) -> None:
     st.add_argument("--project")
     st.add_argument("--session")
     st.add_argument("--model")
+    st.add_argument("--local-model-server", action="store_true",
+                    help="OPT-IN: the box may reach the one host port of a local model server")
     for name in ("lab", "stop"):
         s.add_parser(name, help=f"{name} of a Lab session").add_argument("session")
     ex = s.add_parser("explore", help="one prompt to the session's agent")
@@ -106,6 +111,21 @@ def add_parsers(sub: Any) -> None:
     rc.add_argument("--query")
     s.add_parser("resolve", help="what a number rests on").add_argument("link")
     s.add_parser("schema", help="the JSON Schema of every request and view")
+    dr = s.add_parser("doctor", help="is this machine ready for a first session; what is missing; the next step")
+    dr.add_argument("--registry-key", default="anthropic-api", help="the provider entry of the key you will use")
+    dr.add_argument("--json", action="store_true")
+    to = s.add_parser("toy", help="the minted toy track: runs up to the next step that needs a person")
+    to.add_argument("--session", default="toy-1")
+    to.add_argument("--agent", default="claude-code")
+    to.add_argument("--model")
+    to.add_argument("--registry-key", default="anthropic-api")
+    to.add_argument("--credential-env", help="host variable CHH_LAB_CRED_<NAME> holding the scoped key")
+    to.add_argument("--credential-file", help="file holding the scoped key (outside agent-readable roots)")
+    to.add_argument("--spend-cap-usd", type=float, help="the limit set at the provider on this key")
+    to.add_argument("--scope", default="", help="where the key lives and what limits it (recorded)")
+    to.add_argument("--beacon-round", help="a public random round that has not happened yet")
+    to.add_argument("--beacon", help="the published value of that round")
+    to.add_argument("--new-freeze", action="store_true", help="freeze again, after steering the agent")
 
 
 def _pairs(v: str | None) -> tuple[int, int, int, int] | None:
@@ -123,15 +143,36 @@ def _promote(a: argparse.Namespace, m: Any) -> Any:
                        targets_file=a.targets, dev_pairs=_pairs(a.dev_pairs), n_test=a.n_test)
 
 
+def _toy(a: argparse.Namespace, x: Any, m: Any) -> dict[str, Any]:
+    from . import toy
+    cred = None
+    if a.spend_cap_usd is not None and (a.credential_env or a.credential_file):
+        cred = m.CredentialIn(registry_key=a.registry_key, spend_cap_usd=a.spend_cap_usd, source_env=a.credential_env,
+                              source_file=a.credential_file, scope=a.scope)
+    return asdict(toy.run(x, toy.ToyIn(session_id=a.session, agent=a.agent, registry_key=a.registry_key, model=a.model,
+                                       credential=cred, beacon_round=a.beacon_round, beacon_value=a.beacon,
+                                       new_freeze=a.new_freeze)))
+
+
+def _doctor(a: argparse.Namespace, x: Any) -> int:
+    from . import doctor as d
+    checks = d.doctor(x.store, docker=x.docker, environ=x.environ, registry_key=a.registry_key)
+    print(json.dumps([asdict(c) for c in checks], indent=1) if a.json else d.render(checks))
+    return 1 if d.blocking(checks) else 0
+
+
 def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
     c = a.exp_cmd
+    if c == "toy":
+        return _toy(a, x, m)
     if c == "whoami":
         return x.set_researcher(a.name) if a.name else x.whoami()
     if c == "seal":
         return x.seal(m.SealIn(project=a.project, data_file=a.data, label_column=a.label_column, rows=a.rows,
                                parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon))
     if c == "start":
-        return x.start(m.StartIn(agent=a.agent, project=a.project, session_id=a.session, model=a.model))
+        return x.start(m.StartIn(agent=a.agent, project=a.project, session_id=a.session, model=a.model,
+                                 local_model_server=a.local_model_server))
     if c == "explore":
         return x.explore(m.ExploreIn(session_id=a.session, prompt=a.prompt))
     if c == "steer":
@@ -168,6 +209,8 @@ def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
 def cmd_exp(a: argparse.Namespace, store: EvidenceStore) -> int:
     from . import schemas as m
     from .api import Experience, Refused
+    if a.exp_cmd == "doctor":
+        return _doctor(a, Experience(store))
     try:
         out = _call(a, Experience(store), m)
     except Refused as e:

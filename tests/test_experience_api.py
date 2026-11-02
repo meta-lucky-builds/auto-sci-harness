@@ -228,7 +228,8 @@ def test_whoami_defaults_to_the_os_user_and_owners_are_followed(w):
 
 
 def test_a_session_started_on_the_command_line_counts_for_its_os_user(w):
-    S.start(w.store, "opencode", AgentOptions(model="m"), None, session_id="s-cli", docker=w.x.docker)
+    S.start(w.store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-cli",
+            docker=w.x.docker)
     w.lab_work("s-cli")
     w.x.explore(M.ExploreIn(session_id="s-cli", prompt="go"))
     assert [e.title for e in w.x.record().dead_ends] == ["Angle"]
@@ -390,3 +391,47 @@ def test_the_command_line_speaks_for_the_same_doorway(w, capsys, monkeypatch):
 def test_the_published_schema_is_current():
     doc = json.loads((ROOT / "docs" / "experience_api.schema.json").read_text(encoding="utf-8"))
     assert doc == json.loads(json.dumps(M.api_schema()))
+
+
+def test_a_spent_generated_target_opens_on_the_next_look(tmp_path):
+    c = Case(tmp_path / "c")
+    try:
+        c.run()
+        x = Experience(c.store)
+        first = x.case(c.case_id)
+        assert first.next_step == W.OPENS_NEXT and first.command == f"chh exp case {c.case_id}"
+        assert not first.retired and W.jargon_problems(first.model_dump(mode="json")) == []
+        second = x.case(c.case_id)
+        assert second.retired and second.next_step is None
+    finally:
+        c.close()
+
+
+def test_the_technical_view_and_a_shared_file_count_as_opening(tmp_path):
+    for name in ("technical", "share"):
+        c = Case(tmp_path / name)
+        try:
+            c.run()
+            x = Experience(c.store)
+            if name == "technical":
+                x.technical(c.case_id)
+            else:
+                x.share(M.ShareIn(case_id=c.case_id, reviewer="Reviewer One", out_file=str(tmp_path / "f.json")))
+            assert D.retired(c.store, c.target)
+        finally:
+            c.close()
+
+
+def test_a_refused_agent_configuration_is_a_refusal_of_the_doorway(w):
+    with pytest.raises(Refused) as e:
+        w.x.start(M.StartIn(agent="opencode", session_id="s-nomodel"))
+    assert e.value.code == "AdapterRefused"
+
+
+def test_the_local_model_opt_in_goes_through_the_doorway(w, capsys):
+    parser = argparse.ArgumentParser()
+    exp_cli.add_parsers(parser.add_subparsers(dest="cmd"))
+    with pytest.raises(Refused, match="--local-model-server"):
+        w.x.start(M.StartIn(agent="opencode", model="m", session_id="s-noopt"))
+    a = parser.parse_args(["exp", "start", "opencode", "--model", "m", "--local-model-server"])
+    assert a.local_model_server is True

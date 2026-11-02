@@ -7,7 +7,8 @@ Order of use: `whoami`, `seal`, `start`, `explore` / `steer`, `freeze`, `rehears
 Rules that hold for every verb (tests/test_experience_ratchet.py keeps them true):
   - it holds a HostStore, so private data can only be read through kerneld;
   - Court output reaches it only through `court/display.py`. The return value of `court.minted.run` is dropped;
-  - it never grants: no verb writes an approval, a role, a retirement or a certificate. `approve` writes nothing;
+  - it never grants: no verb writes an approval, a role or a certificate, and the only retirement is the automatic one
+    of a spent generated target (`display.open_case`). `approve` writes nothing;
   - a verb that is a researcher's decision names the researcher and refuses an agent's name or a call from inside a run.
     That is accountability, not authentication: on one machine the OS user is the trust root (human/guard.py).
 """
@@ -39,7 +40,7 @@ from ..kerneld.hoststore import host_store
 from ..lab import promote as P
 from ..lab import session as S
 from ..lab import trace as T
-from ..lab.agents import AgentOptions
+from ..lab.agents import AdapterRefused, AgentOptions
 from ..lab.box import DockerCLI
 from ..lab.credentials import CredentialRefused, CredentialSpec
 from ..lab.session import LabError
@@ -61,7 +62,7 @@ OWN_STEPS = {"needs_beacon": "chh exp mint {case} --beacon VALUE", "ready_to_run
              "outcome_recorded": "chh exp case {case}",
              "needs_role_approval": "chh approve-role {target} --approver NAME"}
 REFUSED: tuple[type[Exception], ...] = (
-    C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError, FileNotFoundError,
+    AdapterRefused, C.CourtRefused, CourtPaperError, CredentialRefused, D.DisplayRefused, FigureError, FileNotFoundError,
     HumanActionRefused, InfraError, LabError, LabWallError, P.PromoteError, R.RehearsalRefused, T.TraceRefused,
     Z.SealRefused)
 
@@ -212,7 +213,8 @@ class Experience:
                                   spend_cap_usd=c.spend_cap_usd, scope=c.scope, source_env=c.source_env,
                                   source_file=c.source_file, ttl_s=c.ttl_hours * 3600)
         rec = S.start(self.store, req.agent, AgentOptions(registry_key=req.registry_key, model=req.model,
-                                                          box_env=req.box_env),
+                                                          box_env=req.box_env,
+                                                          local_model_server=req.local_model_server),
                       cred, session_id=req.session_id, docker=self.docker, environ=self.environ, project=req.project)
         self._own("session", rec["session_id"], name)
         return self._session(rec["session_id"])
@@ -448,7 +450,7 @@ class Experience:
         me = self.whoami().researcher
         if not D.is_case(self.store, case_id):
             return self._audit_case(case_id, me)
-        v = D.view(self.store, case_id, me)
+        v = D.open_case(self.store, case_id, me)
         pub = D.public_case(self.store, case_id)
         step: tuple[str, str] | None = None
         reason = None
@@ -457,6 +459,8 @@ class Experience:
         elif v["state"] == "COULD NOT RUN":
             reason = W.FAILED_AFTER_READ if v["labels_read"] else str(v["reason"])
             step = None if v["labels_read"] else (W.RETRY, OWN_STEPS["ready_to_run"].format(case=case_id))
+        elif v.get("opens_next"):
+            step = W.OPENS_NEXT, OWN_STEPS["outcome_recorded"].format(case=case_id)
         return self._case_view(v, pub, rows=pub["n_test"], step=step, reason=reason)
 
     def _audit_case(self, audit_id: str, viewer: str) -> M.Case:
@@ -473,7 +477,7 @@ class Experience:
         """The separate technical view: the Court's own words, through the same display path."""
         me = self.whoami().researcher
         if D.is_case(self.store, case_id):
-            return M.TechnicalView(case_id=case_id, details=D.view(self.store, case_id, me))
+            return M.TechnicalView(case_id=case_id, details=D.open_case(self.store, case_id, me))
         return M.TechnicalView(case_id=case_id, details=D.view_audit(self.store, case_id, me) or {})
 
     def rehearsal_details(self, promotion_id: str) -> M.TechnicalView:
@@ -499,14 +503,15 @@ class Experience:
         if overlaps(Path(req.out_file), lab_root()):
             raise Refused("InsideLab", "a case file is written outside the lab root")
         viewer = f"reviewer:{check_human_name(req.reviewer, what='the reviewer')}"
-        v = D.view(self.store, req.case_id, viewer)
+        v = D.open_case(self.store, req.case_id, viewer)
         pub = D.public_case(self.store, req.case_id)
         doc = self._case_view(v, pub, rows=pub["n_test"], step=None, reason=None)
         Path(req.out_file).write_text(doc.model_dump_json(indent=1), encoding="utf-8")
         self.store.append_record(SHARE_KIND, {"case_id": req.case_id, "reviewer": req.reviewer, "path": req.out_file,
                                               "at": time.time()})
         return M.Shared(case_id=req.case_id, reviewer=req.reviewer, path=req.out_file,
-                        note="The reviewer sees what you see. The rerun command appears once the target is retired.")
+                        note="The reviewer sees what you see. The rerun command appears once the test data is retired: "
+                             "by itself after the verdict was opened on generated data, by a person on sealed data.")
 
     @refusing
     def paper(self, req: M.PaperIn) -> M.Paper:
