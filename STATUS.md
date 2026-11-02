@@ -15,7 +15,8 @@ Every statement carries one of these:
 |---|---|
 | `main` | The merge of `int18` into the old `main` (c117dcd, tagged `court-v1`). |
 | `int18` | Fast-forwarded to `stage-b` b1ec458: everything up to the Experience API. It stops there. |
-| `launch` | `main` plus the stage-launch work. It waits for the governance record (section 4), then fast-forwards into `main`. |
+| `launch` | Merged into `main` once the governance record existed. |
+| `product` | `main` plus the stage-product work: the feedback-table fix, the UI, product basics, version 1 features. Fast-forwarded into `main`. |
 | Other branches | Kept as they were. The repository has no archive tags or refs, so none were added, and nothing was deleted. |
 
 ## 2. How far the code has been tested
@@ -24,6 +25,8 @@ Every statement carries one of these:
 |---|---|---|
 | b1ec458 (`court-v1` code) | Full gate, two passes, 16 file chunks each, chunk boundaries shifted between passes | Clean (verified): pass 1 3,825 passed, 0 failed, 5 skipped, 20 expected failures, 0 unexpected passes; pass 2 the same totals, chunk p2_04 re-run after a PC sleep killed it (254 passed, 1 expected failure, 0 failed) |
 | After `court-v1` (`launch`) | No full gate. The changed code's test files, one file per process, the source-scanning ratchets, and `scripts/check.py --fast` | The changed and directly affected test files passed, each in its own process. `--fast` passed every step except governance (section 4). The list is in the stage-launch worklog |
+
+| Stage-product (`product`) | No full gate, and no complete `--fast` pass: the owner ruled out a second run. Fast run at 0ec0bba: conflict markers, strict Kernel types, red-team registry, governance, sealed-look ledger, human-check step passed; Kernel tests 277 passed, 100% coverage, one failure (the ruff check); lint, types and trusted coverage (96.65%) failed. Afterwards `ruff`, `mypy` and the quality test passed alone, and the uncovered lines got tests, but **the trusted coverage step was not re-measured as a whole** | Stage-product worklog |
 
 Stated plainly: **the code after `court-v1` has had no full gate.** The owner chose this for the launch stage (no long test
 runs). Any later change to the Court starts a new Court version, which needs a new `chh court health --docker`.
@@ -45,19 +48,26 @@ Stage-launch adds, after `court-v1`: `chh exp doctor`, `chh exp toy`, the
 explicit opt-in for a local model server, a wider check for copies of sealed rows, and the Lab image
 (`custom-harness-lab:py312`, sha256:b0a4b697318a; each agent tool in it reports its version, and none has run a task).
 
-Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement. HTTPS and
-WebSocket are left to the UI stage. The UI itself comes after the first real session (GOAL 18.7).
+Stage-product adds, tested with scripted stand-ins and no agent (reported, stage-product worklog):
+
+| Area | State | Where |
+|---|---|---|
+| Feedback table | K8 and K2 moved to the withheld side; K0, K1, K5 stay shown. Still the owner's decision | docs/court_rehearsal.md |
+| UI | All GOAL 18.7 screens, on `chh exp ui`. Plain HTTP and server-sent events, not HTTPS and WebSocket. Agents cannot be started from it. No user testing | docs/ui.md |
+| Product basics | Install script (dry-run only; Windows), setup, ML starter kit and tutorial, backup, restore, upgrades, spending limit (not a hard cap), default Lab model `claude-haiku-5-5` | docs/user_guide.md, docs/tutorial_ml.md |
+| Version 1 built | Future-data route through kerneld, time window on real-data routes, INCONCLUSIVE, two parallel-world families (synthetic noise), Lab defaults pack | docs/user_guide.md |
+| Version 1 built with a stand-in only | Measured no-data prior (no real model is set up), second family setting (never run with a real model) | `court/prior.py`, docs/user_guide.md |
+| Version 1 part-built | Same-budget baseline: a `gate` check exists, **the evolution loop does not pass it yet**. Hardened benchmark versions: not built. LLM judging: kept out of the Court by a test, but the older research loop still calls it. Literature: Court limited by a test; other modules stay in place | `evolve/selection.py`, `literature/__init__.py` |
+
+Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement.
 
 ## 4. What has not happened yet
 
 - **No run with a real agent in a real Lab box.** No model has been called by this route.
 - **Zero Court-certified discoveries**, and no simulator-scoped certified result yet.
-- The owner's real store has no passing health run for the current Court version. One passed on a scratch store at
-  stage-b's version (verified on real Docker, stage-b). Stage-launch changed `court/rehearsal.py`, so that version is gone and a new
-  `chh court health --docker` is owed.
-- `python scripts/check.py --fast` fails its governance step on `main` since `court-v1`: the owner's rewording of invariant 5
-  in GOAL section 10 is part of the core fingerprint and has no record yet. No Kernel source changed. Only a person may
-  record it (checklist step 1).
+- `chh court health --docker` passed for the Court version of commit 0ce18f3, on the owner's store and real Docker (verified,
+  stage-product). Any later Court change needs a new one.
+- Kaspersky on the owner's machine rewrites the UI page and widens its security policy (docs/ui.md).
 - Invariant 22 stays NOT MET until a person registers a human-held check.
 - `TRUTH_INDEPENDENT` in `court/display.py` is the orchestrator's proposal until the owner has reviewed it.
 - The readiness settings and the strawman margin are UNCALIBRATED, as are all values marked so in the code.
@@ -73,8 +83,8 @@ docs/first_session_checklist.md, in order: every human step, its command, what s
 1. Owner setup.
 2. The first certified result on the minted toy track, labelled simulator-scoped.
 3. The headline on sealed real data or future data.
-4. The UI.
-5. P1, then P2; the deferred hardening before any public release.
+4. Real validation of the UI with 3 to 5 researchers, after a live session.
+5. The rest of P1, then P2; the deferred hardening before any public release.
 
 ## Environment
 

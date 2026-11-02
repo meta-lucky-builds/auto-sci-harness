@@ -138,7 +138,8 @@ means your check failed: look at why, without showing the check to an agent.
 
 ### 8. Review the feedback table
 
-Open `src/custom_harness/court/display.py` and read `TRUTH_INDEPENDENT`. Those checks are shown in full to a researcher before
+Open `src/custom_harness/court/display.py` and read `TRUTH_INDEPENDENT` (now K0, K1 and K5: docs/court_rehearsal.md says why
+K2 and K8 moved). Those checks are shown in full to a researcher before
 a target retires. The table's comment says why each one cannot change with the held-out labels. It is a proposal until you
 accept it.
 
