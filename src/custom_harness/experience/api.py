@@ -47,6 +47,7 @@ from ..lab.walls import LabWallError, lab_root, overlaps
 from ..outputs.court_paper import CourtPaperError, audit_court_paper, generate
 from ..store import EvidenceStore
 from ..studio.queue import pending
+from . import doctor as Dr
 from . import schemas as M
 from . import words as W
 
@@ -574,6 +575,53 @@ class Experience:
                         verdicts_unopened=num("record", me, "unopened", self._unopened(me)),
                         calibration=self._calibration(me), harness_improvement=W.IMPROVEMENT)
 
+    # ---------------------------------------------------------------- what the screens list; all read-only
+    def meta(self) -> M.Meta:
+        return M.Meta(scripted=False, notice=None, researcher=self.whoami().researcher)
+
+    def _my_sessions(self) -> list[str]:
+        ids = sorted({str(r.get("session_id")) for r in self.store.records(S.RECORD_KIND)})
+        return [s for s in ids if self._session_is_mine(s)]
+
+    def sessions(self) -> M.Sessions:
+        """This researcher's Lab sessions and the state of each box. Opens nothing."""
+        rows = [self._session(s) for s in self._my_sessions()]
+        return M.Sessions(sessions=tuple(M.SessionLine(session_id=r.session_id, project=r.project, agent=r.agent,
+                                                       box=r.box) for r in rows),
+                          total=num("sessions", "all", "total", len(rows)))
+
+    @refusing
+    def lab_log(self, session_id: str) -> M.LabLog:
+        """The Story of a session as lines: what the Lab recorded, which holds no held-out data (lab/trace guards)."""
+        S.started(self.store, session_id, allow_stopped=True)
+        evs = T.events(self.store, session_id)
+        lines = tuple(line for line in (W.lab_line(e) for e in evs) if line is not None)
+        n = functools.partial(num, "session", session_id)
+        reading = tuple(M.Reading(source=str(e["payload"].get("source") or "search"),
+                                  query=str(e["payload"].get("query") or ""),
+                                  found=n(f"found:{e['seq']}", e["payload"].get("n_records")))
+                        for e in evs if e["kind"] == "literature")
+        web = [str(e["payload"]["host"]) for e in evs if e["kind"] == "web" and e["payload"].get("host")]
+        return M.LabLog(session_id=session_id, lines=tuple(M.LabLine(**x) for x in lines), reading=reading,
+                        web=tuple(dict.fromkeys(web)))
+
+    def frozen(self) -> M.FrozenIdeas:
+        """Frozen ideas of this researcher: what can be rehearsed and promoted."""
+        rows = [r for r in self.store.records(P.RECORD_KIND) if r.get("event") == "frozen"
+                and self._session_is_mine(str(r["session_id"]))]
+        items = tuple(M.FrozenIdea(promotion_id=str(r["promotion_id"]), session_id=str(r["session_id"]),
+                                   title=str(r["request"]["title"]),
+                                   sentence=str(r["request"]["sentence"])) for r in rows)
+        return M.FrozenIdeas(items=items, total=num("frozen", "all", "total", len(items)))
+
+    def trust(self) -> M.TrustBoard:
+        """Every prerequisite and what is not true yet. Read-only, as `chh exp doctor`."""
+        checks = Dr.doctor(self.store, docker=self.docker, environ=self.environ)
+        left = len(Dr.blocking(checks))
+        return M.TrustBoard(rows=tuple(M.TrustRow(name=c.name, state=c.state, detail=c.detail,  # type: ignore[arg-type]
+                                                  next_step=c.next_step, needed_for=c.needed_for) for c in checks),
+                            steps_left=num("trust", "all", "steps_left", left), limits=W.TRUST_LIMITS)
+
     # ---------------------------------------------------------------- every number is a link
     def _facts(self, kind: str, ident: str) -> dict[str, Any]:
         if kind == "case":
@@ -587,7 +635,8 @@ class Experience:
             return {"lab_rows": seal.get("n_lab"), "seal_seq": seal.get("seal_seq"),
                     "data_sha256": seal.get("data_sha256"), **parts}
         if kind == "session":
-            return self._facts_session(ident)
+            found = {f"found:{e['seq']}": e["payload"].get("n_records") for e in T.events(self.store, ident, "literature")}
+            return {**self._facts_session(ident), **found}
         if kind == "promotion":
             return {"files": P._promotion(self.store, ident)[0]["n_files"]}
         if kind == "rehearsal":
@@ -613,6 +662,12 @@ class Experience:
             return {"total": int(self.waiting().total.value or 0)}
         if kind == "cases":
             return {"total": int(self.cases().total.value or 0)}
+        if kind == "sessions":
+            return {"total": int(self.sessions().total.value or 0)}
+        if kind == "frozen":
+            return {"total": int(self.frozen().total.value or 0)}
+        if kind == "trust":
+            return {"steps_left": len(Dr.blocking(Dr.doctor(self.store, docker=self.docker, environ=self.environ)))}
         raise Refused("BadLink", f"no links of kind {kind!r}")
 
     @refusing

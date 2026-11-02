@@ -8,6 +8,7 @@ through it. The words of a badge never decide it: `court/levels.py` decides, and
 from __future__ import annotations
 
 import re
+import time
 from typing import Any
 
 # internal terms that may not appear on a main view. Upper-case words are matched as written, the rest in any case.
@@ -66,7 +67,9 @@ RESTS_ON = {"case": "What was fixed for this case before any answer was read.",
             "readiness": "The last readiness estimate, on Lab numbers.",
             "target": "The test data's remaining looks.", "viewer": "The record of what this person opened.",
             "record": "Verdicts this person opened.", "paper": "The paper's list of numbers.",
-            "waiting": "The waiting list.", "cases": "This researcher's cases."}
+            "waiting": "The waiting list.", "cases": "This researcher's cases.",
+            "sessions": "This researcher's Lab sessions.", "frozen": "The frozen ideas of this researcher.",
+            "trust": "The checks of this machine, made just now."}
 BADGES = {
     "REPRODUCIBLE": "Run again from the frozen code, offline, with the same result on every seed. One machine only: "
                     "other machines are not checked yet. Reproducible does not mean true.",
@@ -127,6 +130,37 @@ def jargon_problems(view: dict[str, Any], path: str = "") -> list[str]:
             elif isinstance(item, str):
                 out += [f"{where}: {m.group(0)!r}" for m in _JARGON.finditer(item)]
     return out
+
+
+TRUST_LIMITS = (
+    "No agent has run in a real Lab box yet.",
+    "No discovery has been certified yet.",
+    "The readiness numbers are rough and not calibrated.",
+    "A name on this machine is a label, not a login: whoever holds this machine holds its records.",
+    "The hardening planned for a public release is not done. This is a private tool.")
+
+
+def lab_line(ev: dict[str, Any]) -> dict[str, str] | None:
+    """One Story event as a line a person reads, or None for what is noise on a screen (file diffs, costs)."""
+    p, kind = ev["payload"], ev["kind"]
+    if kind == "idea":
+        text = f"{p['op']}: {p.get('title') or p['idea_id']}" + (f" ({p['reason']})" if p.get("reason") else "")
+    elif kind == "run":
+        text = p.get("message") or p.get("command") or p.get("stage") or p.get("run_id", "")
+        if p.get("metrics"):
+            text += "  " + ", ".join(f"{m['name']} {m['value']:.4g} ({m['split']})" for m in p["metrics"])
+    elif kind == "action":
+        text = f"{p['tool']} {p.get('target', '')}".strip()
+    elif kind == "human":
+        text = p.get("note") or p["op"]
+    elif kind == "web":
+        text = f"{p.get('op')}: {p.get('host') or ''}".strip(": ")
+    elif kind == "session":
+        text = p["op"]
+    else:
+        return None
+    who = {"human": "you", "agent": "agent"}.get(str(ev.get("actor", {}).get("type")), "system")
+    return {"at": time.strftime("%H:%M:%S", time.localtime(float(ev["at"]))), "who": who, "kind": kind, "text": str(text)}
 
 
 def scope_sentence(claim: dict[str, Any], *, family: str | None, route: str) -> str:

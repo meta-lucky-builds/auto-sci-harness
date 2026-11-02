@@ -625,6 +625,87 @@
   "title": "Frozen",
   "type": "object"
  },
+ "FrozenIdeas": {
+  "$defs": {
+   "FrozenIdea": {
+    "additionalProperties": false,
+    "properties": {
+     "promotion_id": {
+      "title": "Promotion Id",
+      "type": "string"
+     },
+     "sentence": {
+      "title": "Sentence",
+      "type": "string"
+     },
+     "session_id": {
+      "title": "Session Id",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "promotion_id",
+     "session_id",
+     "title",
+     "sentence"
+    ],
+    "title": "FrozenIdea",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "items": {
+    "items": {
+     "$ref": "#/$defs/FrozenIdea"
+    },
+    "title": "Items",
+    "type": "array"
+   },
+   "total": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "items",
+   "total"
+  ],
+  "title": "FrozenIdeas",
+  "type": "object"
+ },
  "Identity": {
   "additionalProperties": false,
   "properties": {
@@ -652,6 +733,133 @@
    "chosen"
   ],
   "title": "Identity",
+  "type": "object"
+ },
+ "LabLog": {
+  "$defs": {
+   "LabLine": {
+    "additionalProperties": false,
+    "description": "One line of a session's Story, as a person reads it. `at` is a time of day as text, not a measured number.",
+    "properties": {
+     "at": {
+      "title": "At",
+      "type": "string"
+     },
+     "kind": {
+      "title": "Kind",
+      "type": "string"
+     },
+     "text": {
+      "title": "Text",
+      "type": "string"
+     },
+     "who": {
+      "enum": [
+       "you",
+       "agent",
+       "system"
+      ],
+      "title": "Who",
+      "type": "string"
+     }
+    },
+    "required": [
+     "at",
+     "who",
+     "kind",
+     "text"
+    ],
+    "title": "LabLine",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "Reading": {
+    "additionalProperties": false,
+    "properties": {
+     "found": {
+      "$ref": "#/$defs/Number"
+     },
+     "query": {
+      "title": "Query",
+      "type": "string"
+     },
+     "source": {
+      "title": "Source",
+      "type": "string"
+     }
+    },
+    "required": [
+     "source",
+     "query",
+     "found"
+    ],
+    "title": "Reading",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "lines": {
+    "items": {
+     "$ref": "#/$defs/LabLine"
+    },
+    "title": "Lines",
+    "type": "array"
+   },
+   "reading": {
+    "items": {
+     "$ref": "#/$defs/Reading"
+    },
+    "title": "Reading",
+    "type": "array"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   },
+   "web": {
+    "items": {
+     "type": "string"
+    },
+    "title": "Web",
+    "type": "array"
+   }
+  },
+  "required": [
+   "session_id",
+   "lines",
+   "reading",
+   "web"
+  ],
+  "title": "LabLog",
   "type": "object"
  },
  "LabView": {
@@ -774,6 +982,38 @@
    "costs_unknown"
   ],
   "title": "LabView",
+  "type": "object"
+ },
+ "Meta": {
+  "additionalProperties": false,
+  "description": "What is answering the UI. `scripted`: nothing it shows came from the Court, whatever a page looks like.",
+  "properties": {
+   "notice": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Notice"
+   },
+   "researcher": {
+    "title": "Researcher",
+    "type": "string"
+   },
+   "scripted": {
+    "title": "Scripted",
+    "type": "boolean"
+   }
+  },
+  "required": [
+   "scripted",
+   "notice",
+   "researcher"
+  ],
+  "title": "Meta",
   "type": "object"
  },
  "Paper": {
@@ -1771,6 +2011,101 @@
   "title": "Session",
   "type": "object"
  },
+ "Sessions": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "SessionLine": {
+    "additionalProperties": false,
+    "properties": {
+     "agent": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Agent"
+     },
+     "box": {
+      "title": "Box",
+      "type": "string"
+     },
+     "project": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Project"
+     },
+     "session_id": {
+      "title": "Session Id",
+      "type": "string"
+     }
+    },
+    "required": [
+     "session_id",
+     "project",
+     "agent",
+     "box"
+    ],
+    "title": "SessionLine",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "sessions": {
+    "items": {
+     "$ref": "#/$defs/SessionLine"
+    },
+    "title": "Sessions",
+    "type": "array"
+   },
+   "total": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "sessions",
+   "total"
+  ],
+  "title": "Sessions",
+  "type": "object"
+ },
  "ShareIn": {
   "additionalProperties": false,
   "properties": {
@@ -2093,6 +2428,112 @@
    "details"
   ],
   "title": "TechnicalView",
+  "type": "object"
+ },
+ "TrustBoard": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "TrustRow": {
+    "additionalProperties": false,
+    "properties": {
+     "detail": {
+      "title": "Detail",
+      "type": "string"
+     },
+     "name": {
+      "title": "Name",
+      "type": "string"
+     },
+     "needed_for": {
+      "title": "Needed For",
+      "type": "string"
+     },
+     "next_step": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Next Step"
+     },
+     "state": {
+      "enum": [
+       "ok",
+       "missing",
+       "yours"
+      ],
+      "title": "State",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "state",
+     "detail",
+     "next_step",
+     "needed_for"
+    ],
+    "title": "TrustRow",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "limits": {
+    "items": {
+     "type": "string"
+    },
+    "title": "Limits",
+    "type": "array"
+   },
+   "rows": {
+    "items": {
+     "$ref": "#/$defs/TrustRow"
+    },
+    "title": "Rows",
+    "type": "array"
+   },
+   "steps_left": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "rows",
+   "steps_left",
+   "limits"
+  ],
+  "title": "TrustBoard",
   "type": "object"
  },
  "Waiting": {

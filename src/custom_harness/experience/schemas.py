@@ -362,9 +362,77 @@ class TechnicalView(Model):
     details: dict[str, Any]
 
 
+class SessionLine(Model):
+    session_id: str
+    project: str | None
+    agent: str | None
+    box: str
+
+
+class Sessions(Model):
+    sessions: tuple[SessionLine, ...]
+    total: Number
+
+
+class LabLine(Model):
+    """One line of a session's Story, as a person reads it. `at` is a time of day as text, not a measured number."""
+
+    at: str
+    who: Literal["you", "agent", "system"]
+    kind: str
+    text: str
+
+
+class Reading(Model):
+    source: str
+    query: str
+    found: Number
+
+
+class LabLog(Model):
+    session_id: str
+    lines: tuple[LabLine, ...]
+    reading: tuple[Reading, ...]  # the literature drawer: what the agent searched
+    web: tuple[str, ...]  # the hosts it reached, most recent last
+
+
+class FrozenIdea(Model):
+    promotion_id: str
+    session_id: str
+    title: str
+    sentence: str
+
+
+class FrozenIdeas(Model):
+    items: tuple[FrozenIdea, ...]
+    total: Number
+
+
+class TrustRow(Model):
+    name: str
+    state: Literal["ok", "missing", "yours"]
+    detail: str
+    next_step: str | None
+    needed_for: str
+
+
+class TrustBoard(Model):
+    rows: tuple[TrustRow, ...]
+    steps_left: Number
+    limits: tuple[str, ...]  # what is not true yet, in plain words
+
+
+class Meta(Model):
+    """What is answering the UI. `scripted`: nothing it shows came from the Court, whatever a page looks like."""
+
+    scripted: bool
+    notice: str | None
+    researcher: str
+
+
 MAIN_VIEWS: tuple[type[Model], ...] = (
     Identity, Waiting, Sealed, Session, LabView, Explored, Steered, Frozen, Rehearsal, PromotePreview, Promoted, Case,
-    Cases, Shared, Paper, Record)
+    Cases, Shared, Paper, Record, Sessions, LabLog, FrozenIdeas, TrustBoard, Meta)
 REQUESTS: tuple[type[Model], ...] = (SealIn, CredentialIn, StartIn, ExploreIn, SteerIn, FreezeIn, RehearseIn, PromoteIn,
                                      ShareIn, PaperIn)
 OTHER_VIEWS: tuple[type[Model], ...] = (ApprovalRoute, Resolved, TechnicalView)

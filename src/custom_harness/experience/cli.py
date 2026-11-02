@@ -24,6 +24,7 @@
   chh exp schema
   chh exp doctor [--registry-key K] [--json]   is this machine ready? what is missing and the next step
   chh exp toy [key options] [--beacon-round R] [--beacon VALUE] [--new-freeze]   the minted toy track, one command
+  chh exp ui [--port N] [--scripted]           the web interface, on this machine only
 """
 
 from __future__ import annotations
@@ -114,6 +115,9 @@ def add_parsers(sub: Any) -> None:
     dr = s.add_parser("doctor", help="is this machine ready for a first session; what is missing; the next step")
     dr.add_argument("--registry-key", default="anthropic-api", help="the provider entry of the key you will use")
     dr.add_argument("--json", action="store_true")
+    ui = s.add_parser("ui", help="the web interface, on this machine only (docs/ui.md)")
+    ui.add_argument("--port", type=int, default=8765)
+    ui.add_argument("--scripted", action="store_true", help="a scripted example: no store, no agent, no Court")
     to = s.add_parser("toy", help="the minted toy track: runs up to the next step that needs a person")
     to.add_argument("--session", default="toy-1")
     to.add_argument("--agent", default="claude-code")
@@ -211,6 +215,11 @@ def cmd_exp(a: argparse.Namespace, store: EvidenceStore) -> int:
     from .api import Experience, Refused
     if a.exp_cmd == "doctor":
         return _doctor(a, Experience(store))
+    if a.exp_cmd == "ui":
+        from .scripted import ScriptedExperience
+        from .server import serve
+        serve(ScriptedExperience if a.scripted else lambda: Experience(store), a.port)
+        return 0
     try:
         out = _call(a, Experience(store), m)
     except Refused as e:
