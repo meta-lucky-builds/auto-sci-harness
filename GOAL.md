@@ -89,6 +89,10 @@ data. The harness evolves; the adapters do not.
 
 ## 2. Definition of "best" — the win conditions
 
+**Owner decision 2026-10-23 (§18.4):** the PRIMARY scorecard is now discovery yield (certified claims per budget),
+false certifications, and the VALIDATED loop (§6.4). The axes A–H below become diagnostics; agent-benchmark wins are
+reported only against a same-budget test-time-scaling baseline on hardened benchmark versions.
+
 We are best only when all of these hold, measured on the **sealed split, at matched or lower cost, with CIs**:
 
 1. **Coverage:** every capability in the coverage contract (§9) exists in code, with a test, and appears in an ablation.
@@ -529,6 +533,12 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 
 ## 8. Novel contributions (what no surveyed system has)
 
+**Narrowed 2026-10-23 (§18.1):** close prior art now exists for items 1–3 (e.g. the Discovery Certification
+Protocol, arXiv 2609.09219; Study Contracts; ClaimReceipt; REUSE, arXiv 2609.33180). What remains distinctive is the
+COMBINATION: pre-registration + held-out truth created or sealed after the freeze + statistics fixed at registration
++ evidence classes + separate verification badges + a free Lab joined to an LLM-free Court + evidence-gated
+self-evolution. Claims of novelty for any single item below must cite and compare against that prior art.
+
 1. **Evidence Kernel**: a mechanical, LLM-free checker for scientific claims (K0–K9) with certificates.
 2. **Claim Language**: typed, falsifiable scientific claims as the unit of research output.
 3. **Prediction Ledger + Validated Discovery Score**: proper-scored, risk-weighted track record, used as the self-improvement objective.
@@ -557,6 +567,10 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 ---
 
 ## 9. Coverage contract — every surveyed capability has a home
+
+**Retired as a GOAL on 2026-10-23 (owner decision, §18.4).** This table stays as a REFERENCE map, not a requirement:
+frontier coding agents in the Lab bring most of these abilities natively. Build effort goes to the Lab, the Court and
+the researcher experience (§17, §18).
 
 | Source | Capability (as it should work, not as their code does) | Home |
 |---|---|---|
@@ -609,6 +623,9 @@ VALIDATED. Contamination probes and a novelty-weighted subset are mandatory.
 3. No certificate without the Kernel; no Kernel path with an LLM call.
 4. No persistent write (memory, skill, harness, weights) without evidence at the tier floor.
 5. No critic (or independent replicator) from the same model family as the proposer (author) it judges.
+   **Reworded 2026-10-23 (owner, §17.1/§18.2):** a replicator must be a DIFFERENT AGENT (separate session, no access to
+   the author's code); a different model family is the STRONGER form and is shown as such, never required. Every badge
+   records the families involved and the common-mode risk of a same-family replica. Critics and judges remain advisory.
 6. No acceptance without paired statistics and a never-shown gate; the sealed split is touched only via `finalize`.
 7. Every parser and gate fails closed.
 8. Every number in a report resolves to an artifact and is recomputed by the audit.
@@ -1009,6 +1026,7 @@ the point of claiming, not by limiting exploration. Nothing built so far is dele
   third-party notices file. Telemetry, agent feedback and auto-update from it are dropped.
 
 ### 17.1 Verification badges (owner decisions 2026-10-23)
+§18.2 holds the final wording of the badges; this section gives the detail, and it agrees with §18.2.
 Every promoted claim gets every badge its evidence supports. The badges are SEPARATE, not a ladder: a claim can hold
 any combination. Each is computed by code (from Kernel results, the ledger and the bundle), never by a model; badges
 not held are shown as missing with the reason, never as failures of the others.
@@ -1016,9 +1034,9 @@ not held are shown as missing with the reason, never as failures of the others.
 | Badge | Meaning | Basis |
 |---|---|---|
 | **REPRODUCIBLE** | Re-executed from the frozen bundle (pinned environment, offline) with the same result across seeds. "Across machines" is not checked yet, and the badge says so | K0, K3, bundle |
-| **REPLICATED** | An independent replication by a DIFFERENT AGENT (separate agent and session, no access to the author's code) whose own claim was certified. A different model family is NOT required: the badge names the families (e.g. "REPLICATED (codex -> codex, same family)"); a different family is shown as the stronger form, and the invariant-5 status is recorded as a note, never a block | a certified, reproducible replica |
+| **REPLICATED** | A DIFFERENT AGENT (separate agent and session) re-implemented the claim from its text, without the author's code, and agreed: its own claim was certified. Any model family counts: the badge names the families (e.g. "REPLICATED (codex -> codex, same family)"), shows a same-family replica as the weaker form and states its common-mode risk; the invariant-5 status is recorded as a note, never a block | a certified, reproducible replica |
 | **VALIDATED** | Decided ONLY by the fresh-data test: pre-registered, then confirmed on held-out data that did not exist or was sealed when the Lab worked (minted after the freeze, §16.2, future data, or sealed external data), with valid statistics. It does not require REPLICATED | K0–K9, CERTIFIED-VALIDATED, fresh targets |
-| **RE-VALIDATED** | The claim passes the fresh-data test a SECOND time, on a second, independent fresh dataset, with the claim and the frozen code unchanged. The second test is declared before the first verdict (both beacon rounds may be fixed at registration); for minted families it is a second mint with its own pre-declared beacon round; sealed data (two sealed parts) and future data (a second batch) can feed it the same way. A failed re-validation is recorded and shown ("validated once, failed re-validation"), never hidden | VALIDATED twice, independent data |
+| **RE-VALIDATED** | The claim passes the fresh-data test a SECOND time, on a second, independent fresh dataset, with the claim and the frozen code unchanged. The second test is fixed in advance or declared before any label of the first test is read, one per case (both beacon rounds may be fixed at registration); for minted families it is a second mint with its own pre-declared beacon round; sealed data (two sealed parts) and future data (a second batch) can feed it the same way. A failed re-validation is recorded and shown ("validated once, failed re-validation"), never hidden | VALIDATED twice, independent data |
 
 - Reproducible does not mean true: leakage, p-hacking and overfitting all reproduce. Only VALIDATED is a finding;
   RE-VALIDATED is the strongest form of it.
@@ -1050,3 +1068,156 @@ the existing evidence machinery; none may grant a certificate or weaken a check.
 Requirements this adds: a researcher identity on sessions, claims and predictions (local-first); one backend
 "experience API" that the UI and integrations call; all experiences read through kerneld and never expose
 held-out truth or verdict details beyond the release ledger.
+
+---
+
+## 18. Consolidation 2026-10-23: research radar, first-principles upgrades, product shape
+
+Sources (outside the repo): `META/research_radar/RADAR.md` (188 papers, mostly Aug–Oct 2026; read depth mostly
+ABSTRACT or listing, 3 FULL), `META/research_radar/UPGRADES.md` (first-principles synthesis),
+`META/agent_worklogs/stage-a/STAGE_B_ASSESSMENT.md`, `META/openresearch_portmap/PORTMAP.md`. Where this section and
+an earlier section disagree, this section wins. Nothing earlier is deleted.
+
+### 18.1 What the research says (honest context)
+- Close prior art to the Evidence Kernel now exists (§8 narrowed). Our distinctiveness is the combination, not any
+  single mechanism.
+- Research agents reward-hack often and learn to evade from detailed rejection reasons. The Court must not teach the
+  Lab how to cheat (§18.5 feedback split).
+- Adaptive reuse of one evaluation set has a formal answer (REUSE): release only decisions and budget over decision
+  histories. Our release ledger and verdict embargo implement this idea; keep them.
+- Most harness-evolution gains on agent benchmarks are overfitting or extra test-time compute. Self-improvement is
+  judged only by Court outcomes on the VALIDATED loop (§6.4), and every evolution gate includes a same-budget
+  test-time-scaling baseline.
+- "Published after the model cutoff" does not mean unpredictable: K7 gets a measured no-data prior (§18.6).
+- Replicas share mistakes (common-mode errors): REPLICATED badges show the families and that risk.
+- Lean compilation does not certify that a formal statement matches the informal claim: T0 certificates say "the
+  Lean statement only".
+- Agent tooling has measured attack paths: the Lab restricts where the box can reach, not which tools it uses.
+- Competitors ship products and results; we have zero Court-certified discoveries. The first certified discovery is
+  the top priority.
+
+### 18.2 Verification badges (final semantics; where §17.1 differs, this section wins)
+Separate badges; a claim may hold any combination. Each is computed by code, never by a model.
+- **REPRODUCIBLE:** K0 and K3 pass and a bundle is recorded. "Across machines" is not yet checked, and the badge says
+  so.
+- **REPLICATED:** a different agent re-implemented it from the claim text without the author's code and agreed. Any
+  model family counts; the badge names the families, shows a same-family replica as the weaker form, and states its
+  common-mode risk.
+- **VALIDATED:** decided only by the fresh-data test: CERTIFIED-VALIDATED, K0–K9, every target minted after the
+  freeze, future, or sealed. It does not require REPLICATED. Only VALIDATED is a finding.
+- **RE-VALIDATED:** a second independent fresh-data test passes with the claim and frozen code unchanged; the second
+  round is fixed in advance or declared before any label of the first test is read; one per case; a failed
+  re-validation is shown, never hidden.
+- **RETROSPECTIVE:** a cap for public datasets a networked Lab could have seen; never VALIDATED or RE-VALIDATED.
+- Minted VALIDATED says "generator-scoped"; T0 says "Lean statement only".
+
+### 18.3 Product shape
+- **Six concepts:** Project, Lab, Case, Verdict and Badges, Story, Record. Everything else is machinery, kept behind a
+  "technical details" view (tiers T0–T6, Kernel labels, VG ladder, loop labels).
+- **Ten verbs** (the experience API, §18.5): start, seal, explore/steer, rehearse, promote, waiting/approve, case,
+  share, record, challenge (later).
+- **End to end:** start a project and seal part of the data; agents explore with full power (web traffic recorded
+  into the Story); rehearse (a free mock trial showing everything); promote (freeze, readiness and measured prior,
+  looks remaining, approve); a plain-sentence verdict with badges (a second sealed part later gives RE-VALIDATED);
+  share a case file (story plus one-command rerun); the record grows (calibration, dead ends).
+- **The feeling:** a brilliant lab partner who never lies. Two moods: the Lab alive and fast, the Court calm and
+  exact. A jargon budget: no internal term on a main screen. Every number is a link. Honesty badges are calm, never
+  alarms.
+
+### 18.4 Owner decisions recorded 2026-10-23
+1. Kernel budget: **freeze the Kernel core**; new checks live outside it. All code a verdict depends on (the Kernel
+   plus adapter checkers, validation fixtures and the Court plumbing a verdict relies on) is counted as **trusted
+   code**, with its own budget and the same 100% line and branch coverage; moving code out of `kernel/` never dodges
+   review.
+2. §9 is retired as a goal (kept as a reference map).
+3. New primary scorecard (§2 note).
+4. First certified discovery on two tracks: a minted toy first, labelled "simulator-scoped", to prove the Court route;
+   the headline discovery on sealed real data or future data.
+5. Invariant 5 reworded (§10).
+6. No model training (§5 L8). UI required (§5 L9), built in a later phase.
+7. Language: Python for the system; TypeScript/React for the UI; a Rust trusted core (Kernel plus kerneld as a
+   separate process) only after the first certified Lab discovery, with the Python Kernel as its specification.
+8. OpenResearch (MIT) is a reference: its agent drivers, compute backends, connectors, figure styles and LaTeX
+   settings are ported to Python behind Lab isolation and the Court, with its notice kept; telemetry, agent feedback
+   and auto-update are dropped.
+9. Security freeze: no new security work except high-severity, reachable findings until the first certified Lab
+   discovery. The deferred hardening list (keyed private digests, the kerneld label-query lockdown, the K9 reason
+   code, the sealed_look ledger kind, the governance kind, the Kernel red team, station low findings, RT-S4-1/2/3/5/7)
+   resumes before any public release.
+
+### 18.5 Experience API (Stage B), replacing the 13-feature list of §17.2 as the build plan
+One Python doorway that the UI and integrations call. It reads only through kerneld, never exposes held-out truth or
+verdict details beyond the release ledger, and never grants a certificate. Two rules are built into it:
+- **One display path:** every view of Court output, including the owner's own, goes through one function that
+  records a release; the researcher sees how many looks remain on each target.
+- **The feedback split:** checks independent of held-out truth are shown in full; truth-dependent checks return a
+  verdict bit plus a closed reason code; the full autopsy is shown once the target is retired.
+
+Build order: whoami, waiting/approve, seal, rehearse, promote (readiness inside), case, record, steer. Merged:
+case = reviewer link + living paper + reproduce-this-paper output; record = dead ends + track record + harness
+improvement. Deferred: overnight mode, public challenge, integrations, visible self-improvement. Starter kits are
+documentation, not a feature. The §17.2 experiences remain the vision; this is the order and shape in which they are
+built.
+
+### 18.6 Upgrades adopted (P0 before the first certified discovery; P1 v1; P2 later)
+**P0 (Stage C follow-ups, before Stage B):**
+- **Court health run:** run the real Court end to end on an honest toy, planted false claims (leaky, p-hacked,
+  label-reading, flaky, strawman baseline) and one planted real effect; every certificate carries the hash of the
+  health run it passed. Salts merge into this.
+- **Failures never spend truth:** a crash before the first label read keeps the target and its statistical budget.
+- **Wider promotion contract:** "the program reads inputs and writes outputs; the trusted Court computes the metric",
+  so most Lab work can be promoted.
+- **Seal at project start:** a kerneld sealed-split intake; "sealed" becomes a ledger fact ordered before any Lab
+  access; one or two sealed parts (the second for RE-VALIDATED).
+- **Lab network rule:** internet allowed; LAN and host blocked; web traffic recorded into the Story.
+- **Rehearsal:** a mock trial running the exact Court contract on Lab data, showing every check and number, spending
+  no fresh truth. (Our own design; it must be tested.)
+- **Feedback split and one display path** (§18.5).
+
+**P1 (v1):**
+- Measured no-data prior: a pinned model predicts the outcome from the claim text before minting; it can only make K7
+  harder.
+- One researcher vocabulary; honest badge texts; a cheap second model family; Lab defaults (optional skills, periodic
+  context resets, dead ends retrieved on demand rather than injected).
+- Future-data projects and parallel-world generator families; the time window as a required part of a claim's scope.
+- Every L6 gate gets a same-budget test-time-scaling baseline; hardened benchmark versions only.
+- LLM judging (judge panel, tournament, Socratic critic) leaves the Court and becomes advisory Lab tools.
+- The literature module shrinks to citation checking for Court reports plus a small dated fetch for §6.4; Lab agents
+  search natively.
+- The UI (§18.7).
+
+**P2:** a non-obviousness badge, reproduce-this-paper polish, review triage, public challenge, overnight mode,
+integrations (Jupyter, VS Code, Zotero, Overleaf, notifications), more domains, the Rust Court core.
+
+**Conflicts resolved:**
+- Detailed feedback vs evasion: the feedback split, rehearsal, and the autopsy after retirement.
+- Same-family REPLICATED vs common-mode errors: keep the badge, show its weakness, make cross-family replication cheap;
+  only VALIDATED is a finding.
+- Free Lab vs attack paths: restrict reach, not tools; Lab output can never mint a certificate.
+- Readiness meter vs leaks: public inputs only, phrased "unlikely to certify because ...", labelled UNCALIBRATED.
+- Sealing vs generous exploration: size sealed parts by power; offer future data when data is scarce.
+- New checks vs the Kernel budget: checks outside the core, counted as trusted code.
+- One human as approver, judge and reader: waiting(), a counting display path, and a second holder for the offline
+  secret.
+
+### 18.7 UI and frontend (built after Stage B and the first real session)
+- Screens: Home/Today, the Lab workspace (live idea tree, agent panels, runs, literature drawer), Rehearse, the
+  Promote moment, the Verdict and Story view, the Record, Approvals ("waiting"), the Trust board, the paper builder.
+- Stack: TypeScript, React, Vite and a small design system; browser first, served locally; an optional desktop
+  wrapper later. The UI talks only to the experience API (HTTPS on localhost plus WebSocket for live updates), which
+  reads through kerneld; the UI can never reach the store, the Kernel or held-out data.
+- Quality: typed end to end from the API schema; component and end-to-end tests; accessibility; performance budgets;
+  an honesty test suite (no certified styling unless the API says the Kernel certified it); its own gate.
+- Validation: mockups first; real validation after the first live Lab session; usability tests with 3–5 researchers
+  against measurable goals (first agent working in under 2 minutes; badges explained without help; a failure's reason
+  found in under 30 seconds; a reviewer reruns a certificate in one step).
+
+### 18.8 Build plan (current)
+1. **Stage C:** test and fix int18 (running), ending in the full gate alone.
+2. **P0 Court follow-ups** (§18.6), then re-test.
+3. **Stage B:** the experience API from a written contract (the contract may be designed in parallel with testing).
+4. **Owner setup:** the Lab image, scoped API keys, a separate OS user for private data, adapter approvals (ml, lp,
+   sim, circuit), the providers.yaml sign-off, the human-held check.
+5. **First certified discovery** (two tracks, §18.4 item 4).
+6. **UI.**
+7. P1, then P2; the deferred hardening before any public release.
