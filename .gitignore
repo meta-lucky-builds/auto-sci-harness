@@ -21,3 +21,5 @@ github repo/
 .mypy_cache/
 .ruff_cache/
 .mutation/
+ui/node_modules/
+ui/e2e/out/
