@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from pathlib import Path
 
@@ -43,6 +44,51 @@ def test_the_table_covers_every_check_once():
     assert sorted(D.TRUTH_INDEPENDENT + D.TRUTH_DEPENDENT) == sorted(CHECK_IDS)
     assert set(D.REASON_CLASS) == set(D.TRUTH_DEPENDENT)
     assert len(D.REASON_CLASS) + 1 <= 16  # one `count` release may tell 16 values
+
+
+def fake_cert(failed: dict[str, list[str]]):
+    from types import SimpleNamespace
+    checks = {k: SimpleNamespace(status="fail" if k in failed else "pass", reasons=tuple(failed.get(k, ())))
+              for k in CHECK_IDS}
+    return SimpleNamespace(checks=checks, failed=lambda: list(failed))
+
+
+@pytest.mark.parametrize(("check", "reason", "secret"), [
+    ("K8", "K8_RANGE: ev1: score 0.8125 outside the range of accuracy [0.0, 1.0]", "0.8125"),
+    ("K8", "K8_LENGTH: ev1: 999 predictions for 417 labels", "417"),
+    ("K2", "K2_PEEK: private data of target 't' was read 2 time(s) before pre-registration (first at ledger seq 7, "
+           "dataset 'twin-labels', purpose 'evaluate')", "twin-labels"),
+])
+def test_a_check_that_can_print_or_turn_on_held_out_labels_shows_only_a_closed_class(check, reason, secret):
+    """K8 prints the score and the label count; K2's early-read test compares held-out bytes (`related_targets`)."""
+    shown, cls = D.split_checks(fake_cert({check: [reason]}))
+    assert check not in shown and secret not in json.dumps(shown)
+    assert cls == D.REASON_CLASS[check]
+
+
+def test_the_released_index_of_a_reason_class_never_moves():
+    """The index is written to the ledger as a `count`: an old row must keep its meaning when a class is added."""
+    assert D.REASON_RELEASE[:6] == ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN",
+                                    "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND", "FAILED_INDEPENDENT_CHECK")
+    assert set(D.REASON_RELEASE) == {*D.REASON_CLASS.values(), D.OTHER_CLASS} and len(D.REASON_RELEASE) <= 16
+
+
+def test_every_reason_class_has_plain_words():
+    from custom_harness.experience.words import REASONS
+    assert set(D.REASON_RELEASE) <= set(REASONS)
+
+
+def test_a_check_shown_in_full_reads_no_label_and_no_score():
+    """The table's claim, kept true by a source scan of the check and everything the ML adapter adds to it."""
+    from custom_harness.kernel import checks, ml
+    shown = {"K0": [checks.k0_provenance, checks._blob_ok], "K1": [checks.k1_well_formed, ml.metric_reasons,
+             ml.scope_phrase, checks.tolerance_reasons, checks.p0_reasons], "K5": [checks.k5_comparator, ml.conformance]}
+    assert set(shown) == set(D.TRUTH_INDEPENDENT)
+    for k, fns in shown.items():
+        for fn in fns:
+            src = inspect.getsource(fn)
+            for banned in ("label_values", "ctx.labels", ".score", "rec.score", "vault.read"):
+                assert banned not in src, (k, fn.__name__, banned)
 
 
 def test_a_view_records_a_release_and_each_viewer_counts_once(won):

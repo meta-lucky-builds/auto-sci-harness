@@ -28,6 +28,8 @@ REASONS = {
     "EFFECT_NOT_SHOWN": "The claimed effect was not shown on the fresh test data.",
     "OUTCOME_TOO_PREDICTABLE": "The claim was too likely to come true by itself to count as a test.",
     "LEAK_FOUND": "Signs of a leak of the answers were found in the run.",
+    "NOT_FIXED_FIRST": "The claim was not cleanly fixed before the test data was read.",
+    "RULES_OF_THE_RUN_BROKEN": "A file or an output of the run broke the rules of the test.",
     "FAILED_INDEPENDENT_CHECK": "One of the checks shown in full failed: it is named in the technical details.",
 }
 CHECK_PLAIN = {"K0": "The code and records are all present", "K1": "The claim is well formed",

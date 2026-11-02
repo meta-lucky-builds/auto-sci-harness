@@ -9,9 +9,12 @@ The researcher sees how many looks remain. What is shown:
     then recorded as a continuous release, which marks the target adaptively exposed.
 
 `TRUTH_INDEPENDENT` is the table the split rests on. A check is on it only if its result cannot change with the held-out
-labels: K0 (the artifacts and records exist), K1 (the claim's form), K2 (ledger order), K5 (which code and metric ran),
-K8 (which files were inputs). K3, K4, K6, K7 and K9 read scores or labels, so they are truth-dependent. GOAL 18.5 and
-UPGRADES N14 say this table is a human decision: it is the orchestrator's proposal until the owner has reviewed it.
+labels and its reasons print nothing derived from them: K0 (the artifacts and records exist), K1 (the claim's form), K5
+(which code and metric ran). K3, K4, K6, K7 and K9 read scores or labels. K8 prints the score and the label count, and
+K2's early-read test compares held-out file bytes (`checks.related_targets`), so both are truth-dependent too. One
+known remainder: K1's p0 rests on that same byte comparison, but it is fixed in the ledger at registration, before any
+look, so K1 tells nothing new after one (docs/court_rehearsal.md). GOAL 18.5 and UPGRADES N14 say this table is a human
+decision: it is a proposal until the owner has reviewed it.
 
 Each (case, viewer) pair is one release, however many times that viewer looks: the same outcome tells the same person
 nothing new. Two later facts are not "the same outcome" and get their own release:
@@ -43,11 +46,14 @@ from ..store import EvidenceStore
 
 VIEW_KIND = "court_view"
 RETIRED_KIND = "court_retired"
-TRUTH_INDEPENDENT = ("K0", "K1", "K2", "K5", "K8")
-TRUTH_DEPENDENT = ("K3", "K4", "K6", "K7", "K9")
-REASON_CLASS = {"K3": "NOT_REPRODUCED", "K4": "PROCEDURE_NOT_VALID", "K6": "EFFECT_NOT_SHOWN",
-                "K7": "OUTCOME_TOO_PREDICTABLE", "K9": "LEAK_FOUND"}  # the index is released as a `count`
+TRUTH_INDEPENDENT = ("K0", "K1", "K5")
+TRUTH_DEPENDENT = ("K2", "K3", "K4", "K6", "K7", "K8", "K9")
+REASON_CLASS = {"K2": "NOT_FIXED_FIRST", "K3": "NOT_REPRODUCED", "K4": "PROCEDURE_NOT_VALID", "K6": "EFFECT_NOT_SHOWN",
+                "K7": "OUTCOME_TOO_PREDICTABLE", "K8": "RULES_OF_THE_RUN_BROKEN", "K9": "LEAK_FOUND"}
 OTHER_CLASS = "FAILED_INDEPENDENT_CHECK"  # the failure is one of the checks shown in full
+# The index of a class is released as a `count` and stays in the ledger, so classes are only ever added at the end.
+REASON_RELEASE = ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN", "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND",
+                  OTHER_CLASS, "NOT_FIXED_FIRST", "RULES_OF_THE_RUN_BROKEN")
 
 
 class DisplayRefused(RuntimeError):
@@ -223,7 +229,7 @@ def _verdict_release(store: EvidenceStore, case_id: str, target: str, viewer: st
     if last is not None and last.get("badge") == badges.badge:
         return
     if last is None:
-        extra = None if reason_class is None else [*REASON_CLASS.values(), OTHER_CLASS].index(reason_class)
+        extra = None if reason_class is None else REASON_RELEASE.index(reason_class)
         emit_outcome(store, label, extra, [target], channel="report", label_note="court:view",
                      extra_note="court:view_reason", key=f"view:{case_id}:{viewer}")
     related = _related_targets(store, case_id)
