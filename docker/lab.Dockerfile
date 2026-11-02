@@ -1,24 +1,22 @@
 # LAB box image (GOAL §17 "Lab and Court"): full-capability exploration for coding agents. NOT the Court sandbox:
 # agent-written code that is to be CERTIFIED runs in docker/sandbox-candidate.Dockerfile (no network), never here.
 #
-# OWNER STEP (needs network; nothing in the harness builds or pulls this):
-#   1. pin the base image by digest:   FROM python:3.12-slim@sha256:<digest you checked>
-#   2. pick the exact agent CLI versions you reviewed, then
-#      docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 \
-#        --build-arg CLAUDE_CODE_VERSION=<x.y.z> --build-arg CODEX_VERSION=<x.y.z> \
-#        --build-arg OPENCODE_VERSION=<x.y.z> docker
-#   The build fails if any version is missing (no "latest", no auto-update).
+# Build (needs network; nothing in the harness builds or pulls this at run time):
+#      docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 docker
+# The base image and the agent CLI versions below are pinned here. They were set on 2026-11-02 to the newest release at
+# least 14 days old on that day. To move them, change these lines (reviewed versions only; no "latest", no auto-update)
+# or pass --build-arg; the build fails if a version is empty.
 #
 # Static rules checked by custom_harness/lab/walls.py `recipe_problems` (`chh lab check`):
 #   no COPY/ADD (the image holds public packages only: no host file, no truth, no secret can ride along),
 #   no VOLUME (the only volume is the session workspace, bound at run time), no secret-like ENV/ARG,
 #   no `curl | sh` installers, every *_VERSION pinned, ends as a non-root USER.
 # No dataset is bundled (no scikit-learn here; an agent may install packages at run time: the Lab has network).
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
 
-ARG CLAUDE_CODE_VERSION
-ARG CODEX_VERSION
-ARG OPENCODE_VERSION
+ARG CLAUDE_CODE_VERSION=2.1.302
+ARG CODEX_VERSION=0.163.0
+ARG OPENCODE_VERSION=1.19.3
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

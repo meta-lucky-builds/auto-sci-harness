@@ -27,6 +27,8 @@ current, so the UI can be typed end to end.
 | `paper` | a living paper, every number from the certificate | `display.autopsy`, `outputs/court_paper` |
 | `record` | dead ends, opened outcomes, calibration | `lab/trace`, `display.seen`, `display.track_record` |
 | `resolve` | what any number rests on | |
+| `chh exp doctor` | command line only: every prerequisite of a first session, what is missing and the next step. Read-only. It never prints a key | `experience/doctor.py` |
+| `chh exp toy` | command line only: the minted toy track. It runs the route up to the next step that needs a person, and carries on when run again | `experience/toy.py` |
 
 Route names are the researcher's: `generated` is the Court's minted route, `public` the retrospective Claim Audit route.
 `case` also opens a Claim Audit by its audit id: that is the "reproduce this paper" output. Its report stays a full
@@ -69,7 +71,8 @@ appears only with the autopsy. A reviewer's file before retirement has the verdi
 part, compared on the part's feature columns. Before this it refused only whole private files, so the raw file or a
 subset gave scores on sealed labels.
 
-**Never grants.** No verb writes an approval, a role, a retirement or a certificate. `approve` has one parameter, the item
+**Never grants.** No verb writes an approval, a role or a certificate. The one retirement that happens without a person is
+a spent generated target (below). `approve` has one parameter, the item
 id. Steps that are the researcher's decision (`seal`, `start`, `steer`, `freeze`, `promote`, `mint`) refuse an agent's name
 and a call from inside a run. `court retire` and `lab release-verdict` now apply the same check. This is accountability,
 not authentication: on one machine the OS user is the trust root, and `human/guard.py` says so. A Lab box cannot reach
@@ -85,6 +88,20 @@ the types, and the session test resolves every link and compares the value. An u
 A Court case never reads INCONCLUSIVE yet: the difference from NOT CERTIFIED depends on the interval, which the feedback
 split withholds, and N17 (P1) has not been built. A certified claim that is not VALIDATED says it is not a finding.
 
+**One-look targets.** `case`, `technical` and `share` go through `display.open_case`: `view`, and then a generated (minted)
+target with no look left retires by itself. So the first look shows the verdict, the closed reason and the checks in full,
+and the next look shows everything, with the rerun command. UPGRADES N14 allows this: a target retires when its slots
+are spent or the owner retires it, and GOAL 16.4 says the same for slots. It does not weaken anything on this route,
+because a generated target can never be used again and holds no real data, and the view is recorded first, so an
+outcome nobody opened stays out of every other surface. The owner decided this on 2026-11-02.
+
+Three cases stay as they were, on purpose:
+- A sealed target needs a person: `chh court retire TARGET --by NAME`. Its certificate and bundle carry labels of real
+  rows, and a second sealed part of the same data may be unopened. Opening them on a look would be an irreversible step
+  nobody chose, and it would give full feedback before a later claim on the same data.
+- A target waits while a replica or second test of the case has no outcome.
+- A COULD NOT RUN never retires a target.
+
 ## Transport
 
 GOAL 18.7 lists HTTPS on localhost and WebSocket under the UI stack, and 18.5 asks for a Python doorway, so the transport
@@ -94,9 +111,10 @@ must call this class and nothing else.
 ## Limits
 
 - Identity is a name on one machine. A person with the store can read everything; this path counts what the product shows.
-- A reviewer's `share` needs a human retirement before it can carry a rerun. A one-look target that has had its look is
-  not retired automatically: that is the behaviour P0 tested, and it is an owner decision whether to change it.
-- The rows check compares exact values on matching column names. Renamed columns or rounded values pass it.
+- On sealed data a reviewer's `share` needs a human retirement before it can carry a rerun. On generated data it carries
+  one once the verdict has been opened.
+- The rows check catches exact rows on matching columns, and renamed, reordered or rounded copies of at least five rows
+  (`court/rehearsal.py`). Noise added, columns added or rounding below three decimals still pass it.
 - A Claim Audit's COULD NOT RUN shows its report with no release: it names no target to release on.
 - `chh reproduce` of a bundle file already on disk is not gated; the file itself holds what it holds (docs/court_rehearsal.md).
 - The measured no-data prior of readiness is P1. Readiness is power only, UNCALIBRATED, and can only warn.

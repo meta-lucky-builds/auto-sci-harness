@@ -36,7 +36,7 @@ owner host (never visible to a box beyond one directory)
 | `chh lab agents` | lists the adapters, with the deferral reasons |
 | `chh lab check` | static walls: the lab root, the image recipe and the truth layout |
 | `chh lab start --agent claude-code --registry-key anthropic-api --credential-env CHH_LAB_CRED_ANTHROPIC --spend-cap-usd 20 --scope "..." [--gpus all]` | starts a session (Claude Code example) |
-| `chh lab start --agent opencode --model qwen2.5-coder:7b` | starts a session with a local model: no credential |
+| `chh lab start --agent opencode --model qwen2.5-coder:7b --local-model-server` | starts a session with a local model: no credential. The flag is required, because the box can then reach one port of this machine (section 11) |
 | `chh lab attach SESSION` | the agent's own UI, interactive |
 | `chh lab attach SESSION --prompt "..."` | one headless prompt; the transcript goes to `transcripts/` |
 | `chh lab status [SESSION]` | the sessions and their state |
@@ -60,7 +60,7 @@ owner host (never visible to a box beyond one directory)
 | `promote.py` | freeze, hand-off and verdict release |
 | `trace.py` | the discovery trace (§9) |
 | `cli.py` | `chh lab` |
-| `docker/lab.Dockerfile` | the image recipe; **not built** |
+| `docker/lab.Dockerfile` | the image recipe, with the base image and CLI versions pinned |
 | `THIRD_PARTY_NOTICES.md` | OpenResearch's MIT notice |
 | `tests/test_lab_*.py`, `tests/_lab_fakes.py` | the tests; **not run** |
 
@@ -211,9 +211,9 @@ Assume it is capable and, at worst, adversarial. It may want to:
 
 ## 7. Owner steps
 
-1. **Build the image.**
-   - Pin the base image by digest and pick the reviewed CLI versions.
-   - Run `docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 --build-arg CLAUDE_CODE_VERSION=… --build-arg CODEX_VERSION=… --build-arg OPENCODE_VERSION=… docker`.
+1. **The image.** Built on 2026-11-02 from the pinned recipe (first_session_checklist.md has the image id).
+   - To rebuild: `docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 docker`.
+   - To move the versions, change the pins in the recipe after reviewing them.
    - For ACP agents, extend the recipe with their pinned CLIs.
 2. **API keys.** Create one key per Lab use, scoped and spend-limited at the provider:
    - Anthropic: a dedicated workspace with a spend limit;
@@ -226,8 +226,8 @@ Assume it is capable and, at worst, adversarial. It may want to:
      that deny the user who runs `chh lab` and Docker.
    - The Lab's walls then do not rest on path checks alone.
    - On Windows, also restrict Docker Desktop file sharing to the lab root.
-4. **Local models.** Run the model server on the host and pass `--local-base-url` if it is not Ollama's default.
-   Bind the server to loopback, and remember residual risk 4.
+4. **Local models.** Run the model server on the host, pass `--local-model-server`, and pass `--local-base-url` if it is
+   not Ollama's default. Bind the server to loopback, and remember residual risk 4.
 5. **GPUs.** Install the NVIDIA container toolkit and use `--gpus all`.
 6. **Decide:** D5 (BYOS in the Lab), D7 cap ceiling, D11 (manifest-only freeze), D20 (gVisor), the Court-image-from-lock
    question, and which ACP agents get registry entries.
@@ -433,8 +433,9 @@ looks like a key is stored by hash. Records are collected after each prompt, at 
 - Whether each agent CLI honours the proxy settings has not been tested: the Lab image is not built yet [inferred from
   their documentation]. A CLI that ignores them gets no network; it does not get around the rule.
 - A local model server: `opencode` with a local model makes the gateway let through exactly one `host.docker.internal`
-  port. Everything in the box can reach that port, without authentication. UPGRADES N5 suggested an authenticated
-  allow-list; authentication is not built. The allowed pair is in the session record.
+  port. Everything in the box can reach that port, without authentication. So it is refused unless the researcher says
+  `--local-model-server` (owner decision 2026-11-02). UPGRADES N5 suggested an authenticated allow-list; authentication
+  is not built. The allowed pair and the opt-in are in the session record.
 - Addresses a public name resolves to are checked; traffic to a public address the owner's router forwards back to the
   LAN is not detected.
 - Docker's log rotation can drop old records in a very long session (4 files of 64 MB; shown as a gap).

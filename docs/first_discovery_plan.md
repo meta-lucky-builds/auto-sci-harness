@@ -14,6 +14,9 @@ can start now.
 - Route: `chh court health`, `chh lab start`, `chh lab promote`, `chh court rehearse`, `chh court register`,
   `chh court mint`, `chh approve-role`, `chh court run --docker`, `chh court status`.
   The same route in the researcher's words: `chh exp ...` (docs/experience_api.md).
+- One command: `chh exp toy` does the route on the `rings` family, stops at each step that needs a person and says what
+  to do, and carries on when run again. Every step is in docs/first_session_checklist.md. `chh exp doctor` says what is
+  missing first.
 - What it proves: that the real route runs from a Lab session to a certificate with a real agent in a real box. Today
   that has been run only with scripted programs on a local sandbox (see Status).
 - Done when: one claim is VALIDATED, a reviewer reruns its bundle, and the two scorecard numbers are recorded.
@@ -32,7 +35,7 @@ can start now.
 
 | Step | For | Why it is yours |
 |---|---|---|
-| Build the Lab image from `docker/lab.Dockerfile`, with reviewed CLI versions and a pinned base | both tracks | versions are a review decision |
+| Review the pinned base and CLI versions in `docker/lab.Dockerfile` (the image is built from them) | both tracks | versions are a review decision |
 | Scoped, spend-capped API keys for the agents | both | money and credentials |
 | Adapter approval: `chh approve-adapter ml` (and lp, sim, circuit when used) | both | human-only |
 | The providers.yaml sign-off | both | human-only |
@@ -46,6 +49,7 @@ can start now.
 
 ## Status
 
-Built and tested with scripted programs on a local sandbox: seal, program contract, rehearsal, health run, display.
-Not done: any run with a real agent in a real Lab box, and any run of the health suite in the Docker candidate sandbox
-(the Lab image does not exist yet).
+Built and tested with scripted programs on a local sandbox: seal, program contract, rehearsal, health run, display,
+`chh exp doctor`, `chh exp toy`.
+Run for real on Docker: the health run, on a scratch store only (agent_worklogs/stage-b/LOG.md).
+Not done: any run with a real agent in a real Lab box, and a health run for the final Court version on the owner's store.
