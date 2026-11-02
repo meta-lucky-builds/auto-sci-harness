@@ -1,0 +1,14 @@
+diff --git a/src/custom_harness/research/claims.py b/src/custom_harness/research/claims.py
+index 7db6b62..e351c67 100644
+--- a/src/custom_harness/research/claims.py
++++ b/src/custom_harness/research/claims.py
+@@ -62,8 +62,7 @@ _NORMAL = statistics.NormalDist()
+ def _inline(text: Any, limit: int = 500) -> str:
+     """Model-written text as ONE line (whitespace collapsed, backticks removed, bounded), so it cannot start new
+     report lines (fake headings, a fake headline result) or break out of inline code spans."""
+-    s = " ".join(str(text).split()).replace("`", "'")
+-    return s if len(s) <= limit else s[:limit] + "…"
++    return str(text)
+ 
+ 
+ def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:

@@ -45,14 +45,21 @@ the metric itself (e.g. many probing submissions); those need the evaluator-side
 
 from __future__ import annotations
 
+import ast
 import base64
+import contextlib
 import functools
 import hashlib
+import importlib.util
+import io
+import json
 import math
 import os
 import re
 import secrets
 import urllib.parse
+import zipfile
+import zlib
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from itertools import accumulate
@@ -74,6 +81,10 @@ MIN_FRAGMENT = 16  # characters of a canary's random part that identify it
 _B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{24,}={0,2}")
 _HEX_RUN = re.compile(r"[0-9a-fA-F]{32,}")
 _TOKEN_SPLIT = re.compile(r"[\s,;|]+")
+# a label run written as a quoted list / tuple / set literal (`["c", "a", ...]`, `('c', 'a')`): quote and bracket
+# characters are also separators in a second tokenisation (auditor-to-kstats-01); the first one is kept, so a label
+# vocabulary that itself contains such characters is matched as before
+_LITERAL_SPLIT = re.compile(r"""[\s,;|"'`\[\](){}]+""")
 MIN_VERBATIM_LEN = 8
 MIN_ENCODED_LEN = 16
 FRAGMENT_LEN = 16
@@ -220,14 +231,38 @@ def _canary_in(view: str, canaries: list[str]) -> bool:
 
 
 def _runs_in(view: str, runs: list[LabelRuns]) -> bool:
-    tokens = [t for t in _TOKEN_SPLIT.split(view) if t]
-    return any(r.found(tokens) or r.found(tokens[::-1]) for r in runs)
+    for split in (_TOKEN_SPLIT, _LITERAL_SPLIT):
+        tokens = [t for t in split.split(view) if t]
+        if any(r.found(tokens) or r.found(tokens[::-1]) for r in runs):
+            return True
+    return False
 
 
 def scan_text(text: str, where: str, canaries: list[str], windows: list[str],
               runs: list[LabelRuns] | None = None) -> list[str]:
     """Public form of the per-text check (canaries, label windows and runs, escape marker; plain and encoded)."""
     return _check_text(text, where, [c for c in canaries if c], windows, runs or [])
+
+
+def reader_texts(data: bytes, *, source: bool = False, depth: int = 0) -> list[str]:
+    """What a reader of the bytes sees (UTF-8, NULs dropped, parsed JSON, and for Python `source` the decoded source,
+    its literals in source order joined by newlines and directly, and every member of a zip, which `python` runs as a
+    zipapp whatever its name: RT-S4-5): docs/kernel_s4.md, item 1 (K9's view of a blob)."""
+    texts = [data.decode("utf-8", errors="ignore"), data.replace(b"\0", b"").decode("utf-8", errors="ignore")]
+    with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding
+        texts.append(json.dumps(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv]),
+                                sort_keys=True, separators=(",", ":"), allow_nan=False))
+    with contextlib.suppress(ValueError, SyntaxError, RecursionError, LookupError, MemoryError):  # not Python
+        nodes = ast.walk(ast.parse(data)) if source else iter(())
+        consts = sorted((n.lineno, n.col_offset, n.value if isinstance(n.value, str) else n.value.decode(
+            "utf-8", "ignore")) for n in nodes if isinstance(n, ast.Constant) and isinstance(n.value, str | bytes))
+        lits = [v.replace("\0", "") for *_, v in consts]
+        texts += [importlib.util.decode_source(data), "\n".join(lits), "".join(lits)] if source else []
+    with contextlib.suppress(zipfile.BadZipFile, ValueError, OSError, EOFError, NotImplementedError, zlib.error):
+        z = zipfile.ZipFile(io.BytesIO(data)) if source and depth < 2 else None  # all members capped at 64 MiB
+        members = z.infolist() if z and sum(i.file_size for i in z.infolist()) <= 2**26 else []
+        texts += [t for i in members for t in reader_texts(z.read(i), source=True, depth=depth + 1)] if z else []
+    return list(dict.fromkeys(texts))
 
 
 def _strings(obj: Any) -> Iterable[str]:

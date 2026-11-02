@@ -1,4 +1,6 @@
-# Sandbox image for agent-written ML/DL experiment code.
+# FULL sandbox image (trusted task building only: `chh build-suite --docker` exports the real datasets from the
+# scikit-learn files bundled here). Agent-written code runs in the derived candidate image with those files removed:
+# docker/sandbox-candidate.Dockerfile (STATUS ledger BUNDLED-DATA).
 # Build:  docker build -f docker/sandbox.Dockerfile -t custom-harness-sandbox:py312 docker
 # CPU-only torch keeps the image small; a CUDA variant comes with the cloud-GPU backend.
 FROM python:3.12-slim

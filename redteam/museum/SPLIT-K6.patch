@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -716,7 +716,7 @@
+             reasons.append(R(Code.K6_TWIN, f"{target}: identical content registered under other id(s) {twins}"))
+         for other in sorted(d for d in datasets if d != target):  # held-out labels public elsewhere = not held out
+             for where, (n, may_carry_labels) in shared_examples(ctx.vault, target, other).items():
+-                if may_carry_labels:
++                if False:
+                     reasons.append(R(Code.K6_PUBLIC_LABELS,
+                         f"{n} held-out example(s) of {target!r} appear in public file {where}"))
+         prereg = ctx.prereg or registration(ctx.ledger, ctx.claim_hash)

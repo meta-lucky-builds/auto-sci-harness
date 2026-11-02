@@ -13,7 +13,6 @@ import importlib
 import math
 import os
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -99,9 +98,13 @@ STEERED = KNN.format(k=15, pre="", post=(
 
 def _replay_seed(c, w: World, ids: list[str], arm: str, target: str) -> int:
     recs = [(e, _record(w, e)) for e in ids]
-    ctx = SimpleNamespace(records=recs, claim_hash=c.claim_hash(), claim=c)
+    # a real Context (stage-c 2026-10-24): the SimpleNamespace double lacked Context.material(), which replay_seed has
+    # used since d4cb1ef (plan-matched material, R1-F2), so this test raised AttributeError (museum control CONTROL-FAIL
+    # R1-F2, logs/33_museum_control_bf02996.log)
+    ctx = K.Context(claim=c, claim_hash=c.claim_hash(), store=w.store, vault=w.vault, ledger=w.kernel.ledger,
+                    config=K.KernelConfig(), replayer=None, evidence_ids=tuple(ids), records=recs)
     rec = next(r for _, r in recs if r.arm == arm and r.target == target)
-    return K.replay_seed(ctx, rec)  # type: ignore[arg-type]
+    return K.replay_seed(ctx, rec)
 
 
 def test_r1_replay_seed_cannot_be_steered_with_records_on_non_target_datasets(w):

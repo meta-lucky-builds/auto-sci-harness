@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/research/modules.py b/src/custom_harness/research/modules.py
+--- a/src/custom_harness/research/modules.py
++++ b/src/custom_harness/research/modules.py
+@@ -164,7 +164,7 @@
+             return None, {"fold": k, "wall_s": round(wall, 2), "stdout_tail": "", "stderr_tail": over.strip(),
+                           "timed_out": True, "contract": contract}
+         timeout = min(task.solution_timeout_s, remaining)
+-        box = sb.spawn(root / f"fold{k}")
++        box = sb
+         safe_path(box.workspace, "solution.py").write_bytes(code)
+         for rel, ref in ((train_rel, fold["train_ref"]), (test_rel, fold["valid_x_ref"])):
+             p = safe_path(box.workspace, rel)

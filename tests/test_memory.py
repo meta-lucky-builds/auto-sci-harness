@@ -11,10 +11,12 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import time
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,7 @@ from custom_harness.kernel import (
     Scope,
     canonical_json,
 )
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.memory import (
     WRAPPER,
     ExploitVerdict,
@@ -104,7 +107,8 @@ class MW:
         aid = f"lp-{tag}"
         ref = ArtifactRef(artifact_id=aid, hash=self.w.vault.register_artifact(aid, canonical_json(problem),
                                                                               "problem").hash)
-        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {aid} is 13/5", subject=ref,
+        doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(canonical_json(problem), Fraction(13, 5)),
+                    subject=ref,
                     comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                     effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                     scope=Scope(datasets=()), development=(), generalization_targets=(),
@@ -319,6 +323,34 @@ def test_exploit_check_verdict_is_explicit():
     assert PerturbedEvaluatorCheck(lambda e, p: 0.2 if p else 0.3).check(object()).passed  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         PerturbedEvaluatorCheck(lambda e, p: 1.0, min_retained=0.0)  # a check that keeps nothing is no check
+
+
+def test_an_outage_in_the_exploit_check_quarantines_instead_of_rejecting(mw):
+    """GOAL L1 (infra != policy): an exploit evaluator that hits an infrastructure failure (e.g. Docker down while
+    re-running the skill under the perturbed grader) gives no verdict. The entry stays QUARANTINED, unreadable, and is
+    judged again later; until 2026-10-08 the broad `except Exception` turned the outage into a terminal REJECTED."""
+    from custom_harness.errors import InfraError
+
+    down = {"on": True}
+    honest = GainTable({"outage playbook": (0.3, 0.28)})
+
+    def evaluator(entry, perturbed):
+        if down["on"]:
+            raise RuntimeError("perturbed run crashed") from InfraError("docker daemon down", transient=True)
+        return honest(entry, perturbed)
+
+    s = store(mw, exploit_check=PerturbedEvaluatorCheck(evaluator))
+    res = s.submit(P(Kind.PLAYBOOK, "outage playbook", (mw.L1,)), writer="w")
+    assert not res.passed and res.status == Status.QUARANTINED, res
+    with pytest.raises(NotReadable):
+        s.get(res.entry_id, reader="t")
+    down["on"] = False  # the daemon is back: the same entry is judged on its merits
+    again = s.admit(res.entry_id)
+    assert again.passed and again.status == Status.ACTIVE, again
+    # control: a policy failure (the evaluator itself is broken, no infrastructure cause) still rejects for good
+    broken = PerturbedEvaluatorCheck(lambda e, p: (_ for _ in ()).throw(KeyError("no such skill")))
+    bad = store(mw, exploit_check=broken).submit(P(Kind.PLAYBOOK, "broken playbook", (mw.L1,)), writer="w")
+    assert not bad.passed and bad.status == Status.REJECTED
 
 
 # ================================================================ M6 exit: revoking one claim removes every dependent
@@ -593,13 +625,34 @@ def test_memory_package_has_no_model_path_and_only_trusted_code_writes():
     r = subprocess.run([sys.executable, "-c", code], env={**os.environ, "PYTHONPATH": str(SRC)},
                        capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stdout + r.stderr
-    allowed = {"cli.py"}
+    # research/memory_wiring.py: the research loop's reader (recall into the hypothesize prompt) and its trusted
+    # writer (harvest_negatives + record_outcome after certify); research/claims.py only calls it after certify
+    # research/station/archive.py: the multi-agent mode's archive (its only writer is trusted code publishing Kernel
+    # certificates of a turn's ledger window; docs/multi_agent_mode.md)
+    allowed = {"cli.py", "research/memory_wiring.py", "research/claims.py", "research/station/archive.py"}
+    # any relative depth (`from ...memory` was missed by the earlier substring check), and `import ... memory`
+    pattern = re.compile(r"custom_harness\.memory\b|from\s+\.+memory\b|from\s+\.+\s+import\s+[^\n]*\bmemory\b")
+    # int18 merge (s4-station's stricter textual pattern x s4-human's catalog): human/catalog.py NAMES
+    # "custom_harness.memory.store" as the writer of the human `memory_revoke` action (a string in its table). It is
+    # exempt from the textual pattern only while its AST imports nothing from memory and never imports dynamically.
+    text_only = {"human/catalog.py"}
     importers = []
     for p in (SRC / "custom_harness").rglob("*.py"):
         rel = p.relative_to(SRC / "custom_harness").as_posix()
         if rel.startswith("memory/") or rel in allowed:
             continue
-        t = p.read_text(encoding="utf-8")
-        if "custom_harness.memory" in t or "from .memory" in t or "from ..memory" in t:
+        text = p.read_text(encoding="utf-8")
+        if rel in text_only:
+            import ast
+            tree = ast.parse(text)
+            mods = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
+            mods += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
+            names = [a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names]
+            dynamic = [n for n in ast.walk(tree) if isinstance(n, ast.Name | ast.Attribute)
+                       and getattr(n, "id", getattr(n, "attr", "")) in ("import_module", "__import__")]
+            if any("memory" in m for m in mods) or "memory" in names or dynamic:
+                importers.append(rel)
+            continue
+        if pattern.search(text):
             importers.append(rel)
     assert importers == []

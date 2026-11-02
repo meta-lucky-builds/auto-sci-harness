@@ -36,15 +36,28 @@ CREATE TABLE IF NOT EXISTS ledger (seq INTEGER PRIMARY KEY, kind TEXT NOT NULL, 
 
 LedgerRow = tuple[int, str, str, str, str, float]  # seq, kind, body (canonical JSON), prev, hash, at
 
+# In-process observers of ledger appends, called as observe(seq, kind) in the appending thread and context right
+# after the entry is committed. The engine uses one to see which private reads a step made ITSELF (runtime/engine.py,
+# taint attribution), whatever run id the read names. An observer that raises fails the append's caller (fail closed);
+# an entry appended by ANOTHER process (kerneld) is not observed here.
+_LEDGER_OBSERVERS: list[Callable[[int, str], None]] = []
+
+
+def add_ledger_observer(observe: Callable[[int, str], None]) -> None:
+    if observe not in _LEDGER_OBSERVERS:
+        _LEDGER_OBSERVERS.append(observe)
+
 
 class EvidenceStore:
     def __init__(self, root: Path):
         root = Path(root)
         root.mkdir(parents=True, exist_ok=True)
+        self.root = root  # kerneld is started on the same store (GOAL §16.5.2)
         from ..sandbox.base import protect_path
         protect_path(root)  # blobs hold private labels: no sandbox workspace may overlap the store (invariant 2)
         self.blobs = BlobStore(root / "blobs")
-        self._db = sqlite3.connect(root / "evidence.sqlite", check_same_thread=False)
+        # timeout: a second process (kerneld) may hold the write lock briefly; wait instead of failing
+        self._db = sqlite3.connect(root / "evidence.sqlite", check_same_thread=False, timeout=30)
         self._db.executescript(SCHEMA)
         self._lock = threading.Lock()
 
@@ -81,7 +94,18 @@ class EvidenceStore:
         rows = self._rows("SELECT body FROM runs ORDER BY rowid DESC LIMIT ?", (limit,))
         return [Run.model_validate_json(r[0]) for r in rows]
 
+    def run_ablated(self, run_id: str | None) -> tuple[str, ...]:
+        """The ablation switches recorded on the run (custom_harness/ablation.py); () for a production run or an id
+        with no run record."""
+        from ..ablation import run_ablated
+        return run_ablated(self, run_id)
+
     def add_step(self, step: TraceStep) -> None:
+        # the ABLATED marker comes from the run record, never from the writer: every step of an ablated run carries
+        # it, and no step of a production run can claim it
+        off = self.run_ablated(step.run_id)
+        if tuple(step.ablated) != off:
+            step = step.model_copy(update={"ablated": off})
         self._exec("INSERT INTO steps VALUES (?, ?, ?)", (step.run_id, step.index, step.model_dump_json()))
 
     def trace(self, run_id: str) -> list[TraceStep]:
@@ -112,7 +136,10 @@ class EvidenceStore:
         return Evidence.model_validate_json(rows[0][0])
 
     def add_claim(self, claim: Claim) -> None:
-        """Claims can only be created from existing Evidence (Chain-of-Evidence by construction)."""
+        """Claims can only be created from existing Evidence (Chain-of-Evidence by construction): at least one id,
+        and every id must resolve (fail closed: an empty list is refused, not vacuously accepted)."""
+        if not claim.evidence_ids:
+            raise ValueError(f"claim {claim.id} has no evidence: claims come only from evidence (GOAL L2)")
         for ev_id in claim.evidence_ids:
             self.get_evidence(ev_id)
         self._exec("INSERT INTO claims VALUES (?, ?)", (claim.id, claim.model_dump_json()))
@@ -129,6 +156,7 @@ class EvidenceStore:
         return chain_tier(self.get_evidence(e).tier for e in claim.evidence_ids)
 
     def set_claim_status(self, claim_id: str, status: ClaimStatus, detail: str = "") -> None:
+        self.get_claim(claim_id)  # KeyError for an unknown claim: no status without a claim (and its evidence)
         self._exec("INSERT INTO claim_status VALUES (?, ?, ?, ?)", (claim_id, status, detail, time.time()))
 
     def claim_status(self, claim_id: str) -> ClaimStatus:
@@ -168,13 +196,18 @@ class EvidenceStore:
     # --- Evidence-Kernel ledger (hash chain; the chain rule lives in kernel/ledger.py) -------------
     def ledger_append(self, kind: str, body: str, entry_hash: Callable[[int, str, str, str, float], str]
                       ) -> LedgerRow:
-        """Append atomically: seq, prev and the timestamp are fixed under one lock and one transaction."""
+        """Append atomically: seq, prev and the timestamp are fixed under one lock and one transaction. The
+        transaction takes SQLite's write lock BEFORE reading the head (BEGIN IMMEDIATE): another PROCESS on the same
+        store (kerneld, §16.5.2) cannot read the same head in between, which would fork or collide the chain."""
         with self._lock, self._db:
+            self._db.execute("BEGIN IMMEDIATE")
             last = self._db.execute("SELECT seq, hash FROM ledger ORDER BY seq DESC LIMIT 1").fetchone()
             seq, prev = (last[0] + 1, last[1]) if last else (1, "genesis")
             at = time.time()
             h = entry_hash(seq, kind, body, prev, at)
             self._db.execute("INSERT INTO ledger VALUES (?, ?, ?, ?, ?, ?)", (seq, kind, body, prev, h, at))
+        for observe in tuple(_LEDGER_OBSERVERS):  # in the appender's thread and context, after the commit
+            observe(seq, kind)
         return seq, kind, body, prev, h, at
 
     def ledger_import(self, row: LedgerRow) -> None:

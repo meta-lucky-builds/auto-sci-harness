@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/lp.py b/src/custom_harness/kernel/lp.py
+index 05e8379..ed76bf2 100644
+--- a/src/custom_harness/kernel/lp.py
++++ b/src/custom_harness/kernel/lp.py
+@@ -62,7 +62,7 @@ def _load(data: bytes, fmt: str, keys: set[str]) -> dict[str, Any]:
+         text = data.decode("utf-8")  # canonical UTF-8 only: json would also read UTF-16/32 and a BOM,
+         if text.startswith("\ufeff"):  # which K9's byte scan of the same document could not see through
+             raise LPError("a byte-order mark is refused")
+-        doc = json.loads(text, object_pairs_hook=_unique)
++        doc = json.loads(text)
+     except ValueError as e:
+         raise LPError(f"not JSON: {e}") from None
+     if not isinstance(doc, dict) or doc.get("format") != fmt:

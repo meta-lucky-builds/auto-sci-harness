@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/execution.py b/src/custom_harness/kernel/execution.py
+index 976bef8..9dd95bf 100644
+--- a/src/custom_harness/kernel/execution.py
++++ b/src/custom_harness/kernel/execution.py
+@@ -149,7 +149,7 @@ class SandboxReplayer:
+             if vault.store.blobs.put(data) != ref.blob:
+                 raise ExecutionError(f"input {role} ({ref.dataset_id}/{ref.file}) no longer matches the record")
+             inputs[role] = (ref.file, replace.get(role, data))
+-        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-{self.nonce}-"
++        sandbox = self.sandbox_factory(f"replay-{record.arm}-{record.seed}-{record.artifact_hash[:10]}-"
+                                        f"{self.calls}")
+         timeout = float(record.limits.get("timeout_s", 900))
+         # §16.8: Kernel replays are charged CPU time (the recorded CPU limit, else the recorded wall limit as CPU), so

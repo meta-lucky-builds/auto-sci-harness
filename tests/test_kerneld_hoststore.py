@@ -1,0 +1,479 @@
+"""The host store facade and the Kernel's per-claim grants (GOAL Â§16.5.2, kerneld/hoststore.py, kerneld/scope.py), and
+kerneld's private-ingest op (kerneld/ingest.py).
+
+Written 2026-10-14 (s4-kerneld) to FAIL on origin/int17 684f213 and pass with the branch:
+- on int17 there is no `custom_harness.kerneld.hoststore` / `scope` module, no ingest op, the Engine and ModuleContext
+  hold the raw EvidenceStore, and `register_task` reads the labels in-process; every test below then fails (import
+  error, or a private read/ingest that succeeds where it must be refused).
+NOT RUN when written (owner: no test runs this phase).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from custom_harness.kernel import DatasetRole, Kernel, Label, Vault
+from custom_harness.kerneld.client import KernelD, KernelDError, KernelDUnavailable
+from custom_harness.kerneld.hoststore import HostStore, PrivateDataRefused, host_store, open_host_store
+from custom_harness.kerneld.scope import ScopedKernel, screening_canaries
+from kernel_world import World
+
+ROOT = Path(__file__).resolve().parents[1]
+# The module-scoped `world` runs programs in LocalSandbox before conftest's function-scoped autouse fixture sets test
+# mode (pytest instantiates wider-scoped fixtures first): set it at import, as test_exploit_eval.py and
+# test_kernel_s16.py do. (stage-c 2026-10-23: run alone, every `world` test errored with PermissionError; inside the
+# full suite it passed only because another module's import had set the variable first.)
+os.environ.setdefault("CHH_ALLOW_UNISOLATED", "1")
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    w = World(tmp_path_factory.mktemp("hoststore"), seed=11, n_train=80, n_test=80)
+    claim = w.claim(w.artifact("good"), w.artifact("baseline", "baseline"), delta=0.2)
+    w.kernel.preregister(claim)
+    w.claim_obj = claim  # type: ignore[attr-defined]
+    w.evidence = w.evaluate_all(claim)  # type: ignore[attr-defined]  # raw store: the test world's trusted path
+    yield w
+    w.close()
+
+
+def _private_blob(w: World, ds: str = "test") -> str:
+    return next(f.blob for f in w.vault.dataset(ds).files.values() if f.private)
+
+
+def _public_blob(w: World, ds: str = "test") -> str:
+    return next(f.blob for f in w.vault.dataset(ds).files.values() if not f.private)
+
+
+def _ledger_len(w: World) -> int:
+    return len(w.store.ledger_rows())
+
+
+# ------------------------------------------------------------------------------------------- 1. the facade refuses
+def test_host_store_refuses_private_and_canary_blobs_but_serves_public_ones(world):
+    hs = host_store(world.store)
+    assert isinstance(hs, HostStore) and host_store(hs) is hs
+    assert hs.blobs.get(_public_blob(world)) == world.store.blobs.get(_public_blob(world))
+    for digest in (_private_blob(world), world.vault.dataset("test").canary_ref):
+        assert digest is not None
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get(digest)
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get_json(digest)
+    # the refusal is not an OSError/ValueError: "missing"/"malformed" handlers cannot swallow it into a skip
+    assert not issubclass(PrivateDataRefused, (OSError, ValueError))
+    # the ledger names the label file by its KEYED digest only (s4-kernel); the refused digest above is the CONTENT
+    # address the Vault resolves it to (int18 stage-c: the facade indexed only the keyed ref and served the labels)
+    keyed = [f["blob"] for row in world.store.ledger_rows("register_dataset")
+             for f in json.loads(row[2])["files"].values() if f["private"]]
+    assert keyed and all(b.startswith("hmac-sha256:") for b in keyed) and _private_blob(world) not in keyed
+
+
+def test_an_unresolvable_keyed_private_ref_fails_every_host_read_closed(tmp_path):
+    """A keyed private ref whose Vault index entry is missing: the facade cannot tell which blob holds that file, so
+    it refuses every blob read outside a grant; once the index entry is back, public blobs are served again."""
+    w = World(tmp_path / "w", seed=12, n_train=40, n_test=40)
+    try:
+        idx = Path(w.store.root) / "private" / "index"
+        entries = {p.name: p.read_text(encoding="ascii") for p in idx.iterdir()}
+        assert entries
+        for name in entries:
+            (idx / name).unlink()
+        hs = host_store(w.store)
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get(_public_blob(w))
+        for name, text in entries.items():
+            (idx / name).write_text(text, encoding="ascii")
+        assert hs.blobs.get(_public_blob(w)) == w.store.blobs.get(_public_blob(w))
+        with pytest.raises(PrivateDataRefused):
+            hs.blobs.get(_private_blob(w))
+    finally:
+        w.close()
+
+
+def test_vault_read_through_the_host_store_is_refused_before_it_is_logged(world):
+    v = Vault(host_store(world.store))
+    before = _ledger_len(world)
+    for purpose, kw in (("kernel", {"claim_hash": world.claim_obj.claim_hash()}),
+                        ("evaluate", {"claim_hash": world.claim_obj.claim_hash(), "arm": "subject", "seed": 99}),
+                        ("audit", {}), ("leakscan", {})):
+        with pytest.raises(PrivateDataRefused):
+            v.read("test", "test_y.csv", purpose=purpose, **kw)  # type: ignore[arg-type]
+    assert _ledger_len(world) == before  # no data_access entry: a refused read is never a logged "peek"
+    with pytest.raises(PrivateDataRefused):
+        v.canary("test")
+
+
+def test_host_store_refuses_private_ingest_and_keeps_public_registration(tmp_path):
+    s = open_host_store(tmp_path / "store")
+    try:
+        v = Vault(s)
+        with pytest.raises(PrivateDataRefused):
+            v.register_dataset("t", DatasetRole.TEST, public={"x.csv": b"x\n1\n"}, private={"y.csv": b"y\n0\n"})
+        with pytest.raises(PrivateDataRefused):
+            v.register_dataset("c", DatasetRole.DEV, public={"x.csv": b"x\n2\n"}, private={}, canary="CHH-CANARY-c")
+        assert v.datasets() == {}
+        assert v.register_dataset("d", DatasetRole.DEV, public={"tr.csv": b"a\n1\n"}, private={}).dataset_id == "d"
+    finally:
+        s.close()
+
+
+# ------------------------------------------------------------------------------------------- 2. per-claim grants
+def test_scoped_kernel_certifies_like_the_kernel_and_a_bare_kernel_fails_closed(world):
+    claim, ids = world.claim_obj, world.evidence
+    ref = world.kernel.certify(claim, ids, record=False)  # the Kernel's own (raw) store
+    scoped = ScopedKernel(host_store(world.store), replayer=world.replayer).certify(claim, ids, record=False)
+    assert scoped.label == ref.label and scoped.failed() == ref.failed()
+    assert ref.label == Label.CERTIFIED_INTERNAL
+    bare = Kernel(host_store(world.store), replayer=world.replayer).certify(claim, ids, record=False)
+    assert bare.label != Label.CERTIFIED_INTERNAL and bare.failed()  # its private reads raised: failed checks
+
+
+def test_grant_is_narrowed_to_the_claim_and_closed_after_the_call(world):
+    hs = host_store(world.store)
+    k = ScopedKernel(hs, replayer=world.replayer)
+    k.certify(world.claim_obj, world.evidence, record=False)
+    with pytest.raises(PrivateDataRefused):  # the grant ended with the call
+        hs.blobs.get(_private_blob(world))
+    # test2 is not a target of the claim: even inside a certify grant its labels are not readable
+    from custom_harness.kerneld import scope
+    seen: list[str] = []
+    orig = Kernel.certify
+
+    def probe(self, *a, **kw):
+        try:
+            hs.blobs.get(_private_blob(world, "test2"))
+            seen.append("read")
+        except PrivateDataRefused:
+            seen.append("refused")
+        return orig(self, *a, **kw)
+
+    try:
+        Kernel.certify = probe  # type: ignore[method-assign]
+        scope.ScopedKernel(hs, replayer=world.replayer).certify(world.claim_obj, world.evidence, record=False)
+    finally:
+        Kernel.certify = orig  # type: ignore[method-assign]
+    assert seen == ["refused"]
+
+
+def test_bundle_through_the_scoped_kernel(world, tmp_path):
+    cert = world.kernel.certify(world.claim_obj, world.evidence)
+    out = tmp_path / "b.zip"
+    h = ScopedKernel(host_store(world.store), replayer=world.replayer).bundle(cert.cert_hash(), out)
+    assert out.is_file() and any(e.body["bundle_hash"] == h for e in world.kernel.ledger.entries("bundle"))
+
+
+def test_screening_canaries_reads_canaries_only(world):
+    hs = host_store(world.store)
+    got = screening_canaries(Vault(hs))
+    assert got["test"] == world.vault.canary("test") and got["test2"] == world.vault.canary("test2")
+    with pytest.raises(PrivateDataRefused):
+        hs.blobs.get(_private_blob(world))
+
+
+# ------------------------------------------------------------------------------------------- 3. the Engine side
+def test_engine_and_module_context_hold_the_host_store(world):
+    from custom_harness.runtime.modules import ModuleContext
+    ctx = ModuleContext(run_id="r", store=world.store, backends={}, budget=None, sandbox=None)  # type: ignore[arg-type]
+    assert isinstance(ctx._store, HostStore) and isinstance(ctx.kernel(), ScopedKernel)
+    with pytest.raises(PrivateDataRefused):
+        ctx.store.blobs.get(_private_blob(world))
+    import inspect
+
+    from custom_harness.runtime import engine
+    assert "host_store(store)" in inspect.getsource(engine.Engine.__init__)
+
+
+def test_cli_opens_the_store_through_kerneld():
+    import inspect
+
+    from custom_harness import cli
+    src = inspect.getsource(cli.main)
+    assert "open_host_store(" in src and "EvidenceStore(" not in src
+
+
+# ------------------------------------------------------------------------------------------- 4. ingest op
+@pytest.fixture
+def rings(tmp_path):
+    out = tmp_path / "rings"
+    subprocess.run([sys.executable, str(ROOT / "examples/tasks/make_rings_task.py"), str(out), "--n-train", "60",
+                    "--n-test", "40"], check=True, capture_output=True)
+    return out
+
+
+def test_ingest_research_task_registers_in_kerneld_with_a_single_use_token(tmp_path, rings):
+    from custom_harness.research.task import load_task
+    s = open_host_store(tmp_path / "store")
+    try:
+        task = load_task(rings)
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-ingest")
+            ids = run.ingest_research_task(task.id, rings)
+            v = Vault(s)
+            rec = v.dataset(ids["test"])
+            assert rec.role == DatasetRole.TEST and any(f.private for f in rec.files.values())
+            assert v.dataset(ids["train"]).role == DatasetRole.DEV and ids["baseline"] in v.artifacts()
+            assert [r["subject"] for r in s.records("kerneld_ingest")] == [task.id]
+            # single use; bound to its kind and subject
+            tok = run.ingest_token("research_task", task.id)
+            run._call("ingest", token=tok, kind="research_task", task_dir=str(rings))
+            with pytest.raises(KernelDError) as ei:
+                run._call("ingest", token=tok, kind="research_task", task_dir=str(rings))
+            assert ei.value.code == "token_spent"
+            tok = run.ingest_token("research_task", "another-task")
+            with pytest.raises(KernelDError) as ei:
+                run._call("ingest", token=tok, kind="research_task", task_dir=str(rings))
+            assert ei.value.code == "token_scope"
+            tok = run.ingest_token("research_task", task.id)
+            with pytest.raises(KernelDError) as ei:
+                run._call("score", token=tok, metric="accuracy", preds=[])
+            assert ei.value.code == "token_scope"  # an ingest token reads nothing
+            run.close()
+    finally:
+        s.close()
+
+
+def test_ingest_refuses_a_task_whose_canary_differs_for_the_same_data(tmp_path, rings):
+    from custom_harness.research.task import load_task
+    twin = tmp_path / "twin"
+    shutil.copytree(rings, twin)
+    (twin / "private" / "canary.txt").write_text("CHH-CANARY-different\n")
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-canary")
+            run.ingest_research_task(load_task(rings).id, rings)
+            with pytest.raises(KernelDError) as ei:
+                run.ingest_research_task(load_task(twin).id, twin)
+            assert ei.value.code == "canary_mismatch" and str(ei.value) == "canary_mismatch"
+    finally:
+        s.close()
+
+
+def test_a_second_task_on_already_registered_data_is_ingested_not_refused(tmp_path, rings):
+    """Two tasks sharing the same data (same canary), different baselines: the second ingest re-finds the SAME
+    datasets and registers only its own baseline. Fails on int18 d2ec8b3 (stage-c): the ingest pre-check compared the
+    Vault's hash of KEYED private refs (s4-kernel) with a plain-sha256 hash, so every already-registered dataset with
+    a private file read as 'other content' and the ingest was refused (ingest_refused)."""
+    from custom_harness.research.task import load_task
+    twin = tmp_path / "twin"
+    shutil.copytree(rings, twin)
+    (twin / "baseline.py").write_text((rings / "baseline.py").read_text() + "\n# another baseline\n")
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-shared")
+            first = run.ingest_research_task(load_task(rings).id, rings)
+            second = run.ingest_research_task(load_task(twin).id, twin)
+            assert (second["train"], second["test"]) == (first["train"], first["test"])
+            assert second["baseline"] != first["baseline"]
+            v = Vault(s)
+            assert {first["baseline"], second["baseline"]} <= set(v.artifacts())
+            assert sum(e.body.get("dataset_id") == first["test"] for e in v.ledger.entries("register_dataset")) == 1
+            assert len(s.records("kerneld_ingest")) == 2
+    finally:
+        s.close()
+
+
+def test_ingest_issue_refusals(tmp_path):
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-refusals")
+            for kind, subject, claim, code in (("nope", "x", None, "bad_request"),
+                                               ("openml_split", "openml-1-ab", None, "not_registered"),
+                                               ("openml_split", "openml-1-ab", "0" * 64, "not_registered")):
+                with pytest.raises(KernelDError) as ei:
+                    run.ingest_token(kind, subject, claim_hash=claim)
+                assert ei.value.code == code
+    finally:
+        s.close()
+
+
+def test_register_task_fails_closed_when_kerneld_is_unavailable(tmp_path, rings, monkeypatch):
+    from custom_harness.kerneld import client as client_mod
+    from custom_harness.research.claims import register_task
+    from custom_harness.research.task import load_task
+    from custom_harness.runtime.modules import ModuleContext
+
+    def dead(self, *a, **kw):
+        raise KernelDUnavailable()
+
+    monkeypatch.setattr(client_mod.KernelD, "__init__", dead)
+    s = open_host_store(tmp_path / "store")
+    try:
+        ctx = ModuleContext(run_id="r", store=s, backends={}, budget=None, sandbox=None)  # type: ignore[arg-type]
+        with pytest.raises(KernelDUnavailable):
+            register_task(ctx, load_task(rings), rings)
+        assert Vault(s).datasets() == {}  # no fallback: nothing was registered in-process
+    finally:
+        s.close()
+
+
+def test_measurement_refusals_carry_closed_classes_only():
+    from custom_harness.kerneld import ingest as I
+    from custom_harness.kerneld.protocol import MEASUREMENT_PROBLEMS
+    msgs = ["data is not UTF-8 text", "columns ['a'] differ from the protocol's ['b']",
+            "line 3: 2 values for 3 columns", "line 4: load='SECRET-VALUE' is not a finite number",
+            "arm 'x': 1 replicates < the protocol's minimum 3", "something new"]
+    classes = [I._problem_class(m) for m in msgs]
+    assert classes == ["not_utf8", "columns", "row_length", "non_finite", "replicates", "other"]
+    assert set(classes) <= set(MEASUREMENT_PROBLEMS) and not any("SECRET" in c for c in classes)
+    assert json.dumps(classes)  # wire-safe
+
+
+# ----------------------------------------------------------------------------------- 5. review fixes (2026-10-15)
+def test_a_caller_chosen_replayer_runs_without_the_certify_grant(world):
+    """s4-kerneld-review finding 1: the replayer is the caller's code; inside K3 it must not see the target labels."""
+    hs = host_store(world.store)
+    seen: list[str] = []
+
+    class Spy:
+        def replay(self, record, vault):
+            try:
+                vault.store.blobs.get(_private_blob(world))
+                seen.append("read")
+            except PrivateDataRefused:
+                seen.append("refused")
+            return world.replayer.replay(record, vault)
+
+    ScopedKernel(hs, replayer=Spy()).certify(world.claim_obj, world.evidence, record=False)
+    assert seen and set(seen) == {"refused"}
+
+
+def test_scoped_kernel_on_a_raw_store_still_runs_on_the_host_view(world):
+    k = ScopedKernel(world.store)
+    assert isinstance(k.store, HostStore)
+    with pytest.raises(PrivateDataRefused):
+        k.store.blobs.get(_private_blob(world))
+
+
+def test_module_kernel_bundles_only_into_the_bundles_dir_and_records_it(world, tmp_path):
+    from custom_harness.config import data_dir
+    from custom_harness.kernel import KernelError
+    from custom_harness.studio.kill import RunGuardedKernel
+    cert = world.kernel.certify(world.claim_obj, world.evidence)
+    k = RunGuardedKernel(world.store, run_id="r-bundle", replayer=world.replayer)
+    with pytest.raises(KernelError, match="bundle refused"):
+        k.bundle(cert.cert_hash(), tmp_path / "elsewhere.zip")
+    h = k.bundle(cert.cert_hash(), data_dir() / "bundles" / "ok.zip")
+    recs = [r for r in world.store.records("kerneld_bundle") if r["bundle_hash"] == h]
+    assert recs and _private_blob(world) in recs[-1]["private_blobs"]
+
+
+def test_host_store_holds_no_reference_to_the_raw_store(world):
+    hs = host_store(world.store)
+    assert not any(isinstance(v, type(world.store)) and not isinstance(v, HostStore) for v in vars(hs).values())
+    assert not any(callable(v) and getattr(v, "__self__", None) is world.store for v in vars(hs).values())
+
+
+def test_ingest_maps_a_refused_truth_layout_to_its_own_code(tmp_path, monkeypatch, rings):
+    """A truth location the layout refuses is `truth_layout`, never `not_found` (reviewer finding 10)."""
+    from custom_harness.kerneld import ingest as I
+    from custom_harness.truth_layout import TruthLayoutError
+
+    def refuse(task_dir):
+        raise TruthLayoutError("inside an agent-readable root")
+
+    monkeypatch.setattr("custom_harness.truth_layout.truth_dir", refuse)
+    s = open_host_store(tmp_path / "store")
+    try:
+        with pytest.raises(I.IngestRefused) as ei:
+            I.research_task(Vault(s), "r", "rings", str(rings))  # in-process call of the kerneld-side function
+        assert ei.value.code == "truth_layout"
+    finally:
+        s.close()
+
+
+def test_fake_labels_reads_and_writes_through_the_truth_layout(tmp_path, rings):
+    from custom_harness.kerneld.campaign import fake_labels
+    from custom_harness.truth_layout import truth_dir, truth_files
+    out = fake_labels(rings, tmp_path / "fake")
+    before = truth_files(rings)
+    after = truth_files(out)
+    assert set(after) == set(before)  # canary and every other truth file come along
+    assert (truth_dir(out) / "test_y.csv").read_text() != before["test_y.csv"].read_text()  # labels flipped
+    assert (truth_dir(out) / "canary.txt").read_text() == before["canary.txt"].read_text()
+
+
+def test_returned_measurements_token_binds_the_claim(tmp_path):
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-measure")
+            with pytest.raises(KernelDError) as ei:  # the claim must be bound when the token is issued
+                run.ingest_token("returned_measurements", "returned-x")
+            assert ei.value.code == "bad_request"
+    finally:
+        s.close()
+
+
+# ----------------------------------------------------------------------------------- 6. ingest idempotent + atomic
+def test_the_same_ingest_twice_appends_one_record(tmp_path, rings):
+    """Reviewer finding 14: the same (kind, subject, claim, input sha) returns the recorded result, nothing new."""
+    from custom_harness.research.task import load_task
+    s = open_host_store(tmp_path / "store")
+    try:
+        task = load_task(rings)
+        with KernelD(s.root) as kd:
+            run = kd.open_run("run-idem")
+            first = run.ingest_research_task(task.id, rings)
+            second = run.ingest_research_task(task.id, rings)
+            assert first == second
+            assert len(s.records("kerneld_ingest")) == 1
+            assert s.records("kerneld_ingest")[0]["result"] == {"ids": first}
+    finally:
+        s.close()
+
+
+def test_a_conflict_is_found_before_anything_is_registered(tmp_path, rings):
+    """Atomicity: a content conflict on the SECOND registration (an existing id with other bytes) is pre-checked,
+    so neither dataset is registered and no completion record is published."""
+    from custom_harness.research.task import load_task
+    from custom_harness.store import EvidenceStore
+    task = load_task(rings)
+    probe = open_host_store(tmp_path / "probe")
+    try:
+        with KernelD(probe.root) as kd:
+            ids = kd.open_run("run-probe").ingest_research_task(task.id, rings)
+    finally:
+        probe.close()
+    raw = EvidenceStore(tmp_path / "store")  # the Kernel side: a conflicting earlier registration of the TEST id
+    Vault(raw).register_dataset(ids["test"], DatasetRole.DEV, public={"other.csv": b"x\n1\n"}, private={})
+    raw.close()
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            with pytest.raises(KernelDError) as ei:
+                kd.open_run("run-conflict").ingest_research_task(task.id, rings)
+            assert ei.value.code == "ingest_refused"
+        assert ids["train"] not in Vault(s).datasets()  # the first registration was never written
+        assert s.records("kerneld_ingest") == []
+    finally:
+        s.close()
+
+
+def test_truth_query_answers_without_truth_bytes(tmp_path, rings):
+    from custom_harness.kerneld.client import truth_query
+    from custom_harness.research.task import load_task
+    task = load_task(rings)
+    s = open_host_store(tmp_path / "store")
+    try:
+        with KernelD(s.root) as kd:
+            ids = kd.open_run("run-q").ingest_research_task(task.id, rings)
+    finally:
+        s.close()
+    got = truth_query("target_id", store_root=tmp_path / "store", task_dir=str(rings))
+    assert got == {"target": ids["test"]}
+    hashes = truth_query("truth_hashes", store_root=tmp_path / "store", task_dir=str(rings))["hashes"]
+    assert "test_y.csv" in hashes and all(len(h) == 64 for h in hashes.values())
+    with pytest.raises(KernelDError) as ei:
+        truth_query("nope", store_root=tmp_path / "store", task_dir=str(rings))
+    assert ei.value.code == "bad_request"

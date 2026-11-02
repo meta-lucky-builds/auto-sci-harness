@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -362,7 +362,7 @@
+         reasons.append(R(Code.K1_PLAN, f"alpha must be in (0, {cfg.max_alpha}]"))
+     if plan.n_comparisons < 1 or plan.n_boot < cfg.min_boot:
+         reasons.append(R(Code.K1_PLAN, f"n_comparisons must be >= 1 and n_boot >= {cfg.min_boot}"))
+-    if not 0 <= plan.reproduce_tolerance <= cfg.max_reproduce_tolerance:
++    if not 0 <= plan.reproduce_tolerance:
+         reasons.append(R(Code.K1_PLAN, f"reproduce_tolerance must be in [0, {cfg.max_reproduce_tolerance}]"))
+     e = c.effect
+     if not e.predicted_lo <= e.predicted_hi:

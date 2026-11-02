@@ -11,6 +11,7 @@ import math
 import os
 import time
 import zipfile
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
@@ -38,10 +39,12 @@ from custom_harness.kernel import (
     run_program,
 )
 from custom_harness.kernel import checks as K
-from custom_harness.kernel.bundle import build_bundle, reproduce_bundle
+from custom_harness.kernel.bundle import BundleError, build_bundle, reproduce_bundle
 from custom_harness.kernel.checklist import ITEMS, fill, missing, publishable, render
+from custom_harness.kernel.claim import exact_value
 from custom_harness.kernel.execution import ExecutionError, SandboxReplayer, parse_predictions
 from custom_harness.kernel.ledger import Entry, verify_chain
+from custom_harness.kernel.lp import scope_phrase as lp_phrase
 from custom_harness.kernel.predictions import calibration, score_predictions, vds
 from custom_harness.records import Cost, Evidence, EvidenceKind
 from custom_harness.sandbox import LocalSandbox
@@ -129,8 +132,8 @@ def test_k0_failure_paths(base):
                                  unparsable.id, "ev_does_not_exist"))
     text = reasons(K.k0_provenance(cx))
     for want in ("different claim", "not a metric record", "not a list of strings", "code blob missing",
-                 "unresolvable", "target 'nope' unregistered", "run_missing", "ValidationError", "KeyError"):
-        assert want in text, want
+                 "unresolvable", "target 'nope' unregistered", f"{no_run}: KeyError", "ValidationError", "KeyError"):
+        assert want in text, want  # §16.5.8: a foreign exception shows its type only (no 'run_missing' message)
     assert cx.records == []
     empty = K.Context(claim=variant(c, subject__artifact_id="ghost"), claim_hash="h", store=w.store, vault=w.vault,
                       ledger=w.kernel.ledger, config=KernelConfig(), replayer=None, evidence_ids=())
@@ -190,7 +193,9 @@ def test_k3_paths(base):
     w, c, ids = base
     assert "no usable evaluation records" in reasons(K.k3_reproduced(ctx(w, c, [])))
     assert "no replayer configured" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=None)))
-    assert "failed: boom" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(ExecutionError("boom")))))
+    # §16.5.8: an exception's message never enters a reason (it could carry data out); its type name does
+    boom = ctx(w, c, ids, replayer=FixedReplayer(ExecutionError("boom")))
+    assert "failed: ExecutionError" in reasons(K.k3_reproduced(boom))
     assert "produced no predictions" in reasons(K.k3_reproduced(ctx(w, c, ids, replayer=FixedReplayer(None))))
     tol = variant(c, analysis_plan__reproduce_tolerance=0.02)
     w.kernel.preregister(tol)
@@ -419,11 +424,13 @@ def test_prediction_scoring(tmp_path):
     scores = {s.claim_hash: s for s in score_predictions(k.ledger, now)}
     assert len(scores) == 4
     s_hit, s_miss = scores[hit.claim_hash()], scores[miss.claim_hash()]
-    assert math.isclose(s_hit.info_gain_bits, math.log2(0.9 / 0.1))
-    assert math.isclose(s_miss.info_gain_bits, math.log2(0.2 / 0.6))  # p0 = declared prior 0.4
+    # §16.4 (F2): p0 is the level frozen at registration (alpha / n_comparisons = 0.05), never the p_null measured
+    # after the outcome nor the claimant's declared prior (the old expectations here encoded F2)
+    assert math.isclose(s_hit.info_gain_bits, math.log2(0.9 / 0.05))
+    assert math.isclose(s_miss.info_gain_bits, math.log2(0.2 / 0.95))
     s_exp = scores[expired.claim_hash()]
-    assert s_exp.expired and s_exp.outcome is False and math.isclose(s_exp.info_gain_bits, math.log2(0.3 / 0.5))
-    assert scores[pending.claim_hash()].outcome is None and scores[pending.claim_hash()].p0 == 0.3
+    assert s_exp.expired and s_exp.outcome is False and math.isclose(s_exp.info_gain_bits, math.log2(0.3 / 0.95))
+    assert scores[pending.claim_hash()].outcome is None and scores[pending.claim_hash()].p0 == 0.05
     total = vds(list(scores.values()))
     assert math.isclose(total, sum(s.info_gain_bits for s in scores.values() if s.info_gain_bits is not None))
     cal = calibration(list(scores.values()), bins=5)
@@ -481,7 +488,9 @@ def test_bundle_edge_paths(tmp_path, base):
                 if n != f"blobs/{drop}":
                     zout.writestr(n, zin.read(n))
         rep = reproduce_bundle(tmp_path / name, fresh)  # must report, never crash, whichever blob is missing
-        assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems), rep.problems
+        assert not rep.reproduced and [a["sha256"] for a in rep.missing_artifacts] == [drop], rep.missing_artifacts
+        assert any(p.startswith(f"artifact {drop[:12]} ") and "not in the bundle and not found locally" in p
+                   for p in rep.problems), rep.problems
         assert (name == "nocertblob.zip") == ("certificate content missing from the bundle" in rep.problems), name
     with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / "nocert.zip", "w") as zout:
         m = json.loads(zin.read("manifest.json"))
@@ -490,6 +499,20 @@ def test_bundle_edge_paths(tmp_path, base):
             zout.writestr(n, json.dumps(m).encode() if n == "manifest.json" else zin.read(n))
     rep = reproduce_bundle(tmp_path / "nocert.zip", fresh)
     assert not rep.reproduced and "certificate entry missing" in rep.problems[-1]
+
+    def tampered(name: str, edit) -> Path:
+        with zipfile.ZipFile(bundle) as zin, zipfile.ZipFile(tmp_path / name, "w") as zout:
+            m = json.loads(zin.read("manifest.json"))
+            edit(m)
+            for n in zin.namelist():
+                zout.writestr(n, json.dumps(m).encode() if n == "manifest.json" else zin.read(n))
+        return tmp_path / name
+    # the artifact list must name exactly the blob list: an unlisted blob would escape the missing-artifact report
+    rep = reproduce_bundle(tampered("unlisted.zip", lambda m: m.update(artifacts=m["artifacts"][1:])), fresh)
+    assert not rep.reproduced and "the artifact list does not match the bundle's blob list" in rep.problems
+    # a ledger entry whose body has a duplicated key (two JSON readers would disagree on it) is refused outright
+    with pytest.raises(BundleError, match="ledger entry is unreadable"):
+        reproduce_bundle(tampered("dupkey.zip", lambda m: m["ledger"][0].__setitem__(2, '{"k": 1, "k": 2}')), fresh)
 
 
 def test_check_ids_are_complete():
@@ -532,7 +555,9 @@ def test_bundle_is_a_snapshot_and_reports_missing_bytes(tmp_path, base):
     build_bundle(w.kernel, cert.cert_hash(), tmp_path / "three.zip")
     fresh = lambda: SandboxReplayer(lambda key: LocalSandbox(tmp_path / "rp" / key, i_understand_no_isolation=True))  # noqa: E731
     rep = reproduce_bundle(tmp_path / "three.zip", fresh)
-    assert not rep.reproduced and any("missing from the bundle" in p for p in rep.problems)
+    assert not rep.reproduced and rep.missing_artifacts == [  # listed as referenced, reported, never skipped
+        {"sha256": rec.preds_ref, "status": "referenced", "bytes": -1, "kind": "output"}], rep.missing_artifacts
+    assert any("not in the bundle and not found locally" in p for p in rep.problems), rep.problems
     payload = w.store.get_evidence(ids[0]).payload_ref
     with zipfile.ZipFile(tmp_path / "one.zip") as zin, zipfile.ZipFile(tmp_path / "nopayload.zip", "w") as zout:
         for n in zin.namelist():
@@ -676,7 +701,10 @@ def test_adapter_approval_refuses_unknown_anonymous_or_failing_adapters(tmp_path
     from custom_harness.kernel import AdapterError
     from custom_harness.kernel import adapters as A
     assert A.validate(A.ML_CHECKS) == []  # the real ML adapter passes its own fault-injection validation
-    assert A._raises(lambda: None) is False  # a "must refuse" check whose target does NOT refuse fails
+    # the fixture helper moved with the ML validation checks to verify/ml_validation.py (s4-kernel c648278, Kernel
+    # budget); same rule: a "must refuse" check whose target does NOT refuse fails
+    from custom_harness.verify import ml_validation as MV
+    assert MV.raises(lambda: None) is False and MV.raises(lambda: (_ for _ in ()).throw(ValueError("x"))) is True
     w = World(tmp_path / "w", approve_adapters=False)
     try:
         with pytest.raises(AdapterError, match="unknown adapter"):
@@ -704,7 +732,8 @@ def test_evidence_class_and_adapters_keep_old_hashes_stable(base):
     legacy = Certificate.model_validate({k: v for k, v in cert.model_dump(mode="json").items() if k != "adapters"})
     assert legacy.adapters == () and cert.adapters != ()
     import hashlib
-    old_rule = {k: v for k, v in legacy.model_dump(mode="json").items() if k != "adapters"}  # how v1.0 hashed it
+    # how v1.0 hashed it (fields added later, adapters and self_reported, did not exist)
+    old_rule = {k: v for k, v in legacy.model_dump(mode="json").items() if k not in ("adapters", "self_reported")}
     assert legacy.cert_hash() == hashlib.sha256(canonical_json(old_rule)).hexdigest()
     assert legacy.cert_hash() != cert.cert_hash()  # adapters are part of a new certificate's identity
 
@@ -755,7 +784,9 @@ def lp_claim(w: World, *, value: str | None = "13/5", problem: dict | None = Non
              **changes) -> Claim:
     data = canonical_json(problem or LP_PROBLEM)
     ref = ArtifactRef(artifact_id=artifact_id, hash=w.vault.register_artifact(artifact_id, data, "problem").hash)
-    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=f"the optimum of {artifact_id} is {value}", subject=ref,
+    exact = exact_value(value)  # K1 (invariant 14): the statement is exactly the adapter's rendering
+    doc = Claim(kind=ClaimKind.IMPROVEMENT, statement=lp_phrase(data, exact) if exact is not None else "n/a",
+                subject=ref,
                 comparator=ref, metric=MetricRef(id="lp_optimum", higher_is_better=True),
                 effect=Effect(min_effect=0.0, predicted_lo=0.0, predicted_hi=0.0, probability=0.9),
                 scope=Scope(datasets=()), development=(), generalization_targets=(),
@@ -826,12 +857,12 @@ def test_lp_provenance_order_and_leak_faults(lpw):
     claim = lp_claim(lpw)
     lpw.kernel.preregister(claim)
     assert lpw.kernel.certify(claim, []).failed() == ["K0", "K3", "K8"]  # no certificate at all
-    early = lp_claim(lpw, statement="registered after its certificate")
+    early = lp_claim(lpw, effect__probability=0.81)
     aid = lp_cert_artifact(lpw, early)  # the certificate exists BEFORE the claim is pre-registered
     lpw.kernel.preregister(early)
     cert = lpw.kernel.certify(early, [lpw.kernel.record_certificate(early, aid)])
     assert cert.failed() == ["K2"] and "registered before the pre-registration" in reasons(cert.checks["K2"])
-    other = lp_claim(lpw, statement="another claim")
+    other = lp_claim(lpw, effect__probability=0.82)
     foreign = lpw.kernel.record_certificate(other, lp_cert_artifact(lpw, other))
     cert = lpw.kernel.certify(claim, [foreign])
     assert "K0" in cert.failed() and "different claim" in reasons(cert.checks["K0"])
@@ -848,7 +879,7 @@ def test_lp_provenance_order_and_leak_faults(lpw):
         assert why in reasons(lpw.kernel.certify(claim, [eid]).checks["K0"]), why
     with pytest.raises(KernelError, match="not registered"):
         lpw.kernel.record_certificate(claim, "no-such-artifact")
-    lost = lp_claim(lpw, statement="its certificate bytes are lost")
+    lost = lp_claim(lpw, effect__probability=0.83)
     lpw.kernel.preregister(lost)
     lost_aid = lp_cert_artifact(lpw, lost, {"comment": "lost"})
     lost_id = lpw.kernel.record_certificate(lost, lost_aid)
@@ -865,12 +896,12 @@ def test_lp_provenance_order_and_leak_faults(lpw):
     lpw.kernel.preregister(gone)
     assert "problem instance bytes missing or corrupted" in reasons(lpw.kernel.certify(gone, [gone_id]).checks["K0"])
     canary = lpw.vault.canary("test")
-    leaky = lp_certify(lpw, lp_claim(lpw, statement="leaky"), {"comment": f"solved with {canary}"})
+    leaky = lp_certify(lpw, lp_claim(lpw, effect__probability=0.84), {"comment": f"solved with {canary}"})
     assert leaky.failed() == ["K9"] and "canary token found in certificate" in reasons(leaky.checks["K9"])
     labels = lpw.store.blobs.get(lpw.vault.dataset("test").files["test_y.csv"].blob)
-    stolen = lp_certify(lpw, lp_claim(lpw, statement="stolen"), raw=labels)
+    stolen = lp_certify(lpw, lp_claim(lpw, effect__probability=0.85), raw=labels)
     assert "certificate IS a private file (test/test_y.csv)" in reasons(stolen.checks["K9"])
-    unregistered = lp_claim(lpw, statement="never registered")
+    unregistered = lp_claim(lpw, effect__probability=0.86)
     cert = lpw.kernel.certify(unregistered, [lpw.kernel.record_certificate(unregistered, aid)])
     assert cert.failed() == ["K2", "K3", "K8", "K9"] and cert.checks["K4"].status == "n/a"
 
@@ -935,7 +966,6 @@ def test_n_a_outside_the_table_fails_closed(lpw, base, monkeypatch):
 
 
 def test_lp_adapter_validation_and_checker(lpw):
-    from fractions import Fraction
 
     from custom_harness.kernel import adapters as A
     from custom_harness.kernel import lp
@@ -944,10 +974,19 @@ def test_lp_adapter_validation_and_checker(lpw):
     # adding the field invalidated no approval. (A pinned hex value lived here; since R1-F5 the hash covers every
     # project module the adapter imports, so any edit to them changes it by design and needs a new approval.)
     import hashlib
-    legacy = {"name": "ml", "version": "1", "classes": ["data"], "metrics": sorted(A.ML.metrics),
-              "modules": {m: hashlib.sha256(p.read_bytes()).hexdigest() for m, p in A.covered_modules(A.ML).items()}}
-    assert A.ML.exact_module is None
-    assert A.adapter_hash(A.ML) == hashlib.sha256(json.dumps(legacy, sort_keys=True).encode()).hexdigest()
+    # Since the core/adapter split (ee0ef1d) the ML adapter names its procedures module (kernel/ml.py), adding a
+    # "procedures" key: the ML hash changed by design, so an ML approval made before the split needs a new HUMAN
+    # approval. An adapter without procedures (lp) still hashes without that key.
+    def digest(spec, **extra):
+        parts = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
+                 "metrics": sorted(spec.metrics), **extra,
+                 "modules": {m: hashlib.sha256(p.read_bytes()).hexdigest() for m, p in A.covered_modules(spec).items()}}
+        return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+    assert A.ML.exact_module is None and A.ML.procedures == "custom_harness.kernel.ml"
+    assert A.adapter_hash(A.ML) == digest(A.ML, procedures="custom_harness.kernel.ml")
+    lp_spec = A.REGISTRY["lp"][0]
+    assert lp_spec.procedures is None
+    assert A.adapter_hash(lp_spec) == digest(lp_spec, exact_module=lp_spec.exact_module)
     p, cert = canonical_json(LP_PROBLEM), canonical_json(LP_CERT)
     assert lp.check(p, cert, Fraction(13, 5)) == [] and lp.bounds(p, cert, Fraction(13, 5)) == []
     no_b = {k: v for k, v in LP_PROBLEM.items() if k != "b"}

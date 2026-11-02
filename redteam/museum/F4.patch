@@ -1,0 +1,15 @@
+diff --git a/src/custom_harness/research/claims.py b/src/custom_harness/research/claims.py
+index 7db6b62..ec27117 100644
+--- a/src/custom_harness/research/claims.py
++++ b/src/custom_harness/research/claims.py
+@@ -545,7 +545,9 @@ def code_lines(s: str) -> set[str]:
+ def code_similarity(a: str, b: str) -> float:
+     """Jaccard overlap of the sets of non-trivial logical lines (see code_lines). Cheap and conservative: only
+     flags near-copies; it says nothing about deeper copying (renamed variables, reordered or paraphrased code)."""
+-    la, lb = code_lines(a), code_lines(b)
++    def lines(s: str) -> set[str]:
++        return {" ".join(ln.split()) for ln in s.splitlines() if len(ln.strip()) > 8}
++    la, lb = lines(a), lines(b)
+     return len(la & lb) / len(la | lb) if la and lb else 0.0
+ 
+ 

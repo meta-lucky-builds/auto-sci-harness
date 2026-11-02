@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -420,7 +420,7 @@
+         early, integrity = [], []
+         # KD4 (assure, 2026-10-08): a read of a RELATED dataset (the same held-out rows or byte-identical labels
+         # under another id) is a read of this target, with the same excuses
+-        for a in sorted((a for d in related for a in ctx.vault.accesses(d)), key=lambda e: e.seq):
++        for a in ctx.vault.accesses(target):
+             if not a.body.get("private") or a.seq >= prereg.seq:
+                 continue
+             purpose, ch = a.body.get("purpose"), a.body.get("claim_hash")

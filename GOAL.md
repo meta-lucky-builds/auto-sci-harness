@@ -160,7 +160,7 @@ Lean analogy, kept deliberately:
 |---|---|
 | Theorem statement | **Typed Claim** (Claim Language) |
 | Proof | **Evidence Bundle** (pre-registration + code + data hashes + runs + statistics) |
-| Small trusted kernel | Small, deterministic Kernel code (target < 3k LoC, 100% test coverage, no LLM inside) |
+| Small trusted kernel | Small, deterministic Kernel code (target < 4,000 non-comment lines, raised from 3k on 2026-10-08 by the owner: §16 features; core split (§16.6) deferred; 100% test coverage, no LLM inside) |
 | `sorry` / axioms audit | **Assumption audit**: every untested assumption is listed explicitly and lowers the tier (v1: listed and marked tested/untested; tier lowering not yet defined) |
 | Proof checks or fails | Certificate issued at tier T*, or rejected with machine-readable reasons |
 
@@ -1025,20 +1025,24 @@ the point of claiming, not by limiting exploration. Nothing built so far is dele
   `META/openresearch_portmap/PORTMAP.md` (kept outside the repo); its copyright and MIT notice are kept in a
   third-party notices file. Telemetry, agent feedback and auto-update from it are dropped.
 
-### 17.1 Verification levels (owner decision 2026-10-23)
-Every promoted claim gets the strongest level its evidence supports; lower levels are shown as real, positive
-results, never as failures. Levels are cumulative and each is computed by code (the Kernel), never by a model.
+### 17.1 Verification badges (owner decisions 2026-10-23)
+§18.2 holds the final wording of the badges; this section gives the detail, and it agrees with §18.2.
+Every promoted claim gets every badge its evidence supports. The badges are SEPARATE, not a ladder: a claim can hold
+any combination. Each is computed by code (from Kernel results, the ledger and the bundle), never by a model; badges
+not held are shown as missing with the reason, never as failures of the others.
 
-| Level | Meaning | Kernel basis |
+| Badge | Meaning | Basis |
 |---|---|---|
-| **REPRODUCIBLE** | Re-executed from the frozen bundle (pinned environment, offline) with the same result, across seeds and machines | K0, K3, bundle |
-| **REPLICATED** | An independent agent (ideally another model family, invariant 5) re-implemented it from the claim text alone and agreed | + replication |
-| **VALIDATED** | Pre-registered, then confirmed on held-out data that did not exist or was sealed when the Lab worked (minted after the freeze, §16.2, or future/private data), with valid statistics | K0–K9 |
+| **REPRODUCIBLE** | Re-executed from the frozen bundle (pinned environment, offline) with the same result across seeds. "Across machines" is not checked yet, and the badge says so | K0, K3, bundle |
+| **REPLICATED** | A DIFFERENT AGENT (separate agent and session) re-implemented the claim from its text, without the author's code, and agreed: its own claim was certified. Any model family counts: the badge names the families (e.g. "REPLICATED (codex -> codex, same family)"), shows a same-family replica as the weaker form and states its common-mode risk; the invariant-5 status is recorded as a note, never a block | a certified, reproducible replica |
+| **VALIDATED** | Decided ONLY by the fresh-data test: pre-registered, then confirmed on held-out data that did not exist or was sealed when the Lab worked (minted after the freeze, §16.2, future data, or sealed external data), with valid statistics. It does not require REPLICATED | K0–K9, CERTIFIED-VALIDATED, fresh targets |
+| **RE-VALIDATED** | The claim passes the fresh-data test a SECOND time, on a second, independent fresh dataset, with the claim and the frozen code unchanged. The second test is fixed in advance or declared before any label of the first test is read, one per case (both beacon rounds may be fixed at registration); for minted families it is a second mint with its own pre-declared beacon round; sealed data (two sealed parts) and future data (a second batch) can feed it the same way. A failed re-validation is recorded and shown ("validated once, failed re-validation"), never hidden | VALIDATED twice, independent data |
 
-- Reproducible does not mean true: leakage, p-hacking and overfitting all reproduce. Only VALIDATED is a finding.
-- Claims tested on public datasets a networked Lab could have downloaded can reach REPLICATED at most and are
-  labelled RETROSPECTIVE; they never reach VALIDATED.
-- The UI shows the level as a badge with its exact meaning; an honest rejection names the failing check.
+- Reproducible does not mean true: leakage, p-hacking and overfitting all reproduce. Only VALIDATED is a finding;
+  RE-VALIDATED is the strongest form of it.
+- RETROSPECTIVE (a cap): claims tested on public datasets a networked Lab could have downloaded are labelled
+  RETROSPECTIVE; they can never be VALIDATED or RE-VALIDATED.
+- The UI shows each badge with its exact meaning; an honest rejection names the failing check.
 
 ### 17.2 Researcher experiences (owner decision 2026-10-23: all adopted)
 The product is judged by these experiences as much as by the Kernel. Each is built on the Lab trace, the Court and
@@ -1092,7 +1096,7 @@ an earlier section disagree, this section wins. Nothing earlier is deleted.
 - Competitors ship products and results; we have zero Court-certified discoveries. The first certified discovery is
   the top priority.
 
-### 18.2 Verification badges (final semantics; supersede the ladder wording in §17.1)
+### 18.2 Verification badges (final semantics; where §17.1 differs, this section wins)
 Separate badges; a claim may hold any combination. Each is computed by code, never by a model.
 - **REPRODUCIBLE:** K0 and K3 pass and a bundle is recorded. "Across machines" is not yet checked, and the badge says
   so.

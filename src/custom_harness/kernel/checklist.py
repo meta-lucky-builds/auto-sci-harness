@@ -41,6 +41,7 @@ def fill(cert: Certificate, *, run_costs: dict[str, Cost], models: list[str], bu
     for c in run_costs.values():
         total = total + c
     targets = claim["generalization_targets"]
+    unknown = any(c.usd <= 0 for c in run_costs.values())
     return {
         "claim": f"{claim['kind']} on {claim['metric']['id']} (min effect {claim['effect']['min_effect']}); "
                  f"hash {cert.claim_hash}",
@@ -57,8 +58,12 @@ def fill(cert: Certificate, *, run_costs: dict[str, Cost], models: list[str], bu
                          f"data content-addressed in the vault",
         "reproducibility_bundle": f"bundle {bundle_hash} (`chh reproduce`)" if bundle_hash else None,
         "models": ", ".join(models) if models else "none (no model calls in the evidence runs)",
-        "cost": f"{total.prompt_tokens + total.completion_tokens} tokens, ${total.usd:.4f}, "
-                f"{total.quota_units:g} quota units, {total.wall_s:.1f} s wall" if run_costs else None,
+        # a subscription (BYOS) call records usd 0.0 = NOT REPORTED: a zero is never rendered as a known $0 (s3-report),
+        # and a total over runs of which any reported no USD is never rendered as known (RT-S4-9)
+        "cost": f"{total.prompt_tokens + total.completion_tokens} tokens, "
+                + " + ".join([f"${total.usd:.4f}"] * (total.usd > 0) + ["USD unknown / UNCALIBRATED"] * unknown) +
+                f"{' (estimated)' if total.estimated else ''}, {total.quota_units:g} quota units, "
+                f"{total.wall_s:.1f} s wall" if run_costs else None,
         "human_in_the_loop": human_in_the_loop,
         "novelty_verification": novelty,
         "assumptions": "; ".join(f"{a.text} [{'tested: ' + a.tested_by if a.tested_by else 'untested'}]"

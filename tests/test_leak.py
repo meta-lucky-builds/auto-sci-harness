@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 import custom_harness.research  # noqa: F401
+from _kerneld_standin import kerneld_vault
 from custom_harness.gateway import ChatRequest, Message, MockBackend
 from custom_harness.records import RunStatus
 from custom_harness.runtime import Engine, HarnessSpec, register
@@ -51,7 +52,8 @@ def test_clean_run_passes_and_trace_holds_prompts_but_no_private_values(store, t
 
 @register("test.planted_copy_labels")
 def _copy_labels(state, params, ctx):  # a harness bug: hidden labels copied into the agent workspace
-    labels = ctx.kernel().vault.read(state["datasets"]["test"], "test_y.csv", purpose="leakscan")
+    with kerneld_vault(ctx) as vault:  # the bug bypasses the host boundary (tests/_kerneld_standin.py)
+        labels = vault.read(state["datasets"]["test"], "test_y.csv", purpose="leakscan")
     (ctx.sandbox.workspace / "data" / "maybe_useful.csv").write_bytes(labels)
     return {}
 

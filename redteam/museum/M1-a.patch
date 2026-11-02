@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -711,7 +711,7 @@
+                        f"CERTIFIED-INTERNAL; `chh approve-role {target}`)")
+         if rec.hash in dev_hashes:
+             reasons.append(R(Code.K6_DEV_CONTENT, f"{target}: identical content to a development dataset"))
+-        twins = sorted(d for d, other in datasets.items() if d != target and other.hash == rec.hash)
++        twins: list[str] = []
+         if twins:  # e.g. the internal test set re-registered under a new id as "external" (label laundering)
+             reasons.append(R(Code.K6_TWIN, f"{target}: identical content registered under other id(s) {twins}"))
+         for other in sorted(d for d in datasets if d != target):  # held-out labels public elsewhere = not held out

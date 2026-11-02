@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Archiving and Interchange DTD v1.2 20190208//EN" "JATS-archivearticle1.dtd">
+<article xmlns:xlink="http://www.w3.org/1999/xlink" article-type="research-article">
+  <front>
+    <journal-meta><journal-title-group><journal-title>Journal of Test Hepatology</journal-title></journal-title-group></journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmid">31000077</article-id>
+      <article-id pub-id-type="pmc">9000077</article-id>
+      <article-id pub-id-type="doi">10.5555/lit.2022.077</article-id>
+      <title-group><article-title>Hypoxia-Induced Splicing Shifts in Cultured Hepatocytes</article-title></title-group>
+      <contrib-group>
+        <contrib contrib-type="author"><name><surname>Okafor</surname><given-names>Nkem</given-names></name></contrib>
+        <contrib contrib-type="author"><name><surname>Lindqvist</surname><given-names>Maja</given-names></name></contrib>
+        <contrib contrib-type="author"><name><surname>Tanaka</surname><given-names>Hiro</given-names></name></contrib>
+      </contrib-group>
+      <pub-date pub-type="epub"><day>15</day><month>3</month><year>2022</year></pub-date>
+      <pub-date pub-type="pmc-release"><day>01</day><month>4</month><year>2022</year></pub-date>
+      <permissions>
+        <license license-type="open-access" xlink:href="https://creativecommons.org/licenses/by/4.0/">
+          <license-p>This article is distributed under the terms of the Creative Commons Attribution 4.0 License.</license-p>
+        </license>
+      </permissions>
+      <abstract><p>We measured alternative splicing in cultured hepatocytes under low oxygen and report a reproducible shift in exon usage.</p></abstract>
+    </article-meta>
+  </front>
+  <body>
+    <sec><title>Introduction</title>
+      <p>Low oxygen changes how liver cells process messenger RNA.</p>
+    </sec>
+    <sec><title>Results</title>
+      <p>Across three donors, the splice ratio fell by 40 percent within six hours of hypoxia onset, and it recovered
+      after <italic>reoxygenation</italic> for 24 hours.</p>
+      <p>No change was seen in the control exon.</p>
+    </sec>
+  </body>
+  <back><ref-list><ref id="r1"><mixed-citation>A reference that mentions splice ratio in passing.</mixed-citation></ref></ref-list></back>
+</article>

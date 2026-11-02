@@ -1,0 +1,16 @@
+diff --git a/src/custom_harness/evolve/edits.py b/src/custom_harness/evolve/edits.py
+index fcbf631..2453f1a 100644
+--- a/src/custom_harness/evolve/edits.py
++++ b/src/custom_harness/evolve/edits.py
+@@ -296,11 +296,6 @@ def apply_edit(spec: HarnessSpec, edit: Edit,
+             raise EditRejected(f"node '{nid}' would write reserved state key '{key}'")
+         if getattr(node, "module", None) in protected_modules:
+             raise EditRejected(f"node '{nid}' reuses a protected module outside its protected node")
+-        module = getattr(node, "module", None)
+-        same_module = nid in spec.nodes and getattr(spec.nodes[nid], "module", None) == module
+-        if module in RESERVED_WRITING_MODULES and not same_module:
+-            # a module returns whatever keys it likes; output_key checks cannot see them
+-            raise EditRejected(f"node '{nid}' would add module {module!r}, which writes reserved state")
+     _check_roles(spec, new)
+     _check_information_flow(spec, new)
+     for nid in terminal_required:

@@ -16,6 +16,7 @@ daemon does not keep a second, unbounded copy of the output.
 
 from __future__ import annotations
 
+import secrets
 import shutil
 import subprocess
 import time
@@ -32,13 +33,50 @@ from .base import (
     check_mount,
     run_bounded,
 )
+from .hermetic import (
+    CONTAINER_SUPPORT,
+    SUPERVISOR_GRACE_S,
+    parse_witness,
+    split_record,
+    supervisor_argv,
+    support_dir,
+    witness_argv,
+)
 
-DEFAULT_IMAGE = "custom-harness-sandbox:py312"
+# Two images (STATUS ledger BUNDLED-DATA). The full image ships scikit-learn's bundled datasets, from which the real
+# suite tasks are built: a program running in it could load every labelled row, held-out rows included. So agent code
+# ALWAYS runs in the candidate image (derived from the full one with every bundled dataset file removed, see
+# docker/sandbox-candidate.Dockerfile); only trusted task building (`chh build-suite --docker`) uses the full image,
+# and it must say so (`trusted_task_building=True`). A missing candidate image is a refusal, never a fallback.
+FULL_IMAGE = "custom-harness-sandbox:py312"
+CANDIDATE_IMAGE = "custom-harness-sandbox:py312-candidate"
+DEFAULT_IMAGE = CANDIDATE_IMAGE
+CANDIDATE_LABEL = ("org.custom-harness.bundled-data", "removed")
+CANDIDATE_BUILD = "docker build -f docker/sandbox-candidate.Dockerfile -t {image} docker"
 DEFAULT_MAX_FILE_BYTES = 256 << 20  # RLIMIT_FSIZE: the largest single file a program may write
 
 
 class DockerUnavailable(InfraError):
     pass
+
+
+class CandidateImageMissing(InfraError):
+    """The candidate image is not built (or the tag is not the candidate build): a human must build it. Not transient:
+    retrying cannot help, and falling back to the full image would expose the bundled datasets."""
+
+
+def select_image(image: str | None, *, trusted_task_building: bool = False) -> str:
+    """The image policy: None = the candidate image; the full image only for trusted task building."""
+    if trusted_task_building:
+        if image != FULL_IMAGE:
+            raise PermissionError(f"trusted_task_building is only for the full image {FULL_IMAGE}, not {image}")
+        return FULL_IMAGE
+    if image is None:
+        return CANDIDATE_IMAGE
+    if image == FULL_IMAGE:
+        raise PermissionError(f"{FULL_IMAGE} ships bundled datasets (the real tasks' labelled rows): agent code runs "
+                              f"in {CANDIDATE_IMAGE}; only trusted task building may pass trusted_task_building=True")
+    return image
 
 
 def docker_available() -> bool:
@@ -57,7 +95,8 @@ def _has_runtime(exe: str, name: str) -> bool:
 
 
 class DockerSandbox(Sandbox):
-    def __init__(self, workspace: Path, *, image: str = DEFAULT_IMAGE, network: bool = False,
+    def __init__(self, workspace: Path, *, image: str | None = None, trusted_task_building: bool = False,
+                 network: bool = False,
                  memory: str = "4g", cpus: float = 2.0, pids: int = 256, gpus: str | None = None,
                  prefer_gvisor: bool = True, create_attempts: int = 3, create_backoff_s: float = 1.0,
                  max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
@@ -65,6 +104,7 @@ class DockerSandbox(Sandbox):
                  max_workspace_files: int = DEFAULT_MAX_WORKSPACE_FILES,
                  max_file_bytes: int = DEFAULT_MAX_FILE_BYTES):
         check_mount(workspace)  # before anything else: a protected path is never mounted, Docker or not
+        image = select_image(image, trusted_task_building=trusted_task_building)  # also before Docker is contacted
         self.create_attempts, self.create_backoff_s = max(1, create_attempts), create_backoff_s
         self.max_output_bytes, self.max_workspace_bytes, self.max_workspace_files, self.max_file_bytes = (
             max_output_bytes, max_workspace_bytes, max_workspace_files, max_file_bytes)
@@ -72,6 +112,8 @@ class DockerSandbox(Sandbox):
         if exe is None or not docker_available():
             raise DockerUnavailable("Docker is not installed or the daemon is not running")
         self.exe = exe
+        if image == CANDIDATE_IMAGE:
+            self._require_candidate(exe, image)
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.image, self.network, self.memory, self.cpus, self.pids, self.gpus = (
@@ -80,12 +122,29 @@ class DockerSandbox(Sandbox):
         self.isolation = (f"docker{'+gvisor' if self.runtime else ''}; network={'on' if network else 'off'}; "
                           f"mem={memory}; cpus={cpus}; non-root; read-only rootfs; max file {max_file_bytes} B; "
                           f"workspace <= {max_workspace_bytes} B / {max_workspace_files} files")
-        self._settings = {"image": image, "network": network, "memory": memory, "cpus": cpus, "pids": pids,
+        self._settings = {"image": image, "trusted_task_building": trusted_task_building, "network": network,
+                          "memory": memory, "cpus": cpus, "pids": pids,
                           "gpus": gpus, "prefer_gvisor": prefer_gvisor, "create_attempts": create_attempts,
                           "create_backoff_s": create_backoff_s, "max_output_bytes": max_output_bytes,
                           "max_workspace_bytes": max_workspace_bytes, "max_workspace_files": max_workspace_files,
                           "max_file_bytes": max_file_bytes}
         self._image_id: str | None = None
+
+    @classmethod
+    def _require_candidate(cls, exe: str, image: str) -> None:
+        """Fail closed unless `image` exists locally AND carries the candidate build's label (a full image merely
+        tagged with the candidate name does not)."""
+        key, want = CANDIDATE_LABEL
+        p = cls._docker([exe, "image", "inspect", "--format", f'{{{{index .Config.Labels "{key}"}}}}', image],
+                        timeout_s=60)
+        build = CANDIDATE_BUILD.format(image=image)
+        if p.returncode != 0:
+            raise CandidateImageMissing(f"the candidate sandbox image {image} is not built; agent code never runs in "
+                                        f"the full image {FULL_IMAGE} (it ships bundled datasets). Build it once "
+                                        f"(no downloads): {build}")
+        if p.stdout.strip() != want:
+            raise CandidateImageMissing(f"{image} lacks the label {key}={want}, so it is not the candidate build "
+                                        f"(bundled datasets may be present). Rebuild it: {build}")
 
     def spawn(self, workspace: Path) -> DockerSandbox:
         return DockerSandbox(workspace, **self._settings)  # type: ignore[arg-type]
@@ -99,7 +158,8 @@ class DockerSandbox(Sandbox):
             self._image_id = p.stdout.strip()
         return {"sandbox": self.isolation, "image": self.image, "image_id": self._image_id}
 
-    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
+    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None, *,
+             cpu_s: float | None = None) -> ExecResult:
         """create -> start -a -> inspect -> rm. Splitting the steps is what lets us tell an
         infrastructure failure (create/inspect failed, runtime State.Error) from the agent process's
         own exit code: agent code can exit with any code, including Docker's 125, so exit codes alone
@@ -112,12 +172,21 @@ class DockerSandbox(Sandbox):
                 "--cap-drop", "ALL", "--user", "1000:1000",
                 "--ulimit", f"fsize={self.max_file_bytes}", "--log-driver", "none",
                 "-v", f"{self.workspace}:/work", "-w", "/work"]
+        supervised = cpu_s is not None
+        if supervised or self.entropy:  # the trusted helpers, read-only (sandbox/hermetic.py)
+            args += ["-v", f"{support_dir()}:{CONTAINER_SUPPORT}:ro"]
+        if supervised:
+            args += ["-i"]  # the nonce goes to the supervisor on stdin
+        env = self._pinned_env(env, CONTAINER_SUPPORT)
         if self.runtime:
             args += ["--runtime", self.runtime]
         if self.gpus:
             args += ["--gpus", self.gpus]
         for k, v in (env or {}).items():
             args += ["-e", f"{k}={v}"]
+        nonce = secrets.token_hex(16)
+        if supervised:
+            command = supervisor_argv("python", CONTAINER_SUPPORT, float(cpu_s or 0), timeout_s, command)
         args += [self.image, *command]
         # Creating the container runs no agent code, so retrying it here is always safe and keeps a brief
         # daemon hiccup from failing a whole multi-exec step (the engine-level retry re-runs entire nodes).
@@ -140,9 +209,11 @@ class DockerSandbox(Sandbox):
             time.sleep(self.create_backoff_s * 2 ** attempt)
         try:
             try:
-                p = run_bounded([self.exe, "start", "-a", name], timeout_s=timeout_s,
+                p = run_bounded([self.exe, "start", "-a", *(["-i"] if supervised else []), name],
+                                timeout_s=timeout_s + (SUPERVISOR_GRACE_S if supervised else 0),
                                 max_output_bytes=self.max_output_bytes, check=self._workspace_check,
-                                kill=lambda: self._docker([self.exe, "kill", name], timeout_s=60))
+                                kill=lambda: self._docker([self.exe, "kill", name], timeout_s=60),
+                                stdin_data=(nonce + "\n").encode() if supervised else None)
             except OSError as e:
                 raise InfraError(f"could not invoke docker: {e}", transient=True) from e
             if p.timed_out or p.limit_exceeded:  # we killed it: the program's failure (timeout / resource limit)
@@ -158,13 +229,34 @@ class DockerSandbox(Sandbox):
                 code = int(code_s)
             except ValueError as e:
                 raise InfraError(f"unreadable container state: {st.stdout[:200]!r}") from e
-            res = self._result(p, code)
+            if supervised:
+                res = self._supervised_result(p, nonce, float(cpu_s or 0), self._witness)
+            else:
+                res = self._result(p, code)
+                if self.entropy:
+                    res = res.model_copy(update={"entropy_pin": self.entropy.digest})
             if oom.strip() == "true":  # the agent's program exceeded its memory cap: its own failure
                 res = res.model_copy(update={"stderr": res.stderr + f"\n[sandbox] killed: out of memory "
                                                                     f"(cap {self.memory})"})
             return res
         finally:
             self._docker([self.exe, "rm", "-f", name], timeout_s=60)
+
+    def _witness(self) -> float | None:
+        """Contention witness: a fixed CPU loop in a fresh container with the same CPU cap; its wall/CPU ratio."""
+        wn = secrets.token_hex(16)
+        name = f"chh-witness-{uuid.uuid4().hex[:12]}"
+        try:
+            p = run_bounded([self.exe, "run", "--rm", "-i", "--name", name, "--network", "none",
+                             "--cpus", str(self.cpus), "--read-only", "--cap-drop", "ALL", "--user", "1000:1000",
+                             "--log-driver", "none",
+                             "-v", f"{support_dir()}:{CONTAINER_SUPPORT}:ro", self.image,
+                             *witness_argv("python", CONTAINER_SUPPORT)],
+                            timeout_s=120, max_output_bytes=1 << 16, stdin_data=(wn + "\n").encode())
+        except OSError:
+            return None
+        _, rec = split_record(p.stderr)
+        return parse_witness(p.stderr) if rec is not None and rec.get("nonce") == wn else None
 
     @staticmethod
     def _docker(args: list[str], timeout_s: float) -> subprocess.CompletedProcess:

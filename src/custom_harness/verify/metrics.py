@@ -60,6 +60,18 @@ def mae(y_true: list[str], y_pred: list[str]) -> float:
     return sum(abs(a - b) for a, b in zip(t, p, strict=True)) / len(t)
 
 
+def predictions_problem(metric: str, y_pred: list[str]) -> str | None:
+    """Why `y_pred` could never be scored by `metric`, or None. Needs no label: every route calls it BEFORE the first
+    label read, so an unusable output never costs a look (GOAL 18.6)."""
+    if metric in CLASSIFICATION:
+        return None
+    try:
+        _num(y_pred)
+    except ValueError:
+        return f"metric {metric} needs a finite number for every prediction"
+    return None
+
+
 METRICS = {"accuracy": accuracy, "f1_macro": f1_macro, "rmse": rmse, "mae": mae}
 
 

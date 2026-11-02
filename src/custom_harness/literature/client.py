@@ -23,9 +23,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..ablation import NO_ABLATION, AblationSet
+from .fulltext import FULL_TEXT_SOURCES, EuropePMCSource, match_snippets, same_paper
 from .http import HttpxTransport, LiteratureError, PacedTransport, Pacer, Transport, fetch
 from .normalize import title_key
-from .records import LookupResult, PaperRecord, earliest_date, in_window, latest_date, parse_identifier
+from .records import Identifier, LookupResult, PaperRecord, earliest_date, in_window, latest_date, parse_identifier
 from .snapshot import OfflineTransport, RecordingTransport, SnapshotStore
 from .sources import ALL_SOURCES, PACING, DoiResolver, Source
 
@@ -35,6 +37,9 @@ ARXIV_ORDER = ("arxiv", "semanticscholar")
 PMID_ORDER = ("pubmed",)
 AUTHORITY = {"arxiv": "arxiv", "pmid": "pubmed"}  # DOIs: doi.org (DoiResolver)
 SEARCH_ORDER = ("openalex", "crossref", "semanticscholar", "arxiv")  # pubmed / biorxiv on request
+# The full-text source lives in fulltext.py (which builds on sources.py); it is registered here, in network code,
+# so that importing the citation check (cite.py) never loads HTTP code (test_literature_cite).
+ALL_SOURCES.setdefault(EuropePMCSource.name, EuropePMCSource())
 
 
 def _lookup_order(kind: str, value: str) -> tuple[str, ...]:
@@ -57,6 +62,7 @@ class SearchResult(BaseModel):
     excluded_before_window: int = 0
     window: tuple[str | None, str | None] = (None, None)  # effective publication window [from, to]
     retrievals: list[dict[str, Any]] = []  # per answered subquery: {subquery, source, envelope} (provenance)
+    full_text: dict[str, int] = {}  # full_text_search only: attached / unavailable / excluded_after_as_of / errors
 
 
 def split_query(query: str, max_terms: int = 8, max_parts: int = MAX_SUBQUERIES) -> list[str]:
@@ -100,7 +106,8 @@ class Deduper:
 
 class LiteratureClient:
     def __init__(self, transport: Transport, *, as_of: date | None = None, sources: dict[str, Source] | None = None,
-                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 4):
+                 sleep: Callable[[float], None] = time.sleep, max_attempts: int = 4, full_text: bool = False,
+                 ablation: AblationSet = NO_ABLATION):
         snap_as_of = getattr(transport, "as_of", None)
         if snap_as_of is not None:
             if as_of is not None and as_of > snap_as_of:
@@ -110,6 +117,11 @@ class LiteratureClient:
         self.sources = dict(sources or ALL_SOURCES)
         self.resolver = DoiResolver()
         self.sleep, self.max_attempts = sleep, max_attempts
+        self.full_text = full_text  # lookups also fetch open-access full text (for quote-span support)
+        self.full_text_source = EuropePMCSource()
+        # ablation switch `multi_source_retrieval` (custom_harness/ablation.py): search asks only the first source of
+        # its order (no fallback across sources). Lookups (the citation verifier's resolution path) are unchanged.
+        self.ablation = ablation
 
     def _get(self, url: str, params: dict[str, str]) -> Any:
         return fetch(self.transport, url, params, sleep=self.sleep, max_attempts=self.max_attempts)
@@ -159,6 +171,8 @@ class LiteratureClient:
                 if last is None or last > self.as_of:
                     return result("lookup_failed", f"publication date {record.published!r} cannot be placed on or "
                                                    f"before the as-of date {self.as_of}", record)
+            if self.full_text:
+                record, _ = self._attach_full_text(record, ident, attempts)
             return result("resolves", f"{record.source} returned a record with this identifier", record)
         if authority is not None:
             label = {"arxiv": "arXiv", "pubmed": "PubMed"}[authority]
@@ -183,6 +197,72 @@ class LiteratureClient:
                          "envelope": resp.envelope})
         return exists
 
+    # ------------------------------------------------------------------ full text
+    def _attach_full_text(self, rec: PaperRecord, ident: Identifier | None, attempts: list[dict[str, Any]]
+                          ) -> tuple[PaperRecord, str]:
+        """Return (record, outcome). Outcomes: attached, unavailable, mismatch, after_as_of, error. Only a text
+        that states this paper's id, contradicts none, and is provably dated on or before T is attached; for
+        after_as_of only the text's DATE is kept (so the citation check can say why a quote is unchecked)."""
+        src = self.full_text_source
+        envelope = None
+        try:
+            pmcid = rec.source_id if rec.source == src.name and rec.source_id.startswith("PMC") else None
+            if pmcid is None:
+                if rec.source == src.name:  # the search itself says: no PMC full text
+                    return rec, "unavailable"
+                if ident is None:
+                    ident = parse_identifier(sorted(rec.ids())[0]) if rec.ids() else None
+                if ident is None or ident.kind not in ("doi", "pmid"):
+                    return rec, "unavailable"
+                pmcid, resp = src.find_pmcid(self._get, ident)
+                if pmcid is None:
+                    attempts.append({"source": src.name, "outcome": "no_full_text", "envelope": resp.envelope})
+                    return rec, "unavailable"
+            ft, resp = src.fetch_full_text(self._get, pmcid)
+            envelope = resp.envelope
+        except (LiteratureError, ValueError) as e:
+            attempts.append({"source": src.name, "outcome": "error", "detail": str(e)[:300]})
+            return rec, "error"
+        if not same_paper(rec, ft):
+            attempts.append({"source": src.name, "outcome": "mismatch", "envelope": envelope,
+                             "detail": f"record {sorted(rec.ids())}, full text {sorted(ft.ids)}"})
+            return rec, "mismatch"
+        if self.as_of is not None:
+            last = latest_date(ft.version_date)
+            if last is None or last > self.as_of:
+                attempts.append({"source": src.name, "outcome": "after_as_of", "envelope": envelope,
+                                 "detail": f"full text dated {ft.version_date}, as-of date {self.as_of}"})
+                return rec.model_copy(update={"full_text_date": ft.version_date or "unknown"}), "after_as_of"
+        attempts.append({"source": src.name, "outcome": "full_text", "envelope": envelope})
+        return rec.model_copy(update={"full_text": ft.text, "full_text_source": src.name,
+                                      "full_text_envelope": envelope, "full_text_license": ft.license,
+                                      "full_text_date": ft.version_date}), "attached"
+
+    def full_text_search(self, query: str, limit: int = 10, sources: Sequence[str] | None = None, *,
+                         published_from: date | None = None, published_to: date | None = None) -> SearchResult:
+        """Keyword search over full texts; every in-window hit gets its full text (if open access and dated by T)
+        and match snippets cut from it. Same window, as-of, dedup and provenance rules as `search`: full text is
+        fetched only for records that survived the window."""
+        order = list(sources or FULL_TEXT_SOURCES)
+        bad = [s for s in order if s not in FULL_TEXT_SOURCES]
+        if bad:
+            raise ValueError(f"not full-text sources: {bad}")
+        res = self.search(query, limit, order, published_from=published_from, published_to=published_to)
+        counts = {"attached": 0, "unavailable": 0, "excluded_after_as_of": 0, "errors": 0}
+        out = []
+        for rec in res.records:
+            attempts: list[dict[str, Any]] = []
+            new, outcome = self._attach_full_text(rec, None, attempts)
+            counter = {"attached": "attached", "after_as_of": "excluded_after_as_of",
+                       "unavailable": "unavailable"}.get(outcome, "errors")
+            counts[counter] += 1
+            if outcome == "attached" and new.full_text:
+                new = new.model_copy(update={"snippets": match_snippets(new.full_text, query)})
+            elif outcome == "after_as_of":
+                new = rec  # nothing from a text dated after T leaks into a search result
+            out.append(new)
+        return res.model_copy(update={"records": out, "full_text": counts})
+
     # ------------------------------------------------------------------ search
     def window(self, published_from: date | None = None, published_to: date | None = None
                ) -> tuple[date | None, date | None]:
@@ -201,6 +281,8 @@ class LiteratureClient:
         start, end = self.window(published_from, published_to)
         subs = split_query(query)
         order = list(sources or SEARCH_ORDER)
+        if self.ablation.off("multi_source_retrieval"):
+            order = order[:1]
         records: list[PaperRecord] = []
         errors: list[dict[str, str]] = []
         retrievals: list[dict[str, Any]] = []
@@ -242,12 +324,17 @@ def snapshot_store(root: Path) -> SnapshotStore:
     return SnapshotStore(root)
 
 
-def live_client(store: SnapshotStore, *, use_cache: bool = True, as_of: date | None = None) -> LiteratureClient:
-    """Network client; every final answer is recorded into `store` (freeze it later for offline replay)."""
+def live_client(store: SnapshotStore, *, use_cache: bool = True, as_of: date | None = None,
+                full_text: bool = False, ablation: AblationSet = NO_ABLATION) -> LiteratureClient:
+    """Network client; every final answer is recorded into `store` (freeze it later for offline replay).
+    `ablation`: threaded by a scorecard System (only the scorecard runner's entry point makes a non-empty one)."""
     transport = RecordingTransport(PacedTransport(HttpxTransport(), Pacer(PACING)), store, use_cache=use_cache)
-    return LiteratureClient(transport, as_of=as_of)
+    return LiteratureClient(transport, as_of=as_of, full_text=full_text, ablation=ablation)
 
 
-def offline_client(store: SnapshotStore, snapshot_id: str, *, as_of: date | None = None) -> LiteratureClient:
-    """No network: answers only from the frozen snapshot, as of its date T (or an earlier one)."""
-    return LiteratureClient(OfflineTransport(store, snapshot_id), as_of=as_of)
+def offline_client(store: SnapshotStore, snapshot_id: str, *, as_of: date | None = None,
+                   full_text: bool = False, ablation: AblationSet = NO_ABLATION) -> LiteratureClient:
+    """No network: answers only from the frozen snapshot, as of its date T (or an earlier one).
+    `ablation`: as for `live_client`."""
+    return LiteratureClient(OfflineTransport(store, snapshot_id), as_of=as_of, full_text=full_text,
+                            ablation=ablation)

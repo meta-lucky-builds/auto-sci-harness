@@ -9,7 +9,7 @@
     audit    -> I1 certificate resolves and matches the run state, I2 comparator integrity (K5),
                 I3 citations (literature check on the run's frozen snapshot + retrieval log; n/a without),
                 I4 report re-renders byte-identically + every score recomputed from stored predictions,
-                I5 leak and canary scan
+                I5 leak and canary scan, I6 figures re-render from certified evidence (n/a without)
 
 All of these nodes are protected from automatic harness edits (evolve/edits.py).
 """
@@ -18,11 +18,11 @@ from __future__ import annotations
 
 import ast
 import csv
-import hashlib
 import io
 import statistics
 import time
 import tokenize
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +33,6 @@ from ..kernel import (
     ArtifactRef,
     Claim,
     ClaimKind,
-    DatasetRole,
     Effect,
     ExecRecord,
     InputRef,
@@ -43,15 +42,18 @@ from ..kernel import (
     Risk,
     SandboxReplayer,
     Scope,
+    ml,
     run_program,
 )
-from ..kernel.bundle import build_bundle
 from ..kernel.checklist import fill, publishable
 from ..kernel.checklist import render as render_checklist
+from ..kerneld.client import KernelD, KernelDError, KernelDUnavailable, RunHandle
+from ..kerneld.scope import ScopedKernel
+from ..publication import blockers as publication_blockers
+from ..publication import render_loop_item
 from ..runtime import register
 from ..runtime.modules import ModuleContext
 from ..verify import metrics as M
-from ..verify.leak import label_windows, leak_audit
 from ..verify.stats import paired_example_interval
 from .modules import _dev_labels, _require_isolation, _sb, _task
 from .task import TaskSpec
@@ -74,43 +76,29 @@ def _hypotheses(state: dict[str, Any]) -> list[dict[str, Any]]:
     return [h for h in items if isinstance(h, dict)] if isinstance(items, list) else []
 
 
-def _labels(raw: bytes) -> list[str]:
-    rows = list(csv.reader(io.StringIO(raw.decode("utf-8"))))
-    return [r[0] for r in rows[1:] if r]
-
-
-def _kernel(ctx: ModuleContext) -> Kernel:
+def _kernel(ctx: ModuleContext) -> ScopedKernel:
     """A Kernel whose replayer re-executes in fresh sandboxes of the same kind as the run's sandbox."""
     sb = _sb(ctx)
     root = sb.workspace.parent / f"{sb.workspace.name}-replay"
-    return ctx.kernel(replayer=SandboxReplayer(lambda key: sb.spawn(root / key)))
+    # every replay gets a NEW directory (a uuid suffix): two replayers in one run restart their call counters, and a
+    # reused directory would hand a replay the files of an earlier one (orcompute-to-yield-02)
+    return ctx.kernel(replayer=SandboxReplayer(lambda key: sb.spawn(root / f"{key}-{uuid.uuid4().hex[:8]}")))
 
 
 def register_task(ctx: ModuleContext, task: TaskSpec, task_dir: Path) -> dict[str, str]:
     """Register the task's data and baseline in the vault and return their ids (content-based, see
-    TaskSpec.dataset_ids). The labels are read from disk here, once, to register them; afterwards only through the
-    vault. A task whose canary differs from the canary registered for the same data is refused: its own canary
-    would never be scanned for (tasks sharing data must share the canary)."""
-    vault = ctx.kernel().vault
-    train = (task_dir / "public" / task.train_file).read_bytes()
-    test_x = (task_dir / "public" / task.test_features_file).read_bytes()
-    test_y = (task_dir / "private" / task.test_labels_file).read_bytes()
-    baseline = (task_dir / task.baseline_file).read_bytes()
-
-    def digest(*parts: bytes) -> str:  # fixed-length per-file digests: no separator ambiguity
-        return hashlib.sha256(b"".join(hashlib.sha256(b).digest() for b in parts)).hexdigest()
-
-    ids = task.dataset_ids(digest(train, test_x, test_y), digest(train, test_x, test_y, baseline))
-    vault.register_dataset(ids["train"], DatasetRole.DEV, public={task.train_file: train}, private={})
-    canary_path = task_dir / "private" / task.canary_file
-    canary = canary_path.read_text(encoding="utf-8").strip() if canary_path.exists() else None
-    vault.register_dataset(ids["test"], DatasetRole.TEST, public={task.test_features_file: test_x},
-                           private={task.test_labels_file: test_y}, canary=canary)
-    if vault.canary(ids["test"]) != canary:
-        raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same held-out data "
-                         f"({ids['test']}); tasks sharing data must share the canary")
-    vault.register_artifact(ids["baseline"], baseline, "baseline")
-    return ids
+    TaskSpec.dataset_ids). The kerneld process reads the task files and registers them (kerneld/ingest.py,
+    GOAL §16.5.2): the held-out labels and the canary never enter this process. A task whose canary differs from the
+    canary registered for the same data is refused: its own canary would never be scanned for (tasks sharing data must
+    share the canary). kerneld unavailable -> KernelDUnavailable (no fallback to reading the labels here)."""
+    with _KernelDRun(ctx) as kd:
+        try:
+            return kd.run().ingest_research_task(task.id, task_dir)
+        except KernelDError as e:
+            if e.code == "canary_mismatch":
+                raise ValueError(f"task {task.id}: its canary differs from the canary registered for the same "
+                                 f"held-out data; tasks sharing data must share the canary") from None
+            raise ValueError(f"task {task.id}: kerneld refused to register its data ({e.code})") from None
 
 
 # ------------------------------------------------------------------ claim (pre-registration)
@@ -143,6 +131,40 @@ def forecast(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, floor: f
     return delta, min(0.95, max(0.05, q)), iv.lo, iv.hi
 
 
+def _preflight(task: TaskSpec, state: dict[str, Any], ctx: ModuleContext, claim: Claim,
+               candidate_key: str) -> Any:
+    """Run the certifiability preflight (research/preflight.py) on PUBLIC numbers only: the held-out row count (from
+    the target's public feature file), the paired dev outcome (public training labels and out-of-fold predictions)
+    and the family size from the public prereg ledger. No held-out label is read; nothing is written to the ledger."""
+    from ..kernel.checks import related_targets
+    from .preflight import DEFAULT_CONFIG, PreflightResult, PublicInputs, dev_pairs, preflight
+    kernel = ctx.kernel()
+    target = claim.generalization_targets[0]
+    test_x = kernel.vault.read_public(target, task.test_features_file)
+    n_test = len(list(csv.reader(io.StringIO(test_x.decode("utf-8"))))) - 1
+    related = related_targets(kernel.vault, target)
+    registered = {e.body.get("claim_hash") for e in kernel.ledger.entries("prereg")
+                  if related & set(e.body.get("claim", {}).get("generalization_targets", []))}
+    family = max(claim.analysis_plan.n_comparisons, len(registered - {claim.claim_hash()}) + 1)
+    best = state[candidate_key]
+    if not (best.get("dev_preds_ref") and state.get("baseline_dev_preds_ref")):
+        return PreflightResult("unsupported", None, None, None, None, None, 0, DEFAULT_CONFIG.theta,
+                               ["no paired dev predictions: nothing to simulate from (no objection)"])
+    pairs = dev_pairs(_dev_labels(state, ctx), ctx.store.blobs.get_json(best["dev_preds_ref"]),
+                          ctx.store.blobs.get_json(state["baseline_dev_preds_ref"]))
+    plan = claim.analysis_plan
+    return preflight(PublicInputs(metric=task.metric, higher_is_better=task.higher_is_better, n_test=n_test,
+                                  dev_pairs=pairs, min_effect=claim.effect.min_effect, alpha=plan.alpha,
+                                  family_size=family, seeds=plan.seeds, n_boot=plan.n_boot, kind=claim.kind))
+
+
+def declared_probability(q: float, alpha: float, n_comparisons: int) -> float:
+    """The declared probability may not be below the claim's level p0 = alpha / n_comparisons (GOAL §16.4, F2:
+    the Kernel refuses q < p0 at pre-registration). Raising a low forecast to p0 only makes the forecast more
+    confident in success, so a miss is scored more harshly by the prediction ledger, never less."""
+    return max(q, alpha / max(1, n_comparisons))
+
+
 @register("research.claim")
 def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """params: seeds, alpha, n_comparisons, delta_fraction; prefix (state-key prefix, "" or "replica_");
@@ -165,30 +187,50 @@ def make_claim(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext
     delta, q, lo, hi = forecast(task, state, ctx, task.effect_floor(state["baseline_dev"]),
                                 fraction=params.get("delta_fraction", 0.5), candidate_key=candidate_key,
                                 fixed_delta=fixed)
-    hid = _inline(best.get("hypothesis_id"), 80)  # model-written id: never raw in a claim statement
-    who = ("an independent re-implementation (written from the claim text, without the code) of hypothesis "
-           f"{hid}") if p else f"the solution for hypothesis {hid}"
+    # L3 calibrated K3 tolerance (s3-verifiers): 0.0 (identical predictions) unless `calibrate_tolerance` asks trusted
+    # code to measure the candidate's noise floor on public dev data; frozen into the pre-registration below
+    from .noise_floor import claim_tolerance_for
+    tol, tol_rec = claim_tolerance_for(state, params, ctx, ctx.store.blobs.get(best["code_ref"]))
+    tol_ev = None
+    if tol > 0:  # K1 (s4-kernel) accepts a tolerance > 0 only with its noise-floor record, which it re-calibrates
+        from ..verify.tolerance import NoiseFloor
+        f = tol_rec["floor"]
+        tol_ev = kernel.record_noise_floor(NoiseFloor(f["reference"], tuple(f["nominal"]), tuple(f["perturbed"]),
+                                                      (), ()))
     claim = Claim(
-        kind=ClaimKind.IMPROVEMENT,
-        statement=f"On task {task.id}, {who} beats the task baseline on {task.metric} by at least {delta:.4g} "
-                  f"on held-out data",
+        kind=ClaimKind.IMPROVEMENT, statement="",  # rendered below: K1 takes only the ML adapter's scope phrase
         subject=ArtifactRef(artifact_id=subject.artifact_id, hash=subject.hash),
         comparator=ArtifactRef(artifact_id=baseline.artifact_id, hash=baseline.hash),
         metric=MetricRef(id=task.metric, higher_is_better=task.higher_is_better),
-        effect=Effect(min_effect=delta, predicted_lo=lo, predicted_hi=hi, probability=q),
+        effect=Effect(min_effect=delta, predicted_lo=lo, predicted_hi=hi,
+                      probability=declared_probability(q, params.get("alpha", 0.05),
+                                                       int(params.get("n_comparisons", 1)))),
         scope=Scope(datasets=(ids["train"], ids["test"])), development=(ids["train"],),
         generalization_targets=(ids["test"],),
         # n_comparisons: the PRE-DECLARED size of the multiplicity family on this test set. K4 uses
         # max(declared, actual registered claims), so declaring a campaign's planned number of claims per task
         # keeps certification strictness constant during the campaign (no drift against later candidates).
         analysis_plan=AnalysisPlan(seeds=tuple(params.get("seeds", (0, 1, 2))), alpha=params.get("alpha", 0.05),
-                                   n_comparisons=int(params.get("n_comparisons", 1))),
+                                   n_comparisons=int(params.get("n_comparisons", 1)), reproduce_tolerance=tol,
+                                   tolerance_evidence=tol_ev),
         assumptions=("the k-fold cross-validation estimate on the public training data is representative of "
                      "held-out performance",),
         risk=Risk(), resolve_by=time.time() + 86400)
+    claim = claim.model_copy(update={"statement": ml.scope_phrase(claim)})
+    if params.get("preflight", False):  # GOAL §16.8: deny-only; it never registers or certifies anything
+        result = _preflight(task, state, ctx, claim, candidate_key)
+        if result.denied:
+            return {f"{p}preflight": result.as_record(), "route": "preflight_denied"}
+        extra = {f"{p}preflight": result.as_record()}
+    else:
+        extra = {}
+    tol_out = {f"{p}tolerance": tol_rec} if params.get("calibrate_tolerance") is True else {}
     entry = kernel.preregister(claim)
+    if extra:
+        return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
+                f"{p}prereg_seq": entry.seq, **extra, **tol_out, "route": "confirm"}
     return {f"{p}claim": claim.model_dump(mode="json"), f"{p}claim_hash": claim.claim_hash(),
-            f"{p}prereg_seq": entry.seq}
+            f"{p}prereg_seq": entry.seq, **tol_out}
 
 
 # ------------------------------------------------------------------ confirm
@@ -223,29 +265,70 @@ def confirm(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
             continue
         if prior.claim_hash == h:
             done[(prior.arm, prior.seed)] = ev.id
-    for seed in claim.analysis_plan.seeds:
-        for arm, ref in (("subject", claim.subject), ("comparator", claim.comparator)):
-            if (arm, seed) in done:
-                evidence.append(done[(arm, seed)])
-                continue
-            box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" / f"{p}{arm}-{seed}")
-            preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
-                                      argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
-                                                                 "test": (task.test_features_file, test)},
-                                      seed=seed, timeout_s=task.solution_timeout_s)
-            # validate the shape BEFORE touching the labels: an unusable output never causes a label read
-            if preds is None or len(preds) != n_rows:
-                failures.append(f"{arm} seed {seed}: no valid predictions ({diag[-300:]})")
-                continue
-            labels = _labels(vault.read(ids["test"], task.test_labels_file, purpose="evaluate", run_id=ctx.run_id,
-                                        claim_hash=h, arm=arm, seed=seed))
-            rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
-                             label_file=task.test_labels_file, seed=seed, env=env,
-                             limits={"timeout_s": float(task.solution_timeout_s)},
-                             preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
-                             score=M.score(task.metric, labels, preds), run_id=ctx.run_id)
-            evidence.append(kernel.record_evaluation(rec))
+    with _KernelDRun(ctx) as kd:
+        for seed in claim.analysis_plan.seeds:
+            for arm, ref in (("subject", claim.subject), ("comparator", claim.comparator)):
+                if (arm, seed) in done:
+                    evidence.append(done[(arm, seed)])
+                    continue
+                # a NEW directory per attempt (uuid suffix): an engine retry after an infrastructure error must
+                # never run next to the failed attempt's files (GOAL L0; orcompute-to-yield-01)
+                box = sb.spawn(sb.workspace.parent / f"{sb.workspace.name}-confirm" /
+                               f"{p}{arm}-{seed}-{uuid.uuid4().hex[:8]}")
+                preds, diag = run_program(box, code=ctx.store.blobs.get(ref.hash), entrypoint="solution.py",
+                                          argv=DEFAULT_ARGV, inputs={"train": (task.train_file, train),
+                                                                     "test": (task.test_features_file, test)},
+                                          seed=seed, timeout_s=task.solution_timeout_s,
+                                          cpu_s=float(task.solution_timeout_s))  # §16.8: load is infra, not policy
+                # validate the shape BEFORE touching the labels: an unusable output never causes a label read
+                problem = None if preds is None else M.predictions_problem(task.metric, preds)
+                if preds is None or len(preds) != n_rows or problem:
+                    failures.append(f"{arm} seed {seed}: no valid predictions ({problem or diag[-300:]})")
+                    continue
+                # the held-out score comes from kerneld (one single-use 'evaluate' token for this claim, arm and
+                # seed); no label enters this process (GOAL §16.5.2)
+                score = kd.run().held_out_score(ids["test"], task.test_labels_file, task.metric, preds,
+                                                claim_hash=h, arm=arm, seed=seed)
+                rec = ExecRecord(claim_hash=h, arm=arm, artifact_hash=ref.hash, inputs=refs, target=ids["test"],  # type: ignore[arg-type]
+                                 label_file=task.test_labels_file, seed=seed, env=env,
+                                 limits={"timeout_s": float(task.solution_timeout_s),
+                                         "cpu_s": float(task.solution_timeout_s)},
+                                 preds_ref=ctx.store.blobs.put_json(preds), metric=task.metric,
+                                 score=score, run_id=ctx.run_id)
+                evidence.append(kernel.record_evaluation(rec))
     return {f"{p}evidence_ids": evidence, f"{p}confirm_failures": failures}
+
+
+class _KernelDRun:
+    """A kerneld process and a run capability for this run, started on first use (GOAL §16.5.2): research code
+    makes its private reads (held-out score, Kernel re-score, leak scan) through narrow per-claim tokens, so no
+    private byte enters this process. kerneld writes each read's `data_access` entry before using the labels."""
+
+    def __init__(self, ctx: ModuleContext):
+        self._root = ctx.kernel().store.root  # the run's store (the module facade has no `root`)
+        self._run_id = ctx.run_id
+        self._kd: KernelD | None = None
+        self._run: RunHandle | None = None
+
+    def run(self) -> RunHandle:
+        if self._run is None:
+            self._kd = KernelD(self._root)
+            self._run = self._kd.open_run(self._run_id)
+        return self._run
+
+    def __enter__(self) -> _KernelDRun:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._kd is not None:
+            try:
+                if self._run is not None:
+                    self._run.close()
+            except (KernelDError, KernelDUnavailable):
+                pass
+            finally:
+                self._kd.close()
+                self._kd = self._run = None
 
 
 # ------------------------------------------------------------------ certify
@@ -276,7 +359,7 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
     cert = kernel.certify(claim, state.get(f"{p}evidence_ids") or [])
     h = cert.cert_hash()
     bundle_path = data_dir() / "bundles" / f"{h[:20]}.zip"
-    bundle_hash = build_bundle(kernel, h, bundle_path)
+    bundle_hash = kernel.bundle(h, bundle_path)  # a grant for exactly the claim's private files (kerneld/scope.py)
     n_hyp = len(_hypotheses(state))
     policy = state.get("model_policy") or {}
     models = [*_models_used(ctx),  # invariant 5 status, never omitted (a missing record is reported as unknown)
@@ -293,7 +376,22 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                                     "replica was checked on dev, then pre-registered at the same minimum effect"),
                      human_in_the_loop="none (fully automated run)",
                      novelty="not performed: the literature module does not exist yet (GOAL M5)")
+    # invariant 10 / VG Table 10: the loop label is a checklist item (the run's label: its MAIN certificate decides)
+    main_label = cert.label.value if not p else (state.get("certificate") or {}).get("label")
+    checklist["loop_label"] = loop_label({"certificate": {"label": main_label}})
     ok, blockers = publishable(cert, checklist)
+    # stricter than the Kernel's `missing` (a blank or non-string answer is no answer) plus the loop-label item
+    extra = [b for b in publication_blockers(checklist, is_loop=True) if b not in blockers]
+    if extra:
+        ok, blockers = False, [*blockers, *extra]
+    if not p:  # GOAL L4.8 (deny-only): kept critic questions without an answer citing checked evidence block publishing
+        from .critic_answers import critic_gate  # recomputed from the trace, never from run state
+        critic_ok, why = critic_gate(ctx)
+        if not critic_ok:
+            ok, blockers = False, [*blockers, why]
+    from .memory_wiring import after_certify  # L5: harvest verified failures, count skill outcomes (never routes)
+    memory_rec = after_certify(kernel, state, h, ctx.secrets, run_id=ctx.run_id, spawn=_perturbed_spawn(ctx),
+                               targets=_dev_targets(state), candidate_key="replica_best" if p else "best")
     recs = [ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(e).payload_ref))
             for e in cert.evidence_ids]
     target = claim.generalization_targets[0]
@@ -325,8 +423,29 @@ def certify(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -
                             "comparator_mean": _mean([r.score for r in recs if r.arm == "comparator"])
                             if recs else None},
             f"{p}checklist": checklist, f"{p}publishable": ok, f"{p}publish_blockers": blockers,
-            **({"replication_brief": brief} if brief else {}),
+            f"{p}memory_after_certify": memory_rec,
+            **({"replication_brief": brief,
+                # the brief is built from the pre-registered claim, the dev-time idea and the TRAINING profile: no
+                # held-out value; only its existence depends on the target (the verdict bit)
+                "_release_alphabets": {"replication_brief": "verdict_bit"}} if brief else {}),
             **({"replication_refused": refused} if refused else {})}
+
+
+def _perturbed_spawn(ctx: ModuleContext) -> Any:
+    """Fresh sandboxes for the skill writer's perturbed evaluator (memory_wiring.exploit_check); None without one."""
+    if ctx.sandbox is None:
+        return None
+    sb = _sb(ctx)
+    root = sb.workspace.parent / f"{sb.workspace.name}-perturbed"
+    return lambda name: sb.spawn(root / f"{name}-{uuid.uuid4().hex[:8]}")
+
+
+def _dev_targets(state: dict[str, Any]) -> dict[str, str] | None:
+    """The public development dataset and its target column (trusted: from the task spec and the vault ids)."""
+    try:
+        return {state["datasets"]["train"]: _task(state).target_column}
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _trusted_profile(ctx: ModuleContext, task: TaskSpec, train_id: str) -> dict[str, Any]:
@@ -573,7 +692,7 @@ def replica_dev(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContex
         return {"replica_best": {"hypothesis_id": "replication", "dev_score": None, "dev_preds_ref": None,
                                  "code_ref": ctx.store.blobs.put(code.encode()), "error": f"not independent: {why}"},
                 "route": "report"}
-    _ws(ctx, "replica.py").write_text(code, encoding="utf-8")
+    _ws(ctx, "replica.py").write_bytes(code.encode("utf-8"))  # byte-identical to the code that runs (no CRLF)
     labels = _dev_labels(state, ctx)
     preds, info = _dev_predict(ctx, state, code.encode("utf-8"), "replica")
     s = _score(task, labels, preds)
@@ -596,8 +715,10 @@ _CERTIFIED = ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
 
 def headline(state: dict[str, Any]) -> bool:
     """GOAL L4.9: a headline result = certified AND an independent re-implementation certified at the same bar,
-    where independent includes invariant 5 (the replicator is not of the author's model family)."""
+    where independent includes invariant 5 (the replicator is not of the author's model family), and BOTH are
+    publishable (VG Table 10: a result with a publication blocker is never a headline)."""
     return ((state.get("certificate") or {}).get("label") in _CERTIFIED
+            and state.get("publishable") is True and state.get("replica_publishable") is True
             and (state.get("replica_certificate") or {}).get("label") in _CERTIFIED
             and (state.get("model_policy") or {}).get("invariant_5") == "met")
 
@@ -606,6 +727,17 @@ def loop_label(state: dict[str, Any]) -> str:
     """GOAL §6.1: VALIDATED only if the run's accepted claim was certified on external or future data
     (CERTIFIED-VALIDATED); a run that optimised and confirmed on internal data is MECHANICAL."""
     return "VALIDATED" if (state.get("certificate") or {}).get("label") == "CERTIFIED-VALIDATED" else "MECHANICAL"
+
+
+def _publication_line(state: dict[str, Any], p: str) -> str:
+    """VG Table 10: the report states whether it may be published, and every blocker, from the certify node's
+    `publishable` / `publish_blockers` (anything but an explicit True is NOT publishable: fail closed)."""
+    what = "Replication publication" if p else "Publication"
+    if state.get(f"{p}publishable") is True:
+        return f"**{what}: allowed** (checklist complete, loop label present, certified)"
+    raw = state.get(f"{p}publish_blockers")
+    why = "; ".join(_inline(b, 200) for b in raw) if isinstance(raw, list) and raw else "no publishable record"
+    return f"**{what}: BLOCKED (NOT PUBLISHABLE)**: {why}"
 
 
 def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
@@ -637,8 +769,9 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", "### Kernel checks", ""]
         for kid, res in cert.checks.items():
             lines.append(f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else ""))
-        lines += ["", render_checklist(state.get("checklist") or {}),
-                  f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
+        lines += ["", render_checklist(state.get("checklist") or {}).rstrip("\n"),
+                  render_loop_item(state.get("checklist")), "", _publication_line(state, ""),
+                  "", f"Reproduce: `chh reproduce {info['bundle_path']} --docker`", ""]
         rep = state.get("replica_certificate")
         lines += ["## Independent replication", ""]
         if rep:
@@ -646,6 +779,7 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
             lines += [f"**{rcert.label.value}** · certificate `{rep['hash']}`", f"- Claim: {rcert.claim['statement']}"]
             lines += [f"- {kid} {res.status}" + (": " + "; ".join(res.reasons) if res.reasons else "")
                       for kid, res in rcert.checks.items() if res.status == "fail"]
+            lines += ["", _publication_line(state, "replica_")]
         elif state.get("replication_refused"):
             lines.append(f"Replication refused: {_inline(state['replication_refused'])}.")
         elif state.get("replica_best"):
@@ -656,7 +790,18 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
         lines += ["", f"**Headline result** (certified AND independently replicated, replicator of a different "
                       f"model family): {'yes' if headline(state) else 'no'}", ""]
     else:
-        lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
+        pf = state.get("preflight") or {}
+        if pf.get("verdict") == "deny":
+            lines += ["## Result", "", "No claim was registered: the certifiability preflight (GOAL §16.8, deny-only) "
+                      f"estimated P(certify) = {pf.get('p_certify')} < theta {pf.get('theta')} (UNCALIBRATED) from "
+                      "public numbers. No held-out label was read.", ""]
+        else:
+            lines += ["## Result", "", "No claim was made: no candidate beat the baseline on the dev estimate.", ""]
+    if state.get("figures"):  # GOAL L2: each figure is audited (I6); listed with the hash of its figure.json
+        lines += ["## Figures", ""]
+        lines += [f"- `{_inline(f.get('dir'))}` (figure.json sha256 `{_inline(f.get('meta_sha256'))}`)"
+                  if isinstance(f, dict) else f"- malformed figure entry {_inline(f)}" for f in state["figures"]]
+        lines.append("")
     lines += [f"## Exploration log (dev estimate: {_dev_scheme_text(state)} on public training data; "
               f"NOT evidence)", "",
               f"Baseline dev {task.metric}: {state.get('baseline_dev')}", ""]
@@ -666,13 +811,39 @@ def render_report(state: dict[str, Any], ctx: ModuleContext) -> str:
     lines += ["", "## Hypotheses considered (model-written text, quoted; not claims)", ""]
     for hyp in _hypotheses(state):
         lines.append(f"> `{_inline(hyp.get('id'), 80)}`: {_inline(hyp.get('idea'))}")
+    lines += [""] + _tree_lines(state, ctx)
     return "\n".join(lines) + "\n"
+
+
+def _tree_lines(state: dict[str, Any], ctx: ModuleContext) -> list[str]:
+    """GOAL L4.7: the experiment tree's shape diagnostics and selection record, read from the tree's stored log (so
+    the audit's re-render checks them against the log, not against evolvable state)."""
+    if not state.get("tree_id"):
+        return ["## Experiment tree", "", "No candidate ran: no experiment tree.", ""]
+    from .tree import ExperimentTree
+    return ExperimentTree.load(ctx.kernel().store, state["tree_id"]).report_lines()
 
 
 @register("research.report")
 def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
+    tree: dict[str, Any] = {}
+    if state.get("tree_id"):  # log the shape diagnostics (a `report` event) before rendering them
+        from .tree import ExperimentTree
+        t = ExperimentTree.load(ctx.kernel().store, state["tree_id"])
+        rep = t.report()
+        tree = {"tree_report": {"shape": rep["shape"], "selection": rep["selection"], "head": rep["head"]},
+                "tree_seq": t.seq}
+    figs: dict[str, Any] = {}
+    if params.get("figure", False):  # GOAL L2: a figure rendered by a script stored next to it, re-rendered by I6
+        from ..figures.report_figure import FIGURE_NAME, make_report_figure
+        root = data_dir() / "figures" / ctx.run_id
+        box = _sb(ctx).spawn(data_dir() / "sandboxes" / f"figure-make-{ctx.run_id}-{time.time_ns()}")
+        fig = make_report_figure(state, ctx.kernel(), ctx.store, box, root / FIGURE_NAME)
+        if fig is not None:
+            figs = {"figures": [*(state.get("figures") or []), fig]}
+            state = {**state, **figs}
     text = render_report(state, ctx)
-    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode())}
+    return {"report": text, "report_ref": ctx.store.blobs.put(text.encode()), **tree, **figs}
 
 
 # ------------------------------------------------------------------ audit
@@ -680,8 +851,8 @@ def report(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) ->
 def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
     """I1 certificate resolves and the run state agrees with the ledger; I2 comparator integrity (K5);
     I3 citations (`citation_audit`: "n/a" without citations); I4 the report re-renders byte-identically from
-    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan.
-    passed = I1, I2, I4, I5 True and I3 True or "n/a" (anything else fails closed)."""
+    stored artifacts and every held-out score recomputes from its stored predictions; I5 leak/canary scan; I6 figures
+    (`_figure_audit`). passed = I1, I2, I4, I5 True and I3, I6 True or "n/a" (anything else fails closed)."""
     task = _task(state)
     res: dict[str, Any] = {"I1": True, "I2": True, "I3": "n/a", "I4": True, "I5": True, "problems": []}
     cites = citation_audit(state, ctx.run_id)
@@ -696,28 +867,48 @@ def audit(state: dict[str, Any], params: dict[str, Any], ctx: ModuleContext) -> 
 
     kernel = ctx.kernel()
     ids = state["datasets"]
-    for p in ("", "replica_"):
-        _audit_certificate(state, p, ctx, kernel, ids, task, fail)
-    try:
-        rerendered = render_report(state, ctx)
-    except (KernelError, KeyError, ValueError) as e:
-        fail("I4", f"report cannot be re-rendered from stored artifacts: {e}")
-    else:
-        if rerendered != state.get("report"):
-            fail("I4", "the report differs from its re-render from stored artifacts (edited or not generated "
-                       "from the certificate)")
-    test = kernel.vault.dataset(ids["test"])
-    raw = kernel.vault.read(ids["test"], task.test_labels_file, purpose="leakscan", run_id=ctx.run_id)
-    fp = {"hashes": {f.blob: f"{ids['test']}/{name}" for name, f in test.files.items() if f.private},
-          "canaries": [], "label_windows": label_windows(_labels(raw)), "contents": [raw]}
-    canaries = [c for c in (kernel.vault.canary(ids["test"]), state.get("_private_canary")) if c]
-    leak = leak_audit(ctx.store.trace(ctx.run_id), _sb(ctx).workspace, fp, canaries,
-                      extra_texts={"report": state.get("report", "")})
-    for problem in leak["problems"]:
+    with _KernelDRun(ctx) as kd:
+        for p in ("", "replica_"):
+            _audit_certificate(state, p, ctx, kernel, ids, task, fail, kd)
+        try:
+            rerendered = render_report(state, ctx)
+        except (KernelError, KeyError, ValueError) as e:
+            fail("I4", f"report cannot be re-rendered from stored artifacts: {e}")
+        else:
+            if rerendered != state.get("report"):
+                fail("I4", "the report differs from its re-render from stored artifacts (edited or not generated "
+                           "from the certificate)")
+        # I5 through kerneld: it builds the fingerprints from the hidden labels (one ledgered 'leakscan' read) and
+        # returns location strings only (GOAL §16.5.2); the vault canary is added there, the run's own canary here
+        report = state.get("report", "")
+        canary = state.get("_private_canary")
+        run = kd.run()
+        problems = run.leak_scan(run.token("leakscan", ids["test"], task.test_labels_file), ctx.store.trace(ctx.run_id),
+                                 _sb(ctx).workspace, extra_texts={"report": str(report) if report else ""},
+                                 extra_canaries=[canary] if isinstance(canary, str) and canary else [])
+    for problem in problems:
         fail("I5", problem)
+    figs = _figure_audit(state, ctx)
+    res["I6"] = figs["I6"]
+    res["problems"].extend(figs["problems"])
     res["passed"] = (all(res[k] is True for k in ("I1", "I2", "I4", "I5"))
-                     and (res["I3"] is True or res["I3"] == "n/a"))
+                     and (res["I3"] is True or res["I3"] == "n/a") and (res["I6"] is True or res["I6"] == "n/a"))
     return {"audit": res}
+
+
+def _figure_audit(state: dict[str, Any], ctx: ModuleContext) -> dict[str, Any]:
+    """Audit I6 (invariant 8 extended to figures, GOAL L2; figures/audit.py): every figure in `figures` re-renders
+    byte-identically in a fresh sandbox from the run's CERTIFIED evidence only, and its plotted data match. No
+    figures -> "n/a"; anything else fails closed."""
+    from ..figures import audit_figures
+    allowed = {str(e) for e in [*(state.get("evidence_ids") or []), *(state.get("replica_evidence_ids") or [])]}
+    root = data_dir() / "sandboxes" / f"figure-audit-{ctx.run_id}-{time.time_ns()}"
+    certs = {str(c["hash"]) for c in (state.get("certificate"), state.get("replica_certificate"))
+             if isinstance(c, dict) and isinstance(c.get("hash"), str)}
+    kernel = ctx.kernel()
+    return audit_figures(state.get("figures"), ctx.store, lambda i: _sb(ctx).spawn(root / str(i)), allowed,
+                         certificate_of=lambda h: kernel.certificate(h).model_dump(mode="json"),
+                         allowed_certificates=certs)
 
 
 def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:
@@ -755,7 +946,7 @@ def citation_audit(state: dict[str, Any], session: str) -> dict[str, Any]:
 
 
 def _audit_certificate(state: dict[str, Any], p: str, ctx: ModuleContext, kernel: Kernel, ids: dict[str, str],
-                       task: TaskSpec, fail: Any) -> None:
+                       task: TaskSpec, fail: Any, kd: _KernelDRun) -> None:
     """I1/I2/I4 for one certificate in the run state (prefix "" = the claim, "replica_" = its replication)."""
     info = state.get(f"{p}certificate")
     if info:
@@ -774,11 +965,12 @@ def _audit_certificate(state: dict[str, Any], p: str, ctx: ModuleContext, kernel
                 fail("I1", "run state disagrees with the ledger certificate or its evidence (label, claim or means)")
             if cert.checks["K5"].status != "pass":
                 fail("I2", "comparator integrity (K5) failed: " + "; ".join(cert.checks["K5"].reasons))
-            labels = _labels(kernel.vault.read(ids["test"], task.test_labels_file, purpose="kernel",
-                                               run_id=ctx.run_id, claim_hash=cert.claim_hash))
+            # re-score through kerneld with a 'kernel' token bound to this certificate's claim (GOAL §16.5.2)
+            run = kd.run()
+            tok = run.token("kernel", ids["test"], task.test_labels_file, claim_hash=cert.claim_hash)
             for eid in cert.evidence_ids:
                 rec = ExecRecord.model_validate(ctx.store.blobs.get_json(ctx.store.get_evidence(eid).payload_ref))
-                again = M.score(rec.metric, labels, ctx.store.blobs.get_json(rec.preds_ref))
+                again = run.rescore(tok, rec.metric, ctx.store.blobs.get_json(rec.preds_ref))
                 if abs(again - rec.score) > 1e-9:
                     fail("I4", f"{eid}: reported {rec.score!r}, recomputed {again!r}")
     elif state.get(f"{p}claim_hash"):

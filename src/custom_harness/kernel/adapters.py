@@ -17,26 +17,28 @@ enforcement. No model output and no harness edit can reach it.
 from __future__ import annotations
 
 import ast
+import contextlib
 import functools
 import hashlib
 import importlib
 import importlib.util
 import json
 import site
+import sys
 import sysconfig
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from ..verify import leak, lean_validation
+from ..adapters.circuit import validation as circuit_validation
+from ..verify import lean_validation
 from ..verify import metrics as M
-from ..verify.stats import mean_t_interval, paired_example_interval
-from . import lp, sim
-from .claim import EvidenceClass, canonical_json
-from .execution import ExecutionError, parse_predictions
-from .ledger import Entry, Ledger
+from ..verify.lp_validation import LP_CHECKS
+from ..verify.ml_validation import ML_CHECKS
+from . import sim
+from .claim import EvidenceClass
+from .ledger import Entry, Ledger, inside
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,10 @@ class AdapterSpec:
     # computational class: the module (one of `modules`) exporting the exact certificate checker the Kernel calls:
     # check(problem, certificate, value) -> reasons (K3), bounds(...) -> reasons (K8), HIGHER_IS_BETTER
     exact_module: str | None = None
+    # data class: the module of the domain procedures the Kernel core calls in K1 and K3-K8 (kernel/ml.py documents
+    # the interface: metric_reasons, recompute, replay_failure, is_regression, statistics, conformance, risk,
+    # record_bounds). It must be one of `modules`, so it is part of the adapter's identity.
+    procedures: str | None = None
 
 
 @functools.cache
@@ -69,7 +75,14 @@ def _source_file(name: str) -> Path | None:
     if spec is None or not spec.has_location or spec.origin is None:
         return None  # built-in / frozen / namespace package: no source of ours
     path = Path(spec.origin).resolve()
-    return None if any(path.is_relative_to(r) for r in _external_roots()) else path
+    return None if _is_external(path) else path
+
+
+@functools.lru_cache(maxsize=4096)
+def _is_external(path: Path) -> bool:
+    r"""By identity, not spelling (\?\, 8.3, case), cached per process (the identity walk is slow on synced drives);
+    an OSError counts as project code, which is hashed (fail closed)."""
+    return any(inside(path, r, on_error=False) for r in _external_roots())
 
 
 _IMPORTS: dict[str, frozenset[str]] = {}  # sha256 of a module's source -> absolute names it imports (parse cache)
@@ -114,12 +127,38 @@ def covered_modules(spec: AdapterSpec) -> dict[str, Path]:
     return dict(sorted(out.items()))
 
 
+Stamps = tuple[tuple[Path, int, int, int], ...]
+_CLOSURES: dict[tuple[AdapterSpec, tuple[str, ...]], tuple[Stamps, dict[str, Path]]] = {}
+
+
+def _stamps(paths: Iterable[Path]) -> Stamps:
+    return tuple((p, (s := p.stat()).st_mtime_ns, s.st_size, s.st_ino) for p in paths)
+
+
 def adapter_hash(spec: AdapterSpec) -> str:
+    """The import closure (the slow part) is cached per process by (spec, sys.path) and walked again when a covered
+    file's (mtime_ns, size, inode) changed or an edit raced the walk; the file BYTES are hashed on every call (RT-S4-8:
+    an edit that restores size and mtime is still seen). Residual and measurement: docs/kernel_s4.md, item 9."""
+    key = (spec, tuple(sys.path))
+    hit = _CLOSURES.get(key)
+    with contextlib.suppress(OSError):  # a covered file gone: walk again (fails closed there)
+        if hit is not None and _stamps(p for p, *_ in hit[0]) == hit[0]:
+            return _adapter_hash(spec, hit[1])
+    covered = covered_modules(spec)
+    stamps = _stamps(covered.values())
+    if covered_modules(spec) == covered and _stamps(covered.values()) == stamps:
+        _CLOSURES[key] = (stamps, covered)
+    return _adapter_hash(spec, covered)
+
+
+def _adapter_hash(spec: AdapterSpec, covered: dict[str, Path]) -> str:
     parts: dict[str, Any] = {"name": spec.name, "version": spec.version, "classes": sorted(spec.classes),
                              "metrics": sorted(spec.metrics), "modules": {}}
     if spec.exact_module is not None:  # only when set: adapters without one keep their approved hashes
         parts["exact_module"] = spec.exact_module
-    for mod, path in covered_modules(spec).items():
+    if spec.procedures is not None:
+        parts["procedures"] = spec.procedures
+    for mod, path in covered.items():
         parts["modules"][mod] = hashlib.sha256(path.read_bytes()).hexdigest()
     return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 
@@ -127,74 +166,15 @@ def adapter_hash(spec: AdapterSpec) -> str:
 ML = AdapterSpec(
     name="ml", version="1", classes=frozenset({EvidenceClass.DATA}),
     modules=("custom_harness.verify.metrics", "custom_harness.verify.stats", "custom_harness.verify.leak",
-             "custom_harness.kernel.execution"),
-    metrics=frozenset(M.METRICS))
+             "custom_harness.kernel.execution", "custom_harness.verify.transductive", "custom_harness.kernel.ml",
+             "custom_harness.verify.ml_validation"),  # s4: its fixtures (moved from this file) are now hashed
+    metrics=frozenset(M.METRICS), procedures="custom_harness.kernel.ml")
 
-
-def _raises(fn: Callable[[], object]) -> bool:
-    try:
-        fn()
-    except (ValueError, ExecutionError):
-        return True
-    return False
-
-
-def _effect_interval_ok() -> bool:
-    """Planted effect: arm a is right on all 100 examples, arm b on half of them -> effect 0.5 exactly."""
-    y = [str(i % 2) for i in range(100)]
-    b = [y[i] if i < 50 else ("0" if y[i] == "1" else "1") for i in range(100)]
-    iv = paired_example_interval(M.accuracy, y, [y], [b], higher_is_better=True, alpha=0.1, n_boot=1000)
-    return abs(iv.estimate - 0.5) < 1e-12 and 0.0 < iv.lo <= 0.5 <= iv.hi
-
-
-# Fault-injection validation of the ML adapter: each check plants a known fault or a known answer.
-ML_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
-    ("accuracy of a known case", lambda: M.accuracy(["a", "b"], ["a", "a"]) == 0.5),
-    ("misaligned predictions are refused", lambda: _raises(lambda: M.accuracy(["a"], ["a", "b"]))),
-    ("empty labels are refused", lambda: _raises(lambda: M.accuracy([], []))),
-    ("non-finite regression values are refused", lambda: _raises(lambda: M.rmse(["1"], ["nan"]))),
-    ("macro F1 of a perfect prediction", lambda: M.f1_macro(["0", "1", "1"], ["0", "1", "1"]) == 1.0),
-    ("planted paired effect is recovered and bounded", _effect_interval_ok),
-    ("Student-t interval covers a known mean", lambda: mean_t_interval([1.0, 2.0, 3.0], alpha=0.05).lo < 2.0
-     < mean_t_interval([1.0, 2.0, 3.0], alpha=0.05).hi),
-    ("planted canary is detected", lambda: bool(leak.scan_text("x CHH-CANARY-ab12 y", "t", ["CHH-CANARY-ab12"], []))),
-    ("base64-encoded planted canary is detected",  # base64 of "x CHH-CANARY-ab12 y"
-     lambda: bool(leak.scan_text("eCBDSEgtQ0FOQVJZLWFiMTIgeQ==", "t", ["CHH-CANARY-ab12"], []))),
-    ("multi-column predictions are refused", lambda: _raises(lambda: parse_predictions(b"prediction\n1,2\n"))),
-)
 
 LP = AdapterSpec(
-    name="lp", version="1", classes=frozenset({EvidenceClass.COMPUTATIONAL}), modules=("custom_harness.kernel.lp",),
+    name="lp", version="1", classes=frozenset({EvidenceClass.COMPUTATIONAL}),
+    modules=("custom_harness.kernel.lp", "custom_harness.verify.lp_validation"),
     metrics=frozenset({"lp_optimum"}), exact_module="custom_harness.kernel.lp")
-
-# golden case: max x1 + x2 s.t. 2 x1 + x2 <= 4, x1 + 3 x2 <= 5, x >= 0; optimum 13/5, x = (7/5, 6/5), y = (2/5, 1/5)
-_LP_P = {"format": "chh-lp/1", "sense": "max", "c": ["1", "1"], "A": [["2", "1"], ["1", "3"]], "b": ["4", "5"]}
-_LP_C = {"format": "chh-lp-certificate/1", "x": ["7/5", "6/5"], "y": ["2/5", "1/5"]}
-
-
-def _lp(cert: dict[str, Any], value: Fraction = Fraction(13, 5)) -> list[str]:
-    return lp.check(canonical_json(_LP_P), canonical_json({**_LP_C, **cert}), value)
-
-
-def _lp_rejects(cert: dict[str, Any], why: str, value: Fraction = Fraction(13, 5)) -> bool:
-    """The planted fault is rejected FOR THE RIGHT REASON (a checker failing for another reason fails validation)."""
-    return any(why in r for r in _lp(cert, value))
-
-
-# Fault-injection validation of the LP adapter: one golden certificate that must pass, and each planted fault.
-LP_CHECKS: tuple[tuple[str, Callable[[], bool]], ...] = (
-    ("a correct optimality certificate is accepted", lambda: _lp({}) == []),
-    ("an infeasible primal point is rejected", lambda: _lp_rejects({"x": ["2", "1"]}, "primal infeasible")),
-    ("an infeasible dual point is rejected", lambda: _lp_rejects({"y": ["1/5", "1/5"]}, "dual infeasible")),
-    ("a nonzero duality gap is rejected", lambda: _lp_rejects({"x": ["1", "1"]}, "duality gap")),
-    ("an objective other than the claimed value is rejected",
-     lambda: _lp_rejects({}, "differs from the claimed value", Fraction(3))),
-    ("a float-encoded certificate value is refused", lambda: _lp_rejects({"x": [1.4, 1.2]}, "exact rational string")),
-    ("a float-encoded rational is refused", lambda: _raises(lambda: lp.parse_rational("2.6"))),
-    ("wrong dimensions are refused", lambda: _lp_rejects({"x": ["7/5", "6/5", "0"]}, "dimension mismatch")),
-    ("a number beyond the registered size bound is flagged",
-     lambda: bool(lp.bounds(canonical_json(_LP_P), canonical_json(_LP_C), Fraction(10**lp.MAX_DIGITS)))),
-)
 
 # simulated class: exact_module names the pinned simulator module (SIMULATOR, VERSION, scope_phrase, check, bounds)
 SIM = AdapterSpec(
@@ -208,9 +188,26 @@ LEAN = AdapterSpec(
     modules=("custom_harness.kernel.formal", "custom_harness.verify.lean_validation", "custom_harness.sandbox.lean"),
     metrics=frozenset({"lean_theorem"}), exact_module="custom_harness.kernel.formal")
 
+# Linear DC circuits (computational class, T1; M5 engineering, docs/adapters_circuit.md): exact MNA certificates,
+# the checker, its validation evidence and the solver that builds its golden witnesses are ONE adapter.
+CIRCUIT = AdapterSpec(
+    name="circuit", version="1", classes=frozenset({EvidenceClass.COMPUTATIONAL}),
+    modules=("custom_harness.adapters", "custom_harness.adapters.circuit", "custom_harness.adapters.circuit.check",
+             "custom_harness.adapters.circuit.validation", "custom_harness.adapters.circuit.solver"),
+    metrics=frozenset({"circuit_value"}), exact_module="custom_harness.adapters.circuit.check")
+
 REGISTRY: dict[str, tuple[AdapterSpec, tuple[tuple[str, Callable[[], bool]], ...]]] = {
     "ml": (ML, ML_CHECKS), "lp": (LP, LP_CHECKS), "sim": (SIM, sim.SIM_CHECKS),
-    "lean": (LEAN, lean_validation.LEAN_CHECKS)}
+    "lean": (LEAN, lean_validation.LEAN_CHECKS), "circuit": (CIRCUIT, circuit_validation.CIRCUIT_CHECKS)}
+
+
+def procedures_for(evidence_class: EvidenceClass, metric: str) -> str:
+    """The procedures module of the registered adapter serving (class, metric); if none serves it, the first adapter
+    (by name) that has procedures: K1 rejects such a claim anyway (no approved adapter), and its other checks then run
+    exactly as they did before the core/adapter split (docs/kernel_core_adapter_split.md)."""
+    have = [s for _, (s, _) in sorted(REGISTRY.items()) if s.procedures is not None]
+    serving = [s for s in have if evidence_class in s.classes and metric in s.metrics]
+    return str((serving or have)[0].procedures)
 
 
 def validate(checks: tuple[tuple[str, Callable[[], bool]], ...]) -> list[str]:

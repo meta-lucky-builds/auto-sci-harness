@@ -147,7 +147,8 @@ def test_export_has_evolve_runs_only_and_aggregate_gate_decisions(store, tmp_pat
     # certificate summary: label, failed checks, reasons; never the bundle path
     certs = json.loads((out / "certificates.json").read_text(encoding="utf-8"))
     assert certs[0]["label"] == "REJECTED" and certs[0]["failed"] == ["K7"]
-    assert "success probability" in certs[0]["reasons"]["K7"][0]
+    # verdict embargo (GOAL §16.5.3): reason TEXT quotes held-out statistics, so it is withheld; check ids stay
+    assert certs[0]["reasons"]["K7"] == "<embargoed until the target retires>"
     assert "bundle_path" not in text and "bundles/cccc.zip" not in text
     # scores of the exported runs
     scores = json.loads((out / "scores.json").read_text(encoding="utf-8"))
@@ -290,8 +291,12 @@ class CostTable(Evaluator):
         if key not in self.cache:
             self.calls += 1
             arm = "parent" if spec.spec_hash() == self.parent_hash else "cand"
-            self.cache[key] = RunOutcome(unit[0], "", unit[1], self._score(arm, unit[0], unit[1]), False,
-                                         "completed", self._cost(arm, unit[0], unit[1]), [])
+            score = self._score(arm, unit[0], unit[1])
+            # a run that earned nothing carries a failure signature, so the parent's diagnosis has a cluster C0 (the
+            # fixtures that cite C0 cite something real: citations are checked, claims.py)
+            self.cache[key] = RunOutcome(unit[0], "", unit[1], score, False, "completed",
+                                         self._cost(arm, unit[0], unit[1]),
+                                         ["run: gave up after a crash"] if score == 0.0 else [])
         return self.cache[key]
 
 
@@ -389,7 +394,9 @@ def test_generation_counters_record_yield_and_prune(store, tmp_path):
     c = res.counters
     assert c["proposed"] == 4 and c["rejected_static"] == 2 and c["raced"] == 2
     assert c["pruned"] == 1 and c["gated"] == 1 and c["accepted"] == 1 and c["yield"] == pytest.approx(0.25)
-    assert store.records("generation_stats")[-1] == {"parent": res.parent_hash, **c}
+    # the loop instance's record also carries its loop label (invariant 10) and the harness runs it spent (axis B)
+    assert store.records("generation_stats")[-1] == {"parent": res.parent_hash, **c, "loop_label": res.loop_label,
+                                                     "harness_runs": res.evaluations}
 
 
 def test_novelty_gate_refuses_a_re_proposed_rejected_edit(store, tmp_path):

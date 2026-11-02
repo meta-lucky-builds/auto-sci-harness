@@ -21,13 +21,21 @@ import pytest
 
 import custom_harness.research  # noqa: F401
 from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate
+from custom_harness.evolve.multiplicity import MultiplicityDrift
 from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import MockBackend
 from custom_harness.kernel import Kernel
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.sandbox.docker import DockerUnavailable
 from custom_harness.verify.exclusion import EXCLUSION_ALPHA, count_exclusions, exclusion_asymmetry, sign_test_p
-from test_evolve import PROPOSALS, declared_seed_spec, executor, seed_spec, suite  # noqa: F401
+from test_evolve import (  # noqa: F401
+    PROPOSALS,
+    R2_2_OPEN,
+    declared_seed_spec,
+    executor,
+    seed_spec,
+    suite,
+)
 from test_infra import NO_WAIT, FlakyDockerLike
 
 
@@ -71,6 +79,7 @@ def test_selective_candidate_exclusions_pass_the_current_gate_but_not_the_rule()
     assert exclusion_asymmetry(counts.candidate_only, counts.parent_only) is not None
 
 
+@pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=R2_2_OPEN)
 def test_outage_campaign_reaches_the_same_decision_with_the_rule(store, tmp_path, suite, monkeypatch):  # noqa: F811
     """test_infra.py's M0 campaign (Docker outages on both arms), run through the production loop with the rule wired
     in (evolve/loop.py). Until 2026-10-07 this test monkeypatched the rule in; that version also predates R2-2 (it

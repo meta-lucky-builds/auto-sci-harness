@@ -1,0 +1,2184 @@
+{
+ "ApprovalRoute": {
+  "additionalProperties": false,
+  "properties": {
+   "binds": {
+    "additionalProperties": true,
+    "title": "Binds",
+    "type": "object"
+   },
+   "command": {
+    "title": "Command",
+    "type": "string"
+   },
+   "human_only": {
+    "title": "Human Only",
+    "type": "boolean"
+   },
+   "id": {
+    "title": "Id",
+    "type": "string"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "performed": {
+    "const": false,
+    "default": false,
+    "title": "Performed",
+    "type": "boolean"
+   },
+   "title": {
+    "title": "Title",
+    "type": "string"
+   }
+  },
+  "required": [
+   "id",
+   "title",
+   "human_only",
+   "command",
+   "note",
+   "binds"
+  ],
+  "title": "ApprovalRoute",
+  "type": "object"
+ },
+ "Case": {
+  "$defs": {
+   "Badge": {
+    "additionalProperties": false,
+    "properties": {
+     "form": {
+      "title": "Form",
+      "type": "string"
+     },
+     "meaning": {
+      "title": "Meaning",
+      "type": "string"
+     },
+     "name": {
+      "title": "Name",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "form",
+     "meaning"
+    ],
+    "title": "Badge",
+    "type": "object"
+   },
+   "CheckRow": {
+    "additionalProperties": false,
+    "properties": {
+     "name": {
+      "title": "Name",
+      "type": "string"
+     },
+     "status": {
+      "title": "Status",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "status"
+    ],
+    "title": "CheckRow",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "Story": {
+    "additionalProperties": false,
+    "properties": {
+     "idea_path": {
+      "items": {
+       "type": "string"
+      },
+      "title": "Idea Path",
+      "type": "array"
+     },
+     "intact": {
+      "title": "Intact",
+      "type": "boolean"
+     },
+     "session_id": {
+      "title": "Session Id",
+      "type": "string"
+     },
+     "steers": {
+      "$ref": "#/$defs/Number"
+     },
+     "steps": {
+      "$ref": "#/$defs/Number"
+     },
+     "web_connections": {
+      "$ref": "#/$defs/Number"
+     }
+    },
+    "required": [
+     "session_id",
+     "idea_path",
+     "steps",
+     "steers",
+     "web_connections",
+     "intact"
+    ],
+    "title": "Story",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "badges": {
+    "items": {
+     "$ref": "#/$defs/Badge"
+    },
+    "title": "Badges",
+    "type": "array"
+   },
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "checks_in_full": {
+    "items": {
+     "$ref": "#/$defs/CheckRow"
+    },
+    "title": "Checks In Full",
+    "type": "array"
+   },
+   "command": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Command"
+   },
+   "looks_remaining": {
+    "$ref": "#/$defs/Number"
+   },
+   "next_step": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Next Step"
+   },
+   "reason": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Reason"
+   },
+   "reason_code": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Reason Code"
+   },
+   "rerun": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Rerun"
+   },
+   "retired": {
+    "title": "Retired",
+    "type": "boolean"
+   },
+   "scope": {
+    "title": "Scope",
+    "type": "string"
+   },
+   "second_test": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Second Test"
+   },
+   "sentence": {
+    "title": "Sentence",
+    "type": "string"
+   },
+   "story": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/Story"
+     },
+     {
+      "type": "null"
+     }
+    ]
+   },
+   "technical": {
+    "title": "Technical",
+    "type": "string"
+   },
+   "test_rows": {
+    "$ref": "#/$defs/Number"
+   },
+   "title": {
+    "title": "Title",
+    "type": "string"
+   },
+   "verdict": {
+    "anyOf": [
+     {
+      "enum": [
+       "CERTIFIED",
+       "NOT CERTIFIED",
+       "INCONCLUSIVE",
+       "COULD NOT RUN"
+      ],
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Verdict"
+   },
+   "verdict_sentence": {
+    "title": "Verdict Sentence",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "title",
+   "sentence",
+   "scope",
+   "verdict",
+   "verdict_sentence",
+   "reason_code",
+   "reason",
+   "badges",
+   "second_test",
+   "checks_in_full",
+   "looks_remaining",
+   "test_rows",
+   "retired",
+   "next_step",
+   "command",
+   "rerun",
+   "story",
+   "technical"
+  ],
+  "title": "Case",
+  "type": "object"
+ },
+ "Cases": {
+  "$defs": {
+   "CaseLine": {
+    "additionalProperties": false,
+    "properties": {
+     "case_id": {
+      "title": "Case Id",
+      "type": "string"
+     },
+     "looks_remaining": {
+      "$ref": "#/$defs/Number"
+     },
+     "state": {
+      "title": "State",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "case_id",
+     "title",
+     "state",
+     "looks_remaining"
+    ],
+    "title": "CaseLine",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "cases": {
+    "items": {
+     "$ref": "#/$defs/CaseLine"
+    },
+    "title": "Cases",
+    "type": "array"
+   },
+   "total": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "cases",
+   "total"
+  ],
+  "title": "Cases",
+  "type": "object"
+ },
+ "CredentialIn": {
+  "additionalProperties": false,
+  "description": "Where the scoped key is, never the key itself.",
+  "properties": {
+   "registry_key": {
+    "title": "Registry Key",
+    "type": "string"
+   },
+   "scope": {
+    "default": "",
+    "title": "Scope",
+    "type": "string"
+   },
+   "source_env": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Source Env"
+   },
+   "source_file": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Source File"
+   },
+   "spend_cap_usd": {
+    "exclusiveMinimum": 0,
+    "title": "Spend Cap Usd",
+    "type": "number"
+   },
+   "ttl_hours": {
+    "default": 24.0,
+    "exclusiveMinimum": 0,
+    "title": "Ttl Hours",
+    "type": "number"
+   }
+  },
+  "required": [
+   "registry_key",
+   "spend_cap_usd"
+  ],
+  "title": "CredentialIn",
+  "type": "object"
+ },
+ "ExploreIn": {
+  "additionalProperties": false,
+  "properties": {
+   "prompt": {
+    "minLength": 1,
+    "title": "Prompt",
+    "type": "string"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "prompt"
+  ],
+  "title": "ExploreIn",
+  "type": "object"
+ },
+ "Explored": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "actions": {
+    "$ref": "#/$defs/Number"
+   },
+   "finished": {
+    "title": "Finished",
+    "type": "boolean"
+   },
+   "notice": {
+    "title": "Notice",
+    "type": "string"
+   },
+   "reply": {
+    "title": "Reply",
+    "type": "string"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "finished",
+   "reply",
+   "actions",
+   "notice"
+  ],
+  "title": "Explored",
+  "type": "object"
+ },
+ "FreezeIn": {
+  "additionalProperties": false,
+  "properties": {
+   "request_file": {
+    "title": "Request File",
+    "type": "string"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "request_file"
+  ],
+  "title": "FreezeIn",
+  "type": "object"
+ },
+ "Frozen": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "files": {
+    "$ref": "#/$defs/Number"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "session_id",
+   "files",
+   "note"
+  ],
+  "title": "Frozen",
+  "type": "object"
+ },
+ "Identity": {
+  "additionalProperties": false,
+  "properties": {
+   "chosen": {
+    "title": "Chosen",
+    "type": "boolean"
+   },
+   "note": {
+    "default": "A name for the record, on this machine. It grants nothing.",
+    "title": "Note",
+    "type": "string"
+   },
+   "os_user": {
+    "title": "Os User",
+    "type": "string"
+   },
+   "researcher": {
+    "title": "Researcher",
+    "type": "string"
+   }
+  },
+  "required": [
+   "os_user",
+   "researcher",
+   "chosen"
+  ],
+  "title": "Identity",
+  "type": "object"
+ },
+ "LabView": {
+  "$defs": {
+   "Idea": {
+    "additionalProperties": false,
+    "properties": {
+     "idea_id": {
+      "title": "Idea Id",
+      "type": "string"
+     },
+     "status": {
+      "title": "Status",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "idea_id",
+     "title",
+     "status"
+    ],
+    "title": "Idea",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "cost_usd": {
+    "$ref": "#/$defs/Number"
+   },
+   "costs_unknown": {
+    "$ref": "#/$defs/Number"
+   },
+   "dropped_ideas": {
+    "$ref": "#/$defs/Number"
+   },
+   "ideas": {
+    "items": {
+     "$ref": "#/$defs/Idea"
+    },
+    "title": "Ideas",
+    "type": "array"
+   },
+   "notice": {
+    "title": "Notice",
+    "type": "string"
+   },
+   "open_ideas": {
+    "$ref": "#/$defs/Number"
+   },
+   "project": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Project"
+   },
+   "runs": {
+    "$ref": "#/$defs/Number"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   },
+   "steers": {
+    "$ref": "#/$defs/Number"
+   },
+   "web_connections": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "session_id",
+   "project",
+   "notice",
+   "ideas",
+   "open_ideas",
+   "dropped_ideas",
+   "runs",
+   "steers",
+   "web_connections",
+   "cost_usd",
+   "costs_unknown"
+  ],
+  "title": "LabView",
+  "type": "object"
+ },
+ "Paper": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "numbers": {
+    "$ref": "#/$defs/Number"
+   },
+   "path": {
+    "title": "Path",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "path",
+   "numbers",
+   "note"
+  ],
+  "title": "Paper",
+  "type": "object"
+ },
+ "PaperIn": {
+  "additionalProperties": false,
+  "properties": {
+   "body": {
+    "title": "Body",
+    "type": "string"
+   },
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "refs": {
+    "additionalProperties": {
+     "type": "string"
+    },
+    "title": "Refs",
+    "type": "object"
+   },
+   "title": {
+    "title": "Title",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "title",
+   "body",
+   "refs"
+  ],
+  "title": "PaperIn",
+  "type": "object"
+ },
+ "PromoteIn": {
+  "additionalProperties": false,
+  "properties": {
+   "beacon_round": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Beacon Round"
+   },
+   "dev_pairs": {
+    "anyOf": [
+     {
+      "maxItems": 4,
+      "minItems": 4,
+      "prefixItems": [
+       {
+        "type": "integer"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "integer"
+       }
+      ],
+      "type": "array"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Dev Pairs"
+   },
+   "family": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Family"
+   },
+   "n_test": {
+    "anyOf": [
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "N Test"
+   },
+   "project": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Project"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "route": {
+    "enum": [
+     "generated",
+     "sealed",
+     "public"
+    ],
+    "title": "Route",
+    "type": "string"
+   },
+   "second_part": {
+    "default": false,
+    "title": "Second Part",
+    "type": "boolean"
+   },
+   "second_round": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Second Round"
+   },
+   "targets_file": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Targets File"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "route"
+  ],
+  "title": "PromoteIn",
+  "type": "object"
+ },
+ "PromotePreview": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "Readiness": {
+    "additionalProperties": false,
+    "properties": {
+     "notice": {
+      "title": "Notice",
+      "type": "string"
+     },
+     "rows": {
+      "items": {
+       "$ref": "#/$defs/ReadinessRow"
+      },
+      "title": "Rows",
+      "type": "array"
+     },
+     "sentence": {
+      "title": "Sentence",
+      "type": "string"
+     }
+    },
+    "required": [
+     "sentence",
+     "notice",
+     "rows"
+    ],
+    "title": "Readiness",
+    "type": "object"
+   },
+   "ReadinessRow": {
+    "additionalProperties": false,
+    "properties": {
+     "chance": {
+      "$ref": "#/$defs/Number"
+     },
+     "objection": {
+      "title": "Objection",
+      "type": "boolean"
+     },
+     "test_rows": {
+      "$ref": "#/$defs/Number"
+     }
+    },
+    "required": [
+     "test_rows",
+     "chance",
+     "objection"
+    ],
+    "title": "ReadinessRow",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "finding_possible": {
+    "title": "Finding Possible",
+    "type": "boolean"
+   },
+   "looks_remaining": {
+    "$ref": "#/$defs/Number"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "readiness": {
+    "$ref": "#/$defs/Readiness"
+   },
+   "route": {
+    "title": "Route",
+    "type": "string"
+   },
+   "what_happens": {
+    "items": {
+     "type": "string"
+    },
+    "title": "What Happens",
+    "type": "array"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "route",
+   "finding_possible",
+   "readiness",
+   "looks_remaining",
+   "what_happens"
+  ],
+  "title": "PromotePreview",
+  "type": "object"
+ },
+ "Promoted": {
+  "additionalProperties": false,
+  "properties": {
+   "case_id": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Case Id"
+   },
+   "command": {
+    "title": "Command",
+    "type": "string"
+   },
+   "next_step": {
+    "title": "Next Step",
+    "type": "string"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "route": {
+    "title": "Route",
+    "type": "string"
+   },
+   "second_case_id": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Second Case Id"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "case_id",
+   "second_case_id",
+   "route",
+   "next_step",
+   "command"
+  ],
+  "title": "Promoted",
+  "type": "object"
+ },
+ "Record": {
+  "$defs": {
+   "Calibration": {
+    "additionalProperties": false,
+    "properties": {
+     "claims": {
+      "$ref": "#/$defs/Number"
+     },
+     "evidence_bits": {
+      "$ref": "#/$defs/Number"
+     },
+     "mean_squared_error": {
+      "$ref": "#/$defs/Number"
+     },
+     "note": {
+      "title": "Note",
+      "type": "string"
+     }
+    },
+    "required": [
+     "claims",
+     "mean_squared_error",
+     "evidence_bits",
+     "note"
+    ],
+    "title": "Calibration",
+    "type": "object"
+   },
+   "DeadEnd": {
+    "additionalProperties": false,
+    "properties": {
+     "reason": {
+      "title": "Reason",
+      "type": "string"
+     },
+     "source": {
+      "enum": [
+       "idea",
+       "verdict"
+      ],
+      "title": "Source",
+      "type": "string"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     }
+    },
+    "required": [
+     "title",
+     "reason",
+     "source"
+    ],
+    "title": "DeadEnd",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "Outcome": {
+    "additionalProperties": false,
+    "properties": {
+     "badges": {
+      "title": "Badges",
+      "type": "string"
+     },
+     "case_id": {
+      "title": "Case Id",
+      "type": "string"
+     },
+     "reason_code": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Reason Code"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     },
+     "verdict": {
+      "title": "Verdict",
+      "type": "string"
+     }
+    },
+    "required": [
+     "case_id",
+     "title",
+     "verdict",
+     "badges",
+     "reason_code"
+    ],
+    "title": "Outcome",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "calibration": {
+    "$ref": "#/$defs/Calibration"
+   },
+   "dead_ends": {
+    "items": {
+     "$ref": "#/$defs/DeadEnd"
+    },
+    "title": "Dead Ends",
+    "type": "array"
+   },
+   "harness_improvement": {
+    "title": "Harness Improvement",
+    "type": "string"
+   },
+   "outcomes": {
+    "items": {
+     "$ref": "#/$defs/Outcome"
+    },
+    "title": "Outcomes",
+    "type": "array"
+   },
+   "researcher": {
+    "title": "Researcher",
+    "type": "string"
+   },
+   "verdicts_unopened": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "researcher",
+   "dead_ends",
+   "outcomes",
+   "verdicts_unopened",
+   "calibration",
+   "harness_improvement"
+  ],
+  "title": "Record",
+  "type": "object"
+ },
+ "Rehearsal": {
+  "$defs": {
+   "CheckRow": {
+    "additionalProperties": false,
+    "properties": {
+     "name": {
+      "title": "Name",
+      "type": "string"
+     },
+     "status": {
+      "title": "Status",
+      "type": "string"
+     }
+    },
+    "required": [
+     "name",
+     "status"
+    ],
+    "title": "CheckRow",
+    "type": "object"
+   },
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "Readiness": {
+    "additionalProperties": false,
+    "properties": {
+     "notice": {
+      "title": "Notice",
+      "type": "string"
+     },
+     "rows": {
+      "items": {
+       "$ref": "#/$defs/ReadinessRow"
+      },
+      "title": "Rows",
+      "type": "array"
+     },
+     "sentence": {
+      "title": "Sentence",
+      "type": "string"
+     }
+    },
+    "required": [
+     "sentence",
+     "notice",
+     "rows"
+    ],
+    "title": "Readiness",
+    "type": "object"
+   },
+   "ReadinessRow": {
+    "additionalProperties": false,
+    "properties": {
+     "chance": {
+      "$ref": "#/$defs/Number"
+     },
+     "objection": {
+      "title": "Objection",
+      "type": "boolean"
+     },
+     "test_rows": {
+      "$ref": "#/$defs/Number"
+     }
+    },
+    "required": [
+     "test_rows",
+     "chance",
+     "objection"
+    ],
+    "title": "ReadinessRow",
+    "type": "object"
+   },
+   "ScoreRow": {
+    "additionalProperties": false,
+    "properties": {
+     "arm": {
+      "enum": [
+       "method",
+       "baseline"
+      ],
+      "title": "Arm",
+      "type": "string"
+     },
+     "score": {
+      "$ref": "#/$defs/Number"
+     },
+     "seed": {
+      "title": "Seed",
+      "type": "string"
+     }
+    },
+    "required": [
+     "arm",
+     "seed",
+     "score"
+    ],
+    "title": "ScoreRow",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "checks": {
+    "items": {
+     "$ref": "#/$defs/CheckRow"
+    },
+    "title": "Checks",
+    "type": "array"
+   },
+   "notice": {
+    "title": "Notice",
+    "type": "string"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "ran": {
+    "title": "Ran",
+    "type": "boolean"
+   },
+   "readiness": {
+    "$ref": "#/$defs/Readiness"
+   },
+   "reason": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Reason"
+   },
+   "scores": {
+    "items": {
+     "$ref": "#/$defs/ScoreRow"
+    },
+    "title": "Scores",
+    "type": "array"
+   },
+   "would_certify": {
+    "anyOf": [
+     {
+      "type": "boolean"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Would Certify"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "notice",
+   "ran",
+   "would_certify",
+   "reason",
+   "checks",
+   "scores",
+   "readiness"
+  ],
+  "title": "Rehearsal",
+  "type": "object"
+ },
+ "RehearseIn": {
+  "additionalProperties": false,
+  "properties": {
+   "data_file": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Data File"
+   },
+   "label_column": {
+    "default": "label",
+    "title": "Label Column",
+    "type": "string"
+   },
+   "promotion_id": {
+    "title": "Promotion Id",
+    "type": "string"
+   },
+   "rows": {
+    "exclusiveMinimum": 0,
+    "title": "Rows",
+    "type": "integer"
+   }
+  },
+  "required": [
+   "promotion_id",
+   "rows"
+  ],
+  "title": "RehearseIn",
+  "type": "object"
+ },
+ "Resolved": {
+  "additionalProperties": false,
+  "properties": {
+   "link": {
+    "title": "Link",
+    "type": "string"
+   },
+   "rests_on": {
+    "title": "Rests On",
+    "type": "string"
+   },
+   "source": {
+    "additionalProperties": true,
+    "title": "Source",
+    "type": "object"
+   },
+   "value": {
+    "anyOf": [
+     {
+      "type": "number"
+     },
+     {
+      "type": "integer"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Value"
+   }
+  },
+  "required": [
+   "link",
+   "value",
+   "rests_on",
+   "source"
+  ],
+  "title": "Resolved",
+  "type": "object"
+ },
+ "SealIn": {
+  "additionalProperties": false,
+  "properties": {
+   "beacon_round": {
+    "title": "Beacon Round",
+    "type": "string"
+   },
+   "beacon_value": {
+    "title": "Beacon Value",
+    "type": "string"
+   },
+   "data_file": {
+    "title": "Data File",
+    "type": "string"
+   },
+   "label_column": {
+    "title": "Label Column",
+    "type": "string"
+   },
+   "parts": {
+    "default": 1,
+    "maximum": 2,
+    "minimum": 1,
+    "title": "Parts",
+    "type": "integer"
+   },
+   "project": {
+    "title": "Project",
+    "type": "string"
+   },
+   "rows": {
+    "exclusiveMinimum": 0,
+    "title": "Rows",
+    "type": "integer"
+   }
+  },
+  "required": [
+   "project",
+   "data_file",
+   "label_column",
+   "rows",
+   "beacon_round",
+   "beacon_value"
+  ],
+  "title": "SealIn",
+  "type": "object"
+ },
+ "Sealed": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "lab_rows": {
+    "$ref": "#/$defs/Number"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "project": {
+    "title": "Project",
+    "type": "string"
+   },
+   "sealed_rows": {
+    "items": {
+     "$ref": "#/$defs/Number"
+    },
+    "title": "Sealed Rows",
+    "type": "array"
+   }
+  },
+  "required": [
+   "project",
+   "lab_rows",
+   "sealed_rows",
+   "note"
+  ],
+  "title": "Sealed",
+  "type": "object"
+ },
+ "Session": {
+  "additionalProperties": false,
+  "properties": {
+   "agent": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Agent"
+   },
+   "box": {
+    "title": "Box",
+    "type": "string"
+   },
+   "notice": {
+    "title": "Notice",
+    "type": "string"
+   },
+   "project": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Project"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   },
+   "workspace": {
+    "title": "Workspace",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "project",
+   "agent",
+   "box",
+   "workspace",
+   "notice"
+  ],
+  "title": "Session",
+  "type": "object"
+ },
+ "ShareIn": {
+  "additionalProperties": false,
+  "properties": {
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "out_file": {
+    "title": "Out File",
+    "type": "string"
+   },
+   "reviewer": {
+    "minLength": 1,
+    "title": "Reviewer",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "reviewer",
+   "out_file"
+  ],
+  "title": "ShareIn",
+  "type": "object"
+ },
+ "Shared": {
+  "additionalProperties": false,
+  "properties": {
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "path": {
+    "title": "Path",
+    "type": "string"
+   },
+   "reviewer": {
+    "title": "Reviewer",
+    "type": "string"
+   }
+  },
+  "required": [
+   "case_id",
+   "reviewer",
+   "path",
+   "note"
+  ],
+  "title": "Shared",
+  "type": "object"
+ },
+ "StartIn": {
+  "$defs": {
+   "CredentialIn": {
+    "additionalProperties": false,
+    "description": "Where the scoped key is, never the key itself.",
+    "properties": {
+     "registry_key": {
+      "title": "Registry Key",
+      "type": "string"
+     },
+     "scope": {
+      "default": "",
+      "title": "Scope",
+      "type": "string"
+     },
+     "source_env": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Source Env"
+     },
+     "source_file": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "default": null,
+      "title": "Source File"
+     },
+     "spend_cap_usd": {
+      "exclusiveMinimum": 0,
+      "title": "Spend Cap Usd",
+      "type": "number"
+     },
+     "ttl_hours": {
+      "default": 24.0,
+      "exclusiveMinimum": 0,
+      "title": "Ttl Hours",
+      "type": "number"
+     }
+    },
+    "required": [
+     "registry_key",
+     "spend_cap_usd"
+    ],
+    "title": "CredentialIn",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "agent": {
+    "title": "Agent",
+    "type": "string"
+   },
+   "box_env": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Box Env"
+   },
+   "credential": {
+    "anyOf": [
+     {
+      "$ref": "#/$defs/CredentialIn"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null
+   },
+   "model": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Model"
+   },
+   "project": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Project"
+   },
+   "registry_key": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Registry Key"
+   },
+   "session_id": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "default": null,
+    "title": "Session Id"
+   }
+  },
+  "required": [
+   "agent"
+  ],
+  "title": "StartIn",
+  "type": "object"
+ },
+ "SteerIn": {
+  "additionalProperties": false,
+  "properties": {
+   "send": {
+    "default": true,
+    "title": "Send",
+    "type": "boolean"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   },
+   "text": {
+    "minLength": 1,
+    "title": "Text",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "text"
+  ],
+  "title": "SteerIn",
+  "type": "object"
+ },
+ "Steered": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "court_results_seen": {
+    "$ref": "#/$defs/Number"
+   },
+   "event_id": {
+    "title": "Event Id",
+    "type": "string"
+   },
+   "note": {
+    "title": "Note",
+    "type": "string"
+   },
+   "reply": {
+    "anyOf": [
+     {
+      "type": "string"
+     },
+     {
+      "type": "null"
+     }
+    ],
+    "title": "Reply"
+   },
+   "sent": {
+    "title": "Sent",
+    "type": "boolean"
+   },
+   "session_id": {
+    "title": "Session Id",
+    "type": "string"
+   }
+  },
+  "required": [
+   "session_id",
+   "event_id",
+   "sent",
+   "reply",
+   "court_results_seen",
+   "note"
+  ],
+  "title": "Steered",
+  "type": "object"
+ },
+ "TechnicalView": {
+  "additionalProperties": false,
+  "description": "The technical details, as the Court gives them. It shows nothing `display.view` does not.",
+  "properties": {
+   "case_id": {
+    "title": "Case Id",
+    "type": "string"
+   },
+   "details": {
+    "additionalProperties": true,
+    "title": "Details",
+    "type": "object"
+   }
+  },
+  "required": [
+   "case_id",
+   "details"
+  ],
+  "title": "TechnicalView",
+  "type": "object"
+ },
+ "Waiting": {
+  "$defs": {
+   "Number": {
+    "additionalProperties": false,
+    "properties": {
+     "link": {
+      "title": "Link",
+      "type": "string"
+     },
+     "value": {
+      "anyOf": [
+       {
+        "type": "number"
+       },
+       {
+        "type": "integer"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "title": "Value"
+     }
+    },
+    "required": [
+     "value",
+     "link"
+    ],
+    "title": "Number",
+    "type": "object"
+   },
+   "WaitingItem": {
+    "additionalProperties": false,
+    "properties": {
+     "command": {
+      "title": "Command",
+      "type": "string"
+     },
+     "human_only": {
+      "title": "Human Only",
+      "type": "boolean"
+     },
+     "id": {
+      "title": "Id",
+      "type": "string"
+     },
+     "optional": {
+      "default": false,
+      "title": "Optional",
+      "type": "boolean"
+     },
+     "title": {
+      "title": "Title",
+      "type": "string"
+     },
+     "why": {
+      "title": "Why",
+      "type": "string"
+     }
+    },
+    "required": [
+     "id",
+     "title",
+     "why",
+     "human_only",
+     "command"
+    ],
+    "title": "WaitingItem",
+    "type": "object"
+   }
+  },
+  "additionalProperties": false,
+  "properties": {
+   "items": {
+    "items": {
+     "$ref": "#/$defs/WaitingItem"
+    },
+    "title": "Items",
+    "type": "array"
+   },
+   "total": {
+    "$ref": "#/$defs/Number"
+   }
+  },
+  "required": [
+   "items",
+   "total"
+  ],
+  "title": "Waiting",
+  "type": "object"
+ }
+}

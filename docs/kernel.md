@@ -121,3 +121,28 @@ Not detected: other transformations (re-mapping labels, nested or compressed enc
 thresholds), and information leaking through the metric itself (probing submissions). The engine's trace scrubber
 and the research audit (I5) are outside the Kernel; I5 gains the encoded-view checks through `verify/leak.py` but
 not label runs unless its caller passes `label_runs` in the fingerprint.
+
+## 8. Kernel 1.2 (GOAL §16, 2026-10-07)
+
+- **Fixed at registration (invariant 17).** `preregister` stores `fixed` in the prereg entry: `p0` (alpha /
+  n_comparisons, or the alpha-account slot level), `p_ref` (Laplace base rate of certificates resolved so far, the
+  pinned reference forecaster) and the K3 reliability requirement (`eps_max`, `beta`, `replays`). A forecast q < p0 is
+  refused (F2). VDS = sum of log2 LR with LR = q/p0 or (1-q)/(1-p0); `ville_threshold(alpha)` = log2(1/alpha). Skill
+  is reported separately against `p_ref`.
+- **Alpha-accounts.** `open_alpha_account(target, alpha, slots, approver)` (human; refused once a claim exists on the
+  target family). Each later claim reserves a slot at alpha/slots; the last slot retires the target;
+  `retire_alpha_account` retires early. Targets without an account keep alpha / max(n_comparisons, family).
+- **Release ledger.** `record_release(target, channel, alphabet, note)`; K4 uses the transcript bound
+  (`releases.transcript_bound`); a `continuous` release makes later claims on the family fail K6 (adaptively
+  exposed). Assumption on every data certificate: the release log is complete.
+- **verify.** `verify_status(cert)` re-derives as of the certificate's own ledger prefix (forged if different) and
+  today (stale if different). `verify()` stays strict (problems prefixed `forged:` / `stale:`).
+- **K3** passes only after `replays` consecutive clean re-executions (zero-failure demonstration; presets
+  eps 0.2, beta 0.1 -> 11 replays, UNCALIBRATED).
+- **K4** compares the executed test (interval methods, level, sample size) with the registered plan
+  (`K4_PLAN_CODE_DIVERGENCE`).
+- **Reason codes.** Every reason carries a closed `reasons.Code`; exception messages never enter reasons (type name
+  from a fixed set only). Agent-visible surfaces should carry codes, never reason text.
+- **Self-reported fields** (an external/future role no human approved) cap the tier at T4 (UNCALIBRATED).
+- **Replayed evidence** (record or trace marked `replayed`) is refused at K0 (invariant 21).
+- **Minted targets.** `record_mint` (one mint per frozen hash); K1 enforces `delta_floor` on minted targets.

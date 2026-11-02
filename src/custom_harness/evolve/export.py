@@ -45,14 +45,20 @@ import re
 import secrets
 import shutil
 import stat
+import tempfile
 from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..kerneld.client import truth_query
+from ..kerneld.releases import Releases, run_targets
+from ..runtime.taint import step_labels
 from ..store import EvidenceStore
-from ..verify.leak import CANARY_PREFIX, label_windows, scan_text
+from ..verify.leak import CANARY_PREFIX, scan_text
+from ..weights.goodhart import scan as goodhart_scan
+from ..weights.goodhart import sealed_fingerprints
 from .evaluate import RunOutcome, SuiteTask
 
 FORMAT = "chh-evidence-export/1"
@@ -68,9 +74,16 @@ _LINEAGE_VIEW = ("parent", "status", "candidate", "edit", "reason", "problem", "
                  "signature", "claims_check", "rejected_on")
 # generation_stats: counters over lineage statuses only (loop._counters)
 _STATS_VIEW = ("parent", "proposed", "malformed", "declined", "rejected_novelty", "rejected_static",
-               "no_op_or_duplicate", "accepted", "rejected_gate", "raced", "pruned", "gated", "yield")
+               "no_op_or_duplicate", "rejected_claims", "rejected_smoke", "accepted", "rejected_gate",
+               "infra_aborted", "raced", "pruned", "gated", "yield")
 _DROP_KEYS = ("bundle_path", "checkpoint_ref")  # host path of a label-carrying bundle; private state blob
-_HEX = re.compile(r"^[0-9a-f]{16,128}$")
+# verdict embargo (GOAL §16.5.3): held-out results reach the proposer as verdict labels only. These state keys hold
+# certificate summaries (subject/comparator means, effect, CIs: continuous held-out values) or text rendered from
+# them; in exported traces they are reduced to their label (certificates) or withheld (text).
+_CERT_KEYS = ("certificate", "replica_certificate")
+_EMBARGOED_KEYS = ("report", "report_ref", "publish_blockers", "checklist")
+EMBARGOED = "<embargoed until the target retires>"
+_HEX = re.compile(r"^[0-9a-f]{16,128}\Z")  # \Z, not $: `$` also matches before a trailing newline
 _MAX_PRIVATE_SCAN = 1024 * 1024  # private files above this are matched by hash only
 
 
@@ -136,6 +149,45 @@ def _clean(obj: Any, drop: tuple[str, ...] = _DROP_KEYS) -> Any:
     return obj
 
 
+def embargo(obj: Any) -> Any:
+    """Reduce held-out results to verdict labels: certificate dicts keep only hash and label; report text is
+    withheld. Applied recursively to exported trace outputs."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for k, v in obj.items():
+            if k in _CERT_KEYS and isinstance(v, dict):
+                out[k] = {"hash": v.get("hash"), "label": v.get("label"), "embargoed": True}
+            elif k in _EMBARGOED_KEYS:
+                out[k] = EMBARGOED
+            else:
+                out[k] = embargo(v)
+        return out
+    if isinstance(obj, list):
+        return [embargo(v) for v in obj]
+    return obj
+
+
+def embargo_labelled(doc: dict[str, Any], *, control: bool) -> dict[str, Any]:
+    """A trace step whose output carries target labels (runtime/taint.py: what it wrote derives from held-out
+    targets): every output value and the error are withheld, except certificate summaries already reduced to their
+    verdict label by `embargo`. If the step ran BECAUSE of a target-dependent routing decision (`control`), which node
+    ran is withheld too. Withholding, not releasing: continuous held-out values never reach the evolver (inv. 18)."""
+    out = dict(doc)
+    output = out.get("output")
+    if isinstance(output, dict):
+        out["output"] = {k: (v if k in _CERT_KEYS and isinstance(v, dict) and v.get("embargoed") is True
+                             else EMBARGOED) for k, v in output.items()}
+    if out.get("error") is not None:
+        out["error"] = EMBARGOED
+    if control:  # which node ran, and anything naming it, tells which way the decision went
+        out["node_id"] = EMBARGOED
+        out["input"] = EMBARGOED
+        out["output"] = EMBARGOED  # its output KEYS name the branch too
+        if out.get("provenance") is not None:
+            out["provenance"] = EMBARGOED
+    return out
+
+
 def _dump(path: Path, obj: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\n") as f:
@@ -143,7 +195,7 @@ def _dump(path: Path, obj: Any) -> None:
 
 
 def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOutcome], tasks: list[SuiteTask],
-                    canaries: Iterable[str] = ()) -> ExportResult:
+                    canaries: Iterable[str] = (), releases: Releases | None = None) -> ExportResult:
     out_dir = Path(out_dir)
     if out_dir.exists():
         raise ExportRefused([f"destination exists: {out_dir} (an export is never overwritten)"])
@@ -159,11 +211,18 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         split = by_id[o.task_id].split
         if split != "evolve":
             excluded[split] += 1
+        elif o.run_id and _record_task(store, o.run_id) != o.task_id:  # the run record says another task: untrusted
+            excluded["task_mismatch"] += 1
         elif o.run_id not in exported:
             exported[o.run_id] = o
     tmp = out_dir.parent / f".{out_dir.name}.partial-{secrets.token_hex(4)}"
     try:
         files = _write(store, tmp, exported, evolve_ids)
+        rel = releases if releases is not None else Releases.live(store)
+        for run_id, o in sorted(exported.items()):  # each exported run releases its verdict labels
+            if run_id:
+                rel.emit(o.cert_label, targets=run_targets(store, run_id), channel="export",
+                         alphabet="verdict_bit", note="export.run:verdict", key=f"{o.task_id}|{o.seed}")
         problems = _audit(tmp, _fingerprints(store, tasks, exported, canaries))
         if problems:
             raise ExportRefused(problems)
@@ -173,6 +232,13 @@ def export_evidence(store: EvidenceStore, out_dir: Path, *, runs: Iterable[RunOu
         raise
     _make_read_only(out_dir)
     return ExportResult(out_dir, len([r for r in exported if r]), dict(excluded), files)
+
+
+def _record_task(store: EvidenceStore, run_id: str) -> str | None:
+    try:
+        return store.get_run(run_id).task_id
+    except KeyError:
+        return None
 
 
 def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], evolve_ids: set[str]) -> list[str]:
@@ -199,13 +265,19 @@ def _write(store: EvidenceStore, root: Path, exported: dict[str, RunOutcome], ev
         status, detail = store.run_status(run_id)
         spec_hashes.add(run.harness_hash)
         steps = []
+        labels = step_labels(store, run_id)
         for st in store.trace(run_id):
-            doc = _clean(st.model_dump(mode="json"))
+            doc = embargo(_clean(st.model_dump(mode="json")))
+            lab = labels.get(st.index)
+            if lab is not None and lab.tainted:
+                doc = embargo_labelled(doc, control=bool(lab.control))
             steps.append(doc)
             out = st.output if isinstance(st.output, dict) else {}
             for key in ("certificate", "replica_certificate"):
                 if isinstance(out.get(key), dict):
                     certs.append(_cert_summary(store, run_id, st.index, key, out[key], cert_blobs))
+        if any(lab.tainted for lab in labels.values()):
+            detail = EMBARGOED  # the run's end detail quotes its last step's error (possibly target-derived)
         put(f"traces/{run_id}.json", {"run": {"id": run.id, "harness_hash": run.harness_hash, "task_id": run.task_id,
                                               "seed": run.seed, "status": status.value, "detail": detail},
                                       "steps": steps})
@@ -244,7 +316,7 @@ def _cert_summary(store: EvidenceStore, run_id: str, index: int, key: str, info:
                   cert_blobs: dict[str, Any]) -> dict[str, Any]:
     """Label, failed checks and their reasons. The full certificate (claim, evidence ids, config) stays out."""
     out: dict[str, Any] = {"run_id": run_id, "step": index, "key": key, "hash": info.get("hash"),
-                           "label": info.get("label"), "failed": list(info.get("failed") or []), "reasons": {}}
+                           "label": info.get("label"), "failed": [], "reasons": {}}
     blob = cert_blobs.get(str(info.get("hash")))
     if blob:
         try:
@@ -255,7 +327,8 @@ def _cert_summary(store: EvidenceStore, run_id: str, index: int, key: str, info:
             out["label"] = cert.get("label", out["label"])
             failed = {k: v for k, v in cert["checks"].items() if isinstance(v, dict) and v.get("status") == "fail"}
             out["failed"] = sorted(failed)
-            out["reasons"] = {k: list(v.get("reasons") or []) for k, v in sorted(failed.items())}
+            # reasons are free text that quotes held-out statistics (CI bounds, means): embargoed (§16.5.3)
+            out["reasons"] = {k: EMBARGOED for k in sorted(failed)}
     return out
 
 
@@ -273,25 +346,9 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
     windows: list[str] = []
     paths: list[str] = []
     found: list[str] = [c for c in canaries if c]
-    for t in tasks:
-        pdir = Path(t.task_dir) / "private"
-        if not pdir.is_dir():
-            continue
-        for variant in {str(pdir), pdir.as_posix(), str(pdir.resolve()), pdir.resolve().as_posix()}:
-            paths.append(variant.replace("\\", "/").lower())
-        for p in sorted(pdir.rglob("*")):
-            if not p.is_file():
-                continue
-            data = p.read_bytes()
-            hashes[hashlib.sha256(data).hexdigest()] = f"{t.task_id}/private/{p.relative_to(pdir).as_posix()}"
-            if len(data) > _MAX_PRIVATE_SCAN:
-                continue
-            text = data.decode("utf-8", errors="ignore")
-            found += [tok for tok in text.split() if tok.startswith(CANARY_PREFIX)]
-            if len(text.strip()) >= 16:
-                contents.append(text.strip())
-            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-            windows += label_windows(lines[1:])  # a private CSV: header, then one label per line
+    # GOAL §16.5.2: no host read of task truth. The truth part of the audit (hashes, truth canaries, label windows,
+    # verbatim contents, truth dir paths) runs in kerneld (`truth_query export_scan`, see `_audit`); the truth keys
+    # stay for shape and are empty here.
     secrets_: list[str] = []
     for run_id in exported:
         if not run_id:
@@ -306,7 +363,12 @@ def _fingerprints(store: EvidenceStore, tasks: list[SuiteTask], exported: dict[s
             state = doc.get("state", doc) if isinstance(doc, dict) else {}
             secrets_ += _private_values(state)
     return {"hashes": hashes, "contents": contents, "windows": windows, "paths": sorted(set(paths)),
-            "canaries": sorted(set(found)), "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True)}
+            "canaries": sorted(set(found)),
+            # secrets minus the PASSED canaries only (canaries inside truth files are no longer known here)
+            "secrets": sorted(set(secrets_) - set(found), key=len, reverse=True),
+            "truth_tasks": {t.task_id: str(t.task_dir) for t in tasks}, "store_root": str(store.root),
+            # L8 (s3-verifiers): owner-only coupled-Goodhart reports (they hold sealed scores, invariant 18)
+            "goodhart": sealed_fingerprints(store)}
 
 
 def _strings(obj: Any, keys: list[str]) -> Iterable[str]:
@@ -346,10 +408,51 @@ def _audit(root: Path, fp: dict[str, Any]) -> list[str]:
                 problems.append(f"a private run-state value found in {rel}")
             if any(c in text for c in fp["contents"]):
                 problems.append(f"verbatim content of a task's private file found in {rel}")
+            problems += [f"{what} found in {rel}" for what in goodhart_scan(text, fp.get("goodhart", {}))]
             norm = text.replace("\\", "/").lower()
             if any(pp in norm for pp in fp["paths"]):
                 problems.append(f"a task's private directory path found in {rel}")
+    if fp.get("truth_tasks"):  # the truth part of the audit, computed in kerneld (fail closed: errors propagate)
+        problems += truth_query("export_scan", store_root=fp["store_root"], tasks=fp["truth_tasks"],
+                                root=str(root))["problems"]
     return list(dict.fromkeys(problems))
+
+
+def screen_digest(digest: dict[str, Any], store: EvidenceStore, *, runs: Iterable[RunOutcome],
+                  tasks: list[SuiteTask], canaries: Iterable[str] = ()) -> dict[str, Any]:
+    """The export's leak audit (`_audit`, same fingerprints: every task's private files, canaries, label windows,
+    private run-state values, private paths) applied to the diagnosis the proposer reads in its prompt. Fail closed:
+    on any finding the raw cluster example excerpts are dropped; if the rest still fails, only counts remain. The
+    findings are reported as a count (`withheld`), never quoted."""
+    by_id = {t.task_id: t for t in tasks}
+    # the runs the diagnosis can have read: evolve tasks whose run record exists and names the same task (as
+    # propose.diagnose and export_evidence require); a run id with no record has nothing to fingerprint
+    exported = {o.run_id: o for o in runs if o.task_id in by_id and by_id[o.task_id].split == "evolve"
+                and (not o.run_id or _record_task(store, o.run_id) == o.task_id)}
+    fp = _fingerprints(store, tasks, exported, canaries)
+
+    def problems(doc: dict[str, Any]) -> list[str]:
+        tmp = Path(tempfile.mkdtemp(prefix="chh-digest-"))
+        try:
+            _dump(tmp / "digest.json", doc)
+            found = _audit(tmp, fp)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        # error signatures are normalised (evaluate._signature: digits -> <n>), which mangles a canary past the
+        # verbatim/fragment match above while its prefix and letters survive: the prefix alone is a finding
+        if CANARY_PREFIX.lower() in json.dumps(doc, default=str).lower():
+            found.append("a canary prefix found in the digest")
+        return found
+
+    found = problems(digest)
+    if not found:
+        return digest
+    lean = {**digest, "clusters": [{k: v for k, v in c.items() if k != "examples"} for c in digest.get("clusters", [])],
+            "withheld": len(found)}
+    if not problems(lean):
+        return lean
+    return {k: digest[k] for k in ("n_runs", "n_excluded_infra", "n_excluded_split") if k in digest} | {
+        "clusters": [], "divergences": [], "no_reference": [], "withheld": len(found)}
 
 
 def _make_read_only(root: Path) -> None:

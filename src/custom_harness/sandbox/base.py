@@ -16,6 +16,9 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ..pathsafe import canon, is_within, root_overlapping
+from .hermetic import WITNESS_CONTENDED_RATIO, EntropyPin, parse_supervisor, split_record
+
 
 class WorkspaceEscape(PermissionError):
     """A host-side workspace access would leave the workspace (symlink, junction, '..', absolute path).
@@ -39,7 +42,7 @@ def safe_path(workspace: Path, rel: str | Path) -> Path:
         cur = cur / part
         if is_link_like(cur):
             raise WorkspaceEscape(f"refusing to follow link or special entry at {cur.relative_to(root).as_posix()!r}")
-    if not cur.resolve().is_relative_to(root):
+    if not is_within(cur, root):
         raise WorkspaceEscape(f"path {str(rel)!r} resolves outside the workspace")
     return cur
 
@@ -72,6 +75,14 @@ class ExecResult(BaseModel):
     #: why the sandbox killed / failed the program for exceeding a resource limit (a POLICY failure of the
     #: program: returncode is LIMIT_RETURNCODE; never an infrastructure failure)
     limit_exceeded: str | None = None
+    #: CPU seconds charged to the program (None = no CPU limit was set: today's wall-clock-only behaviour)
+    cpu_s: float | None = None
+    cpu_exceeded: bool = False
+    #: contention witness verdict after a wall backstop fired below the CPU limit (None = no witness run). True means
+    #: the host was contended: INFRA, the caller re-runs the WHOLE evaluation (never a single seed)
+    contended: bool | None = None
+    #: digest of the entropy pin the run had (None = unpinned)
+    entropy_pin: str | None = None
 
 
 # ---------------------------------------------------------------- resource limits (STATUS §D, M0 "agent cannot
@@ -169,13 +180,18 @@ class BoundedRun:
 
 def run_bounded(args: list[str], *, timeout_s: float, max_output_bytes: int, cwd: Path | None = None,
                 env: dict[str, str] | None = None, check: Callable[[], str | None] | None = None,
-                kill: Callable[[], object] | None = None, poll_s: float = WORKSPACE_POLL_S) -> BoundedRun:
+                kill: Callable[[], object] | None = None, poll_s: float = WORKSPACE_POLL_S,
+                stdin_data: bytes | None = None) -> BoundedRun:
     """Run a process with bounded output capture. `check` is polled while it runs (and once after it exits);
     a non-None reason kills it (`kill` first, e.g. `docker kill`, then the local process). OSError from starting
     the process propagates (the caller classifies it)."""
     t0 = time.monotonic()
-    proc = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL if stdin_data is None else subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if stdin_data is not None and proc.stdin is not None:
+        with contextlib.suppress(OSError):
+            proc.stdin.write(stdin_data)
+            proc.stdin.close()
     out, err = _Capture(proc.stdout, max_output_bytes), _Capture(proc.stderr, max_output_bytes)
     deadline = t0 + timeout_s
     timed_out, reason = False, None
@@ -221,7 +237,7 @@ class ProtectedMount(PermissionError):
 
 
 def _norm(p: Path | str) -> Path:
-    return Path(os.path.normcase(str(Path(p).resolve())))
+    return Path(os.path.normcase(str(canon(p))))
 
 
 def protect_path(p: Path | str) -> None:
@@ -231,17 +247,22 @@ def protect_path(p: Path | str) -> None:
 
 def protected_paths() -> list[Path]:
     from ..config import data_dir
+    from ..truth_layout import protected_truth_dirs
     d = data_dir()
-    return sorted({_norm(d / "store"), _norm(d / "bundles"), *(Path(p) for p in _PROTECTED)})
+    # d / "human": the human-only L9 config (studio/tierpolicy.py), never inside an agent mount; the held-out truth
+    # dirs (truth_layout: every mapped task's private files) likewise, whether or not a task registered them yet
+    return sorted({_norm(d / "store"), _norm(d / "bundles"), _norm(d / "human"),
+                   *(_norm(t) for t in protected_truth_dirs()), *(Path(p) for p in _PROTECTED)})
 
 
 def check_mount(workspace: Path | str) -> None:
-    """Refuse a workspace that is, is inside, or contains a protected path."""
-    ws = _norm(workspace)
-    for p in protected_paths():
-        if ws == p or ws.is_relative_to(p) or p.is_relative_to(ws):
-            raise ProtectedMount(f"sandbox workspace {workspace} overlaps the protected path {p} "
-                                 "(evidence store, bundles or a task's private files must never be agent-visible)")
+    """Refuse a workspace that is, is inside, or contains a protected path. Alias-safe (pathsafe.overlaps): a
+    `\\\\?\\` or `\\\\.\\` prefix, an admin share, an 8.3 short name or other case of the same directory is the same
+    directory (s3-evolve red team, 2026-10-14: the `\\\\?\\` alias of the evidence store was accepted)."""
+    p = root_overlapping(workspace, protected_paths())
+    if p is not None:
+        raise ProtectedMount(f"sandbox workspace {workspace} overlaps the protected path {p} "
+                             "(evidence store, bundles or a task's private files must never be agent-visible)")
 
 
 class Sandbox(ABC):
@@ -267,9 +288,56 @@ class Sandbox(ABC):
                           wall_s=r.wall_s, timed_out=r.timed_out, stdout_omitted=r.stdout_omitted,
                           stderr_omitted=r.stderr_omitted, limit_exceeded=r.limit_exceeded)
 
+    #: entropy every later exec gets (None = unpinned, today's behaviour). Set with pin_entropy().
+    entropy: EntropyPin | None = None
+
+    def pin_entropy(self, pin: EntropyPin | None) -> None:
+        """Pin (or unpin) the entropy of every later exec (GOAL §16.5.1; what is pinned: sandbox/hermetic.py)."""
+        self.entropy = pin
+
+    def _pinned_env(self, env: dict[str, str] | None, support: str) -> dict[str, str]:
+        """The caller's env with the pin's variables on top (the pin wins: it is what the record says ran)."""
+        return {**(env or {}), **(self.entropy.env(support) if self.entropy else {})}
+
+    def _supervised_result(self, r: BoundedRun, nonce: str, cpu_s: float,
+                           witness: Callable[[], float | None]) -> ExecResult:
+        """ExecResult of a run under the CPU supervisor. Every failure to obtain a genuine supervisor record is the
+        PROGRAM's failure (it is the only party that could have prevented the record), never infrastructure."""
+        stderr, raw = split_record(r.stderr)
+        sup = parse_supervisor(raw) if raw is not None and raw.get("nonce") == nonce else None
+        pin = self.entropy.digest if self.entropy else None
+        base = BoundedRun(r.returncode, r.stdout, stderr, r.stdout_omitted, r.stderr_omitted, r.wall_s, r.timed_out,
+                          r.limit_exceeded)
+        if r.timed_out or r.limit_exceeded:
+            res = self._result(base, -1)
+            return res.model_copy(update={"cpu_s": sup.cpu_s if sup else None, "entropy_pin": pin})
+        if sup is None:
+            base.limit_exceeded = "the CPU supervisor's record is missing or not genuine"
+            return self._result(base, -1).model_copy(update={"entropy_pin": pin})
+        if sup.cpu_exceeded:
+            base.limit_exceeded = f"CPU time exceeded its limit ({cpu_s} s)"
+            return self._result(base, -1).model_copy(update={"cpu_s": sup.cpu_s, "cpu_exceeded": True,
+                                                             "entropy_pin": pin})
+        if sup.wall_exceeded:  # the wall backstop fired below the CPU limit: slept, or the host was contended
+            ratio = witness()
+            contended = None if ratio is None else ratio > WITNESS_CONTENDED_RATIO
+            base.timed_out = True
+            verdict = {True: "contended: INFRA, re-run the whole evaluation",
+                       False: "not contended: the program's own failure", None: "witness unavailable"}[contended]
+            note = (f"\n[sandbox] wall backstop fired at {sup.wall_s} s with {sup.cpu_s} s CPU (limit {cpu_s} s); "
+                    f"contention witness wall/CPU={ratio}: {verdict}")
+            base.stderr += note
+            return self._result(base, -1).model_copy(update={"cpu_s": sup.cpu_s, "contended": contended,
+                                                             "entropy_pin": pin})
+        return self._result(base, sup.rc if sup.rc is not None else -1).model_copy(
+            update={"cpu_s": sup.cpu_s, "entropy_pin": pin})
+
     @abstractmethod
-    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None) -> ExecResult:
-        ...
+    def exec(self, command: list[str], timeout_s: float = 600, env: dict[str, str] | None = None, *,
+             cpu_s: float | None = None) -> ExecResult:
+        """Run `command`. `cpu_s` (GOAL §16.8): charge the program CPU seconds across all its processes, with a wall
+        backstop of `timeout_s` (callers set it to about hermetic.CPU_WALL_BACKSTOP x cpu_s). None = wall timeout
+        only (today's behaviour). Implemented by the trusted supervisor in sandbox/support/supervise.py."""
 
     @abstractmethod
     def spawn(self, workspace: Path) -> Sandbox:

@@ -1,0 +1,17 @@
+{
+  "version": "6.9",
+  "hitCount": 1,
+  "request": {"queryString": "DOI:\"10.5555/lit.2022.077\"", "resultType": "core", "pageSize": 1},
+  "resultList": {
+    "result": [
+      {
+        "id": "31000077", "source": "MED", "pmid": "31000077", "pmcid": "PMC9000077", "doi": "10.5555/lit.2022.077",
+        "title": "Hypoxia-Induced Splicing Shifts in Cultured Hepatocytes.",
+        "authorString": "Okafor N, Lindqvist M, Tanaka H.",
+        "pubYear": "2022", "firstPublicationDate": "2022-03-15",
+        "abstractText": "We measured alternative splicing in cultured hepatocytes under low oxygen and report a reproducible shift in exon usage.",
+        "isOpenAccess": "Y", "inEPMC": "Y", "license": "cc by"
+      }
+    ]
+  }
+}

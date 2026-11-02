@@ -16,13 +16,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ..store.evidence import EvidenceStore, LedgerRow
-from .claim import canonical_json
+from .claim import canonical_json, strict_json
 
 KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_access", "certificate", "bundle",
                    "retraction", "adapter_approval",
@@ -31,7 +33,20 @@ KINDS = frozenset({"register_dataset", "register_artifact", "prereg", "data_acce
                    "statement_approval",  # a HUMAN approved a Lean statement (`chh approve-statement`)
                    # approval node (runtime/engine.py): the engine records each pause; only `chh approve` records
                    # a human decision
-                   "approval_request", "approval"})
+                   "approval_request", "approval",
+                   # §16.5.3 release ledger; §16.4 per-target alpha-accounts (open: human; reserve: preregister;
+                   # retire: slots exhausted or a human)
+                   "release", "alpha_open", "alpha_reserve", "alpha_retire",
+                   # §16.2 minted targets (Kernel.record_mint); bodies owned by other workstreams: human feature-
+                   # provenance rulings (§16.5.6) and second-family role-exam admissions (§16.8)
+                   "mint", "feature_ruling", "role_exam",
+                   "truth_copy",  # §16.5.4: a declared agent-reachable copy of a target's truth (declare_truth_copy)
+                   "tree_event",  # L4.7 experiment-tree events (research/tree.py owns the body)
+                   "salt_commitment", "salt_reveal",  # §16.9 salt campaigns (salts/plan.py owns the bodies)
+                   # L9 HUMAN actions written by the studio CLI (`chh kill`, `chh tier-policy set`)
+                   "run_kill", "tier_policy",
+                   "verifier_review",  # verify/synthesis.py owns the body
+                   "fork"})  # runtime/engine.py Engine.fork owns the body
 
 
 def entry_hash(seq: int, kind: str, body: str, prev: str, at: float) -> str:
@@ -50,7 +65,7 @@ class Entry:
     @staticmethod
     def from_row(row: LedgerRow) -> Entry:
         seq, kind, body, prev, h, at = row
-        return Entry(seq, kind, json.loads(body), prev, h, at)
+        return Entry(seq, kind, strict_json(body), prev, h, at)
 
     def row(self) -> LedgerRow:
         return self.seq, self.kind, canonical_json(self.body).decode(), self.prev, self.hash, self.at
@@ -80,6 +95,19 @@ class Ledger:
         return verify_chain(self.entries(), full=True)
 
 
+class AsOfLedger(Ledger):
+    """The ledger as it was up to and including entry `last_seq` (§16.4: `verify` re-derives a certificate as of
+    its own ledger prefix). Reads see only that prefix; appends (the logged label reads a re-derivation makes) still
+    go to the real ledger, because a read is a real event that must be logged."""
+
+    def __init__(self, store: EvidenceStore, last_seq: int):
+        super().__init__(store)
+        self.last_seq = last_seq
+
+    def entries(self, kind: str | None = None) -> list[Entry]:
+        return [e for e in super().entries(kind) if e.seq <= self.last_seq]
+
+
 def verify_chain(entries: list[Entry], *, full: bool) -> list[str]:
     """Every entry must hash correctly. With full=True the entries must also form one unbroken chain
     from genesis; an excerpt (full=False) is checked per entry and for increasing seq only."""
@@ -96,6 +124,24 @@ def verify_chain(entries: list[Entry], *, full: bool) -> list[str]:
     return problems
 
 
+# ------------------------------------------------------------------ path containment (Windows aliases)
+_DEVICE = re.compile(r"^\\\\[?.]\\(?:(UNC)\\|(?=[A-Za-z]:))", re.I)  # \\?\C:..., \\.\C:..., \\?\UNC\server\...
+
+
+def inside(a: Path | str, b: Path | str, *, on_error: bool) -> bool:
+    """`a` is `b` or under it, whatever the spelling: by path without Windows device prefixes, then by file identity of
+    every existing ancestor (8.3, case, shares, GLOBALROOT); an NTFS stream suffix (`dir:stream`, RT-S4-7) names its
+    file. OSError -> `on_error`, the caller's fail-closed side."""
+    a, b = (Path((d := os.path.splitdrive(_DEVICE.sub(lambda m: "\\\\" if m.group(1) else "", os.fspath(p))))[0]
+                 + re.sub(r":[^\\/]+", "", d[1])).resolve() for p in (a, b))
+    if a == b or b in a.parents:
+        return True
+    try:
+        return b.exists() and any(x.exists() and os.path.samefile(x, b) for x in (a, *a.parents))
+    except OSError:
+        return on_error
+
+
 # ------------------------------------------------------------------ external anchoring
 ANCHOR_FORMAT = "chh-anchor/1"
 
@@ -107,7 +153,7 @@ class AnchorError(ValueError):
 def write_anchor(ledger: Ledger, path: Path, store_root: Path) -> dict[str, Any]:
     """Append the current (length, head) of an INTACT chain to an anchor file outside the store; returns the anchor."""
     path, root = Path(path).resolve(), Path(store_root).resolve()
-    if path == root or path.is_relative_to(root):
+    if inside(path, root, on_error=True):  # any alias of the store (\?\, 8.3, case) is the store
         raise AnchorError(f"the anchor file must live outside the store ({root}): whoever can rewrite the store "
                           f"could rewrite an anchor kept inside it")
     entries = ledger.entries()
@@ -130,7 +176,7 @@ def check_anchors(entries: list[Entry], path: Path) -> list[str]:
         return [f"anchor file {path} holds no anchor"]
     for i, line in enumerate(lines, 1):
         try:
-            a = json.loads(line)
+            a = strict_json(line)
             n, head = int(a["length"]), str(a["head"])
             if a.get("format") != ANCHOR_FORMAT or n < 0:
                 raise ValueError("not a chh-anchor/1 record")

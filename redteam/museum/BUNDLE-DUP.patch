@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/bundle.py b/src/custom_harness/kernel/bundle.py
+--- a/src/custom_harness/kernel/bundle.py
++++ b/src/custom_harness/kernel/bundle.py
+@@ -178,8 +178,6 @@
+             raise BundleError(f"bundle has {len(infos)} members, more than the cap of {limits.members}")
+         names = [i.filename for i in infos]
+         dups = sorted({n for n in names if names.count(n) > 1})
+-        if dups:  # a dict keeps the LAST member of a name; another reader may show the first: refuse (fail closed)
+-            raise BundleError(f"bundle has duplicate member name(s) {dups[:5]}: refused")
+         self.infos = {i.filename: i for i in infos}
+ 
+     def read(self, name: str) -> bytes:

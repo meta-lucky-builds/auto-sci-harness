@@ -7,22 +7,39 @@ runtime engine, the research loop or the evolver.
 
 from __future__ import annotations
 
+import csv
+import io
 import time
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
+from typing import Any, Literal
 
 from ..errors import InfraError
 from ..records import Evidence, EvidenceKind
 from ..store.evidence import EvidenceStore
 from ..tiers import Tier
-from . import adapters
+from . import adapters, alpha
 from .certificate import CHECK_IDS, VG_LADDER, Assumption, Certificate, CheckResult, Label
-from .checks import Context, KernelConfig, Replayer, applicability, checks_for, is_external
-from .claim import Claim, EvidenceClass
+from .checks import (
+    NOISE_FLOOR,
+    NOISE_SOURCES,
+    Context,
+    KernelConfig,
+    Replayer,
+    applicability,
+    checks_for,
+    fixed_terms,
+    is_external,
+    related_targets,
+    slot_charge,
+)
+from .claim import Claim, EvidenceClass, canonical_json, strict_json
 from .execution import ExecRecord
-from .ledger import Entry, Ledger
+from .ledger import AsOfLedger, Entry, Ledger
+from .reasons import Code, UncodedReason, exception_name
+from .releases import NOTE, Alphabet, Channel
 from .simulated import SIMULATED_ASSUMPTIONS
-from .vault import CertificateRecord, Vault
+from .vault import EXTERNAL_ROLES, HELD_OUT_ROLES, CertificateRecord, Vault, VaultError
 
 STANDARD_ASSUMPTIONS = (
     Assumption(text="held-out examples are an i.i.d. sample of the population the claim is about", tested_by=None),
@@ -52,8 +69,32 @@ FORMAL_ASSUMPTIONS = (
 )
 
 
+RELEASE_ASSUMPTION = Assumption(
+    text="the release ledger is complete: no target-derived information reached an agent-visible surface except as a "
+         "ledgered release counted by K4 (side channels such as timing are not logged)", tested_by=None)
+
+
+# the exact classes: certified label, tier (simulated: T2, conservative, UNCALIBRATED: T1 allowed by §4.7), verifier id
+# prefix and standard assumptions; every other class is certified as data
+EXACT_CLASSES: dict[EvidenceClass, tuple[Label, Tier, str, tuple[Assumption, ...]]] = {
+    EvidenceClass.COMPUTATIONAL: (Label.CERTIFIED_EXACT, Tier.T1_EXECUTABLE, "exact", COMPUTATIONAL_ASSUMPTIONS),
+    EvidenceClass.SIMULATED: (Label.CERTIFIED_SIMULATED, Tier.T2_STATISTICAL, "sim", SIMULATED_ASSUMPTIONS),
+    EvidenceClass.FORMAL: (Label.CERTIFIED_FORMAL, Tier.T0_FORMAL, "lean", FORMAL_ASSUMPTIONS)}
+
+
 class KernelError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class VerifyResult:
+    """`valid`: the certificate is what the Kernel issues both as of its own ledger prefix and today. `stale`: it
+    re-derives as issued from its own prefix, but later events or a changed Kernel rule change today's verdict.
+    `forged`: it does not re-derive from the ledger as it stood when it was issued, under the same rules."""
+
+    status: Literal["valid", "stale", "forged"]
+    forged: tuple[str, ...]
+    stale: tuple[str, ...]
 
 
 class Kernel:
@@ -65,6 +106,9 @@ class Kernel:
         self.config = config or KernelConfig()
         self.replayer = replayer
         self.clock = clock
+        # s4-station: the run this Kernel is BOUND to (set only by a run-bound subclass, studio/kill.RunGuardedKernel,
+        # from ModuleContext.run_id; never a call argument). Recorded on prereg and certificate entries when set
+        self.run_id: str | None = None
 
     # ------------------------------------------------------------------ pre-registration
     def approve_adapter(self, name: str, approver: str) -> Entry:
@@ -76,12 +120,118 @@ class Kernel:
         return self.vault.approve_role(dataset_id, approver, note)
 
     def preregister(self, claim: Claim) -> Entry:
-        """Commit the claim (and its analysis plan) to the ledger. Idempotent per claim hash."""
+        """Commit the claim (and its analysis plan) to the ledger with the terms its verdict depends on frozen (§16.4,
+        invariant 17): p0, the reference forecast and the K3 reliability requirement. A forecast q < p0 is refused (F2).
+        On a target with an alpha-account the claim reserves a slot; a retired target refuses it. Idempotent."""
         h = claim.claim_hash()
         for e in self.ledger.entries("prereg"):
             if e.body.get("claim_hash") == h:
                 return e
-        return self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json")})
+        terms = fixed_terms(self.ledger, self.vault, claim, self.config)
+        if claim.evidence_class == EvidenceClass.DATA and claim.effect.probability < terms["p0"]:
+            raise KernelError(f"declared probability {claim.effect.probability} is below the claim's level p0 = "
+                              f"{terms['p0']:.4g} (a forecast below p0 would earn VDS by failing)")
+        accounts = {a.seq: a for t in claim.generalization_targets
+                    for a in alpha.accounts(self.ledger, related_targets(self.vault, t))}
+        spent = sorted({a.dataset_id for a in accounts.values() if alpha.retired(self.ledger, a)})
+        if spent:
+            raise KernelError(f"target(s) {spent} are retired (alpha-account closed): register on fresh data")
+        charge = {s: slot_charge(self.ledger, self.vault, a, self.config) for s, a in accounts.items()}
+        short = sorted({a.dataset_id for s, a in accounts.items()
+                        if charge[s] > a.slots - alpha.charged(self.ledger, a)})
+        if short:  # releases made this claim cost more slots than remain: refused, never tested at a looser level
+            raise KernelError(f"the alpha-account of target(s) {short} cannot pay this claim's slot charge (releases "
+                              f"since it opened): register on fresh data")
+        entry = self.ledger.append("prereg", {"claim_hash": h, "claim": claim.model_dump(mode="json"), "fixed": terms,
+                                              **self._bound()})
+        for a in sorted(accounts.values(), key=lambda a: a.seq):
+            n = len(alpha.reservations(self.ledger, a)) + 1
+            self.ledger.append("alpha_reserve", {"account": a.seq, "dataset_id": a.dataset_id, "claim_hash": h,
+                                                 "slot": n, "level": a.level, "charge": charge[a.seq]})
+            if alpha.charged(self.ledger, a) >= a.slots:
+                self.ledger.append("alpha_retire", {"account": a.seq, "dataset_id": a.dataset_id,
+                                                    "code": "slots_exhausted", "approver": None})
+        return entry
+
+    # ------------------------------------------------------------------ alpha-accounts (§16.4) and releases (§16.5.3)
+    def open_alpha_account(self, dataset_id: str, alpha_total: float, slots: int, approver: str) -> Entry:
+        """HUMAN action: give a held-out target a fixed budget of `slots` claims, each tested at alpha_total / slots.
+        Refused once any claim is registered on the target or a related one (their tests were not budgeted)."""
+        rec = self.vault.dataset(dataset_id)
+        if rec.role not in HELD_OUT_ROLES:
+            raise KernelError(f"{dataset_id!r} has role {rec.role.value!r}: only held-out targets get an alpha-account")
+        if not approver.strip():
+            raise KernelError("an alpha-account must name the human who opened it")
+        if not (0 < alpha_total <= self.config.max_alpha and slots >= 1):
+            raise KernelError(f"an alpha-account needs alpha in (0, {self.config.max_alpha}] and >= 1 slot")
+        related = related_targets(self.vault, dataset_id)
+        if alpha.accounts(self.ledger, related):
+            raise KernelError(f"{dataset_id!r} (or a target sharing its held-out examples) already has an account")
+        if any(related & set(e.body.get("claim", {}).get("generalization_targets", []))
+               for e in self.ledger.entries("prereg")):
+            raise KernelError(f"claims are already registered on {dataset_id!r} or a related target: open the account "
+                              f"before the first claim")
+        return self.ledger.append("alpha_open", {"dataset_id": dataset_id, "dataset_hash": rec.hash,
+                                                 "alpha": alpha_total, "slots": slots, "approver": approver})
+
+    def retire_alpha_account(self, dataset_id: str, approver: str) -> Entry:
+        """HUMAN action: retire a target early (no further claims can be registered on it)."""
+        accts = alpha.accounts(self.ledger, {dataset_id})
+        if not accts or not approver.strip():
+            raise KernelError(f"no alpha-account on {dataset_id!r}, or no approver named")
+        return self.ledger.append("alpha_retire", {"account": accts[0].seq, "dataset_id": dataset_id,
+                                                   "code": "human", "approver": approver})
+
+    def record_release(self, target_dataset_id: str, channel: str, alphabet: str, note: str) -> Entry:
+        """Log one transfer of target-derived information to an agent-visible surface (invariant 18). K4 counts the
+        transcripts releases allow; a `continuous` release adaptively exposes the target (K6)."""
+        try:
+            self.vault.dataset(target_dataset_id)
+            ch, ab = Channel(channel), Alphabet(alphabet)
+        except (VaultError, ValueError):
+            raise KernelError("release refused: unregistered target, or a channel/alphabet outside the closed set") \
+                from None
+        if NOTE.fullmatch(note) is None:
+            raise KernelError("a release note is a short lowercase code ([a-z][a-z0-9_.:-]{0,79}), never free text")
+        return self.ledger.append("release", {"dataset_id": target_dataset_id, "channel": ch.value,
+                                              "alphabet": ab.value, "note": note})
+
+    def record_mint(self, dataset_id: str, frozen_hash: str, beacon: str, task_id: str) -> Entry:
+        """Record that a target's truth was minted after the freeze `frozen_hash` (§16.2). One mint per frozen hash:
+        minting again under the same freeze (beacon shopping) is refused."""
+        self.vault.dataset(dataset_id)
+        if any(e.body.get("frozen_hash") == frozen_hash for e in self.ledger.entries("mint")):
+            raise KernelError(f"frozen hash {frozen_hash[:12]} was already minted: a second mint is beacon shopping")
+        return self.ledger.append("mint", {"dataset_id": dataset_id, "frozen_hash": frozen_hash, "beacon": beacon,
+                                           "task_id": task_id})
+
+    def declare_truth_copy(self, target: str, dataset_id: str, file: str, column: str, declarer: str) -> Entry:
+        """Trusted host code (task registration) declares that public file `dataset_id/file`, column `column`, carries
+        a copy of `target`'s held-out truth (possibly encoded) that a program could receive. K3 then requires the
+        non-interference replay (§16.5.4) of every record given that file. Declaring more only adds checks.
+        The public hook for task registration, IDEMPOTENT; declare before the task's first claim (docs/kernel_s4.md)."""
+        rec = self.vault.dataset(dataset_id)
+        if target not in self.vault.datasets() or file not in rec.files or rec.files[file].private:
+            raise KernelError("a truth copy is a PUBLIC file of a registered dataset, for a registered target")
+        header = next(csv.reader(io.StringIO(self.store.blobs.get(rec.files[file].blob).decode("utf-8", "replace"))),
+                      [])
+        if not declarer.strip() or column not in header:
+            raise KernelError(f"no column {column!r} in {dataset_id}/{file}, or no declarer named")
+        body = {"target": target, "dataset_id": dataset_id, "file": file, "column": column}
+        old = [e for e in self.ledger.entries("truth_copy") if {k: e.body.get(k) for k in body} == body]
+        return old[0] if old else self.ledger.append("truth_copy", {**body, "blob": rec.files[file].blob,
+                                                                    "declarer": declarer})
+
+    def record_noise_floor(self, floor: Any) -> str:
+        """Store a NoiseFloor as a chh-noise-floor/1 record: its hash is what a claim cites (K1 re-checks it)."""
+        runs = {k: [float(v) for v in getattr(floor, k)] for k in NOISE_SOURCES}
+        doc = {"format": NOISE_FLOOR, "reference": float(floor.reference), **runs}
+        return self.store.blobs.put(canonical_json(doc))
+
+    def releases(self, target_dataset_id: str) -> list[Entry]:
+        """Releases on the target and on every target sharing its held-out examples (the K4 family)."""
+        related = related_targets(self.vault, target_dataset_id)
+        return [e for e in self.ledger.entries("release") if e.body.get("dataset_id") in related]
 
     def registered_claim(self, claim_hash: str) -> Claim:
         for e in self.ledger.entries("prereg"):
@@ -114,51 +264,54 @@ class Kernel:
 
     # ------------------------------------------------------------------ certification
     def certify(self, claim: Claim, evidence_ids: list[str] | tuple[str, ...], *,
-                full_chain: bool = True, record: bool = True) -> Certificate:
+                full_chain: bool = True, record: bool = True, as_of: int | None = None) -> Certificate:
         """Run K0-K9 and issue an immutable certificate (recorded in the ledger). A check that raises is a
-        FAILED check. full_chain=False is only for reproducing from a bundle (a ledger excerpt)."""
-        ctx = Context(claim=claim, claim_hash=claim.claim_hash(), store=self.store, vault=self.vault,
-                      ledger=self.ledger, config=self.config, replayer=self.replayer,
+        FAILED check. full_chain=False is only for reproducing from a bundle (a ledger excerpt). as_of=seq re-derives
+        on the ledger as it stood up to entry seq (never recorded)."""
+        ablated = self._ablated_runs(evidence_ids)
+        if ablated:  # an ablation run is a measurement arm, never a source of certified truth (fail closed)
+            raise KernelError(f"certification refused: evidence produced by ABLATED run(s) {ablated}")
+        ledger = self.ledger if as_of is None else AsOfLedger(self.store, as_of)
+        vault = self.vault if as_of is None else Vault(self.store, ledger)
+        record = record and as_of is None
+        ctx = Context(claim=claim, claim_hash=claim.claim_hash(), store=self.store, vault=vault,
+                      ledger=ledger, config=self.config, replayer=self.replayer,
                       evidence_ids=tuple(evidence_ids), full_chain=full_chain)
         results: dict[str, CheckResult] = {}
-        registered = self.vault.registered(ctx.claim_hash)
+        registered = vault.registered(ctx.claim_hash)
         table, impl = applicability(claim.evidence_class), checks_for(claim.evidence_class)
-        computational = claim.evidence_class == EvidenceClass.COMPUTATIONAL
-        simulated = claim.evidence_class == EvidenceClass.SIMULATED
-        formal = claim.evidence_class == EvidenceClass.FORMAL
+        exact = EXACT_CLASSES.get(claim.evidence_class)  # (label, tier, verifier prefix, assumptions) or data
         for kid in CHECK_IDS:
             na = table[kid]
             if na is not None:  # the human-owned table says this check does not apply to the class: record why
-                results[kid] = CheckResult(status="n/a", reasons=(na,))
+                results[kid] = CheckResult(status="n/a", reasons=(na,), codes=(Code.NOT_APPLICABLE,))
                 continue
             if not registered and kid not in ("K0", "K1", "K2"):
                 # never touch held-out data for an unregistered claim: certify must not be a free look
-                results[kid] = CheckResult(status="fail", reasons=(
+                results[kid] = CheckResult(status="fail", codes=(Code.NOT_EVALUATED_UNREGISTERED,), reasons=(
                     "not evaluated: the claim was never pre-registered (held-out data are not read for it)",))
                 continue
             try:
                 results[kid] = impl[kid](ctx)
+                if len(results[kid].codes) != len(results[kid].reasons):  # §16.5.8: every reason carries a code
+                    raise UncodedReason("uncoded Kernel reason")
             except InfraError:
                 # the environment broke (e.g. Docker down during K3 re-execution): issue NO certificate, so the
                 # claim is judged on a retry instead of being rejected for an outage (infra != policy, GOAL L1)
                 raise
             except Exception as e:  # noqa: BLE001  fail closed: a crashing check never passes
-                results[kid] = CheckResult(status="fail", reasons=(f"check raised {type(e).__name__}: {e}",))
+                # §16.5.8: the exception's message never enters a reason (it could carry data out of the Kernel)
+                code = Code.CHECK_UNCODED if isinstance(e, UncodedReason) else Code.CHECK_RAISED
+                results[kid] = CheckResult(status="fail", codes=(code,),
+                                           reasons=(f"check raised {exception_name(e)}",))
         # fail closed: only an explicit pass counts, or an n/a where the TABLE (not the check) says it does not apply
         ok = all(r.status == "pass" or (r.status == "n/a" and table[k] is not None) for k, r in results.items())
-        if not ok:
-            label = Label.REJECTED
-        elif computational:
-            label = Label.CERTIFIED_EXACT
-        elif simulated:  # holds in the named simulator only; T2 (conservative, UNCALIBRATED: T1 allowed by §4.7)
-            label = Label.CERTIFIED_SIMULATED
-        elif formal:
-            label = Label.CERTIFIED_FORMAL
-        else:
-            label = Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL
+        label = (Label.REJECTED if not ok else exact[0] if exact else
+                 Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL)
         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)
                     for o in results[kid].observations if "seed-invariant" in o]
-        if formal and ok:  # the certificate lists every axiom the theorem relies on (untested, GOAL §4.7)
+        # a formal certificate lists every axiom the theorem relies on (untested, GOAL §4.7)
+        if claim.evidence_class == EvidenceClass.FORMAL and ok:
             observed += [Assumption(text=f"K3: {o}", tested_by=None) for o in results["K3"].observations
                          if o.startswith("relies on axiom ")]
         stats = {t: {"estimate": s.example.estimate, "lo": s.example.lo, "hi": s.example.hi, "met": s.met,
@@ -166,53 +319,93 @@ class Kernel:
         p_nulls = [s.p_null for s in ctx.stats.values() if s.p_null is not None]
         resolution = {"outcome": ok, "declared_probability": claim.effect.probability,
                       "p_null": max(p_nulls) if p_nulls else None, "targets": stats}
-        tier = (Tier.T6_NONE if not ok else Tier.T1_EXECUTABLE if computational else Tier.T0_FORMAL if formal
-                else Tier.T2_STATISTICAL)
-        verifiers = (("kernel:K0-K9", f"exact:{claim.metric.id}") if computational else
-                     ("kernel:K0-K9", f"sim:{claim.metric.id}") if simulated else
-                     ("kernel:K0-K9", f"lean:{claim.metric.id}") if formal else
+        if ok and ctx.exclusion is not None:  # §16.10: the bounded-null statement (absent otherwise: old bytes kept)
+            resolution["exclusion"] = ctx.exclusion
+        tier = Tier.T6_NONE if not ok else exact[1] if exact else Tier.T2_STATISTICAL
+        # §16.7: a field only the claimant's pipeline reported (no human approved it) caps the tier
+        self_reported = tuple(sorted(
+            f"role {d.role.value!r} of target {t!r} is not human-approved" for t, d in vault.datasets().items()
+            if t in claim.generalization_targets and d.role in EXTERNAL_ROLES and vault.role_approval(t) is None))
+        if ok and self_reported:
+            tier = Tier(max(int(tier), self.config.self_reported_tier_cap))
+        verifiers = (("kernel:K0-K9", f"{exact[2]}:{claim.metric.id}") if exact else
                      ("kernel:K0-K9", *sorted({f"metric:{r.metric}" for _, r in ctx.records}),
                       "stats:paired-t-seeds", "stats:bca-examples"))
         cert = Certificate(
             kernel_version=self.config.version, claim_hash=ctx.claim_hash, claim=claim.model_dump(mode="json"),
             label=label, tier=int(tier), checks=results,
-            assumptions=(*(COMPUTATIONAL_ASSUMPTIONS if computational else SIMULATED_ASSUMPTIONS if simulated
-                           else FORMAL_ASSUMPTIONS if formal else STANDARD_ASSUMPTIONS), *observed,
+            assumptions=(*(exact[3] if exact else (*STANDARD_ASSUMPTIONS, RELEASE_ASSUMPTION)),
+                         *observed,
                          *(Assumption(text=a, tested_by=None) for a in claim.assumptions)),
             evidence_ids=tuple(evidence_ids), verifier_ids=verifiers,
             prereg_seq=ctx.prereg.seq if ctx.prereg else None, resolution=resolution, issued_at=self.clock(),
             vg_ladder=VG_LADDER.get(label.value, VG_LADDER["REJECTED"]), config=asdict(self.config),
-            adapters=(ctx.adapter,) if ctx.adapter else ())
+            adapters=(ctx.adapter,) if ctx.adapter else (), self_reported=self_reported)
         if not record:
             return cert
         blob = self.store.blobs.put_json(cert.model_dump(mode="json"))
         self.ledger.append("certificate", {"cert_hash": cert.cert_hash(), "claim_hash": ctx.claim_hash,
-                                           "label": label.value, "blob": blob, "resolution": resolution})
+                                           "label": label.value, "blob": blob, "resolution": resolution,
+                                           **self._bound()})
         return cert
+
+    def _ablated_runs(self, evidence_ids: list[str] | tuple[str, ...]) -> list[str]:
+        """The runs marked ABLATED (Run.ablated, custom_harness/ablation.py) that produced any of the evidence. An id
+        that does not resolve is left to K0 (which fails it); a run id with no run record is not an ablated run (a run
+        is only ever ablated through its own record)."""
+        out: list[str] = []
+        for e in evidence_ids:
+            try:
+                run_id = self.store.get_evidence(e).produced_by_run
+                if run_id is not None and self.store.get_run(run_id).ablated and run_id not in out:
+                    out.append(run_id)
+            except KeyError:
+                continue
+        return out
+
+    def _bound(self) -> dict[str, str]:
+        """{"run_id": ...} for a run-bound Kernel, else {} (older entries keep their bytes and hashes)."""
+        return {} if self.run_id is None else {"run_id": str(self.run_id)}
 
     # ------------------------------------------------------------------ lookup / retraction
     def certificate(self, cert_hash: str) -> Certificate:
         """Look up a certificate. Its content must hash to the id it is filed under (catches a mis-filed or
         edited blob). A forger with write access could still file a self-consistent fake: use verify()."""
         for e in self.ledger.entries("certificate"):
-            if e.body["cert_hash"] == cert_hash:
-                cert = Certificate.model_validate(self.store.blobs.get_json(e.body["blob"]))
+            if e.body.get("cert_hash") == cert_hash:  # a malformed entry never breaks other lookups
+                cert = Certificate.model_validate(strict_json(self.store.blobs.get(e.body["blob"])))
                 if cert.cert_hash() != cert_hash or cert.claim_hash != e.body.get("claim_hash"):
                     raise KernelError(f"certificate {cert_hash[:12]}: content does not match its ledger entry")
                 return cert
         raise KernelError(f"no certificate {cert_hash[:12]}")
 
     def verify(self, cert_hash: str) -> list[str]:
-        """Re-derive a certificate from the evidence (re-running every check, including re-execution) and
-        report every difference. Empty list = the certificate is what the Kernel issues today. This, not the
-        ledger entry, is what makes a certificate trustworthy: the ledger is tamper-evident, not authenticated."""
+        """Every problem with a certificate, prefixed `forged:` or `stale:` (see verify_status). Empty list = the
+        certificate is what the Kernel issues both as of its own ledger prefix and today; callers that must not rely
+        on a stale certificate (the memory gate) keep using this strict form."""
+        res = self.verify_status(cert_hash)
+        return [f"forged: {p}" for p in res.forged] + [f"stale: {p}" for p in res.stale]
+
+    def verify_status(self, cert_hash: str) -> VerifyResult:
+        """Re-derive a certificate (re-running every check, including re-execution) as of its OWN ledger prefix
+        (forgery detection) and on today's ledger (staleness). Later honest events, such as a new claim on the same
+        test set, make a certificate STALE, never "forged" (§16.4, invariant 17). A certificate issued under other
+        Kernel rules (version or config) cannot be told apart from a forgery by re-derivation: it is reported STALE
+        with that reason, and is not valid either way. This, not the ledger entry, is what makes a certificate
+        trustworthy: the ledger is tamper-evident, not authenticated."""
         cert = self.certificate(cert_hash)
-        again = self.certify(Claim.model_validate(cert.claim), list(cert.evidence_ids), record=False)
-        problems = [f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived"
-                    for k in CHECK_IDS if cert.checks[k].status != again.checks[k].status]
-        if again.label != cert.label:
-            problems.append(f"label {cert.label.value} recorded, {again.label.value} re-derived")
-        return problems
+        entry = next(e for e in self.ledger.entries("certificate") if e.body.get("cert_hash") == cert_hash)
+        claim, ids = Claim.model_validate(cert.claim), list(cert.evidence_ids)
+        better, worse = _differences(cert, self.certify(claim, ids, as_of=entry.seq - 1))
+        if (better or worse) and (cert.kernel_version != self.config.version or cert.config != asdict(self.config)):
+            return VerifyResult("stale", (), (f"issued under Kernel {cert.kernel_version} with other rules; today's "
+                                              f"Kernel {self.config.version} re-derives differently", *better, *worse))
+        if better:  # the record claims MORE than its own ledger prefix supports: forged
+            return VerifyResult("forged", tuple(better), tuple(worse))
+        # a record LESS favourable than its re-derivation (e.g. a flaky K3 that passed this time) is not a forgery
+        b_now, w_now = _differences(cert, self.certify(claim, ids, record=False))
+        now = [*worse, *(p for p in (*b_now, *w_now) if p not in worse)]
+        return VerifyResult("stale" if now else "valid", (), tuple(now))
 
     def retract(self, cert_hash: str, reason: str) -> Entry:
         self.certificate(cert_hash)  # must exist
@@ -222,5 +415,23 @@ class Kernel:
 
     def status(self, cert_hash: str) -> str:
         self.certificate(cert_hash)
-        retracted = any(e.body["cert_hash"] == cert_hash for e in self.ledger.entries("retraction"))
+        retracted = any(e.body.get("cert_hash") == cert_hash for e in self.ledger.entries("retraction"))
         return "retracted" if retracted else "active"
+
+
+def _differences(cert: Certificate, again: Certificate) -> tuple[list[str], list[str]]:
+    """(differences where the record is MORE favourable than the re-derivation, those where it is less)."""
+    better: list[str] = []
+    worse: list[str] = []
+    for k in CHECK_IDS:
+        if cert.checks[k].status != again.checks[k].status:
+            (better if again.checks[k].status == "fail" else worse).append(
+                f"{k}: {cert.checks[k].status} recorded, {again.checks[k].status} re-derived")
+    if again.label != cert.label:
+        (better if again.label == Label.REJECTED else worse).append(
+            f"label {cert.label.value} recorded, {again.label.value} re-derived")
+    if again.tier != cert.tier:
+        (better if cert.tier < again.tier else worse).append(f"tier {cert.tier} recorded, {again.tier} re-derived")
+    if cert.resolution.get("exclusion") != again.resolution.get("exclusion"):  # §16.10: the stated limit is re-derived
+        better.append("bounded-null exclusion statement differs from its re-derivation")
+    return better, worse

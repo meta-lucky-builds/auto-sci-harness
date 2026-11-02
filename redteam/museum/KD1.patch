@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -732,9 +732,6 @@
+         # (declared in the claim, or read with purpose 'develop') are development use of this target
+         dev_twins = sorted(d for d in related_targets(ctx.vault, target) - {target} if d in ctx.claim.development
+                            or any(a.body.get("purpose") == "develop" for a in ctx.vault.accesses(d)))
+-        if dev_twins:
+-            reasons.append(R(Code.K6_DEVELOP_READ, f"{target}: its held-out examples are also in development "
+-                                                   f"dataset(s) {dev_twins}"))
+         st = ctx.stats.get(target)
+         if st is None:
+             reasons.append(R(Code.K6_NO_STATS, f"{target}: no valid statistics (see K4)"))

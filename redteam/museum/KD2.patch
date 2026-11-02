@@ -1,0 +1,13 @@
+diff --git a/src/custom_harness/kernel/ml.py b/src/custom_harness/kernel/ml.py
+index e7aeba4..8e4ca03 100644
+--- a/src/custom_harness/kernel/ml.py
++++ b/src/custom_harness/kernel/ml.py
+@@ -209,7 +209,7 @@ def risk(ctx: Any) -> tuple[list[str], list[str]]:
+             f"no risk model for {c.kind.value} claims in Kernel v{ctx.config.version}: a vacuous bound "
+                   f"(one that could not have failed) cannot be detected without a prior over effects")], []
+     missing = sorted(set(c.generalization_targets) - set(ctx.stats))
+-    if missing:  # KD2 (assure): risk is judged on every target, never on the subset that has statistics
++    if not ctx.stats:
+         return [R(Code.K7_NO_STATS, f"no statistics to assess risk on {missing} (see K4)")], []
+     if bounded:
+         return bounded_null(ctx)

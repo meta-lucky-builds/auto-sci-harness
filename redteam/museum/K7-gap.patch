@@ -1,0 +1,27 @@
+diff --git a/src/custom_harness/kernel/checks.py b/src/custom_harness/kernel/checks.py
+index 3c2941c..cc8cf0d 100644
+--- a/src/custom_harness/kernel/checks.py
++++ b/src/custom_harness/kernel/checks.py
+@@ -785,6 +785,9 @@ def is_external(ctx: Context) -> bool:
+ # ------------------------------------------------------------------ K7 risk
+ def k7_risk(ctx: Context) -> CheckResult:
+     """Success must have been improbable under the domain's noise model (the adapter's risk procedure)."""
++    c = ctx.claim
++    if c.kind not in (ClaimKind.IMPROVEMENT, ClaimKind.ABLATION_EFFECT) and c.analysis_plan.power is None:
++        return CheckResult(status="n/a", reasons=("no risk model",), codes=(Code.NOT_APPLICABLE,))
+     return _result(*procedures(ctx).risk(ctx))
+ 
+ 
+diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
+index 1b8dbc6..f4e0f0b 100644
+--- a/src/custom_harness/kernel/kernel.py
++++ b/src/custom_harness/kernel/kernel.py
+@@ -304,7 +304,7 @@ class Kernel:
+                 results[kid] = CheckResult(status="fail", codes=(code,),
+                                            reasons=(f"check raised {exception_name(e)}",))
+         # fail closed: only an explicit pass counts, or an n/a where the TABLE (not the check) says it does not apply
+-        ok = all(r.status == "pass" or (r.status == "n/a" and table[k] is not None) for k, r in results.items())
++        ok = all(r.status in ("pass", "n/a") for k, r in results.items())
+         label = (Label.REJECTED if not ok else exact[0] if exact else
+                  Label.CERTIFIED_VALIDATED if is_external(ctx) else Label.CERTIFIED_INTERNAL)
+         observed = [Assumption(text=f"{kid}: {o}", tested_by=kid) for kid in ("K4",)

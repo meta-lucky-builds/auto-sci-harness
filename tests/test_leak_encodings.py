@@ -146,3 +146,22 @@ def test_short_values_get_no_encoded_or_fragment_matching():
     assert leak.secret_patterns("abc", min_verbatim=8) == []
     long_pats = leak.secret_patterns(CANARY)
     assert all(len(p) >= leak.FRAGMENT_LEN for p in long_pats)
+
+
+@pytest.mark.parametrize("form", ["json", "repr", "tuple", "braces"])
+def test_label_run_written_as_a_quoted_list_literal_is_found(form):
+    """auditor-to-kstats-01: `_ANSWERS = ["c", "a", ...]` kept the quotes and brackets in every token, so a full answer
+    key in a program's source never matched the label run index (K9 certified a memorising method)."""
+    import json
+
+    rng = random.Random(7)
+    labels = [rng.choice("abc") for _ in range(120)]
+    text = {"json": json.dumps(labels), "repr": repr(labels), "tuple": repr(tuple(labels)),
+            "braces": "{" + ", ".join(f"'{x}'" for x in labels) + "}"}[form]
+    runs = [leak.label_runs(labels)]
+    import re
+    bare = [t for t in re.split(r"[\s,;|]+", text) if t]  # the old tokenisation: the attack really evades it
+    assert not runs[0].found(bare) and not runs[0].found(bare[::-1])
+    assert leak.scan_text(f"_ANSWERS = {text}\n", "code", [], [], runs), form
+    other = [rng.choice("abc") for _ in range(120)]  # control: another answer key in the same form is not flagged
+    assert leak.scan_text(f"_ANSWERS = {json.dumps(other)}\n", "code", [], [], runs) == []

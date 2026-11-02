@@ -29,7 +29,6 @@ task's private/ directory: never mount it, or anything derived from it, into an 
 from __future__ import annotations
 
 import hashlib
-import json
 import platform
 import sys
 import tempfile
@@ -43,11 +42,11 @@ from ..records import Evidence, EvidenceKind, Run, RunStatus, TraceStep
 from ..store.evidence import EvidenceStore
 from .certificate import CHECK_IDS, Certificate
 from .checks import KernelConfig, Replayer
-from .claim import Claim, canonical_json
+from .claim import Claim, canonical_json, strict_json
 from .execution import ExecRecord
 from .kernel import Kernel
 from .ledger import Entry, verify_chain
-from .vault import CertificateRecord
+from .vault import KEYED, CertificateRecord, FileRef, Vault
 
 FORMAT = "chh-bundle/2"
 LEGACY_FORMATS = frozenset({"chh-bundle/1"})  # ledger excerpt only: re-checked, labelled "EXCERPT ONLY"
@@ -71,13 +70,38 @@ class BundleError(ValueError):
     pass
 
 
-def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
+LARGE_ARTIFACT_BYTES = 64 * 2**20  # UNCALIBRATED (owner decision, GOAL §13.8): larger blobs are listed, not bundled
+
+
+def _artifacts(store: EvidenceStore, blobs: set[str], data: set[str], preds: set[str], large: int
+               ) -> list[dict[str, Any]]:
+    """GOAL L2 large artifacts, in the run-bundle format (store/run_bundle.py check_artifacts): EVERY blob the
+    certificate needs, with its size, sha256 and status: bundled (in the zip), available_locally (over `large`: on
+    the building machine's blob store only) or referenced (missing on the building machine; bytes -1)."""
+    out = []
+    for h in sorted(blobs):
+        try:
+            n = store.blobs._path(h).stat().st_size
+            status = "available_locally" if n > large else "bundled"
+            if status == "bundled":
+                store.blobs.get(h)  # intact (hash-checked): a corrupted blob is not bundled
+        except OSError:
+            n, status = -1, "referenced"
+        out.append({"path": f"blobs/{h}", "bytes": n, "sha256": h, "required": True, "status": status,
+                    "kind": "dataset" if h in data else "output" if h in preds else "other"})
+    return out
+
+
+def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path, large_bytes: int = LARGE_ARTIFACT_BYTES) -> str:
     cert = kernel.certificate(cert_hash)
     claim = Claim.model_validate(cert.claim)
     store = kernel.store
     blobs: set[str] = {claim.subject.hash, claim.comparator.hash}
     evidence: list[dict[str, Any]] = []
     run_ids: set[str] = set()
+    data_blobs: set[str] = set()
+    index: dict[str, str] = {}  # s4: keyed digest -> content address of the bundled private files
+    preds: set[str] = set()
     dataset_ids = set(claim.generalization_targets) | set(claim.development) | set(claim.scope.datasets)
     for eid in cert.evidence_ids:
         try:
@@ -87,7 +111,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         evidence.append(ev.model_dump(mode="json"))
         blobs.add(ev.payload_ref)
         try:
-            doc = store.blobs.get_json(ev.payload_ref)
+            doc = strict_json(store.blobs.get(ev.payload_ref))
             if ev.kind == EvidenceKind.PROOF:  # a computational claim's certificate: its artifact bytes travel along
                 blobs.add(CertificateRecord.model_validate(doc).hash)
                 continue
@@ -95,6 +119,7 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         except (ValueError, OSError):
             continue
         blobs |= {rec.preds_ref, rec.artifact_hash} | {r.blob for r in rec.inputs.values()}
+        preds.add(rec.preds_ref)
         dataset_ids |= {rec.target} | {r.dataset_id for r in rec.inputs.values()}
         run_ids.add(rec.run_id)
     all_entries = kernel.ledger.entries()
@@ -105,7 +130,12 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
     for e in entries:
         b = e.body
         if e.kind == "register_dataset":  # private files only of the claim's datasets; public files of all
-            blobs |= {f["blob"] for f in b["files"].values() if b.get("dataset_id") in dataset_ids or not f["private"]}
+            sel = [f for f in b["files"].values() if b.get("dataset_id") in dataset_ids or not f["private"]]
+            res = {str(f["blob"]): kernel.vault.resolve(FileRef.model_validate(f)).blob for f in sel}
+            index |= {k.removeprefix(KEYED): v for k, v in res.items() if k.startswith(KEYED)}  # s4: keyed private
+            files = set(res.values())
+            blobs |= files
+            data_blobs |= files
             if b.get("canary_ref"):
                 blobs.add(b["canary_ref"])
         if e.kind == "certificate" and b.get("claim_hash") == cert.claim_hash:
@@ -119,11 +149,12 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
         status, detail = store.run_status(rid)
         runs.append({"run": run.model_dump(mode="json"), "status": status.value, "detail": detail,
                      "steps": [s.model_dump(mode="json") for s in store.trace(rid)]})
+    artifacts = _artifacts(store, blobs, data_blobs, preds, large_bytes)
     manifest = {
         "format": FORMAT, "cert_hash": cert_hash, "claim_hash": cert.claim_hash, "label": cert.label.value,
         "kernel_config": cert.config, "ledger": [list(e.row()) for e in entries], "ledger_head": entries[-1].hash,
         "evidence": evidence,
-        "runs": runs, "blobs": sorted(blobs),
+        "runs": runs, "blobs": sorted(blobs), "artifacts": artifacts, **({"vault_index": index} if index else {}),
         "environment": {"python": sys.version.split()[0], "platform": platform.platform()},
     }
     data = canonical_json(manifest)
@@ -131,11 +162,9 @@ def build_bundle(kernel: Kernel, cert_hash: str, out_path: Path) -> str:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr("manifest.json", data)
-        for h in sorted(blobs):
-            try:
-                z.writestr(f"blobs/{h}", store.blobs.get(h))
-            except OSError:
-                continue  # missing blobs are reported by K0 when the bundle is re-checked
+        for a in artifacts:  # every blob is listed; one not bundled is reported on reproduce, never skipped silently
+            if a["status"] == "bundled":
+                z.writestr(a["path"], store.blobs.get(a["sha256"]))
     bundle_hash = hashlib.sha256(data).hexdigest()
     kernel.ledger.append("bundle", {"cert_hash": cert_hash, "bundle_hash": bundle_hash})
     return bundle_hash
@@ -151,18 +180,27 @@ class ReproduceReport:
     certificate: Certificate | None = None
     ledger_check: str = ""  # what was verified about the bundled ledger (full chain, or EXCERPT ONLY for v1)
     ledger_head: str | None = None  # hash of the last bundled ledger entry (compare with a published anchor)
+    # GOAL L2: every needed blob found neither in the zip nor through `artifact_source` (never skipped silently)
+    missing_artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def reproduce_bundle(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path | None = None,
-                     limits: ReadLimits = DEFAULT_LIMITS) -> ReproduceReport:
+                     limits: ReadLimits = DEFAULT_LIMITS,
+                     artifact_source: Callable[[str], bytes | None] | None = None) -> ReproduceReport:
     """Re-check a bundle from its bytes alone. reproduced = same label AND the same status on every check.
+    A needed blob the zip does not carry (a large artifact listed `available_locally`, or one `referenced`) is
+    looked up with `artifact_source(sha256)` (e.g. a local blob store) and hash-checked; one found nowhere is
+    reported in `missing_artifacts` and as a problem (the bundle then does not reproduce).
     Raises BundleError for an unsupported format or a bundle over a read limit (refused, never partly read)."""
     tmp = None
     if workdir is None:
         tmp = tempfile.TemporaryDirectory(prefix="chh-reproduce-")
         workdir = Path(tmp.name)
     try:
-        return _reproduce(Path(path), replayer_factory, Path(workdir), limits)
+        missing: list[dict[str, Any]] = []
+        report = _reproduce(Path(path), replayer_factory, Path(workdir), limits, artifact_source, missing)
+        report.missing_artifacts = missing
+        return report
     finally:
         if tmp is not None:
             tmp.cleanup()
@@ -176,6 +214,10 @@ class _Reader:
         infos = z.infolist()
         if len(infos) > limits.members:
             raise BundleError(f"bundle has {len(infos)} members, more than the cap of {limits.members}")
+        names = [i.filename for i in infos]
+        dups = sorted({n for n in names if names.count(n) > 1})
+        if dups:  # a dict keeps the LAST member of a name; another reader may show the first: refuse (fail closed)
+            raise BundleError(f"bundle has duplicate member name(s) {dups[:5]}: refused")
         self.infos = {i.filename: i for i in infos}
 
     def read(self, name: str) -> bytes:
@@ -194,14 +236,17 @@ class _Reader:
         return self.z.read(info)
 
 
-def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path, limits: ReadLimits
-               ) -> ReproduceReport:
+def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Path, limits: ReadLimits,
+               source: Callable[[str], bytes | None] | None, missing: list[dict[str, Any]]) -> ReproduceReport:
     with zipfile.ZipFile(path) as z:
         reader = _Reader(z, limits)
         if "manifest.json" not in reader.infos:
             raise BundleError("bundle has no manifest.json")
         data = reader.read("manifest.json")
-        manifest = json.loads(data)
+        try:
+            manifest = strict_json(data)
+        except ValueError:  # malformed, or a duplicated key two readers would resolve differently
+            raise BundleError("manifest.json is not JSON or has a duplicated key: refused") from None
         bundle_hash = hashlib.sha256(data).hexdigest()
         fmt = manifest.get("format")
         if fmt != FORMAT and fmt not in LEGACY_FORMATS:
@@ -209,19 +254,31 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
         store = EvidenceStore(workdir / "store")
         problems: list[str] = []
         try:
+            listed = {a.get("sha256"): a for a in manifest.get("artifacts") or [] if isinstance(a, dict)}
+            if "artifacts" in manifest and set(listed) != set(manifest["blobs"]):
+                problems.append("the artifact list does not match the bundle's blob list")
             for h in manifest["blobs"]:
-                if f"blobs/{h}" not in reader.infos:
-                    problems.append(f"blob {h[:12]} missing from the bundle")
+                inside = f"blobs/{h}" in reader.infos
+                got = reader.read(f"blobs/{h}") if inside else source(h) if source is not None else None
+                if got is None:
+                    a = listed.get(h, {})
+                    missing.append({"sha256": h, "status": a.get("status", "unlisted"), "bytes": a.get("bytes"),
+                                    "kind": a.get("kind")})
+                    problems.append(f"artifact {h[:12]} ({a.get('kind', 'unlisted')}, {a.get('status', 'unlisted')}) "
+                                    f"missing: not in the bundle and not found locally")
                     continue
-                if store.blobs.put(reader.read(f"blobs/{h}")) != h:
-                    problems.append(f"blob {h[:12]} does not match its hash (tampered)")
-        except BundleError:
+                if store.blobs.put(got) != h:
+                    problems.append(f"blob {h[:12]} does not match its hash ({'tampered' if inside else 'local copy'})")
+        except BaseException:  # any failure here (a read limit, a malformed manifest) closes the store
             store.close()
             raise
     full = fmt == FORMAT
     try:
-        entries = [Entry.from_row((int(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), float(r[5])))
-                   for r in manifest["ledger"]]
+        try:
+            entries = [Entry.from_row((int(r[0]), str(r[1]), str(r[2]), str(r[3]), str(r[4]), float(r[5])))
+                       for r in manifest["ledger"]]
+        except ValueError:  # e.g. an entry body with a duplicated key
+            raise BundleError("a bundled ledger entry is unreadable: refused") from None
         problems += verify_chain(entries, full=full)
         head = entries[-1].hash if entries else None
         ledger_check = (f"unbroken hash chain from genesis: {len(entries)} entries, head {head}" if full else
@@ -229,6 +286,7 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                         f"order; NOT an unbroken chain from genesis, so omitted entries cannot be detected")
         for e in entries:
             store.ledger_import(e.row())
+        Vault(store).import_index({str(k): str(v) for k, v in (manifest.get("vault_index") or {}).items()})
         for item in manifest["runs"]:
             store.add_run(Run.model_validate(item["run"]))
             for s in item["steps"]:
@@ -239,13 +297,13 @@ def _reproduce(path: Path, replayer_factory: Callable[[], Replayer], workdir: Pa
                 store.add_evidence(Evidence.model_validate(ev))
             except ValueError as e:  # its payload blob is missing: K0 will fail that record
                 problems.append(f"evidence {ev.get('id')} not importable: {e}")
-        entry = next((e for e in entries if e.kind == "certificate" and e.body["cert_hash"] == manifest["cert_hash"]),
-                     None)
+        want = manifest["cert_hash"]
+        entry = next((e for e in entries if e.kind == "certificate" and e.body.get("cert_hash") == want), None)
         if entry is None:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
                                    [*problems, "certificate entry missing from the bundle"], None, ledger_check, head)
         try:
-            original = Certificate.model_validate(store.blobs.get_json(entry.body["blob"]))
+            original = Certificate.model_validate(strict_json(store.blobs.get(entry.body["blob"])))
         except OSError:
             return ReproduceReport(False, bundle_hash, manifest["label"], None,
                                    [*problems, "certificate content missing from the bundle"], None, ledger_check,

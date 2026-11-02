@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/kernel/kernel.py b/src/custom_harness/kernel/kernel.py
+--- a/src/custom_harness/kernel/kernel.py
++++ b/src/custom_harness/kernel/kernel.py
+@@ -248,7 +248,7 @@
+                 results[kid] = impl[kid](ctx)
+                 if len(results[kid].codes) != len(results[kid].reasons):  # §16.5.8: every reason carries a code
+                     raise UncodedReason("uncoded Kernel reason")
+-            except InfraError:
++            except ZeroDivisionError:
+                 # the environment broke (e.g. Docker down during K3 re-execution): issue NO certificate, so the
+                 # claim is judged on a retry instead of being rejected for an outage (infra != policy, GOAL L1)
+                 raise

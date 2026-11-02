@@ -4,6 +4,7 @@ Done-when (GOAL L1): a Docker outage mid-campaign changes no accept/reject decis
 """
 
 import json
+import math
 import sys
 
 import pytest
@@ -11,15 +12,23 @@ import pytest
 import custom_harness.research  # noqa: F401
 from custom_harness.errors import InfraError, infra_cause, is_transient
 from custom_harness.evolve import Evaluator, EvolveConfig, evolve_generation, gate, race
+from custom_harness.evolve.multiplicity import MultiplicityDrift
 from custom_harness.evolve.selection import paired_sample
 from custom_harness.gateway import BackendError, MockBackend
-from custom_harness.kernel import Kernel
+from custom_harness.kernel import Kernel, KernelConfig
 from custom_harness.records import RunStatus
 from custom_harness.runtime import END, Condition, Edge, Engine, HarnessSpec, LLMNode, ModuleNode, register
 from custom_harness.runtime.engine import RetryPolicy
 from custom_harness.sandbox import LocalSandbox
 from custom_harness.sandbox.docker import DockerSandbox, DockerUnavailable, docker_available
-from test_evolve import PROPOSALS, declared_seed_spec, executor, seed_spec, suite  # noqa: F401
+from test_evolve import (  # noqa: F401
+    PROPOSALS,
+    R2_2_OPEN,
+    declared_seed_spec,
+    executor,
+    seed_spec,
+    suite,
+)
 
 NO_WAIT = RetryPolicy(max_attempts=3, backoff_s=0.0)
 
@@ -125,10 +134,24 @@ def test_race_never_scores_infra_failures_as_zero():
     assert rr.stats["good"]["excluded"] == 3
 
 
-class FlakyDockerLike(LocalSandbox):
-    """Simulates short Docker outages: in every window of 11 exec calls, calls 5 and 6 fail (daemon down
-    for two consecutive calls) with a transient InfraError."""
+def _k3_replays() -> int:
+    """Clean consecutive replays K3 needs under the Kernel's default reliability presets (checks.reliability)."""
+    cfg = KernelConfig()
+    return math.ceil(math.log(cfg.k3_beta) / math.log(1 - cfg.k3_eps_max) - 1e-12)
 
+
+class FlakyDockerLike(LocalSandbox):
+    """Simulates short Docker outages: in every window of PERIOD exec calls, calls 5 and 6 fail (daemon down
+    for two consecutive calls) with a transient InfraError.
+
+    PERIOD must leave a clean stretch longer than the longest run of consecutive exec calls one node needs: K3's
+    zero-failure demonstration (GOAL §16.4) re-executes `_k3_replays()` times in a row inside one certify. With a
+    period of 11 (the K3 count under the default presets) every 11 consecutive calls contained an outage, so no
+    certify could ever finish: that is a permanent outage for certify, not a short one, and the gate correctly failed
+    closed on the candidate's excluded units (found 2026-10-08). After an outage the engine's third attempt starts on
+    call 7 of the window, so PERIOD >= 7 + replays - 5 is the minimum; twice the K3 count leaves margin."""
+
+    PERIOD = 2 * _k3_replays() + 2
     count = 0
 
     def spawn(self, workspace):
@@ -136,13 +159,14 @@ class FlakyDockerLike(LocalSandbox):
         # so they share its outages
         return FlakyDockerLike(workspace, i_understand_no_isolation=True)
 
-    def exec(self, command, timeout_s=600, env=None):
+    def exec(self, command, timeout_s=600, env=None, *, cpu_s=None):
         FlakyDockerLike.count += 1
-        if FlakyDockerLike.count % 11 in (5, 6):
+        if FlakyDockerLike.count % FlakyDockerLike.PERIOD in (5, 6):
             raise InfraError("Cannot connect to the Docker daemon", transient=True)
-        return super().exec(command, timeout_s, env)
+        return super().exec(command, timeout_s, env, cpu_s=cpu_s)
 
 
+@pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=R2_2_OPEN)
 def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, monkeypatch):  # noqa: F811
     """GOAL L1 done-when. Same campaign twice: clean environment vs outages (sandbox creation failures
     and exec failures). Decisions and the accepted harness must be identical."""
@@ -172,11 +196,73 @@ def test_docker_outage_mid_campaign_changes_no_decision(store, tmp_path, suite, 
             raise DockerUnavailable("Docker is not running")
         return FlakyDockerLike(tmp_path / "sb2" / f"{key}-{created['n']}", i_understand_no_isolation=True)
 
+    # count certifications aborted by an outage (K3 re-execution hit the daemon being down): the outage must reach
+    # the Kernel's replays too, and the retried certify must still reach the clean campaign's decision
+    aborted = {"n": 0}
+    real_certify = Kernel.certify
+
+    def certify(self, *a, **kw):
+        try:
+            return real_certify(self, *a, **kw)
+        except InfraError:
+            aborted["n"] += 1
+            raise
+
+    monkeypatch.setattr(Kernel, "certify", certify)
     FlakyDockerLike.count = 0
     flaky, ev = campaign("flaky", outage_factory)
     assert ev.infra_failures > 0 and FlakyDockerLike.count >= 11  # both kinds of outage really happened
+    assert aborted["n"] > 0  # ... including during the Kernel's K3 re-executions
     assert flaky.accepted == clean.accepted and flaky.decision == clean.decision
     assert flaky.new_parent.spec_hash() == clean.new_parent.spec_hash()
+
+
+def test_gate_marks_an_exclusion_failure_as_infra_aborted_not_a_verdict():
+    """Owner decision 2026-10-08: too many infrastructure exclusions make the comparison INCONCLUSIVE; the gate still
+    never accepts, but says so (infra_aborted), so the loop does not record a policy rejection."""
+    units = [("t", s) for s in range(4)]
+    up = {u: 1.0 for u in units}
+    down = {u: (None if u[1] < 2 else 1.0) for u in units}  # half the candidate's units lost to an outage
+    healthy = paired_sample(units, up.get, lambda u: 0.5)
+    outage = paired_sample(units, down.get, lambda u: 0.5)
+    d = gate(outage, healthy, require_evolve_ci=False)
+    assert not d.accepted and d.infra_aborted and "excluded for infrastructure" in d.reason
+    worse = paired_sample(units, lambda u: 0.0, lambda u: 0.5)  # control: a real loss is a policy verdict
+    d2 = gate(worse, worse, require_evolve_ci=False)
+    assert not d2.accepted and not d2.infra_aborted
+
+
+@pytest.mark.xfail(strict=True, raises=MultiplicityDrift, reason=R2_2_OPEN)
+def test_a_persistent_outage_ends_infra_aborted_never_rejected(store, tmp_path, suite, monkeypatch):  # noqa: F811
+    """Owner decision 2026-10-08 (GOAL L1, 'excluded, not scored'): when the candidate's units are lost to an outage
+    past the exclusion threshold, the generation ends INCONCLUSIVE: lineage status `infra_aborted` (no
+    `rejected_gate`, no rejected_on stage), not accepted, and the edit is NOT novelty-blocked for later generations."""
+    from custom_harness.evolve.loop import rejected_signatures
+    from custom_harness.store import EvidenceStore
+    monkeypatch.setenv("CHH_ALLOW_UNISOLATED", "1")
+    st = EvidenceStore(tmp_path / "persistent")
+    Kernel(st).approve_adapter("ml", approver="pytest")
+    llm = MockBackend(executor)
+    roles = {"proposer": llm, "executor": llm, "judge": llm, "replicator": llm}
+    # the pre-2026-10-08 outage pattern: exec calls 5 and 6 of every 11 fail, forever. K3 needs 11 consecutive clean
+    # replays, so no certify can ever finish: a permanently degraded environment, not a mid-campaign outage
+    monkeypatch.setattr(FlakyDockerLike, "PERIOD", 11)
+    FlakyDockerLike.count = 0
+    ev = Evaluator(roles, st, lambda key: FlakyDockerLike(tmp_path / "sb" / key, i_understand_no_isolation=True),
+                   suite, retry=NO_WAIT)
+    cfg = EvolveConfig(n_edits=4, race_rounds=2)
+    res = evolve_generation(declared_seed_spec(cfg), suite, evaluator=ev,
+                            proposer=MockBackend([json.dumps(PROPOSALS)]), store=st, cfg=cfg)
+    statuses = [r["status"] for r in st.records("lineage")]
+    edits = st.records("harness_edit")
+    assert ev.infra_failures > 0
+    assert not res.accepted and "infra_aborted" in statuses and "rejected_gate" not in statuses, statuses
+    assert res.decision.startswith("inconclusive"), res.decision
+    assert edits and all(e["infra_aborted"] and not e["accepted"] and e["rejected_on"] is None for e in edits)
+    aborted = [r for r in st.records("lineage") if r["status"] == "infra_aborted"]
+    assert aborted and not {r["signature"] for r in aborted} & set(rejected_signatures(st))  # not novelty-blocked
+    assert st.records("generation_stats")[-1]["infra_aborted"] == len(aborted)
+    st.close()
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker daemon not running")
@@ -195,3 +281,21 @@ def test_docker_missing_image_is_infra(tmp_path):
     sb = DockerSandbox(tmp_path / "ws", image="custom-harness-does-not-exist:none")
     with pytest.raises(InfraError):
         sb.exec([sys.executable, "-c", "pass"], timeout_s=60)
+
+
+def test_an_infra_failed_smoke_run_is_excluded_not_a_rejection():
+    """GOAL L1 / "an infrastructure failure means excluded, not scored": the smoke run (L6.7) rejected a candidate
+    whose smoke unit hit an outage, so an outage changed an accept/reject decision (found 2026-10-08 through
+    test_docker_outage_mid_campaign_changes_no_decision). An infra-failed smoke run is inconclusive: the candidate
+    goes on to the race, where that unit is excluded and the gate fails closed on too many exclusions."""
+    from custom_harness.evolve.evaluate import RunOutcome
+    from custom_harness.evolve.loop import _smoke_failure
+    from custom_harness.records import Cost
+
+    def out(status):
+        return RunOutcome("t", "r", 0, None, False, status, Cost())
+    ok = out(RunStatus.COMPLETED.value)
+    assert out(RunStatus.INFRA_FAILED.value).infra_failed  # the precondition: this outcome is an infra failure
+    assert _smoke_failure(out(RunStatus.INFRA_FAILED.value), ok) is None
+    broken = out(RunStatus.FAILED.value)  # control: a real breakage where the parent ran still rejects
+    assert _smoke_failure(broken, ok) is not None

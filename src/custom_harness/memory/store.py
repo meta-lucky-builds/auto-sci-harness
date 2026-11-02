@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..errors import InfraError
+from ..errors import infra_cause
 from ..kernel import Certificate, Claim, Kernel, KernelError, Label
 from ..kernel.checks import applicability
 from ..kernel.claim import EvidenceClass, canonical_json
@@ -48,9 +48,9 @@ from .model import (
 from .screen import WRAPPER, Fingerprints, screen_proposal, screen_strings
 
 CERTIFIED = frozenset({Label.CERTIFIED_VALIDATED, Label.CERTIFIED_INTERNAL, Label.CERTIFIED_EXACT})
-_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
-_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*$")
-_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_NAMESPACE = re.compile(r"^[A-Za-z0-9_\-]{1,64}\Z")
+_CATEGORY = re.compile(r"^[a-z0-9_\-]+(/[a-z0-9_\-]+)*\Z")
+_HEX64 = re.compile(r"^[0-9a-f]{64}\Z")
 
 
 def cascade_closure(children: Mapping[str, Iterable[str]], roots: Iterable[str]) -> set[str]:
@@ -143,6 +143,15 @@ class MemoryStore:
             prev = r.get("hash", "") if isinstance(r, dict) else ""
         return problems
 
+    def _refuse_if_ablated(self, what: str) -> None:
+        """Nothing an ABLATED run produces is persisted as memory or skill (custom_harness/ablation.py, fail closed).
+        The run is the one the Kernel is bound to (ModuleContext.kernel()). Reads, and the revocation cascades that
+        derive only from Kernel retractions, are not run output and stay allowed."""
+        run_id = getattr(self.kernel, "run_id", None)
+        off = self.kernel.store.run_ablated(run_id) if isinstance(run_id, str) else ()
+        if off:
+            raise MemoryRefused(f"{what} refused: run {run_id} is ABLATED (switched off: {', '.join(off)})")
+
     def _append(self, typ: str, payload: dict[str, Any]) -> None:
         raw = self._raw()
         seq, prev = len(raw) + 1, (raw[-1]["hash"] if raw else "genesis")
@@ -190,7 +199,9 @@ class MemoryStore:
         same content again returns the existing id and changes nothing."""
         if not writer.strip():
             raise MemoryRefused("a write must name its (trusted) writer")
+        self._refuse_if_ablated("memory write")
         problems = screen_proposal(proposal, Fingerprints.from_vault(self.kernel.vault), secrets)
+        problems += heldout_value_problems(self.kernel, proposal)
         if problems:
             self._append("refusal", {"writer": writer, "reasons": problems})  # categories only, never content
             raise MemoryRefused("memory write refused: " + "; ".join(problems))
@@ -206,6 +217,7 @@ class MemoryStore:
 
     def admit(self, entry_id: str, *, secrets: Sequence[str] = ()) -> GateResult:
         """The quarantine gate. Deterministic, model-free; every failure rejects (terminal for this id)."""
+        self._refuse_if_ablated("memory admission")
         self.sync()
         st = self._state()
         if entry_id not in st.entries:
@@ -216,7 +228,11 @@ class MemoryStore:
         entry = st.entries[entry_id]
         try:
             reasons, tier = self._gate(entry, st, secrets)
-        except InfraError as e:  # the environment broke during re-derivation: judge again later, do not reject
+        except Exception as e:
+            # the environment broke (Kernel re-derivation, the exploit evaluator): judge again later, do not reject
+            # (GOAL L1, infra != policy). Anything else propagates as before.
+            if infra_cause(e) is None:
+                raise
             return GateResult(entry_id, False, Status.QUARANTINED, None, (f"infrastructure failure: {e}",))
         if reasons:
             self._set(entry_id, Status.REJECTED, "gate", reasons, tier)
@@ -304,7 +320,9 @@ class MemoryStore:
                     verdict = self.exploit_check.check(entry)
                     if not verdict.passed:
                         reasons += list(verdict.reasons) or ["exploit check failed"]
-                except Exception as e:  # noqa: BLE001  fail closed
+                except Exception as e:  # fail closed
+                    if infra_cause(e) is not None:  # an outage is no verdict: admit() keeps the entry quarantined
+                        raise
                     reasons.append(f"exploit check raised {type(e).__name__}")
         return reasons, tier
 
@@ -480,6 +498,7 @@ class MemoryStore:
         """Count a Kernel outcome for a skill: a certified claim is a success, a verified failure a failure.
         Anything else (no certificate, retracted, re-derivation differs, integrity failure, already counted, the
         skill's own evidence) is refused. The caller (trusted code) asserts the outcome came from using the skill."""
+        self._refuse_if_ablated("skill outcome")
         st = self._state()
         if st.status.get(entry_id) not in READABLE or st.entries[entry_id].kind not in SKILL_KINDS:
             raise ValueError("outcomes are recorded only for readable skill entries")
@@ -519,8 +538,11 @@ class MemoryStore:
         for i, e in enumerate(entries, start=1):
             if st.status.get(e.id) not in READABLE or st.entries[e.id] != e:
                 raise NotReadable(f"{e.id} is not readable (or differs from the stored entry)")
+            title, text, data = e.title, e.text, e.data
+            if heldout_value_problems(self.kernel, e.proposal):  # written before the invariant-18 guard (2026-10-15)
+                title, text, data = f"{e.kind.value} entry (withheld)", WITHHELD_HELDOUT_TEXT, {}
             record = {"id": e.id, "kind": e.kind.value, "status": st.status[e.id].value,
-                      "tier": st.tier[e.id].name.split("_")[0], "title": e.title, "text": e.text, "data": e.data,
+                      "tier": st.tier[e.id].name.split("_")[0], "title": title, "text": text, "data": data,
                       "derives_from": {"certificates": list(e.evidence), "entries": list(e.parents)}}
             if e.kind in SKILL_KINDS:
                 m = self.maturity(e.id)
@@ -542,6 +564,67 @@ class MemoryStore:
         return f"{head}\n{body}\n<<{WRAPPER} END nonce={nonce}>>"
 
 
+# ---------------------------------------------------------------------- invariant 18 guard on every write
+# Data keys that name a held-out-derived continuous value. Memory is rendered into later runs' prompts
+# (research.recall_memory) without a release, so no entry may carry one (orchestrator decision 2026-10-15).
+WITHHELD_HELDOUT_TEXT = ("withheld: this entry was written with held-out values before they were barred from memory "
+                         "(invariant 18); only its certificate citation is shown")
+HELDOUT_VALUE_KEYS = frozenset({"estimate", "lo", "hi", "interval", "ci", "score", "held_out_score", "heldout_score",
+                                "observed", "effect_estimate", "sealed_score", "p_value", "pvalue"})
+
+
+def _numbers(v: Any) -> list[float]:
+    return [float(v)] if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float(
+        "inf") else []
+
+
+_NUM_TOKEN = re.compile(r"(?<![\w.])[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?(?![\w.])")
+
+
+def _sig_digits(tok: str) -> int:
+    mant = re.split(r"[eE]", tok)[0].lstrip("+-").replace(".", "").lstrip("0")
+    return len(mant)
+
+
+def _quotes(tokens: list[str], x: float) -> bool:
+    """A standalone number token of the text (not part of a word or hash) equals `x` rounded to its own precision,
+    with at least 3 significant digits (0, 0.5 or 1 are too common to screen for without false refusals)."""
+    for t in tokens:
+        n = _sig_digits(t)
+        if n >= 3 and float(f"{x:.{n}g}") == float(t):
+            return True
+    return False
+
+
+def heldout_value_problems(kernel: Kernel, proposal: Proposal) -> list[str]:
+    """Problems (empty = clean): a data key naming a held-out value (HELDOUT_VALUE_KEYS, at any depth), or a
+    held-out estimate/bound of a cited certificate's resolution written into the title, text or data. Category
+    messages only, never the value."""
+    out: list[str] = []
+    stack: list[Any] = [proposal.data]
+    while stack:
+        v = stack.pop()
+        if isinstance(v, dict):
+            bad = sorted(str(k) for k in v if str(k).lower() in HELDOUT_VALUE_KEYS)
+            if bad:
+                out.append(f"data carries held-out value field(s) {bad} (invariant 18: memory gets no held-out values)")
+            stack += list(v.values())
+        elif isinstance(v, (list, tuple)):
+            stack += list(v)
+    blob = " ".join([proposal.title, proposal.text, json.dumps(proposal.data, sort_keys=True, default=str)])
+    tokens = _NUM_TOKEN.findall(blob)
+    for h in proposal.evidence:
+        try:
+            cert = kernel.certificate(h)
+        except KernelError:
+            continue
+        for s in (cert.resolution.get("targets") or {}).values():
+            for k in ("estimate", "lo", "hi"):
+                if any(_quotes(tokens, x) for x in _numbers(s.get(k))):
+                    out.append(f"text or data quotes a held-out {k} of certificate {h[:12]} (invariant 18)")
+    return sorted(set(out))
+
+
 # ---------------------------------------------------------------------- negative memory, generated automatically
 def negative_proposal(kernel: Kernel, cert_hash: str) -> Proposal | None:
     """Build negative memory from a Kernel certificate that records a verified failure (REJECTED on K6 alone).
@@ -553,21 +636,23 @@ def negative_proposal(kernel: Kernel, cert_hash: str) -> Proposal | None:
     if verified_failure(cert) is not None:
         return None
     claim = Claim.model_validate(cert.claim)
-    targets = {t: {k: (v if isinstance(v, (int, float)) and v == v and abs(v) != float("inf") else None)
-                   for k, v in s.items() if k in ("estimate", "lo", "hi")}
-               for t, s in (cert.resolution.get("targets") or {}).items()}
-    observed = "; ".join(f"{t}: estimate {s.get('estimate')} [{s.get('lo')}, {s.get('hi')}]"
-                         for t, s in sorted(targets.items()))
+    # Invariant 18 (orchestrator decision 2026-10-15, the strict option): NO held-out estimate or interval is written.
+    # Memory is rendered into later runs' prompts (research.recall_memory) without a release, so a negative entry
+    # carries only the verdict, the failing check codes and fields the claim fixed at pre-registration.
     text = (f"Verified failure: the pre-registered claim was not confirmed on held-out data (Kernel REJECTED it on "
             f"K6 alone; every procedure check passed). Claim: {claim.statement}. Metric {claim.metric.id}, minimum "
-            f"effect asked {claim.effect.min_effect}. Held-out: {observed or 'n/a'}.")
+            f"effect asked {claim.effect.min_effect}.")
     return Proposal(kind=Kind.NEGATIVE, title=f"Not confirmed: {claim.statement}"[:200], text=text[:4000],
-                    evidence=(cert_hash,), data={"claim_hash": cert.claim_hash, "failed": ["K6"],
-                                                 "min_effect": claim.effect.min_effect, "targets": targets})
+                    evidence=(cert_hash,), data={"claim_hash": cert.claim_hash, "verdict": Label.REJECTED.value,
+                                                 "failed": ["K6"], "metric": claim.metric.id,
+                                                 "min_effect": claim.effect.min_effect,
+                                                 "targets": sorted((cert.resolution.get("targets") or {}).keys())})
 
 
-def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> list[GateResult]:
-    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store."""
+def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest",
+                      secrets: Sequence[str] = ()) -> list[GateResult]:
+    """Propose and gate negative memory for every verified failure in the Kernel ledger not yet in this store.
+    `secrets`: the calling run's private values (the research loop passes them), screened like any write's."""
     st = store._state()
     done = {h for e in st.entries.values() if e.kind == Kind.NEGATIVE for h in e.evidence}
     out = []
@@ -579,7 +664,7 @@ def harvest_negatives(store: MemoryStore, *, writer: str = "kernel-harvest") -> 
         if prop is None:
             continue
         try:
-            out.append(store.submit(prop, writer=writer))
+            out.append(store.submit(prop, writer=writer, secrets=secrets))
         except MemoryRefused:
             continue  # e.g. the claim statement carries an injection pattern: refused and logged by propose
         done.add(h)

@@ -1,0 +1,366 @@
+{
+ "source": "synthetic-fixture",
+ "note": "NOT human labels. Written by an agent (seeded generator) to exercise the validation harness: the label is whichever plan carries the higher [q=...] marker (|dq| < 0.03 is a tie). A panel validated on this file must never be usable (source != 'human').",
+ "labels": [
+  {
+   "id": "p00",
+   "a": "Plan using target encoding [q=0.31]",
+   "b": "Plan using fold stratification [q=0.44]",
+   "human": "b"
+  },
+  {
+   "id": "p01",
+   "a": "Plan using outlier clipping [q=0.94]",
+   "b": "Plan using fold stratification [q=0.92]",
+   "human": "tie"
+  },
+  {
+   "id": "p02",
+   "a": "Plan using early stopping [q=0.75]",
+   "b": "Plan using class reweighting [q=0.69]",
+   "human": "a"
+  },
+  {
+   "id": "p03",
+   "a": "Plan using early stopping [q=0.56]",
+   "b": "Plan using ensembling [q=0.47]",
+   "human": "a"
+  },
+  {
+   "id": "p04",
+   "a": "Plan using interaction terms [q=0.25]",
+   "b": "Plan using feature scaling [q=0.31]",
+   "human": "b"
+  },
+  {
+   "id": "p05",
+   "a": "Plan using fold stratification [q=0.22]",
+   "b": "Plan using early stopping [q=0.55]",
+   "human": "b"
+  },
+  {
+   "id": "p06",
+   "a": "Plan using feature scaling [q=0.49]",
+   "b": "Plan using monotone constraints [q=0.94]",
+   "human": "b"
+  },
+  {
+   "id": "p07",
+   "a": "Plan using interaction terms [q=0.77]",
+   "b": "Plan using class reweighting [q=0.12]",
+   "human": "a"
+  },
+  {
+   "id": "p08",
+   "a": "Plan using monotone constraints [q=0.35]",
+   "b": "Plan using class reweighting [q=0.57]",
+   "human": "b"
+  },
+  {
+   "id": "p09",
+   "a": "Plan using feature scaling [q=0.34]",
+   "b": "Plan using class reweighting [q=0.36]",
+   "human": "tie"
+  },
+  {
+   "id": "p10",
+   "a": "Plan using fold stratification [q=0.71]",
+   "b": "Plan using outlier clipping [q=0.65]",
+   "human": "a"
+  },
+  {
+   "id": "p11",
+   "a": "Plan using target encoding [q=0.86]",
+   "b": "Plan using class reweighting [q=0.76]",
+   "human": "a"
+  },
+  {
+   "id": "p12",
+   "a": "Plan using class reweighting [q=0.30]",
+   "b": "Plan using feature scaling [q=0.05]",
+   "human": "a"
+  },
+  {
+   "id": "p13",
+   "a": "Plan using class reweighting [q=0.53]",
+   "b": "Plan using missing-value indicators [q=0.77]",
+   "human": "b"
+  },
+  {
+   "id": "p14",
+   "a": "Plan using early stopping [q=0.82]",
+   "b": "Plan using class reweighting [q=0.68]",
+   "human": "a"
+  },
+  {
+   "id": "p15",
+   "a": "Plan using target encoding [q=0.09]",
+   "b": "Plan using ensembling [q=0.44]",
+   "human": "b"
+  },
+  {
+   "id": "p16",
+   "a": "Plan using fold stratification [q=0.44]",
+   "b": "Plan using monotone constraints [q=0.74]",
+   "human": "b"
+  },
+  {
+   "id": "p17",
+   "a": "Plan using ensembling [q=0.84]",
+   "b": "Plan using feature scaling [q=0.15]",
+   "human": "a"
+  },
+  {
+   "id": "p18",
+   "a": "Plan using outlier clipping [q=0.27]",
+   "b": "Plan using interaction terms [q=0.75]",
+   "human": "b"
+  },
+  {
+   "id": "p19",
+   "a": "Plan using feature scaling [q=0.32]",
+   "b": "Plan using outlier clipping [q=0.71]",
+   "human": "b"
+  },
+  {
+   "id": "p20",
+   "a": "Plan using feature scaling [q=0.66]",
+   "b": "Plan using interaction terms [q=0.14]",
+   "human": "a"
+  },
+  {
+   "id": "p21",
+   "a": "Plan using monotone constraints [q=0.29]",
+   "b": "Plan using ensembling [q=0.51]",
+   "human": "b"
+  },
+  {
+   "id": "p22",
+   "a": "Plan using fold stratification [q=0.87]",
+   "b": "Plan using feature scaling [q=0.53]",
+   "human": "a"
+  },
+  {
+   "id": "p23",
+   "a": "Plan using class reweighting [q=0.70]",
+   "b": "Plan using feature scaling [q=0.11]",
+   "human": "a"
+  },
+  {
+   "id": "p24",
+   "a": "Plan using class reweighting [q=0.37]",
+   "b": "Plan using early stopping [q=0.06]",
+   "human": "a"
+  },
+  {
+   "id": "p25",
+   "a": "Plan using target encoding [q=0.48]",
+   "b": "Plan using fold stratification [q=0.73]",
+   "human": "b"
+  },
+  {
+   "id": "p26",
+   "a": "Plan using early stopping [q=0.93]",
+   "b": "Plan using monotone constraints [q=0.24]",
+   "human": "a"
+  },
+  {
+   "id": "p27",
+   "a": "Plan using missing-value indicators [q=0.19]",
+   "b": "Plan using feature scaling [q=0.24]",
+   "human": "b"
+  },
+  {
+   "id": "p28",
+   "a": "Plan using outlier clipping [q=0.85]",
+   "b": "Plan using target encoding [q=0.18]",
+   "human": "a"
+  },
+  {
+   "id": "p29",
+   "a": "Plan using fold stratification [q=0.62]",
+   "b": "Plan using target encoding [q=0.37]",
+   "human": "a"
+  },
+  {
+   "id": "p30",
+   "a": "Plan using fold stratification [q=0.09]",
+   "b": "Plan using target encoding [q=0.30]",
+   "human": "b"
+  },
+  {
+   "id": "p31",
+   "a": "Plan using feature scaling [q=0.10]",
+   "b": "Plan using outlier clipping [q=0.53]",
+   "human": "b"
+  },
+  {
+   "id": "p32",
+   "a": "Plan using target encoding [q=0.61]",
+   "b": "Plan using fold stratification [q=0.56]",
+   "human": "a"
+  },
+  {
+   "id": "p33",
+   "a": "Plan using outlier clipping [q=0.47]",
+   "b": "Plan using target encoding [q=0.11]",
+   "human": "a"
+  },
+  {
+   "id": "p34",
+   "a": "Plan using early stopping [q=0.27]",
+   "b": "Plan using fold stratification [q=0.60]",
+   "human": "b"
+  },
+  {
+   "id": "p35",
+   "a": "Plan using interaction terms [q=0.87]",
+   "b": "Plan using feature scaling [q=0.48]",
+   "human": "a"
+  },
+  {
+   "id": "p36",
+   "a": "Plan using monotone constraints [q=0.59]",
+   "b": "Plan using interaction terms [q=0.69]",
+   "human": "b"
+  },
+  {
+   "id": "p37",
+   "a": "Plan using interaction terms [q=0.60]",
+   "b": "Plan using outlier clipping [q=0.88]",
+   "human": "b"
+  },
+  {
+   "id": "p38",
+   "a": "Plan using target encoding [q=0.35]",
+   "b": "Plan using outlier clipping [q=0.28]",
+   "human": "a"
+  },
+  {
+   "id": "p39",
+   "a": "Plan using target encoding [q=0.81]",
+   "b": "Plan using early stopping [q=0.94]",
+   "human": "b"
+  },
+  {
+   "id": "p40",
+   "a": "Plan using class reweighting [q=0.35]",
+   "b": "Plan using fold stratification [q=0.33]",
+   "human": "tie"
+  },
+  {
+   "id": "p41",
+   "a": "Plan using outlier clipping [q=0.46]",
+   "b": "Plan using fold stratification [q=0.13]",
+   "human": "a"
+  },
+  {
+   "id": "p42",
+   "a": "Plan using class reweighting [q=0.22]",
+   "b": "Plan using target encoding [q=0.86]",
+   "human": "b"
+  },
+  {
+   "id": "p43",
+   "a": "Plan using fold stratification [q=0.66]",
+   "b": "Plan using monotone constraints [q=0.92]",
+   "human": "b"
+  },
+  {
+   "id": "p44",
+   "a": "Plan using early stopping [q=0.24]",
+   "b": "Plan using feature scaling [q=0.21]",
+   "human": "a"
+  },
+  {
+   "id": "p45",
+   "a": "Plan using interaction terms [q=0.15]",
+   "b": "Plan using monotone constraints [q=0.41]",
+   "human": "b"
+  },
+  {
+   "id": "p46",
+   "a": "Plan using ensembling [q=0.77]",
+   "b": "Plan using class reweighting [q=0.82]",
+   "human": "b"
+  },
+  {
+   "id": "p47",
+   "a": "Plan using ensembling [q=0.72]",
+   "b": "Plan using missing-value indicators [q=0.32]",
+   "human": "a"
+  },
+  {
+   "id": "p48",
+   "a": "Plan using missing-value indicators [q=0.53]",
+   "b": "Plan using ensembling [q=0.90]",
+   "human": "b"
+  },
+  {
+   "id": "p49",
+   "a": "Plan using monotone constraints [q=0.34]",
+   "b": "Plan using early stopping [q=0.71]",
+   "human": "b"
+  },
+  {
+   "id": "p50",
+   "a": "Plan using early stopping [q=0.84]",
+   "b": "Plan using monotone constraints [q=0.16]",
+   "human": "a"
+  },
+  {
+   "id": "p51",
+   "a": "Plan using missing-value indicators [q=0.34]",
+   "b": "Plan using feature scaling [q=0.51]",
+   "human": "b"
+  },
+  {
+   "id": "p52",
+   "a": "Plan using fold stratification [q=0.24]",
+   "b": "Plan using monotone constraints [q=0.29]",
+   "human": "b"
+  },
+  {
+   "id": "p53",
+   "a": "Plan using monotone constraints [q=0.62]",
+   "b": "Plan using feature scaling [q=0.70]",
+   "human": "b"
+  },
+  {
+   "id": "p54",
+   "a": "Plan using early stopping [q=0.22]",
+   "b": "Plan using target encoding [q=0.76]",
+   "human": "b"
+  },
+  {
+   "id": "p55",
+   "a": "Plan using outlier clipping [q=0.07]",
+   "b": "Plan using target encoding [q=0.85]",
+   "human": "b"
+  },
+  {
+   "id": "p56",
+   "a": "Plan using ensembling [q=0.15]",
+   "b": "Plan using class reweighting [q=0.59]",
+   "human": "b"
+  },
+  {
+   "id": "p57",
+   "a": "Plan using monotone constraints [q=0.76]",
+   "b": "Plan using early stopping [q=0.14]",
+   "human": "a"
+  },
+  {
+   "id": "p58",
+   "a": "Plan using ensembling [q=0.42]",
+   "b": "Plan using feature scaling [q=0.06]",
+   "human": "a"
+  },
+  {
+   "id": "p59",
+   "a": "Plan using class reweighting [q=0.21]",
+   "b": "Plan using fold stratification [q=0.76]",
+   "human": "b"
+  }
+ ]
+}

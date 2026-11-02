@@ -87,7 +87,12 @@ def main() -> None:
     a = ap.parse_args()
     out = Path(a.out_dir)
     (out / "public").mkdir(parents=True, exist_ok=True)
-    (out / "private").mkdir(parents=True, exist_ok=True)
+    # held-out truth goes to truth_layout.truth_dir: outside every agent-readable root (<data>/private/tasks/... for a
+    # task under <data>/tasks); refused (TruthLayoutError) before anything is written if it would be inside one
+    from custom_harness.truth_layout import truth_dir
+
+    truth = truth_dir(out)
+    truth.mkdir(parents=True, exist_ok=True)
     rng = random.Random(a.seed)
     header = ["x1", "x2", "n1", "n2", "n3", "n4", "color", "label"]
     train = [sample(rng) for _ in range(a.n_train)]
@@ -96,12 +101,12 @@ def main() -> None:
         csv.writer(f).writerows([header] + train)
     with open(out / "public" / "test_X.csv", "w", newline="") as f:
         csv.writer(f).writerows([header[:-1]] + [r[:-1] for r in test])
-    with open(out / "private" / "test_y.csv", "w", newline="") as f:
+    with open(truth / "test_y.csv", "w", newline="") as f:
         csv.writer(f).writerows([["label"]] + [[r[-1]] for r in test])
-    # Canary: a random token that exists only in the private directory. If it ever appears in a prompt,
+    # Canary: a random token that exists only in the truth directory. If it ever appears in a prompt,
     # a trace or the agent workspace, private data leaked (research.audit I5). Random, not seeded: the
     # task data stay deterministic, the canary must not be guessable from the seed.
-    (out / "private" / "canary.txt").write_text("CHH-CANARY-" + secrets.token_hex(16) + "\n")
+    (truth / "canary.txt").write_text("CHH-CANARY-" + secrets.token_hex(16) + "\n")
     (out / "baseline.py").write_text(BASELINE)
     (out / "task.yaml").write_text(TASK_YAML)
     print(f"wrote task to {out}")

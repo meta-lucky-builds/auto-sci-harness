@@ -8,7 +8,8 @@ harness-science ledger (incl. per-group results and OOD drop, key "lofo") and pr
 A campaign without a held-out family (/domain) is refused (GOAL invariant 16, fail closed).
 
 M4 pieces (GOAL §5 L6.3/6.6/6.8/6.10): the diagnosis carries first-divergence causal signatures from evolve-split
-runs; each edit's cited cluster/divergence ids are checked against it (`claims_check`); an edit whose normalised
+runs; an edit whose citations do not resolve in what the proposer saw, or whose claimed change is not the real diff
+of its ops, is rejected unevaluated (`claims_check`, status `rejected_claims`, claims.py); an edit whose normalised
 signature equals a previously REJECTED one (static or gate) is refused before any evaluation (novelty gate); the
 proposer may decline (recorded, not an error); acceptance also needs the cost term (candidate cost on the paired gate
 units <= (1 + max_cost_increase) x parent, fail closed without cost data); the ledger records per-task
@@ -26,22 +27,53 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ..ablation import DUPLICATE_GATE_SWITCH, MARKER, NO_ABLATION, AblationSet
 from ..budget import Budget, BudgetExceeded
 from ..gateway import Backend
+from ..kerneld.releases import Releases, run_targets
 from ..runtime.engine import RetryPolicy
 from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
-from .diagnosis import check_claims
-from .edits import DEFAULT_PROTECTED_NODES, Edit, EditRejected, apply_edit
-from .evaluate import RunOutcome, SandboxFactory, SuiteTask, check_held_out, run_harness
-from .export import proposer_view
+from .branches import BranchConfig, propose_branch
+from .claims import check_claims, digest_refs
+from .critic import FamilySeparatedCritic
+from .durable import ProposalLog
+from .edits import (
+    DEFAULT_PROTECTED_NODES,
+    Edit,
+    EditRejected,
+    EditType,
+    ScreenRejected,
+    _token_hit,
+    apply_edit,
+    check_one_mechanism,
+    denied_tokens,
+    screen_prediction,
+    withheld,
+)
+from .evaluate import (
+    DURABLE_KIND,
+    Attempt,
+    ExecutedRun,
+    RunOutcome,
+    SandboxFactory,
+    SuiteTask,
+    check_held_out,
+    execute_run,
+    finish_run,
+)
+from .evaluate import outcome_from_record as _outcome_from
+from .evaluate import outcome_to_record as _outcome_to
+from .export import proposer_view, screen_digest
 from .multiplicity import check_run, last_prereg_seq
 from .propose import diagnose, propose
+from .proposer_agent import ProposerAgent
 from .selection import (
     PairedSample,
     Unit,
@@ -55,7 +87,13 @@ from .selection import (
 
 # lineage statuses whose edit signature the novelty gate refuses to see again (GOAL §5 L6.6, HarnessX "reverted").
 # Race losers are NOT included: they were eliminated on a few evolve units, never judged by the gate.
-REJECTED_STATUSES = ("rejected_static", "rejected_gate")
+# A smoke failure is included (the candidate broke where the parent did not). Infra-failed smoke runs are not
+# rejections at all (_smoke_failure); older lineage records marked `infra` are still skipped below.
+REJECTED_STATUSES = ("rejected_static", "rejected_gate", "rejected_smoke")
+# smoke run (GOAL §5 L6.7): run statuses meaning the harness itself broke on the smoke task
+SMOKE_BROKEN = ("failed", "step_limit", "budget_exceeded")
+# screened edit fields whose dropped items are unchecked claims (claims.py): a drop rejects the edit
+UNVERIFIABLE_IF_DROPPED = ("evidence", "failure_clusters_fixed", "claimed_change")
 
 
 @dataclass
@@ -76,6 +114,21 @@ class EvolveConfig:
     # 1.0 = at most twice the parent's cost: a provisional default, not calibrated on a real campaign.
     max_cost_increase: float = 1.0
     cost_metric: str = "tokens"  # "tokens" (prompt + completion), "wall_s" or "usd" (selection.COST_METRICS)
+    # prediction screen (edits.screen_prediction, GOAL §5 L6.2): bounds on proposer free text and on the predicted
+    # delta (the objective per run lies in [-0.5, 1.5], so a paired delta lies in [-2, 2]). A bandwidth limit on the
+    # ledger channel, not claim policy.
+    max_rationale_chars: int = 2000
+    max_expected_delta: float = 2.0
+    delta_decimals: int = 3
+    # race allocation (GOAL §5 L1; control/allocator.py, evalrace.py, voi.py). "batch" = selection.race in a loop
+    # (default). "per_completion" = the completion-driven allocator over the single-writer Evaluator; with
+    # race_slots=1 it evaluates in exactly the batch order. race_slots > 1 runs harness runs concurrently: refused
+    # unless race_concurrency_ack (an owner decision: unit scores depend on Kernel ledger history, so concurrent
+    # orders are not shown to give the batch race's decisions; docs/control_allocation.md).
+    race_allocator: str = "batch"
+    race_slots: int = 1
+    race_concurrency_ack: bool = False
+    race_timeout_s: float = 3600.0
 
 
 @dataclass
@@ -92,6 +145,8 @@ class GenerationResult:
     loop_label: str = "MECHANICAL"
     # yield/prune counters of this generation (also appended as a `generation_stats` record)
     counters: dict[str, Any] = field(default_factory=dict)
+    # L6.9: the `branch` record created this generation (a gate-rejected candidate that won a cluster), or None
+    branch: dict[str, Any] | None = None
 
 
 class Evaluator:
@@ -100,11 +155,17 @@ class Evaluator:
     def __init__(self, backends: dict[str, Backend], store: EvidenceStore, sandbox_factory: SandboxFactory,
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
-                 campaign_budget: Budget | None = None):
+                 campaign_budget: Budget | None = None, releases: Releases | None = None,
+                 durable_key: str | None = None, ablation: AblationSet = NO_ABLATION):
         sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
         if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
             raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
+        # capability switches OFF in every run this evaluator starts (custom_harness/ablation.py): each run is marked
+        # ABLATED, and its durable outcomes live under their own key (never mixed with production outcomes)
+        self.ablation = ablation
+        if ablation and durable_key is not None:
+            durable_key = f"{durable_key}|{MARKER}:{','.join(ablation.names)}"
         self.tasks = {t.task_id: t for t in tasks}
         self.budget_per_run = budget_per_run
         self.infra_retries = infra_retries
@@ -112,45 +173,149 @@ class Evaluator:
         # campaign-level cap across all runs (persisted when built with budget.persistent_budget); checked
         # before every run, charged after it; exhaustion stops the campaign cleanly (BudgetExceeded)
         self.campaign_budget = campaign_budget
+        self.releases = releases  # None = live releases on the store's ledger; a replay passes pinned releases
         self.cache: dict[tuple[str, str, int], RunOutcome] = {}
         self.calls = 0  # actual harness runs executed (cache misses, incl. infra re-runs)
         self.infra_failures = 0  # runs that ended INFRA_FAILED (each one excluded, never scored)
+        # SINGLE WRITER (control/evalrace.py): every mutation of the state above (cache, counters, budget charges,
+        # durable unit records, releases) happens in begin()/finish() on ONE thread, the first that calls them.
+        # Only attempt() (the harness run itself) may run on other threads. A second writer thread is refused.
+        self._writer: int | None = None
+        self._in_flight: set[tuple[str, str, int]] = set()
+        # durable unit outcomes (crash/resume): with a key, every finished unit is appended to the store AFTER its
+        # charge, and a new Evaluator with the same key starts from them (never re-run, never charged again)
+        self.durable_key = durable_key
+        if durable_key is not None:
+            for rec in store.records_where(DURABLE_KIND, "durable_key", durable_key):
+                self.cache[(rec["spec_hash"], rec["task_id"], int(rec["seed"]))] = _outcome_from(rec["outcome"])
 
     def outcome(self, spec: HarnessSpec, unit: Unit) -> RunOutcome:
         """A unit whose run failed for infrastructure reasons is re-run (fresh run, same seed) up to
         `infra_retries` times; if it still fails it stays excluded (score None)."""
         key = (spec.spec_hash(), unit[0], unit[1])
-        if key not in self.cache:
-            for _ in range(1 + self.infra_retries):
-                if self.campaign_budget is not None:
-                    self.campaign_budget.check()
-                self.calls += 1
-                since = last_prereg_seq(self.store)
-                out = run_harness(spec, self.tasks[unit[0]], unit[1], backends=self.backends,
-                                  store=self.store, sandbox_factory=self.sandbox_factory,
-                                  budget_limits=self.budget_per_run, retry=self.retry)
-                # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
-                # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
-                check_run(self.store, since)
-                if self.campaign_budget is not None:
-                    try:
-                        self.campaign_budget.charge(out.cost)
-                    except BudgetExceeded:
-                        pass  # recorded; the next check() stops the campaign before any further run
-                if not out.infra_failed:
-                    break
-                self.infra_failures += 1
-            self.cache[key] = out
+        n = 0
+        while key not in self.cache:
+            att = self.begin(spec, unit, n)
+            try:
+                ex = self.attempt(att)
+            except BaseException:
+                self.abandon(att)
+                raise
+            self.finish(att, ex)
+            n += 1
         return self.cache[key]
+
+    # ---------------------------------------------------------------- single-writer protocol (evalrace.py)
+    def _own(self) -> None:
+        me = threading.get_ident()
+        if self._writer is None:
+            self._writer = me
+        elif self._writer != me:
+            raise RuntimeError("Evaluator state has a single writer thread; run only attempt() on other threads "
+                               "(control/evalrace.py)")
+
+    def begin(self, spec: HarnessSpec, unit: Unit, n: int = 0) -> Attempt:
+        """Writer thread: start attempt `n` of a unit (campaign budget check first, as before every run)."""
+        self._own()
+        key = (spec.spec_hash(), unit[0], unit[1])
+        if key in self.cache:
+            raise RuntimeError(f"unit {key} is already evaluated")
+        if n == 0 and key in self._in_flight:
+            raise RuntimeError(f"unit {key} is already being evaluated (a duplicate run would be charged twice)")
+        if self.campaign_budget is not None:
+            try:
+                self.campaign_budget.check()
+            except BaseException:
+                self._in_flight.discard(key)
+                raise
+        self._in_flight.add(key)
+        self.calls += 1
+        return Attempt(key, spec, unit, n, last_prereg_seq(self.store))
+
+    def attempt(self, att: Attempt) -> ExecutedRun:
+        """Any thread: the harness run itself (no Evaluator state is touched)."""
+        return execute_run(att.spec, self.tasks[att.unit[0]], att.unit[1], backends=self.backends, store=self.store,
+                           sandbox_factory=self.sandbox_factory, budget_limits=self.budget_per_run, retry=self.retry,
+                           ablation=self.ablation)
+
+    def finish(self, att: Attempt, ex: ExecutedRun) -> RunOutcome | None:
+        """Writer thread: score, check, charge and record attempt `att`. Returns the unit's final outcome, or None
+        when it failed for infrastructure reasons and has a retry left (the caller begins attempt att.n + 1)."""
+        self._own()
+        out = finish_run(ex, store=self.store, releases=self.releases)
+        # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
+        # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
+        try:
+            check_run(self.store, att.since)
+        except BaseException:
+            self._in_flight.discard(att.key)
+            raise
+        if self.campaign_budget is not None:
+            try:
+                self.campaign_budget.charge(out.cost)
+            except BudgetExceeded:
+                pass  # recorded; the next check() stops the campaign before any further run
+        if out.infra_failed:
+            self.infra_failures += 1
+            if att.n < self.infra_retries:
+                return None
+        self._in_flight.discard(att.key)
+        if self.durable_key is not None:  # after the charge: a crash in between re-runs the unit (a real, second
+            # run, charged once itself); a recorded unit is never re-run nor charged again
+            self.store.append_record(DURABLE_KIND, {"durable_key": self.durable_key, "spec_hash": att.key[0],
+                                                    "task_id": att.key[1], "seed": att.key[2],
+                                                    "outcome": _outcome_to(out)})
+        self.cache[att.key] = out
+        return out
+
+    def abandon(self, att: Attempt) -> None:
+        """Writer thread: an attempt whose run raised (no outcome): it is no longer in flight."""
+        self._own()
+        self._in_flight.discard(att.key)
 
     def score(self, spec: HarnessSpec, unit: Unit) -> float | None:
         return self.outcome(spec, unit).score
 
 
 def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator: Evaluator,
-                      proposer: Backend, store: EvidenceStore, cfg: EvolveConfig | None = None
+                      proposer: Backend | ProposerAgent, store: EvidenceStore, cfg: EvolveConfig | None = None,
+                      releases: Releases | None = None,
+                      critic: FamilySeparatedCritic | None = None,
+                      branching: BranchConfig | None = None, ablation: AblationSet | None = None,
+                      proposals: ProposalLog | None = None,
+                      edit_admission: Callable[[list[Edit]], tuple[list[int], list[int]]] | None = None
                       ) -> GenerationResult:
+    """`proposer`: a Backend (one-shot proposer, propose.py) or a ProposerAgent (agentic: reads the evidence export
+    in a sandbox). `critic`: optional family-separated critic (critic.py), refused before any model call when it
+    shares the proposer's family; its review is advisory (recorded, never gating). `branching`: when given, a
+    candidate rejected on its evolve re-measurement or the held-out gate is tested per gate cluster and may become
+    a branch (branches.py; its cluster bits are ledgered releases); None = no branching (unchanged behaviour).
+    `proposals`: the campaign's durable proposal log for this generation (durable.py): the proposal is persisted
+    before any candidate runs and, on a resume, replayed instead of calling the proposer again.
+
+    `ablation` (custom_harness/ablation.py; default: the evaluator's): capability switches OFF in this generation. An
+    ablated generation NEVER accepts an edit and never proposes a branch: it is a measurement arm. Its lineage,
+    harness-edit, stats and proposer-session records go to `<kind>:ABLATED` record kinds, which no production reader
+    (novelty gate, proposer ledger, calibration, export) reads. Any acceptance run that is itself ABLATED also blocks
+    acceptance (fail closed). An ablated generation is refused a durable proposal log (int17 merge: the log writes
+    the production `PROPOSAL_KIND`, which an ablated arm must never enter).
+
+    `edit_admission`: the L7 edit-type quota (control/islands.admit, bound by evolve/search.py): given the proposed
+    edits it returns (admitted, refused) indices, a partition of the proposal (fail closed otherwise). A refused edit
+    is recorded `rejected_static` (edit withheld, reason naming the quota, no signature: the duplicate gate is not
+    fed, the same edit may be admitted later) and never evaluated. None = every edit admitted (unchanged)."""
+    abl = ablation if ablation is not None else getattr(evaluator, "ablation", NO_ABLATION)
+    if getattr(evaluator, "ablation", abl) != abl:
+        raise ValueError(f"the generation's ablation {list(abl.names)} differs from its evaluator's "
+                         f"{list(evaluator.ablation.names)}: both arms of one generation run under one ablation")
+    if abl and proposals is not None:
+        raise ValueError(f"an ablated generation ({list(abl.names)}) cannot use a durable proposal log: its "
+                         "proposal record would enter the production record kinds")
+    sfx = f":{MARKER}" if abl else ""  # ablated records never enter the production record kinds
     cfg = cfg or EvolveConfig()
+    check_race_config(cfg)  # fail closed before any run
+    if critic is not None:
+        critic.check_proposer(proposer.backend if isinstance(proposer, ProposerAgent) else proposer)
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
     gate_units = [(t.task_id, s) for t in tasks if t.split == "gate" for s in cfg.seeds]
     if not evolve_units or not gate_units:
@@ -169,28 +334,105 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     parent_outcomes = [evaluator.outcome(parent, u) for u in evolve_units]
     parent_scores = {u: o.score for u, o in zip(evolve_units, parent_outcomes, strict=True)}
     evolve_ids = {t.task_id for t in tasks if t.split == "evolve"}
-    # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
-    # outcomes never feed the diagnosis, which the proposer reads
-    references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
-    digest = diagnose(parent_outcomes, store, references=references)
-    ledger = [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
+    # a resumed campaign generation (evolve/durable.py): the proposal persisted before the crash, with the evidence
+    # ids it may cite and the novelty gate's state; neither the diagnosis nor the proposer runs again
+    saved = proposals.load(parent_hash) if proposals is not None else None
+    proposal: Any
+    if saved is not None:
+        proposal, known, rejected_before = saved
+    else:
+        # first-divergence references: any cached outcome of an EVOLVE task (other seeds, earlier candidates); gate
+        # outcomes never feed the diagnosis, which the proposer reads
+        references = [o for (_, task_id, _), o in getattr(evaluator, "cache", {}).items() if task_id in evolve_ids]
+        if abl.off("proposer-history"):  # ablation: no earlier candidate's runs either; the parent's own runs only
+            references = [o for (h, task_id, _), o in getattr(evaluator, "cache", {}).items()
+                          if task_id in evolve_ids and h == parent_hash]
+        digest = diagnose(parent_outcomes, store, references=references, evolve_ids=evolve_ids)
+        if abl.off("causal-signatures"):  # ablation: no first-divergence causal signatures reach the proposer
+            digest = {**digest, "divergences": [], "no_reference": [], "unlinked": 0}
+        # the prompt carries the digest: the export's leak audit applies to it too (fail closed, export.screen_digest)
+        digest = screen_digest(digest, store, runs=[*parent_outcomes, *references], tasks=tasks,
+                               canaries=getattr(proposer, "canaries", ()))
+        no_history = abl.off("proposer-history")  # ablation: no past-edit ledger and no evidence-export session
+        ledger = [] if no_history else [proposer_view(r, evolve_ids) for r in store.records("harness_edit")]
 
-    proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+        if isinstance(proposer, ProposerAgent) and no_history:
+            proposal = propose(proposer.backend, parent, digest, ledger, n_edits=cfg.n_edits,
+                               protected=cfg.protected_nodes)
+        elif isinstance(proposer, ProposerAgent):
+            proposal = proposer.propose_from_export(
+                parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
+                n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+            store.append_record("proposer_session" + sfx, {"parent": parent_hash, "transcript": proposal.transcript,
+                                                           "problems": proposal.problems})
+        else:
+            proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+        # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis,
+        # or the one-shot proposer's diagnosis
+        shown = getattr(proposal, "evidence_refs", None)
+        known = set(shown) if shown is not None else digest_refs(digest)
+        rejected_before = set() if abl.off(DUPLICATE_GATE_SWITCH) else rejected_signatures(store)
+        if proposals is not None:  # persisted BEFORE any candidate runs: a crash from here on resumes, not re-asks
+            proposals.save(parent_hash, proposal, known, rejected_before)
     edits, problems = proposal.edits, proposal.problems
-    rejected_before = rejected_signatures(store)
+    admitted: list[Edit] = list(edits)
+    quota_refused: list[Edit] = []
+    if edit_admission is not None:
+        # the quota sees each edit's EFFECTIVE type: an edit whose ops only rewrite prompt text is prompt-only,
+        # whatever type it declares (red-team finding: mislabelled prompt edits passed the quota)
+        adm_ok, adm_refused = edit_admission([_quota_view(e) for e in edits])
+        both = [*adm_ok, *adm_refused]
+        if any(type(i) is not int for i in both) or sorted(both) != list(range(len(edits))):
+            raise ValueError("edit_admission must partition the proposal's edit indices (fail closed)")
+        admitted, quota_refused = [edits[i] for i in sorted(adm_ok)], [edits[i] for i in sorted(adm_refused)]
+    claims_by: dict[str, dict[str, Any]] = {}
+    deny = denied_tokens(tasks)
+    task_ids = {t.task_id for t in tasks}
     candidates: dict[str, tuple[Edit, HarnessSpec]] = {}
+    extras: dict[str, dict[str, Any]] = {}  # per candidate: screen notes and the (advisory) critic review
     records: list[dict[str, Any]] = [{"status": "malformed", "problem": p} for p in problems]
     if proposal.decline is not None:
-        records.append({"status": "declined", "reason": proposal.decline})
-    for edit in edits:
+        # proposer free text written to the lineage (exported): screened like an edit's rationale
+        reason = proposal.decline if not _token_hit(proposal.decline, deny) else "<withheld: names held-out data>"
+        records.append({"status": "declined", "reason": reason})
+    records += [{"status": "rejected_static", "edit": withheld(e),
+                 "reason": "edit-type quota (L7 orchestrator admission): not admitted this generation"}
+                for e in quota_refused]
+    for edit in admitted:
         sig = edit_signature(edit)
-        base = {"edit": edit.model_dump(), "signature": sig, "claims_check": check_claims(edit, digest)}
+        if abl.off("contract-hop-edits") and edit.type in (EditType.CONTRACT, EditType.HOP):
+            # ablation: these edit types do not exist in this arm (unscreened text never stored: withheld)
+            records.append({"status": "ablated_edit_type", "edit": withheld(edit),
+                            "reason": f"edit type {edit.type.value!r} switched off (contract-hop-edits)"})
+            continue
+        try:  # covert-channel / leak screen on the edit's text and predicted effect, before anything is stored
+            edit, notes = screen_prediction(edit, task_ids=task_ids, deny=deny, max_text_chars=cfg.max_rationale_chars,
+                                            max_delta=cfg.max_expected_delta, delta_decimals=cfg.delta_decimals)
+        except ScreenRejected as e:  # the refused text is never stored (withheld); a text-only refusal does not
+            # feed the novelty gate (the same change re-worded is a different proposal), an ops refusal does
+            if sig in rejected_before:
+                records.append({"status": "rejected_novelty", "edit": withheld(edit), "signature": sig,
+                                "reason": "identical (normalised) to a previously rejected edit"})
+            else:
+                records.append({"status": "rejected_static", "edit": withheld(edit), "reason": str(e),
+                                **({"signature": sig} if e.about_ops else {})})
+            continue
+        base = {"edit": _public(edit, evolve_ids), "signature": sig, "claims_check": check_claims(edit, refs=known),
+                **({"screen": notes} if notes else {})}
         if sig in rejected_before:
             records.append({"status": "rejected_novelty", **base,
                             "reason": "identical (normalised) to a previously rejected edit"})
             continue
+        # a citation or claimed path the screen DROPPED (too long, too many, not an id) can never be checked: the edit
+        # is refused rather than judged on what is left (fail closed; the notes quote no proposer text)
+        unverifiable = [n for n in notes if n.split(":")[0] in UNVERIFIABLE_IF_DROPPED and "dropped" in n]
+        if unverifiable:
+            records.append({"status": "rejected_claims", **base,
+                            "reason": "unverifiable claims: " + "; ".join(unverifiable)})
+            continue
         try:
             spec = apply_edit(parent, edit, cfg.protected_nodes)
+            check_one_mechanism(edit, parent)  # GOAL §5 L6.6: one mechanism per candidate
         except EditRejected as e:
             records.append({"status": "rejected_static", **base, "reason": str(e)})
             continue
@@ -198,23 +440,54 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
         if h == parent_hash or h in candidates:
             records.append({"status": "no_op_or_duplicate", **base})
             continue
-        candidates[h] = (edit, spec)
+        # GOAL §5 L6.3, enforced: citations resolve in what the proposer saw AND the claimed change is the real diff.
+        # Not a novelty rejection (the same ops honestly claimed are a new proposal): no REJECTED_STATUSES entry.
+        base["claims_check"] = claims_by[h] = check_claims(
+            edit, refs=known, before=parent.model_dump(mode="json"), after=spec.model_dump(mode="json"))
+        if not claims_by[h]["passed"]:
+            records.append({"status": "rejected_claims", **base, "reason": claims_by[h]["reason"]})
+            continue
+        if critic is not None:
+            base["critic"] = critic.review(edit).as_record()
         store.add_harness_version(spec.id, spec.model_dump(mode="json"), parent_hash=parent_hash)
+        # smoke run (GOAL §5 L6.7): the candidate runs the first evolve unit through the real loop before racing.
+        # That unit is in the race's first chunk, so a passing smoke run costs nothing extra (the Evaluator caches it).
+        # ablation `minibatch-prefilter`: no smoke run pre-filter
+        smoke = None if abl.off("minibatch-prefilter") else evaluator.outcome(spec, evolve_units[0])
+        smoke_fail = None if smoke is None else _smoke_failure(smoke, parent_outcomes[0])
+        if smoke is not None and smoke_fail is not None:
+            records.append({"status": "rejected_smoke", **base, "candidate": h, "reason": smoke_fail,
+                            "infra": smoke.infra_failed, "smoke": {"task": smoke.task_id, "seed": smoke.seed,
+                                                                   "status": smoke.status, "run_id": smoke.run_id}})
+            continue
+        candidates[h] = (edit, spec)
+        extras[h] = {k: base[k] for k in ("screen", "critic") if k in base}
+        if smoke is not None and smoke.infra_failed:  # excluded, not scored (invariant 21: a proxy denies only on
+            # evidence): ledgered here
+            extras[h]["smoke"] = {"excluded": "infra", "task": smoke.task_id, "seed": smoke.seed,
+                                  "status": smoke.status, "run_id": smoke.run_id}
 
     accepted_spec, accepted = parent, False
     decision = f"proposer declined: {proposal.decline}" if proposal.decline is not None else "no valid candidates"
     survivors: list[Any] = []
     loop_label = "MECHANICAL"
     fixed_k = 0
+    branch: dict[str, Any] | None = None
     if candidates:
-        rr = race(list(candidates), evolve_units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
-                  parent_scores, rounds=cfg.race_rounds, keep=1)
+        race_cfg = cfg  # selection only; the acceptance rule below never reads it
+        if abl.off("minibatch-prefilter"):  # ablation: no successive-halving elimination (one round, every unit)
+            race_cfg = replace(race_cfg, race_rounds=1)
+        if abl.off("voi-allocation") and race_cfg.race_allocator == "voi":  # ablation: the batch race instead
+            race_cfg = replace(race_cfg, race_allocator="batch")
+        if abl.off("per-completion-race") and race_cfg.race_allocator == "per_completion":
+            race_cfg = replace(race_cfg, race_allocator="batch", race_slots=1)  # ablation: the batch race instead
+        rr = _race(candidates, evolve_units, evaluator, parent_scores, race_cfg)
         fixed_k = rr.evaluations_fixed_k
         survivors = list(rr.survivors)
         for h, (edit, _) in candidates.items():
             st = rr.stats.get(h, {})
-            records.append({"status": "raced", "candidate": h, "edit": edit.model_dump(), "race": st,
-                            "survived": h in rr.survivors, "signature": edit_signature(edit)})
+            records.append({"status": "raced", "candidate": h, "edit": _public(edit, evolve_ids), "race": st,
+                            "survived": h in rr.survivors, "signature": edit_signature(edit), **extras[h]})
         if rr.survivors:
             best = str(rr.survivors[0])
             edit, spec = candidates[best]
@@ -237,37 +510,79 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             cost = cost_bound(valid_gate, lambda u: evaluator.outcome(spec, u).cost,
                               lambda u: evaluator.outcome(parent, u).cost,
                               max_increase=cfg.max_cost_increase, metric=cfg.cost_metric)
+            if abl.off("cost-term"):  # ablation: the cost term is measured, not applied (this arm never accepts)
+                cost = {**cost, "passed": True, "ablated": {"switch": "cost-term", "measured_passed": cost["passed"]}}
             ok = d.accepted and lofo["passed"] and cost["passed"] and excl["passed"]
+            # the accept/reject bit is computed from gate-target verdicts and reaches the proposer (proposer_view):
+            # a ledgered verdict-bit release on every target the acceptance runs read (GOAL §16.5.3); pinned in a
+            # replayed campaign
+            used_runs = {evaluator.outcome(x, u).run_id for x in (spec, parent) for u in gate_units}
+            gate_targets = sorted({t for r in used_runs if r for t in run_targets(store, r)})
+            rel = releases or getattr(evaluator, "releases", None) or Releases.live(store)
+            ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
+                               note="evolve.gate:decision", key=f"{parent_hash}|{best}"))
+            # ABLATED (custom_harness/ablation.py): an ablated generation, or an acceptance resting on any ablated run,
+            # never accepts. The released bit is kept as the measurement (`ablated_would_accept`), nothing else.
+            ablated_runs = sorted(r for r in used_runs if r and store.run_ablated(r))
+            ablated_block: dict[str, Any] = {}
+            if abl or ablated_runs:
+                ablated_block = {MARKER: True, "disabled": list(abl.names), "ablated_runs": ablated_runs,
+                                 "ablated_would_accept": ok}
+                ok = False
             rejected_on: str | None
+            # infra_aborted: too many units were lost to infrastructure failures, so there is no verdict at all
+            # (INCONCLUSIVE, owner decision 2026-10-08; GOAL L1 "excluded, not scored"). Never accepted, but not a
+            # policy rejection either: no rejected_on stage, no novelty block, no branch.
+            infra_aborted = False
             if not excl["passed"]:  # the comparison itself is untrustworthy: checked first (fail closed)
                 decision, rejected_on = "rejected: " + excl["reason"], "exclusion_asymmetry"
+            elif not d.accepted and d.infra_aborted:
+                decision, rejected_on, infra_aborted = "inconclusive: " + d.reason, None, True
             elif not d.accepted:
                 decision = d.reason
                 rejected_on = "evolve" if d.reason.startswith("evolve") else "held_out_gate"
+            elif not lofo["passed"] and lofo.get("infra_aborted"):
+                decision, rejected_on, infra_aborted = "inconclusive: " + lofo["reason"], None, True
             elif not lofo["passed"]:
                 decision, rejected_on = "rejected: " + lofo["reason"], "held_out_gate"
             elif not cost["passed"]:
                 decision, rejected_on = "rejected: " + cost["reason"], "cost"
             else:
                 decision, rejected_on = d.reason, None
+            # the rejecting stage reaches the proposer (proposer_view, lineage_view) and the L7 orchestrator, and it
+            # is gate-derived ('cost' says the pooled gate and every LOFO group passed): a ledgered `count` release
+            # on the same targets, pinned in a replayed campaign (GOAL §16.5.3, invariant 18)
+            # (emitted only for a rejection: an accepted candidate has no stage beyond the accept bit)
+            if rejected_on is not None:
+                code = rel.emit(GATE_STAGES.index(rejected_on), targets=gate_targets, channel="evolution_score",
+                                alphabet="count", note="evolve.gate:stage", key=f"{parent_hash}|{best}")
+                if type(code) is not int or not 1 <= code < len(GATE_STAGES):
+                    raise ValueError("released gate stage is not a rejecting stage (fail closed)")
+                rejected_on = GATE_STAGES[code]
             per_task = _per_task(fresh_units + gate_units, tasks, lambda u: evaluator.score(spec, u),
                                  lambda u: evaluator.score(parent, u))
             flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
             regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
-            at_risk = set(edit.predicted.tasks_at_risk)
-            claims = check_claims(edit, digest)
+            at_risk = set(edit.predicted.tasks_at_risk)  # screened: exact campaign task ids only
+            claims = claims_by[best]
             # every unit the acceptance decision rested on, BOTH arms: the fresh evolve re-measurement and the gate
             # (R2-4: the gate alone made a decision on internal evolve evidence look VALIDATED)
             used_labels = [evaluator.outcome(x, u).cert_label for x in (spec, parent) for u in fresh_units + gate_units]
             loop_label = "VALIDATED" if all(lb == "CERTIFIED-VALIDATED" for lb in used_labels) else "MECHANICAL"
-            records.append({"status": "accepted" if ok else "rejected_gate", "candidate": best,
+            if ablated_block:
+                decision, rejected_on = f"not accepted: {MARKER} measurement arm ({decision})", None
+            records.append({"status": "accepted" if ok else ("ablated_not_accepted" if ablated_block else
+                                                             "infra_aborted" if infra_aborted else "rejected_gate"),
+                            **ablated_block,
+                            "candidate": best,
                             "loop_label": loop_label,
-                            "edit": edit.model_dump(), "race": rr.stats.get(best, {}), "evolve_fresh": d.evolve,
+                            "edit": _public(edit, evolve_ids), "race": rr.stats.get(best, {}),
+                            "evolve_fresh": d.evolve,
                             "gate": d.gate, "pooled_gate_accepted": d.accepted, "lofo": lofo, "cost": cost,
                             "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
                             "claims_check": claims})
             # Harness-science ledger + proposer calibration (§8.5, §8.10)
-            store.append_record("harness_edit", {
+            store.append_record("harness_edit" + sfx, {**ablated_block,
                 "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
                 "rationale": edit.rationale, "accepted": ok, "decision": decision,
                 "pooled_gate_accepted": d.accepted, "lofo": lofo,
@@ -275,18 +590,93 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                 "race_evolve_delta": rr.stats.get(best, {}).get("mean_diff"),
                 "actual_gate_delta": d.gate["mean_diff"], "loop_label": loop_label,
                 "clusters_claimed": edit.predicted.failure_clusters_fixed, "claims_check": claims,
-                "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "signature": edit_signature(edit),
-                "per_task": per_task, "flipped": flipped, "regressed": regressed,
+                "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "infra_aborted": infra_aborted,
+                "signature": edit_signature(edit), "per_task": per_task, "flipped": flipped, "regressed": regressed,
                 "tasks_at_risk": sorted(at_risk), "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
             if ok:
                 accepted_spec, accepted = spec, True
+            elif branching is not None and rejected_on in ("evolve", "held_out_gate"):
+                branch = propose_branch(parent, spec, tasks, seeds=cfg.seeds, outcome=evaluator.outcome,
+                                        store=store, releases=rel, globally_accepted=False, cfg=branching,
+                                        lofo_eps=cfg.non_regression_eps)
     for r in records:
-        store.append_record("lineage", {"parent": parent_hash, **r})
+        store.append_record("lineage" + sfx, {"parent": parent_hash, **r, **abl.marker()})
     counters = _counters(records, n_proposed=len(edits) + len(problems), n_raced=len(candidates),
                          n_survivors=len(survivors))
-    store.append_record("generation_stats", {"parent": parent_hash, **counters})
+    # one generation_stats record per generation = the loop instance's record: it carries the loop label (GOAL §6.1,
+    # invariant 10) and the harness runs it spent (axis B, rollouts). Neither is in export._STATS_VIEW, so neither
+    # reaches the proposer (the label is a per-split gate outcome). An ablated generation writes `:ABLATED`.
+    store.append_record("generation_stats" + sfx, {"parent": parent_hash, **counters, "loop_label": loop_label,
+                                                   "harness_runs": evaluator.calls - calls_before, **abl.marker()})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
-                            evaluator.calls - calls_before, fixed_k, loop_label, counters)
+                            evaluator.calls - calls_before, fixed_k, loop_label, counters, branch)
+
+
+RACE_ALLOCATORS = ("batch", "per_completion", "voi")
+# spec fields that hold prompt text (runtime/spec.py: LLM node `system` / `prompt`, approval node `prompt`, the spec
+# `description`): an edit whose every op ends in one of them only changes wording
+PROMPT_TEXT_FIELDS = frozenset({"system", "prompt", "description"})
+
+
+def _quota_view(edit: Edit) -> Edit:
+    """`edit` as the L7 edit-type quota sees it: typed prompt_text when every op targets a prompt-text field."""
+    if edit.ops and all(op.path.rstrip("/").rsplit("/", 1)[-1] in PROMPT_TEXT_FIELDS for op in edit.ops):
+        return edit.model_copy(update={"type": EditType.PROMPT_TEXT})
+    return edit
+# the released gate-stage code (index): None = accepted, else the rejecting stage
+GATE_STAGES: tuple[str | None, ...] = (None, "evolve", "held_out_gate", "cost", "exclusion_asymmetry")
+
+
+def check_race_config(cfg: EvolveConfig) -> None:
+    """Fail closed on a race configuration that is unknown or not shown to keep the batch race's decisions."""
+    if cfg.race_allocator not in RACE_ALLOCATORS:
+        raise ValueError(f"unknown race_allocator {cfg.race_allocator!r} (known: {RACE_ALLOCATORS})")
+    if isinstance(cfg.race_slots, bool) or not isinstance(cfg.race_slots, int) or cfg.race_slots < 1:
+        raise ValueError("race_slots must be an integer >= 1")
+    if cfg.race_slots > 1 and cfg.race_allocator != "per_completion":
+        raise ValueError("race_slots > 1 needs race_allocator='per_completion'")
+    if cfg.race_slots > 1 and not cfg.race_concurrency_ack:
+        raise ValueError("race_slots > 1 runs harness runs concurrently, whose scores depend on Kernel ledger order "
+                         "(K4 transcript bound): decisions equal to the batch race are not shown. Refused unless "
+                         "race_concurrency_ack=True (owner decision; docs/control_allocation.md)")
+
+
+def _race(candidates: dict[str, tuple[Edit, HarnessSpec]], units: list[Unit], evaluator: Evaluator,
+          parent_scores: dict[Unit, float | None], cfg: EvolveConfig) -> Any:
+    if cfg.race_allocator == "per_completion":
+        from ..control.evalrace import race_evaluator  # local: control/ imports evolve.selection
+        rr, _alloc, _ex = race_evaluator({h: spec for h, (_, spec) in candidates.items()}, units, evaluator,
+                                         parent_scores, slots=cfg.race_slots, rounds=cfg.race_rounds, keep=1,
+                                         timeout_s=cfg.race_timeout_s)
+        return rr
+    if cfg.race_allocator == "voi":  # selection order/allocation only; the acceptance rule below is unchanged
+        from ..control.voi import voi_race
+        return voi_race(list(candidates), units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
+                        parent_scores, rounds=cfg.race_rounds, keep=1)
+    return race(list(candidates), units, lambda h, u: evaluator.score(candidates[str(h)][1], u),
+                parent_scores, rounds=cfg.race_rounds, keep=1)
+
+
+def _public(edit: Edit, evolve_ids: set[str]) -> dict[str, Any]:
+    """An edit as the lineage (exported to the proposer) stores it: tasks_at_risk restricted to evolve tasks. The
+    harness_edit ledger keeps the full list (it computes `regressed_unpredicted`; never exported raw)."""
+    doc = edit.model_dump()
+    doc["predicted"]["tasks_at_risk"] = [t for t in doc["predicted"]["tasks_at_risk"] if t in evolve_ids]
+    return doc
+
+
+def _smoke_failure(cand: RunOutcome, parent: RunOutcome) -> str | None:
+    """Why a candidate fails its smoke run, or None. It fails when its run ended broken (SMOKE_BROKEN) on a unit where
+    the parent's run did not. A smoke run that failed for infrastructure reasons is EXCLUDED, not a rejection (GOAL
+    L1: "an infrastructure failure means excluded, not scored"; an outage must change no accept/reject decision):
+    the candidate goes on to the race, which excludes that unit, and the gate fails closed when too many units are
+    excluded. (Until 2026-10-08 it was rejected, which let an outage change decisions.)"""
+    if cand.infra_failed:
+        return None
+    if cand.status in SMOKE_BROKEN and parent.status not in SMOKE_BROKEN:
+        sig = "; ".join(cand.failure_signatures[:2])
+        return f"smoke run ended {cand.status!r} where the parent's did not ({sig[:300]})"
+    return None
 
 
 def edit_signature(edit: Edit) -> str:
@@ -302,7 +692,7 @@ def rejected_signatures(store: EvidenceStore) -> set[str]:
     existed are re-signed from their stored edit; an unreadable one is skipped (it cannot be compared)."""
     out: set[str] = set()
     for r in store.records("lineage"):
-        if r.get("status") not in REJECTED_STATUSES:
+        if r.get("status") not in REJECTED_STATUSES or (r.get("status") == "rejected_smoke" and r.get("infra")):
             continue
         if r.get("signature"):
             out.add(r["signature"])
@@ -331,8 +721,8 @@ def _per_task(units: list[Unit], tasks: list[SuiteTask], cand: Callable[[Unit], 
 def _counters(records: list[dict[str, Any]], *, n_proposed: int, n_raced: int, n_survivors: int) -> dict[str, Any]:
     """Yield/prune counters of one generation (L6.10). yield = accepted / proposed; pruned = raced - race survivors."""
     count = {s: sum(r["status"] == s for r in records) for s in (
-        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "accepted",
-        "rejected_gate")}
+        "malformed", "declined", "rejected_novelty", "rejected_static", "no_op_or_duplicate", "rejected_claims",
+        "rejected_smoke", "accepted", "rejected_gate", "infra_aborted")}
     gated = count["accepted"] + count["rejected_gate"]
     return {"proposed": n_proposed, **count, "raced": n_raced, "pruned": n_raced - n_survivors, "gated": gated,
             "yield": count["accepted"] / n_proposed if n_proposed else 0.0}
@@ -357,6 +747,9 @@ def _lofo(tasks: list[SuiteTask], families: list[str], domains: list[str], cfg: 
                 failed.append(f"held-out {kind} {name}: {r['reason']}")
     out["passed"] = not failed
     out["reason"] = "; ".join(failed) if failed else "every held-out family/domain non-regressing"
+    groups = [*out["families"].values(), *out["domains"].values()]
+    # inconclusive only when EVERY failing group failed on infrastructure exclusions (a policy failure wins)
+    out["infra_aborted"] = bool(failed) and all(r.get("infra_aborted") for r in groups if not r["passed"])
     return out
 
 

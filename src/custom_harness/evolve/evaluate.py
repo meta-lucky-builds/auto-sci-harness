@@ -1,14 +1,22 @@
 """Evaluating a harness on a task suite (PLAN §6.2, §10 splits).
 
-Objective per research run (M2 version, documented so it can be audited and changed by humans):
+Objective per research run (documented so it can be audited and changed by humans):
   None (EXCLUDED)           if the environment failed (status INFRA_FAILED): it says nothing about the harness
   0                         if the run did not complete or the integrity audit failed (hard constraint)
-  0.5 * certified + 0.5 * replicated + 0.5 * clip(relative held-out improvement, -1, 1)   otherwise
+  0.5 * certified + 0.5 * replicated + 0.5 * clip(relative DEV improvement, -1, 1)   otherwise
 "certified" = the run's claim holds a Kernel certificate (CERTIFIED-INTERNAL/VALIDATED); "replicated" = an
 independent re-implementation written from the claim text (not the code) was ALSO certified at the same
-minimum effect (GOAL L4.9 headline rule). The relative improvement comes from the held-out evaluation records.
-The VDS-centred objective (GOAL §6.3)
-replaces this once the prediction ledger has enough resolved predictions per campaign (M3).
+minimum effect (GOAL L4.9 headline rule). The relative improvement is the best candidate's DEV score against the
+baseline's dev score (cross-validation on public training data only).
+
+Verdict embargo (GOAL §16.5.3, invariant 18: "continuous held-out values never reach the evolver"): until
+2026-10-07 the third term was the relative HELD-OUT improvement (certificate subject_mean vs comparator_mean), a
+continuous function of the test labels fed back to the proposer every generation (F1: 55.5% false certification
+at nominal 5% in the toy). The held-out side of the score is now only verdict bits (audit passed, certified,
+replicated, the certificate label), and those bits are a typed, ledgered release (`Releases.emit`, channel
+`evolution_score`, alphabet `verdict_bit`) on every target whose private files the run read. In a replayed
+campaign (kerneld/campaign.py) the bits are PINNED to their recorded values.
+The VDS-centred objective (GOAL §6.3) replaces this once the prediction ledger has enough resolved predictions.
 Splits are over TASKS: evolve (proposer sees traces), gate (accept/reject only), sealed (humans only).
 """
 
@@ -19,14 +27,16 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
+from ..ablation import NO_ABLATION, AblationSet
 from ..budget import Budget
 from ..errors import InfraError
 from ..gateway import Backend
+from ..kerneld.releases import VERDICT_LABELS, Releases, attributed_reads, run_targets
 from ..records import Cost, RunStatus
 from ..runtime import Engine, HarnessSpec
-from ..runtime.engine import RetryPolicy
+from ..runtime.engine import RetryPolicy, run_family
 from ..sandbox import Sandbox
 from ..store import EvidenceStore
 
@@ -99,6 +109,36 @@ class RunOutcome:
 
 SandboxFactory = Callable[[str], Sandbox]
 
+# store record kind of a durable unit outcome (Evaluator(durable_key=...)): host-only, never exported
+DURABLE_KIND = "evolve_unit"
+
+
+def outcome_to_record(o: RunOutcome) -> dict[str, Any]:
+    return {"task_id": o.task_id, "run_id": o.run_id, "seed": o.seed, "score": o.score, "verified": o.verified,
+            "status": o.status, "cost": o.cost.model_dump(mode="json"),
+            "failure_signatures": list(o.failure_signatures), "cert_label": o.cert_label}
+
+
+def outcome_from_record(r: dict[str, Any]) -> RunOutcome:
+    score = r["score"]
+    if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float))):
+        raise ValueError("malformed durable unit outcome (score)")  # fail closed: never guess a score
+    return RunOutcome(str(r["task_id"]), str(r["run_id"]), int(r["seed"]), None if score is None else float(score),
+                      bool(r["verified"]), str(r["status"]), Cost.model_validate(r["cost"]),
+                      [str(s) for s in r["failure_signatures"]], r.get("cert_label"))
+
+
+@dataclass
+class Attempt:
+    """One attempt (number `n`, 0 = first) at evaluating `unit` with `spec` (Evaluator.begin/finish). `since` = the
+    last pre-registration ledger seq before it started (R2-2 check_run)."""
+
+    key: tuple[str, str, int]
+    spec: HarnessSpec
+    unit: tuple[str, int]
+    n: int
+    since: int
+
 
 def _signature(text: str) -> str:
     """Normalise an error into a clusterable signature (drop numbers, paths, quotes)."""
@@ -108,9 +148,26 @@ def _signature(text: str) -> str:
     return text.strip()[:160]
 
 
+EMBARGOED_SIGNATURE = "<embargoed>"
+
+
 def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
+    """Clusterable failure signatures of a run (the proposer sees them). A step whose output carries target labels
+    (runtime/taint.py) contributes only `<node>: <embargoed>` (and not even the node when it ran because of a
+    target-dependent routing decision); the run's end detail is withheld once any step is labelled."""
+    from ..runtime.taint import step_labels
     sigs = []
+    labels = step_labels(store, run_id)
+    tainted = False
     for step in store.trace(run_id):
+        lab = labels.get(step.index)
+        if lab is not None and lab.tainted:
+            tainted = True
+            out = step.output if isinstance(step.output, dict) else {}
+            if step.error or out.get("run_error") or out.get("route") == "give_up":
+                node = EMBARGOED_SIGNATURE if lab.control else step.node_id
+                sigs.append(f"{node}: {EMBARGOED_SIGNATURE}")
+            continue
         if step.error:
             sigs.append(f"{step.node_id}: {_signature(step.error.splitlines()[0])}")
         run_err = step.output.get("run_error") if isinstance(step.output, dict) else None
@@ -121,40 +178,90 @@ def failure_signatures(store: EvidenceStore, run_id: str) -> list[str]:
             sigs.append(f"{step.node_id}: gave up without beating baseline on dev")
     status, detail = store.run_status(run_id)
     if status != RunStatus.COMPLETED:
-        sigs.append(f"run: {status.value}: {_signature(detail.splitlines()[0] if detail else '')}")
+        why = EMBARGOED_SIGNATURE if tainted else _signature(detail.splitlines()[0] if detail else "")
+        sigs.append(f"run: {status.value}: {why}")
     return sigs
+
+
+def verdict_bits(state: dict, status: RunStatus) -> dict[str, Any]:
+    """The TARGET-DERIVED part of the run score: verdict bits only (never a continuous held-out value)."""
+    none: dict[str, Any] = {"audit": False, "certified": False, "replicated": False, "label": None}
+    if status != RunStatus.COMPLETED:
+        return dict(none)
+    try:
+        audit = state.get("audit")
+        cert = state.get("certificate")
+        label = cert.get("label") if isinstance(cert, dict) else None
+        label = label if isinstance(label, str) and label in VERDICT_LABELS else None
+        # credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger
+        certified = label in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
+        # replication earns credit only when it was independent by policy too: a replicator of the author's model
+        # family (invariant 5 not met) shares its biases (GOAL §10.5)
+        independent = (state.get("model_policy") or {}).get("invariant_5") == "met"
+        rcert = state.get("replica_certificate") or {}
+        replicated = bool(certified and independent and rcert.get("label") in (
+            "CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED"))
+    except (AttributeError, TypeError, ValueError, KeyError):  # malformed state: no credit (fail closed)
+        return dict(none)
+    return {"audit": isinstance(audit, dict) and audit.get("passed") is True, "certified": certified,
+            "replicated": replicated, "label": label}
+
+
+def dev_term(state: dict) -> float:
+    """clip(relative dev improvement of the best candidate over the baseline, -1, 1); 0 if unavailable. Dev scores
+    come from cross-validation on PUBLIC training data: not target-derived, never a release."""
+    try:
+        best, base = (state.get("best") or {}).get("dev_score"), state.get("baseline_dev")
+        hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
+    except (AttributeError, TypeError):
+        return 0.0
+    if (isinstance(best, (int, float)) and isinstance(base, (int, float)) and not isinstance(best, bool)
+            and not isinstance(base, bool) and math.isfinite(best) and math.isfinite(base) and base != 0):
+        rel = ((best - base) if hib else (base - best)) / abs(base)
+        return max(-1.0, min(1.0, rel))
+    return 0.0
+
+
+DEV_KEYS = ("best", "baseline_dev", "task")  # the state keys dev_term reads
+
+
+def dev_withheld(store: EvidenceStore, run_id: str) -> bool:
+    """Is the dev term of this run computed from a TARGET-LABELLED value (runtime/taint.py: a key `dev_term` reads
+    carries targets in the run's last labelled checkpoint, or the run has no labelled checkpoint at all and read a
+    private file: fail closed)? Then it is withheld (0.0): the proposer sees scores, and a continuous function of a
+    held-out value is not a verdict bit."""
+    from ..runtime.taint import TAINT_DOC_VERSION
+    steps = store.trace(run_id)
+    for st in reversed(steps):
+        if st.checkpoint_ref is None:
+            continue
+        try:
+            doc = store.blobs.get_json(st.checkpoint_ref).get("taint")
+        except (OSError, ValueError, KeyError, AttributeError):
+            doc = None
+        if isinstance(doc, dict) and doc.get("v") == TAINT_DOC_VERSION and isinstance(doc.get("labels"), dict):
+            return any(doc["labels"].get(k) for k in DEV_KEYS)
+        break
+    return bool(run_targets(store, run_id))
+
+
+def combine(status: RunStatus, bits: dict[str, Any], dev: float) -> tuple[float | None, bool]:
+    """The run score from the (possibly pinned) verdict bits and the dev term."""
+    if status == RunStatus.INFRA_FAILED:
+        return None, False
+    if status != RunStatus.COMPLETED or bits.get("audit") is not True:  # incl. PAUSED; no audit = no credit
+        return 0.0, False
+    verified = bits.get("certified") is True
+    replicated = verified and bits.get("replicated") is True
+    return 0.5 * verified + 0.5 * replicated + 0.5 * dev, verified
 
 
 def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
     if status == RunStatus.INFRA_FAILED:
         return None, False
-    if status != RunStatus.COMPLETED:  # incl. PAUSED: a run waiting for a human decision earns no credit
+    if not isinstance(state, dict):
         return 0.0, False
-    try:
-        return _score_completed(state)
-    except (AttributeError, TypeError, ValueError, KeyError):  # malformed state: no credit (fail closed)
-        return 0.0, False
-
-
-def _score_completed(state: dict) -> tuple[float, bool]:
-    audit = state.get("audit")
-    if not isinstance(audit, dict) or audit.get("passed") is not True:  # no audit = no credit (hard constraint)
-        return 0.0, False
-    cert = state.get("certificate") or {}
-    # Credit only for Kernel certificates; the audit (I1) has already checked this state against the ledger.
-    verified = cert.get("label") in ("CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
-    # replication earns credit only when it was independent by policy too: a replicator of the author's model
-    # family (invariant 5 not met) shares its biases (GOAL §10.5)
-    independent = (state.get("model_policy") or {}).get("invariant_5") == "met"
-    replicated = verified and independent and (state.get("replica_certificate") or {}).get("label") in (
-        "CERTIFIED-INTERNAL", "CERTIFIED-VALIDATED")
-    sol, base = cert.get("subject_mean"), cert.get("comparator_mean")
-    rel = 0.0
-    if (isinstance(sol, (int, float)) and isinstance(base, (int, float)) and not isinstance(sol, bool)
-            and not isinstance(base, bool) and math.isfinite(sol) and math.isfinite(base) and base != 0):
-        hib = (state.get("task") or {}).get("metric") not in ("rmse", "mae")
-        rel = ((sol - base) if hib else (base - sol)) / abs(base)
-    return 0.5 * verified + 0.5 * replicated + 0.5 * max(-1.0, min(1.0, rel)), verified
+    return combine(status, verdict_bits(state, status), dev_term(state))
 
 
 # Capability for the one-shot sealed-split evaluation (finalize.py): run_harness refuses a sealed task without it.
@@ -164,18 +271,77 @@ _SEALED_ACCESS = object()
 def run_harness(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
                 store: EvidenceStore, sandbox_factory: SandboxFactory,
                 budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
-                sealed_access: object | None = None) -> RunOutcome:
+                sealed_access: object | None = None, releases: Releases | None = None) -> RunOutcome:
+    """`releases`: where the score's verdict bits are released (default: the store's ledger, live mode). Evolve-
+    split scores reach the proposer, so their bits are emitted on every target the run read privately.
+
+    = `finish_run(execute_run(...))`. The split exists for the per-completion race (control/evalrace.py): only
+    `execute_run` runs on a worker thread; `finish_run` (the release emission, a write to the shared Releases
+    object and the ledger) runs on the single writer thread."""
+    return finish_run(execute_run(spec, task, seed, backends=backends, store=store, sandbox_factory=sandbox_factory,
+                                  budget_limits=budget_limits, retry=retry, sealed_access=sealed_access),
+                      store=store, releases=releases)
+
+
+@dataclass
+class ExecutedRun:
+    """A finished harness run whose score is not computed yet (`finish_run`). `infra` is set instead of `result`
+    when the sandbox could not even be created. `targets` = datasets whose private files were read while it ran
+    (per run: reads naming it, no run or an unknown run; a concurrent run's own reads do not count)."""
+
+    spec_hash: str
+    task: SuiteTask
+    seed: int
+    result: Any = None  # runtime.engine.RunResult
+    infra: RunOutcome | None = None
+    targets: list[str] = field(default_factory=list)
+
+
+def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict[str, Backend],
+                store: EvidenceStore, sandbox_factory: SandboxFactory,
+                budget_limits: dict[str, float | None] | None = None, retry: RetryPolicy | None = None,
+                sealed_access: object | None = None, ablation: AblationSet = NO_ABLATION) -> ExecutedRun:
+    """Run the harness; touch no shared in-memory state (the store is internally locked). `ablation`: capability
+    switches OFF (custom_harness/ablation.py); the run is marked ABLATED."""
     if task.split == "sealed" and sealed_access is not _SEALED_ACCESS:  # invariant 6: sealed only via finalize
         raise ValueError(f"task {task.task_id} is in the sealed split: only `chh finalize` (a human action) runs it")
+    h = spec.spec_hash()
     try:
-        sandbox = sandbox_factory(f"{spec.spec_hash()[:10]}-{task.task_id}-{seed}")
+        sandbox = sandbox_factory(f"{h[:10]}-{task.task_id}-{seed}")
     except InfraError as e:  # e.g. Docker daemon down before the run even started
-        return RunOutcome(task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
-                          [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"])
+        return ExecutedRun(h, task, seed, infra=RunOutcome(
+            task.task_id, "", seed, None, False, RunStatus.INFRA_FAILED.value, Cost(),
+            [f"run: infra_failed: {_signature(str(e).splitlines()[0] if str(e) else '')}"]))
     eng = Engine(spec, backends=backends, store=store, sandbox=sandbox,
-                 budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy())
+                 budget=Budget(limits=budget_limits) if budget_limits else None, retry=retry or RetryPolicy(),
+                 ablation=ablation)
+    rows = store.ledger_rows()
+    before = rows[-1][0] if rows else 0
     res = eng.run(task.task_id, {"task_dir": str(task.task_dir)}, seed=seed)
-    score, verified = score_state(res.state, res.status)
+    # per run, fail closed (kerneld/releases.attributed_reads): a concurrent run's own reads do not count, reads
+    # naming no run or an unknown run do; so does every target the run's persisted labels carry (e.g. a read a step
+    # made itself naming another run, runtime/taint.persisted_run_label)
+    from ..runtime.taint import persisted_run_label
+    targets = (sorted(set(attributed_reads(store, after_seq=before, run_ids=run_family(res.run_id))[0])
+                      | persisted_run_label(store, res.run_id))
+               if task.split == "evolve" else [])
+    return ExecutedRun(h, task, seed, result=res, targets=targets)
+
+
+def finish_run(ex: ExecutedRun, *, store: EvidenceStore, releases: Releases | None = None) -> RunOutcome:
+    """The run's score: verdict bits (released on `ex.targets` for an evolve-split run) plus the dev term."""
+    if ex.infra is not None:
+        return ex.infra
+    res, task, seed = ex.result, ex.task, ex.seed
+    bits = verdict_bits(res.state, res.status) if isinstance(res.state, dict) else verdict_bits({}, res.status)
+    if task.split == "evolve":
+        rel = releases if releases is not None else Releases.live(store)
+        bits = rel.emit(bits, targets=ex.targets, channel="evolution_score", alphabet="verdict_bit",
+                        note="evolve.score:verdict", key=f"{ex.spec_hash}|{task.task_id}|{seed}")
+    dev = dev_term(res.state) if isinstance(res.state, dict) else 0.0
+    if task.split == "evolve" and dev_withheld(store, res.run_id):
+        dev = 0.0  # a continuous term computed from target-labelled keys never reaches the proposer (inv. 18)
+    score, verified = combine(res.status, bits, dev)
     cert = res.state.get("certificate")
     label = cert.get("label") if isinstance(cert, dict) else None
     return RunOutcome(task.task_id, res.run_id, seed, score, verified, res.status.value, res.cost,

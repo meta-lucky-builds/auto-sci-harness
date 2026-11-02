@@ -3,8 +3,11 @@
 task_dir/
   task.yaml        TaskSpec
   public/          copied into the agent workspace (train.csv, test_X.csv)
-  private/         NEVER copied into any agent-visible place (test_y.csv)
   baseline.py      reference solution; same CLI contract as agent solutions
+truth_layout.truth_dir(task_dir)/
+                   test_y.csv, canary.txt (and mint.json): NEVER inside any agent-readable root. For a suite task
+                   (under <data>/suites) it is <data>/private/suites/<same path>; elsewhere the legacy
+                   task_dir/private/, allowed only outside every agent-readable root (truth_layout.py)
 
 Solution CLI contract (agent code and baseline):
   python solution.py --train TRAIN_CSV --test TEST_X_CSV --out PREDS_CSV --seed N
@@ -39,6 +42,10 @@ class TaskSpec(BaseModel):
     # 0.02 for accuracy/f1_macro, 2% of the baseline's dev score for error metrics (rmse/mae).
     min_effect: float | None = None
     canary_file: str = "canary.txt"  # under private/, optional
+    # Auxiliary agent-visible DEV tables under public/ (plain file names), profiled into the key graph (GOAL L4.2,
+    # research/keys.py) and copied into the workspace's data/. Not passed to solution runs (the CLI contract has only
+    # TRAIN and TEST): ideation context only.
+    aux_files: list[str] = []
 
     @property
     def higher_is_better(self) -> bool:
@@ -63,8 +70,16 @@ class TaskSpec(BaseModel):
 def load_task(task_dir: Path) -> TaskSpec:
     task_dir = Path(task_dir)
     spec = TaskSpec.model_validate(yaml.safe_load((task_dir / "task.yaml").read_text(encoding="utf-8")))
-    for rel in (f"public/{spec.train_file}", f"public/{spec.test_features_file}",
-                f"private/{spec.test_labels_file}", spec.baseline_file):
+    for name in spec.aux_files:
+        if not name or name != Path(name).name or name in (".", "..") or name in (
+                spec.train_file, spec.test_features_file) or len(set(spec.aux_files)) != len(spec.aux_files):
+            raise ValueError(f"task {spec.id}: aux file {name!r} must be a distinct plain file name under public/")
+    for rel in (f"public/{spec.train_file}", f"public/{spec.test_features_file}", spec.baseline_file,
+                *(f"public/{a}" for a in spec.aux_files)):
         if not (task_dir / rel).exists():
             raise FileNotFoundError(f"task {spec.id}: missing {rel}")
+    from ..truth_layout import truth_file  # raises TruthLayoutError for unmigrated or agent-readable truth
+
+    if not truth_file(task_dir, spec.test_labels_file).exists():
+        raise FileNotFoundError(f"task {spec.id}: missing private/{spec.test_labels_file} (truth_layout.truth_dir)")
     return spec

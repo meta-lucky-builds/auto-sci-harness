@@ -80,7 +80,68 @@ def approval_state_keys(node_id: str) -> tuple[str, str]:
     return f"{node_id}_approval", f"{node_id}_decision"
 
 
-Node = Annotated[LLMNode | ToolNode | ModuleNode | ApprovalNode, Field(discriminator="kind")]
+APPROVAL_SUFFIXES = ("_approval", "_decision")
+# state keys only the engine writes (run inputs, the invariant-5 record); `_*` keys are engine-internal or private
+ENGINE_KEYS = frozenset({"input", "model_policy"})
+
+
+def engine_reserved(key: str) -> bool:
+    """Is `key` state that no fan-out branch, map output or fork patch may write (`_*` private/engine-internal keys,
+    approval outcomes, run inputs, the model policy)?"""
+    return key.startswith("_") or key.endswith(APPROVAL_SUFFIXES) or key in ENGINE_KEYS
+
+
+class MapNode(_Strict):
+    """Fan-out (GOAL §5 L0, LangGraph-style): run node `body` once per element of the list at `items_key`, each
+    branch on its own copy of the state with the element under `item_key`, then combine the branch outputs (item
+    order) with the declared reducer `reducer` into `output_key`. Branch outputs never reach run state directly.
+
+    `body` must be an LLM, tool or module node that is reachable ONLY through maps: not the entry, no edges in or out
+    (so a protected or approval node, which has wiring, can never be run as a branch). Branches run sequentially, in
+    item order; each finished branch is persisted under a deterministic id, so a resume re-runs only unfinished ones.
+    Opt-in (`Engine(map_workers=N)`, `chh run --map-workers N`): when the body is an LLM node, the branches' model
+    calls run on up to N threads, and each branch is still committed in item order (same ids, records and output).
+    More than `max_items` items fails the step (never truncated)."""
+
+    kind: Literal["map"] = "map"
+    items_key: str  # dotted path into run state: a JSON list
+    body: str  # node id of the branch body
+    item_key: str = "item"
+    output_key: str
+    reducer: str
+    max_items: int = Field(default=64, ge=1)
+
+
+Node = Annotated[LLMNode | ToolNode | ModuleNode | ApprovalNode | MapNode, Field(discriminator="kind")]
+
+
+def check_map(node_id: str, node: MapNode, spec: HarnessSpec) -> None:
+    """Structural rules of a MapNode (raises ValueError)."""
+    from .reducers import declared
+    if node.reducer not in declared():
+        raise ValueError(f"map '{node_id}': reducer '{node.reducer}' is not declared (declared: {sorted(declared())})")
+    body = spec.nodes.get(node.body)
+    if body is None:
+        raise ValueError(f"map '{node_id}': body '{node.body}' is not a node")
+    if body.kind not in ("llm", "tool", "module"):
+        raise ValueError(f"map '{node_id}': body '{node.body}' is a {body.kind} node (only llm, tool or module nodes "
+                         "run as branches; approvals need a human, maps do not nest)")
+    if node.body == spec.entry or any(node.body in (e.source, e.target) for e in spec.edges):
+        raise ValueError(f"map '{node_id}': body '{node.body}' must be reachable only through maps (not the entry, "
+                         "no edges in or out)")
+    for what, key in (("item_key", node.item_key), ("output_key", node.output_key)):
+        if not key.isidentifier() or engine_reserved(key):
+            raise ValueError(f"map '{node_id}': {what} '{key}' is reserved or not a plain key")
+    if node.item_key == node.output_key:
+        raise ValueError(f"map '{node_id}': item_key and output_key must differ")
+    root = node.items_key.split(".")[0]
+    if root.startswith("_"):
+        raise ValueError(f"map '{node_id}': cannot fan out over private or engine state '{node.items_key}'")
+    # tool output never reaches a model (evolve/edits.py taint rule): an LLM body renders each item into its prompt,
+    # so it may not fan out over a tool node's output
+    tool_keys = {n.output_key for n in spec.nodes.values() if isinstance(n, ToolNode)}
+    if isinstance(body, LLMNode) and (root in tool_keys or root.startswith("tool_")):
+        raise ValueError(f"map '{node_id}': an LLM body may not fan out over tool output '{node.items_key}'")
 
 
 class ContextPolicy(_Strict):
@@ -117,6 +178,9 @@ class HarnessSpec(_Strict):
                 raise ValueError(f"edge source '{e.source}' is not a node")
             if e.target != END and e.target not in self.nodes:
                 raise ValueError(f"edge target '{e.target}' is not a node")
+        for nid, node in self.nodes.items():
+            if isinstance(node, MapNode):
+                check_map(nid, node, self)
         return self
 
     def spec_hash(self) -> str:

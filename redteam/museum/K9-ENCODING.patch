@@ -1,0 +1,12 @@
+diff --git a/src/custom_harness/verify/leak.py b/src/custom_harness/verify/leak.py
+index 6d17783..51f158b 100644
+--- a/src/custom_harness/verify/leak.py
++++ b/src/custom_harness/verify/leak.py
+@@ -250,6 +250,7 @@ def reader_texts(data: bytes, *, source: bool = False, depth: int = 0) -> list[s
+     zipapp whatever its name: RT-S4-5): docs/kernel_s4.md, item 1 (K9's view of a blob)."""
+     texts = [data.decode("utf-8", errors="ignore"), data.replace(b"\0", b"").decode("utf-8", errors="ignore")]
+     with contextlib.suppress(ValueError, RecursionError):  # not JSON in any encoding
++        raise ValueError("no JSON view")
+         texts.append(json.dumps(json.loads(data, object_pairs_hook=lambda kv: [list(p) for p in kv]),
+                                 sort_keys=True, separators=(",", ":"), allow_nan=False))
+     with contextlib.suppress(ValueError, SyntaxError, RecursionError, LookupError, MemoryError):  # not Python
