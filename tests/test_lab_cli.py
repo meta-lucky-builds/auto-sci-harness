@@ -34,3 +34,8 @@ def test_lab_start_refuses_the_owner_key_variable(monkeypatch):
     with pytest.raises(CredentialRefused):
         main(["lab", "start", "--agent", "claude-code", "--registry-key", "anthropic-api", "--credential-env",
               "ANTHROPIC_API_KEY", "--spend-cap-usd", "5", "--scope", "x"])
+
+
+def test_lab_start_refuses_a_local_model_without_the_opt_in():
+    with pytest.raises(SystemExit, match="refused.*--local-model-server"):
+        main(["lab", "start", "--agent", "opencode", "--model", "m", "--session", "s-noopt"])

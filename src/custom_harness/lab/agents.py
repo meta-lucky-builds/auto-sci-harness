@@ -54,6 +54,7 @@ class AgentOptions:
     permission_mode: str | None = None  # adapter-specific; default = the agent's full-access mode inside the box
     local_base_url: str | None = None  # OpenCode + local models: an OpenAI-compatible endpoint reachable from the box
     local_context: int = 32768
+    local_model_server: bool = False  # the researcher's opt-in to a box reaching one host port (lab/session.py start)
     acp_preset: str | None = None  # ACP: a preset name (PRESETS) ...
     acp_command: tuple[str, ...] = ()  # ... or an explicit in-box command (the owner's own ACP agent)
     box_env: str | None = None  # override of the in-box credential variable name

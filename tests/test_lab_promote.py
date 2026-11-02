@@ -51,7 +51,7 @@ datasets:
 @pytest.fixture
 def lab(store, tmp_path):
     fake = FakeDocker()
-    S.start(store, "opencode", AgentOptions(model="m"), None, session_id="s-prom", docker=docker(fake))
+    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-prom", docker=docker(fake))
     ws = S.workspace_of("s-prom")
     (ws / "method.py").write_bytes(METHOD)
     (ws / "baseline.py").write_bytes(BASELINE)

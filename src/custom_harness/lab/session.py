@@ -33,7 +33,7 @@ from . import EXPLORATORY, NOT_A_FINDING
 from . import trace as T
 from .acp_client import AcpClient, AcpError, allow_once
 from .agents import AgentOptions, Plan, adapter, fill_prompt
-from .box import BoxSpec, DockerCLI, LabBox, network_record
+from .box import BoxSpec, DockerCLI, LabBox, host_allow, network_record
 from .credentials import CredentialRefused, CredentialSpec, SessionCredential, require_live, resolve
 from .egress import collect_web
 from .walls import (
@@ -96,6 +96,9 @@ def start(store: EvidenceStore, agent: str, options: AgentOptions, credential: C
         raise LabError(f"Lab session {sid!r} already exists; pick a new id")
     spec = box or BoxSpec()
     plan = adapter(agent).plan(options)
+    if host_allow(plan) and not options.local_model_server:
+        raise LabError(f"{agent} with a local model lets everything in the box reach {host_allow(plan)[0]}, without "
+                       "authentication (docs/lab.md section 11). Say so explicitly: --local-model-server")
     cred: SessionCredential | None = None
     if plan.box_env:
         if credential is None:

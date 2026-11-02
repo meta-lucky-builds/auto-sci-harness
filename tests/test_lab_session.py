@@ -60,21 +60,21 @@ def test_a_contaminated_workspace_refuses_the_start(store):
     (ws / "labels.csv").write_bytes(labels)
     fake = FakeDocker()
     with pytest.raises(LabWallError):
-        S.start(store, "opencode", AgentOptions(model="m"), None, session_id="s-dirty", docker=docker(fake))
+        S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-dirty", docker=docker(fake))
     assert "run" not in fake.subcommands()
 
 
 def test_failed_docker_run_is_recorded_and_cleaned_up(store):
     fake = FakeDocker(run_rc=125)
     with pytest.raises(RuntimeError):
-        S.start(store, "opencode", AgentOptions(model="m"), None, session_id="s-fail", docker=docker(fake))
+        S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-fail", docker=docker(fake))
     assert S.events(store, "s-fail")[-1]["event"] == "start_failed"
     assert "rm" in fake.subcommands()
 
 
 def test_status_and_stop(store):
     fake = FakeDocker()
-    S.start(store, "opencode", AgentOptions(model="m"), None, session_id="s-three", docker=docker(fake))
+    S.start(store, "opencode", AgentOptions(model="m", local_model_server=True), None, session_id="s-three", docker=docker(fake))
     rows = S.status(store, "s-three", docker=docker(fake))
     assert rows[0]["box"] == "running" and rows[0]["label"] == EXPLORATORY
     S.stop(store, "s-three", docker=docker(fake))

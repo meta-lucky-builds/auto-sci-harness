@@ -46,6 +46,8 @@ def add_parsers(sub: Any) -> None:
     st.add_argument("--model")
     st.add_argument("--permission-mode", help="the agent's own mode inside the box (default: full access)")
     st.add_argument("--local-base-url", help="OpenCode + local model: OpenAI-compatible endpoint seen from the box")
+    st.add_argument("--local-model-server", action="store_true",
+                    help="OPT-IN: let the box reach the one host port of the local model server; recorded")
     st.add_argument("--acp-preset", help="ACP agent preset (see `chh lab agents`)")
     st.add_argument("--acp-command", help="ACP agent stdio command inside the box (quoted)")
     st.add_argument("--box-env", help="ACP: the in-box variable the agent reads its key from")
@@ -122,7 +124,8 @@ def cmd_lab(a: argparse.Namespace, store: EvidenceStore) -> int:
         return 1 if problems else 0
     if c == "start":
         opts = AgentOptions(registry_key=a.registry_key, model=a.model, permission_mode=a.permission_mode,
-                            local_base_url=a.local_base_url, acp_preset=a.acp_preset,
+                            local_base_url=a.local_base_url, local_model_server=a.local_model_server,
+                            acp_preset=a.acp_preset,
                             acp_command=tuple(shlex.split(a.acp_command)) if a.acp_command else (),
                             box_env=a.box_env)
         cred = None
@@ -133,7 +136,10 @@ def cmd_lab(a: argparse.Namespace, store: EvidenceStore) -> int:
                                   spend_cap_usd=a.spend_cap_usd, scope=a.scope, source_env=a.credential_env,
                                   source_file=a.credential_file, ttl_s=a.ttl_hours * 3600)
         box = BoxSpec(image=a.image or LAB_IMAGE, gpus=a.gpus, memory=a.memory, cpus=a.cpus, root=a.root)
-        return _out(S.start(store, a.agent, opts, cred, box=box, session_id=a.session, project=a.project))
+        try:
+            return _out(S.start(store, a.agent, opts, cred, box=box, session_id=a.session, project=a.project))
+        except S.LabError as e:
+            raise SystemExit(f"refused: {e}") from None
     if c == "seal":
         from ..court.sealed import SealRefused, seal_project
         try:

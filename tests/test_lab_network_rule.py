@@ -32,7 +32,7 @@ def world(tmp_path, monkeypatch):
 
 
 def _local_options(port: int = 11434) -> AgentOptions:
-    return AgentOptions(model="m", local_base_url=f"http://host.docker.internal:{port}/v1")
+    return AgentOptions(model="m", local_base_url=f"http://host.docker.internal:{port}/v1", local_model_server=True)
 
 
 def _start(store, fake, sid="s-net-1", **kw):
@@ -192,3 +192,19 @@ def test_the_session_record_states_the_rule(world):
     n = rec["network"]
     assert n["network"] == "chh-lab-net-s-net-1" and n["gateway_sha256"] == G.gateway_sha256()
     assert n["host_allow"] == ["host.docker.internal:11434"]
+
+
+def test_a_local_model_server_needs_an_explicit_opt_in(world):
+    """Everything in the box can reach that host port, without authentication, so it is never the default."""
+    store, fake = world
+    no = AgentOptions(model="m", local_base_url="http://host.docker.internal:11434/v1")
+    with pytest.raises(S.LabError, match="--local-model-server"):
+        S.start(store, "opencode", no, None, session_id="s-noopt", docker=docker(fake))
+    assert fake.calls == [] and S.events(store, "s-noopt") == []  # refused before any network or box
+    rec = _start(store, fake, sid="s-opt")
+    assert rec["options"]["local_model_server"] is True  # the choice is in the session record
+
+
+def test_the_opt_in_is_only_asked_of_a_session_with_a_host_port(world):
+    plan = adapter("opencode").plan(AgentOptions(model="m", local_base_url="http://models.example.org:9000/v1"))
+    assert host_allow(plan) == ()

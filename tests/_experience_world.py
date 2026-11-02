@@ -80,7 +80,8 @@ class World:
         (ws / ".lab" / "trace.jsonl").write_text("\n".join(json.dumps(x) for x in lines), encoding="utf-8")
 
     def session(self, sid: str = "s-exp", project: str | None = "cohort-1") -> M.Session:
-        out = self.x.start(M.StartIn(agent="opencode", project=project, session_id=sid, model="m"))
+        out = self.x.start(M.StartIn(agent="opencode", project=project, session_id=sid, model="m",
+                                     local_model_server=True))
         self.lab_work(sid)
         return out
 
