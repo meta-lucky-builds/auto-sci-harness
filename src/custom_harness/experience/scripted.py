@@ -39,7 +39,7 @@ def _badge(name: str, form: str | None = None) -> M.Badge:
 
 
 class ScriptedExperience:
-    """The methods the server calls, with the signatures of `Experience`. Opening a case is remembered in memory only."""
+    """The methods the server calls, with the signatures of `Experience`. Opening a case is held in memory only."""
 
     def __init__(self) -> None:
         self.started = time.monotonic()
@@ -121,7 +121,8 @@ class ScriptedExperience:
         return M.Case(case_id=case_id, title=f["title"], sentence=f["sentence"], scope=f["sentence"],
                       verdict=f["verdict"], verdict_sentence=f["verdict_sentence"], reason_code=f["reason_code"],
                       reason=f.get("reason"), badges=f["badges"], second_test=f["second"],
-                      checks_in_full=tuple(M.CheckRow(name=W.CHECK_PLAIN[k], status="pass") for k in ("K0", "K1", "K5")),
+                      checks_in_full=tuple(M.CheckRow(name=W.CHECK_PLAIN[k], status="pass")
+                                           for k in ("K0", "K1", "K5")),
                       looks_remaining=self._n(f"looks-{case_id}", f["looks"]),
                       test_rows=self._n(f"rows-{case_id}", 2000), retired=False, next_step=None, command=None,
                       rerun=f["rerun"], story=story, technical=f"chh://case/{case_id}/technical")
@@ -231,7 +232,8 @@ class ScriptedExperience:
                         harness_improvement=W.IMPROVEMENT)
 
     def trust(self) -> M.TrustBoard:
-        rows = (M.TrustRow(name="Docker", state="ok", detail="Scripted example.", next_step=None, needed_for="both tracks"),
+        rows = (M.TrustRow(name="Docker", state="ok", detail="Scripted example.", next_step=None,
+                           needed_for="both tracks"),
                 M.TrustRow(name="Court health run", state="missing", detail="Scripted example.",
                            next_step="chh court health --docker", needed_for="both tracks"),
                 M.TrustRow(name="Feedback table", state="yours", detail="Scripted example.",

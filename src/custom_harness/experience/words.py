@@ -172,7 +172,8 @@ def lab_line(ev: dict[str, Any]) -> dict[str, str] | None:
     else:
         return None
     who = {"human": "you", "agent": "agent"}.get(str(ev.get("actor", {}).get("type")), "system")
-    return {"at": time.strftime("%H:%M:%S", time.localtime(float(ev["at"]))), "who": who, "kind": kind, "text": str(text)}
+    at = time.strftime("%H:%M:%S", time.localtime(float(ev["at"])))
+    return {"at": at, "who": who, "kind": kind, "text": str(text)}
 
 
 def scope_sentence(claim: dict[str, Any], *, family: str | None, route: str,

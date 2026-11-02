@@ -82,8 +82,10 @@ def test_every_reason_class_has_plain_words():
 def test_a_check_shown_in_full_reads_no_label_and_no_score():
     """The table's claim, kept true by a source scan of the check and everything the ML adapter adds to it."""
     from custom_harness.kernel import checks, ml
-    shown = {"K0": [checks.k0_provenance, checks._blob_ok], "K1": [checks.k1_well_formed, ml.metric_reasons,
-             ml.scope_phrase, checks.tolerance_reasons, checks.p0_reasons], "K5": [checks.k5_comparator, ml.conformance]}
+    shown = {"K0": [checks.k0_provenance, checks._blob_ok],
+             "K1": [checks.k1_well_formed, ml.metric_reasons, ml.scope_phrase, checks.tolerance_reasons,
+                    checks.p0_reasons],
+             "K5": [checks.k5_comparator, ml.conformance]}
     assert set(shown) == set(D.TRUTH_INDEPENDENT)
     for k, fns in shown.items():
         for fn in fns:

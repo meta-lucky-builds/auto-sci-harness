@@ -133,8 +133,8 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
             return 0 if out.get("cert_hash") else 1
         elif a.court_cmd == "replicate":
             from ..cli import _backend  # local: the root CLI imports this module
-            from .replicate import replicate
             from ..settings import load
+            from .replicate import replicate
             kind = a.replicator or load()["replicator"]
             if not kind:
                 raise SystemExit("Name a replicator: --replicator KIND, or `chh exp setup --replicator KIND`.")

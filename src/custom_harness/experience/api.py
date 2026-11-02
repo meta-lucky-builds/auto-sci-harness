@@ -37,8 +37,8 @@ from ..errors import InfraError
 from ..figures.audit import FigureError
 from ..human.guard import HumanActionRefused, check_human_name, require_human
 from ..kerneld.hoststore import host_store
-from ..lab import promote as P
 from ..lab import defaults
+from ..lab import promote as P
 from ..lab import session as S
 from ..lab import trace as T
 from ..lab.agents import AdapterRefused, AgentOptions
@@ -645,7 +645,7 @@ class Experience:
                                   found=n(f"found:{e['seq']}", e["payload"].get("n_records")))
                         for e in evs if e["kind"] == "literature")
         web = [str(e["payload"]["host"]) for e in evs if e["kind"] == "web" and e["payload"].get("host")]
-        return M.LabLog(session_id=session_id, lines=tuple(M.LabLine(**x) for x in lines), reading=reading,
+        return M.LabLog(session_id=session_id, lines=tuple(M.LabLine.model_validate(x) for x in lines), reading=reading,
                         web=tuple(dict.fromkeys(web)))
 
     def frozen(self) -> M.FrozenIdeas:
@@ -678,7 +678,8 @@ class Experience:
             return {"lab_rows": seal.get("n_lab"), "seal_seq": seal.get("seal_seq"),
                     "data_sha256": seal.get("data_sha256"), **parts}
         if kind == "session":
-            found = {f"found:{e['seq']}": e["payload"].get("n_records") for e in T.events(self.store, ident, "literature")}
+            found = {f"found:{e['seq']}": e["payload"].get("n_records")
+                     for e in T.events(self.store, ident, "literature")}
             return {**self._facts_session(ident), **found}
         if kind == "promotion":
             return {"files": P._promotion(self.store, ident)[0]["n_files"]}

@@ -47,8 +47,8 @@ def _csv(rows: list[list[str]]) -> bytes:
 
 def future_protocol(project: str, n_test: int) -> str:
     """What a future-data claim freezes: kerneld/ingest.future_heldout takes only the data this names."""
-    return (f"{FUTURE_FORMAT} project={project} n_test={n_test}: held-out truth registered by kerneld after this claim was "
-            f"fixed and anchored (GOAL 18.6); both arms through one contract")
+    return (f"{FUTURE_FORMAT} project={project} n_test={n_test}: held-out truth registered by kerneld after this claim "
+            f"was fixed and anchored (GOAL 18.6); both arms through one contract")
 
 
 def future_files(raw: bytes, label_column: str, n_test: int, lab: bytes) -> SealedPart:

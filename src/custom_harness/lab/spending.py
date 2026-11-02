@@ -1,5 +1,5 @@
-"""Spending limits (docs/user_guide.md). The session's recorded spend is checked before each prompt, in `run_prompt`, the
-one route every headless model call of a Lab session takes.
+"""Spending limits (docs/user_guide.md). The session's recorded spend is checked before each prompt, in `run_prompt`,
+the one route every headless model call of a Lab session takes.
 
 What this is not: a hard cap. It stops the next prompt; a prompt already running can overshoot, and an interactive
 `chh lab attach` session is not stopped by it. The hard cap is the limit set at the provider on the scoped key

@@ -108,7 +108,8 @@ def test_too_many_calls_of_unknown_cost_stop_the_session(w):
 def test_every_prompt_route_passes_the_spending_check():
     src = Path(S.__file__).read_text(encoding="utf-8")
     body = src[src.index("def run_prompt"):]
-    assert body.index("require_room") < body.index("lb.docker.call") and body.index("require_room") < body.index("_acp_prompt")
+    room = body.index("require_room")
+    assert room < body.index("lb.docker.call") and room < body.index("_acp_prompt")
 
 
 # ---------------------------------------------------------------- the default model

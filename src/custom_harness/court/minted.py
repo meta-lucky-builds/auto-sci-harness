@@ -406,8 +406,8 @@ def register_sealed(store: EvidenceStore, pid: str, project: str, *, anchor_file
 
 def register_future(store: EvidenceStore, pid: str, project: str, *, n_test: int, anchor_file: Path | None = None
                     ) -> dict[str, Any]:
-    """A frozen Lab promotion -> a Court case on data that does not exist yet (GOAL 18.6, UPGRADES N10). The Lab's part of
-    the sealed `project` is the training data; `n_test` rows arrive later through `arrive`. The whole time window must
+    """A frozen Lab promotion -> a Court case on data that does not exist yet (GOAL 18.6, UPGRADES N10). The Lab's part
+    of the sealed `project` is the training data; `n_test` rows arrive later through `arrive`. The time window must
     start on or after the day of the freeze, so the claim really is about data that is still to come."""
     from ..lab import trace as T
     from ..lab.promote import RECORD_KIND as PROMOTION_KIND

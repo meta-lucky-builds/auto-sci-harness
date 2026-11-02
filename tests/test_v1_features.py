@@ -1,5 +1,5 @@
-"""Version 1 features of GOAL 18.6. Where a real model would be needed, a scripted stand-in plays it. Nothing here calls a
-model or real Docker."""
+"""Version 1 features of GOAL 18.6. Where a real model would be needed, a scripted stand-in plays it. Nothing here calls
+a model or real Docker."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ from custom_harness.experience import Experience, Refused
 from custom_harness.experience import schemas as M
 from custom_harness.experience import words as W
 from custom_harness.kernel import Kernel
-from custom_harness.kerneld.seal import SealSpecError, future_files
 from custom_harness.kerneld.mint import mintable_families, minted_files
+from custom_harness.kerneld.seal import SealSpecError, future_files
 from custom_harness.lab import defaults
 from custom_harness.lab import session as S
 from custom_harness.lab.promote import PromoteRequest
@@ -95,7 +95,8 @@ def test_the_source_sees_only_the_words_and_a_second_try_is_refused(w):
 @pytest.mark.parametrize("model", ["latest", "claude-latest", "Has Spaces", ""])
 def test_a_prior_needs_a_pinned_model(w, model):
     with pytest.raises(Pr.PriorRefused, match="pinned"):
-        Pr.measure(w.store, "p1", Scripted(0.3, model=model), title="t", sentence="s", metric="accuracy", min_effect=0.1)
+        Pr.measure(w.store, "p1", Scripted(0.3, model=model), title="t", sentence="s", metric="accuracy",
+                   min_effect=0.1)
 
 
 @pytest.mark.parametrize("value", [0.0, 1.0, -0.2, 1.5, 1, "0.5", float("nan")])
@@ -156,6 +157,35 @@ def test_a_real_case_near_the_line_reads_inconclusive_and_records_a_closed_class
         c.close()
 
 
+def test_the_list_links_resolve(w):
+    w.seal()
+    w.session()
+    for view, link in ((w.x.sessions(), "total"), (w.x.trust(), "steps_left"), (w.x.frozen(), "total")):
+        n = getattr(view, link)
+        assert w.x.resolve(n.link).value == n.value
+
+
+@pytest.mark.parametrize(("kind", "payload", "actor", "want"), [
+    ("idea", {"op": "abandon", "idea_id": "a", "title": "A", "reason": "r"}, "agent", "abandon: A (r)"),
+    ("idea", {"op": "propose", "idea_id": "a"}, "agent", "propose: a"),
+    ("run", {"run_id": "r1", "command": "go", "metrics": [{"name": "acc", "value": 0.5, "split": "dev"}]}, "agent",
+     "go  acc 0.5 (dev)"),
+    ("run", {"run_id": "r1", "message": "done"}, "system", "done"),
+    ("action", {"tool": "read", "target": "f"}, "agent", "read f"),
+    ("human", {"op": "steer", "note": "n"}, "human", "n"),
+    ("human", {"op": "stop"}, "human", "stop"),
+    ("web", {"op": "connection", "host": "h"}, "agent", "connection: h"),
+    ("web", {"op": "gap"}, "system", "gap"),
+    ("session", {"op": "start"}, "system", "start")])
+def test_a_story_event_reads_as_one_line(kind, payload, actor, want):
+    line = W.lab_line({"kind": kind, "payload": payload, "actor": {"type": actor}, "at": 0.0})
+    assert line["text"] == want and line["who"] == {"human": "you", "agent": "agent"}.get(actor, "system")
+
+
+def test_file_diffs_and_costs_stay_off_the_story_lines():
+    assert W.lab_line({"kind": "file", "payload": {}, "actor": {}, "at": 0.0}) is None
+
+
 # ---------------------------------------------------------------- the time window
 def request_with(tmp_path, window):
     text = REQUEST.replace("time_window: {start: 2024-01-01, end: 2025-12-31}\n", window)
@@ -185,8 +215,8 @@ def test_the_window_is_in_the_claim_and_the_scope_sentence(w):
 def test_a_backwards_window_is_refused():
     with pytest.raises(ValueError, match="starts before"):
         PromoteRequest.model_validate({
-            "format": "chh-lab-promote/1", "title": "abc", "sentence": "a sentence of ten", "method": "m", "baseline": "b",
-            "lock": "l", "claim": part().model_dump(mode="json"), "budget": {"timeout_s": 10},
+            "format": "chh-lab-promote/1", "title": "abc", "sentence": "a sentence of ten", "method": "m",
+            "baseline": "b", "lock": "l", "claim": part().model_dump(mode="json"), "budget": {"timeout_s": 10},
             "time_window": {"start": "2025-01-02", "end": "2025-01-01"}})
 
 
@@ -294,9 +324,11 @@ def test_the_parallel_gravity_law_is_not_the_textbook_one():
     import random
     f, lab = random.Random(1), random.Random(2)
     rows = FAMILIES["parallel-gravity"].rows(f, lab, 4000)
+
     def right(power):
-        hit = sum(int(math.log(float(r[0]) * float(r[1])) - power * math.log(float(r[2])) > 0.2) == int(r[4]) for r in rows)
-        return hit / len(rows)
+        pull = [math.log(float(r[0]) * float(r[1])) - power * math.log(float(r[2])) for r in rows]
+        return sum(int(p > 0.2) == int(r[4]) for p, r in zip(pull, rows, strict=True)) / len(rows)
+
     assert right(2.5) > right(2.0) + 0.01
 
 

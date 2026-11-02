@@ -106,14 +106,15 @@ def backup(store: EvidenceStore, out_dir: Path, by: str) -> dict[str, Any]:
         if p.is_file() and rel.as_posix() not in SKIP:
             (dest / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(p, dest / rel)
-    manifest = {"format": FORMAT, "by": name, "at": time.time(), "store_format": store_format(root),
-                "files": _files(dest)}
+    files = _files(dest)
+    manifest: dict[str, Any] = {"format": FORMAT, "by": name, "at": time.time(), "store_format": store_format(root),
+                                "files": files}
     problems, n = _ledger_problems(dest / DB)
     if problems:
-        raise BackupRefused(f"The ledger failed its check while backing up, so this copy is not a backup: {problems[:3]}")
+        raise BackupRefused(f"The ledger failed its check while backing up, so this is no backup: {problems[:3]}")
     manifest["ledger_entries"] = n
     (dest / MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True), encoding="utf-8")
-    return {"path": str(dest), "files": len(manifest["files"]), "ledger_entries": n,
+    return {"path": str(dest), "files": len(files), "ledger_entries": n,
             "note": "This backup holds the sealed answers. Keep it where no Lab and no agent can read it."}
 
 

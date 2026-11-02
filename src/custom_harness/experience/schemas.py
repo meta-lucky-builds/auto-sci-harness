@@ -52,7 +52,7 @@ class StartIn(Model):
     box_env: str | None = None
     credential: CredentialIn | None = None
     local_model_server: bool = False  # opt-in: the box may reach one port of this machine (docs/lab.md section 11)
-    lab_defaults: bool = True  # optional skills and on-demand dead ends in `.lab/` (lab/defaults.py); nothing is injected
+    lab_defaults: bool = True  # optional skills and on-demand dead ends in `.lab/` (lab/defaults.py); no injection
 
 
 class ExploreIn(Model):

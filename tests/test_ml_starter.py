@@ -26,7 +26,8 @@ def kit(tmp_path):
 
 
 def test_the_quick_look_runs_with_nothing_but_python_and_the_method_wins(kit):
-    out = subprocess.run([sys.executable, "-I", str(kit / "try_it.py")], check=True, capture_output=True, text=True).stdout
+    out = subprocess.run([sys.executable, "-I", str(kit / "try_it.py")], check=True, capture_output=True,
+                         text=True).stdout
     scores = {x.split()[0]: float(x.split()[-1]) for x in out.splitlines() if " accuracy " in x}
     assert scores["method"] > scores["baseline"] + 0.1 and "Only the Court" in out
 

@@ -137,7 +137,7 @@ def _second_family() -> Check:
     if kind:
         return Check("Second model family", OK, f"Replicas use {kind}.", None, WHEN_USED)
     return Check("Second model family", YOURS, "Not set, so a replica needs a backend named each time.",
-                 "chh exp setup --replicator ollama:<model>  (a local open-weights model costs no API spend)", WHEN_USED)
+                 "chh exp setup --replicator ollama:<model>  (local open weights cost no API spend)", WHEN_USED)
 
 
 def _dataset(store: EvidenceStore) -> Check:

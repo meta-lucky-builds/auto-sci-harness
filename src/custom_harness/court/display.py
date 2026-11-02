@@ -129,7 +129,7 @@ def split_checks(cert: Certificate) -> tuple[dict[str, Any], str | None]:
 
 def _too_close(cert: Certificate) -> bool:
     """The effect was not shown, yet the claimed size is still inside the interval: the test could not tell. A released
-    closed class like any other: it says on which side of the claimed size the top of the interval fell, and no number."""
+    closed class like any other: it says on which side of the claimed size the top of the interval fell, no number."""
     targets = cert.resolution.get("targets") or {}
     return any(t.get("hi") is not None and t["hi"] >= cert.claim["effect"]["min_effect"] for t in targets.values())
 

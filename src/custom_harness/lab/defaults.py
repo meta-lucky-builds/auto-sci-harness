@@ -1,9 +1,9 @@
 """Lab defaults (GOAL 18.6 P1, UPGRADES N19): optional skills, and dead ends that wait to be asked for.
 
-The files go in `.lab/` in the workspace. Nothing is injected into a prompt and nothing limits the agent: it may read them
-or ignore them. Past dead ends sit in a file, so an agent reads them when it wants them, because history pushed into
-context can anchor an agent (UPGRADES conflict 6). They come from Lab ideas only: a Court verdict never reaches a box this
-way.
+The files go in `.lab/` in the workspace. Nothing is injected into a prompt and nothing limits the agent: it may read
+them or ignore them. Past dead ends sit in a file, so an agent reads them when it wants them, because history pushed
+into context can anchor an agent (UPGRADES conflict 6). They come from Lab ideas only: a Court verdict never reaches a
+box this way.
 
 Periodic context resets are advice in the checklist. The harness does not reset an agent's context: that is the agent's
 own. What it does do is run each headless prompt as a fresh process.

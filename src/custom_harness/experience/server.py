@@ -41,8 +41,9 @@ MAX_BODY = 1 << 20
 LIVE_EVERY_S = 1.5
 # name -> the query parameters of a read, which writes nothing and spends nothing
 READS: dict[str, tuple[str, ...]] = {
-    "meta": (), "whoami": (), "waiting": (), "cases": (), "sessions": (), "frozen": (), "trust": (), "record": ("query",),
-    "resolve": ("target",), "lab": ("session_id",), "lab_log": ("session_id",), "rehearsal_details": ("promotion_id",),
+    "meta": (), "whoami": (), "waiting": (), "cases": (), "sessions": (), "frozen": (), "trust": (),
+    "record": ("query",), "resolve": ("target",), "lab": ("session_id",), "lab_log": ("session_id",),
+    "rehearsal_details": ("promotion_id",),
     "approve": ("item_id",)}
 # name -> what a POST body holds. `case` and `technical` are POST because opening a case counts as a look.
 ACTS: dict[str, type[BaseModel] | tuple[str, ...]] = {
@@ -147,7 +148,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception:  # noqa: BLE001  a browser gets no traceback; the page says the machine broke
             self._refuse(500, "Broken", "Something broke on this machine. Nothing was decided. Run `chh exp doctor`.")
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if not self._same_site():
             return self._refuse(403, "NotThisSite", "This server answers its own page only.")
         url = urllib.parse.urlsplit(self.path)
@@ -161,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._guarded(lambda: self.app.read(name, query))
         return self._static(url.path)
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         size = int(self.headers.get("Content-Length") or 0)
         if size > MAX_BODY:
             self.close_connection = True
