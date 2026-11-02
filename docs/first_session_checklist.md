@@ -18,10 +18,13 @@ Keep these three things in mind:
 ```powershell
 & C:\Users\mykids\custom-harness-data\venv\Scripts\Activate.ps1
 cd C:\Users\mykids\OneDrive\Desktop\META\custom-harness
-git pull --ff-only origin main
+git fetch origin
+git checkout launch
+git pull --ff-only origin launch
 ```
 
-Success: git says "Fast-forward" or "Already up to date", and `chh --help` prints a list of commands.
+Success: git says "Fast-forward" or "Already up to date", and `chh --help` prints a list of commands. The launch work reaches
+`main` at the end of this step.
 On failure: if git says your files would be overwritten, run `git status` and sort that out first. The `.claude` folder it
 lists as untracked is expected. If `chh` is not found, the first line did not run.
 
@@ -34,10 +37,15 @@ python scripts/governance.py --record --kind delegated --approver NAME --delegat
 python scripts/governance.py
 git add redteam/kernel_core_changes.yaml
 git commit -m "governance: record the invariant 5 rewording"
-git push origin HEAD
+git push origin launch
+python scripts/check.py --fast
+git checkout main
+git merge --ff-only origin/launch
+git push origin main
 ```
 
-Success: the second command says `governance: OK`.
+Success: the second command says `governance: OK`, the fast checks end with every step OK (about 40 minutes), and the merge
+says "Fast-forward".
 On failure: read what it names. To record it as a scheduled change with the 7-day cooling-off instead, see the top of
 `scripts/governance.py`.
 

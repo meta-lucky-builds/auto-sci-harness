@@ -13,9 +13,9 @@ Every statement carries one of these:
 
 | Ref | What it holds |
 |---|---|
-| `main` | The merge of `int18` into the old `main` (c117dcd, tagged `court-v1`), then the stage-launch work from branch `launch`. |
+| `main` | The merge of `int18` into the old `main` (c117dcd, tagged `court-v1`). |
 | `int18` | Fast-forwarded to `stage-b` b1ec458: everything up to the Experience API. It stops there. |
-| `launch` | The stage-launch work after `court-v1`; fast-forwarded into `main`. |
+| `launch` | `main` plus the stage-launch work. It waits for the governance record (section 4), then fast-forwards into `main`. |
 | Other branches | Kept as they were. The repository has no archive tags or refs, so none were added, and nothing was deleted. |
 
 ## 2. How far the code has been tested
@@ -23,7 +23,7 @@ Every statement carries one of these:
 | Code | Test | Result |
 |---|---|---|
 | b1ec458 (`court-v1` code) | Full gate, two passes, 16 file chunks each, chunk boundaries shifted between passes | Clean (verified): pass 1 3,825 passed, 0 failed, 5 skipped, 20 expected failures, 0 unexpected passes; pass 2 the same totals, chunk p2_04 re-run after a PC sleep killed it (254 passed, 1 expected failure, 0 failed) |
-| After `court-v1` (`launch`) | No full gate. The changed code's test files, one file per process, the source-scanning ratchets, and `scripts/check.py --fast` | The changed and directly affected test files passed, each in its own process, and `--fast` passed. The list is in the stage-launch worklog |
+| After `court-v1` (`launch`) | No full gate. The changed code's test files, one file per process, the source-scanning ratchets, and `scripts/check.py --fast` | The changed and directly affected test files passed, each in its own process. `--fast` passed every step except governance (section 4). The list is in the stage-launch worklog |
 
 Stated plainly: **the code after `court-v1` has had no full gate.** The owner chose this for the launch stage (no long test
 runs). Any later change to the Court starts a new Court version, which needs a new `chh court health --docker`.
