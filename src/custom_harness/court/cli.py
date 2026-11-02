@@ -129,7 +129,7 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
             from ..audit.cli import _factory
             from ..config import data_dir
             out = C.run(store, a.case, _factory(a, data_dir() / "sandboxes" / f"court-{a.case}"))
-            _print(D.view(store, a.case, _viewer()))
+            _print(D.open_case(store, a.case, _viewer()))
             return 0 if out.get("cert_hash") else 1
         elif a.court_cmd == "replicate":
             from ..cli import _backend  # local: the root CLI imports this module
@@ -145,9 +145,9 @@ def cmd_court(a: argparse.Namespace, store: EvidenceStore) -> int:
                     _print(res.as_dict())
                     return 0
                 ref = str(own["case_id"])
-            _print(D.view(store, ref, _viewer()))
+            _print(D.open_case(store, ref, _viewer()))
         elif a.court_cmd == "status":
-            _print(D.view(store, a.case, _viewer()))
+            _print(D.open_case(store, a.case, _viewer()))
         elif a.court_cmd == "retire":
             _print(D.retire(store, a.target, a.by))
         elif a.court_cmd == "rehearse":

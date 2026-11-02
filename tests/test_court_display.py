@@ -199,3 +199,79 @@ def test_sealed_target_second_case_needs_a_budget(tmp_path):
 
 def test_part_helper_has_defaults():
     assert part().metric == "accuracy"
+
+
+# ---------------------------------------------------------------- automatic retirement of a spent generated target
+def test_opening_a_spent_generated_target_retires_it_after_the_verdict(lost):
+    first = D.open_case(lost.store, lost.case_id, "owner")
+    assert first["opens_next"] and not first["retired"] and "autopsy" not in first  # the bit and the class, nothing more
+    rows = lost.store.records_where(D.RETIRED_KIND, "target", lost.target)
+    assert [r["by"] for r in rows] == [D.AUTO_RETIRED_BY] and D.retired(lost.store, lost.target)
+    second = D.open_case(lost.store, lost.case_id, "owner")
+    assert second["retired"] and second["autopsy"]["checks"]["K6"] and "opens_next" not in second
+    assert [r["note"] for r in released(lost.store, lost.target)].count("court:autopsy") == 1  # counted, as a release
+    assert len(lost.store.records_where(D.RETIRED_KIND, "target", lost.target)) == 1
+
+
+def test_an_outcome_nobody_opened_does_not_retire(won):
+    assert not D.retired(won.store, won.target) and D.exposure(won.store, won.claim_hash) == "none"
+
+
+def test_a_plain_view_never_retires(won):
+    D.view(won.store, won.case_id, "owner")
+    assert not D.retired(won.store, won.target) and D.exposure(won.store, won.claim_hash) == "label"
+
+
+def test_a_case_with_no_outcome_does_not_retire(tmp_path):
+    c = Case(tmp_path / "c")
+    try:
+        assert D.open_case(c.store, c.case_id, "owner")["state"] == "no outcome yet"
+        assert not D.retired(c.store, c.target)
+    finally:
+        c.close()
+
+
+def test_a_could_not_run_does_not_retire(tmp_path):
+    c = Case(tmp_path / "c", method=b"def build_model(seed):\n    raise ValueError('typo')\n")
+    try:
+        c.run()
+        assert D.open_case(c.store, c.case_id, "owner")["state"] == "COULD NOT RUN"
+        assert not D.retired(c.store, c.target)
+    finally:
+        c.close()
+
+
+def test_a_sealed_target_stays_a_human_step(tmp_path):
+    """Its certificate and bundle carry labels of real rows, and a second part of the same data may be unopened."""
+    from test_sealed_project import Project
+    p = Project(tmp_path / "p", parts=1)
+    try:
+        p.session()
+        body = C.register_sealed(p.store, p.freeze(), p.project, anchor_file=p.anchor())
+        p.run(body)
+        out = D.open_case(p.store, body["case_id"], "owner")
+        assert out["state"] == "DECIDED" and "opens_next" not in out and not D.retired(p.store, body["target"])
+    finally:
+        p.close()
+
+
+def test_retirement_waits_for_the_second_test_of_the_case(tmp_path):
+    c = Case(tmp_path / "c")
+    try:
+        second = C.declare_revalidation(c.store, c.case_id, "r2", anchor_file=c.root / "anchors" / "court.jsonl")
+        c.run()
+        assert "opens_next" not in D.open_case(c.store, c.case_id, "owner")
+        assert not D.retired(c.store, c.target)
+        C.mint(c.store, second["case_id"], "public-beacon-value-0002")
+        Kernel(c.store).approve_role(second["target"], approver="fixture-human", note="fixture")
+        C.run(c.store, second["case_id"], c.factory)
+        assert D.open_case(c.store, c.case_id, "owner")["opens_next"]
+        assert D.retired(c.store, c.target)
+    finally:
+        c.close()
+
+
+def test_a_retired_target_is_not_retired_twice(won):
+    D.retire(won.store, won.target, "owner")
+    assert "opens_next" not in D.open_case(won.store, won.case_id, "owner")
+    assert [r["by"] for r in won.store.records_where(D.RETIRED_KIND, "target", won.target)] == ["owner"]

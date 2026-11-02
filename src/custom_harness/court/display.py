@@ -26,6 +26,14 @@ Every surface that shows a Court case goes through this module. `view` is the di
 `released_scores` read back what was already released; `require_autopsy` and `autopsy` are the gates of the surfaces
 that show a whole certificate (`chh explain`, `chh bundle`, the living paper). tests/test_experience_ratchet.py
 keeps every other reader of a certificate on a closed list.
+
+`open_case` is `view` for a person opening a case. It adds one thing: a generated (minted) target whose one look is
+spent retires by itself once its verdict has been shown (owner decision 2026-11-02; UPGRADES N14: a target retires when
+its slots are spent, or when the owner retires it). The verdict shown first stays the bit and the closed class; the full
+record opens on the next look. Only a generated target does this, because nothing can reuse it and it holds no real
+data. A sealed target stays a human step: its certificate and bundle carry labels of real rows, and a second sealed part
+of the same data may still be unopened. A target waits while a replica or second test of the case has no outcome, and a
+COULD NOT RUN never retires one.
 """
 
 from __future__ import annotations
@@ -43,6 +51,7 @@ from ..store import EvidenceStore
 
 VIEW_KIND = "court_view"
 RETIRED_KIND = "court_retired"
+AUTO_RETIRED_BY = "automatic: its one look was spent"
 TRUTH_INDEPENDENT = ("K0", "K1", "K2", "K5", "K8")
 TRUTH_DEPENDENT = ("K3", "K4", "K6", "K7", "K9")
 REASON_CLASS = {"K3": "NOT_REPRODUCED", "K4": "PROCEDURE_NOT_VALID", "K6": "EFFECT_NOT_SHOWN",
@@ -272,6 +281,27 @@ def view(store: EvidenceStore, case_id: str, viewer: str) -> dict[str, Any]:
     return out
 
 
+def _look_spent(store: EvidenceStore, case_id: str) -> bool:
+    """A generated target with no look left and not yet retired, and no replica or second test of the case to finish."""
+    from .minted import case, latest, related_cases
+    c = case(store, case_id)
+    if c.get("route") != "minted" or looks_remaining(store, c) != 0 or retired(store, str(c["target"])):
+        return False
+    rows = [*related_cases(store, case_id, "replica"), *related_cases(store, case_id, "revalidation")]
+    return all(latest(store, str(r["case_id"]), "outcome") is not None for r in rows)
+
+
+def open_case(store: EvidenceStore, case_id: str, viewer: str) -> dict[str, Any]:
+    """`view`, then the automatic retirement (module docstring). It comes after the view, so a target only retires once
+    someone has been shown its verdict: an outcome nobody opened stays out of every other surface (`exposure`)."""
+    out = view(store, case_id, viewer)
+    if out["state"] != "DECIDED" or not _look_spent(store, case_id):
+        return out
+    store.append_record(RETIRED_KIND, {"target": out["target"], "by": AUTO_RETIRED_BY, "case_id": case_id,
+                                       "at": time.time()})
+    return {**out, "opens_next": True}
+
+
 def _rerun(store: EvidenceStore, cert_hash: str) -> str | None:
     """The one command that reruns a certificate. Its bundle carries the labels, so only the autopsy names it."""
     rows = store.records_where(BUNDLE_RECORD, "cert_hash", cert_hash)
@@ -348,5 +378,5 @@ def track_record(store: EvidenceStore, viewer: str) -> dict[str, Any]:
 
 
 __all__ = ["CHECK_IDS", "DisplayRefused", "autopsy", "emit_outcome", "exposure", "is_case", "listed", "looks_on_target",
-           "looks_remaining", "progress", "public_case", "record_report_view", "released_scores", "require_autopsy",
+           "looks_remaining", "open_case", "progress", "public_case", "record_report_view", "released_scores", "require_autopsy",
            "results_seen", "retire", "retired", "seen", "split_checks", "track_record", "view", "view_audit"]
