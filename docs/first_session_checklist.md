@@ -59,8 +59,9 @@ file: the base image and the three agent tool versions.
 docker image inspect custom-harness-lab:py312 --format '{{.Id}}'
 ```
 
-Success: it prints LAB_IMAGE_ID. No agent tool in the image needs a login: the Lab passes your scoped key in when
-a session starts.
+Success: it prints `sha256:b0a4b697318a18abb2c52c03e94e1a51c2df2c145b452d4b5ca514023d99963d`. No agent tool in the image needs a login: the Lab passes your scoped key in when
+a session starts. Whether each tool really accepts that key has not been tried, because that needs a model call: the first
+real test is step 11.
 On failure: rebuild with `docker build -f docker/lab.Dockerfile -t custom-harness-lab:py312 docker`. If you changed a
 version, the new id goes in this file.
 

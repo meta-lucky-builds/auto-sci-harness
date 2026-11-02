@@ -85,7 +85,7 @@ def test_a_failed_trial_is_reported_as_what_it_is(w, monkeypatch):
     go(w, beacon_value=BEACON)
     case_id = next(c["case_id"] for c in D.listed(w.store))
     w.approve_role(str(D.public_case(w.store, case_id)["target"]))
-    monkeypatch.setattr(w.x, "run_case", lambda _case: None)  # no outcome: `case` says so
+    monkeypatch.setattr(w.x, "run_case", w.x.case)  # no outcome: `case` says so
     r = go(w)
     assert r.done and not r.stopped_because.startswith(Y.RESULT_NAME)
 

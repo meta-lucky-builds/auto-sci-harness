@@ -51,5 +51,5 @@ can start now.
 
 Built and tested with scripted programs on a local sandbox: seal, program contract, rehearsal, health run, display,
 `chh exp doctor`, `chh exp toy`.
-Run for real on Docker: the health run, on a scratch store only (agent_worklogs/stage-b/LOG.md).
+Run for real on Docker: the health run, on a scratch store only (agent_worklogs/stage-b/LOG.md). The Lab image is built.
 Not done: any run with a real agent in a real Lab box, and a health run for the final Court version on the owner's store.

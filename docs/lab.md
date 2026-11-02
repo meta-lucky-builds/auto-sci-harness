@@ -1,9 +1,9 @@
 # The Lab: full-capability exploration, walled off from the Court (GOAL §17)
 
-**Status: built 2026-10-23 on branch `lab-agents` (from `origin/int17` 916bc5d). Built, NOT test-verified.**
-No test was run, no image was built or pulled, nothing was installed, no agent CLI was started. ruff and mypy pass
-on the new code. Every statement about a vendor CLI's flags or switches comes from OpenResearch's code
-(fe36f74, MIT) or vendor documentation, and is marked [U] where I could not check it.
+**Status (2026-11-02).** The code passed the full gate at `court-v1`, with a fake docker for the box. The Lab image exists
+(`custom-harness-lab:py312`; first_session_checklist.md has its id), and each agent tool in it reports its version. No
+agent has run in a real box. Every statement about a vendor CLI's flags or switches comes from OpenResearch's code
+(fe36f74, MIT) or vendor documentation, and is marked [U] where it could not be checked.
 
 ## 1. What it is
 
@@ -62,7 +62,7 @@ owner host (never visible to a box beyond one directory)
 | `cli.py` | `chh lab` |
 | `docker/lab.Dockerfile` | the image recipe, with the base image and CLI versions pinned |
 | `THIRD_PARTY_NOTICES.md` | OpenResearch's MIT notice |
-| `tests/test_lab_*.py`, `tests/_lab_fakes.py` | the tests; **not run** |
+| `tests/test_lab_*.py`, `tests/_lab_fakes.py` | the tests |
 
 ## 2. Threat model
 
@@ -202,7 +202,7 @@ Assume it is capable and, at worst, adversarial. It may want to:
 
 ## 6. Next (not built)
 
-- **Minted-target Court route for promotions:** built on int18 (section 10), NOT test-verified.
+- **Minted-target Court route for promotions:** built on int18 (section 10).
 - **A Court image built from a frozen lock.** It needs an owner decision. The build must be offline at run time and
   get the same bundled-data truth scan as the candidate image.
 - **Renderers never show EXPLORATORY records as findings:** a static check over report and studio code.
@@ -232,7 +232,7 @@ Assume it is capable and, at worst, adversarial. It may want to:
 6. **Decide:** D5 (BYOS in the Lab), D7 cap ceiling, D11 (manifest-only freeze), D20 (gVisor), the Court-image-from-lock
    question, and which ACP agents get registry entries.
 
-## 8. Tests owed (none run)
+## 8. Tests owed
 
 `tests/test_lab_walls.py`, `test_lab_credentials.py`, `test_lab_agents.py`, `test_lab_session.py`,
 `test_lab_promote.py`, `test_lab_trace.py` and `test_lab_cli.py` use a fake docker client. `tests/test_telemetry.py` was amended (D16).
@@ -357,7 +357,7 @@ A promotion request may name the `idea` it came from. It must exist in the trace
 - `seq` and `prev` assume one writer per session at a time (the manager).
 - The trace is owner-side (the store); nothing of it is mounted into the box.
 
-## 10. Court routes for a promotion and verification badges (int18, stage-a; built, NOT test-verified)
+## 10. Court routes for a promotion and verification badges
 
 One Court route per freeze:
 
@@ -430,8 +430,8 @@ looks like a key is stored by hash. Records are collected after each prompt, at 
   them for plain HTTP only). Reading HTTPS would need a certificate installed in the box.
 - Only TCP through the proxy works. UDP, ping, and tools that cannot use an HTTP proxy (for example `git` over `ssh://`
   without a proxy command) fail. That is a real loss of convenience.
-- Whether each agent CLI honours the proxy settings has not been tested: the Lab image is not built yet [inferred from
-  their documentation]. A CLI that ignores them gets no network; it does not get around the rule.
+- Whether each agent CLI honours the proxy settings has not been tested: no agent has run in a real box yet [inferred
+  from their documentation]. A CLI that ignores them gets no network; it does not get around the rule.
 - A local model server: `opencode` with a local model makes the gateway let through exactly one `host.docker.internal`
   port. Everything in the box can reach that port, without authentication. So it is refused unless the researcher says
   `--local-model-server` (owner decision 2026-11-02). UPGRADES N5 suggested an authenticated allow-list; authentication
@@ -445,4 +445,4 @@ looks like a key is stored by hash. Records are collected after each prompt, at 
 - Checked on Docker Desktop for Windows. Linux and other Docker setups are not checked: run
   `tests/test_lab_network_real.py` on each.
 
-The gateway uses the existing image `custom-harness-sandbox:py312`; it needs only Python. No image was built for this.
+The gateway uses the existing image `custom-harness-sandbox:py312`; it needs only Python.

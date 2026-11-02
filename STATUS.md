@@ -13,9 +13,9 @@ Every statement carries one of these:
 
 | Ref | What it holds |
 |---|---|
-| `main` | The merge of `int18` into the old `main`, tagged `court-v1`, plus work from branch `launch` once fast checks pass. |
+| `main` | The merge of `int18` into the old `main` (c117dcd, tagged `court-v1`), then the stage-launch work from branch `launch`. |
 | `int18` | Fast-forwarded to `stage-b` b1ec458: everything up to the Experience API. It stops there. |
-| `launch` | The stage-launch work after `court-v1`. |
+| `launch` | The stage-launch work after `court-v1`; fast-forwarded into `main`. |
 | Other branches | Kept as they were. The repository has no archive tags or refs, so none were added, and nothing was deleted. |
 
 ## 2. How far the code has been tested
@@ -23,7 +23,7 @@ Every statement carries one of these:
 | Code | Test | Result |
 |---|---|---|
 | b1ec458 (`court-v1` code) | Full gate, two passes, 16 file chunks each, chunk boundaries shifted between passes | Clean (verified): pass 1 3,825 passed, 0 failed, 5 skipped, 20 expected failures, 0 unexpected passes; pass 2 the same totals, chunk p2_04 re-run after a PC sleep killed it (254 passed, 1 expected failure, 0 failed) |
-| After `court-v1` (`launch`) | No full gate. The changed code's test files, one file per process, the source-scanning ratchets, and `scripts/check.py --fast` | Not yet run at this merge; the launch stage report says what ran |
+| After `court-v1` (`launch`) | No full gate. The changed code's test files, one file per process, the source-scanning ratchets, and `scripts/check.py --fast` | The changed and directly affected test files passed, each in its own process, and `--fast` passed. The list is in the stage-launch worklog |
 
 Stated plainly: **the code after `court-v1` has had no full gate.** The owner chose this for the launch stage (no long test
 runs). Any later change to the Court starts a new Court version, which needs a new `chh court health --docker`.
@@ -41,8 +41,9 @@ runs). Any later change to the Court starts a new Court version, which needs a n
 | Experience API and `chh exp` | Built: one full session runs through it with real kerneld, a fake docker and scripted programs | docs/experience_api.md |
 | Older layers: research loop, memory, evolution, adapters, verifiers, studio, scorecard | Built to varying depth; see the old file and each doc. Not re-assessed here | docs/ |
 
-Stage-launch adds, on `launch`, after `court-v1`: `chh exp doctor`, `chh exp toy`, automatic retirement of a spent generated
-target, the explicit opt-in for a local model server, a wider check for copies of sealed rows, and the Lab image.
+Stage-launch adds, after `court-v1`: `chh exp doctor`, `chh exp toy`, automatic retirement of a spent generated target, the
+explicit opt-in for a local model server, a wider check for copies of sealed rows, and the Lab image
+(`custom-harness-lab:py312`, sha256:b0a4b697318a; each agent tool in it reports its version, and none has run a task).
 
 Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement. HTTPS and
 WebSocket are left to the UI stage. The UI itself comes after the first real session (GOAL 18.7).
@@ -52,7 +53,8 @@ WebSocket are left to the UI stage. The UI itself comes after the first real ses
 - **No run with a real agent in a real Lab box.** No model has been called by this route.
 - **Zero Court-certified discoveries**, and no simulator-scoped certified result yet.
 - The owner's real store has no passing health run for the current Court version. One passed on a scratch store at
-  stage-b's version (verified on real Docker, stage-b).
+  stage-b's version (verified on real Docker, stage-b). Stage-launch changed `court/`, so that version is gone and a new
+  `chh court health --docker` is owed.
 - Invariant 22 stays NOT MET until a person registers a human-held check.
 - `TRUTH_INDEPENDENT` in `court/display.py` is the orchestrator's proposal until the owner has reviewed it.
 - The readiness settings and the strawman margin are UNCALIBRATED, as are all values marked so in the code.
