@@ -15,6 +15,7 @@ from custom_harness.kernel import Kernel
 from custom_harness.kernel.certificate import CHECK_IDS
 from custom_harness.kerneld.client import KernelDUnavailable, RunHandle
 from custom_harness.kerneld.releases import released
+from custom_harness.lab import promote as LP
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -169,7 +170,10 @@ def test_only_the_display_module_emits_outcome_releases():
 
 def test_the_court_cli_prints_cases_only_through_the_view():
     src = (ROOT / "src/custom_harness/court/cli.py").read_text(encoding="utf-8")
-    assert "level_of_case" not in src and "C.summary" not in src and "D.view(" in src
+    assert "level_of_case" not in src and "C.summary" not in src and "D.open_case(" in src and "D.view(" not in src
+    body = ast.parse((ROOT / "src/custom_harness/court/display.py").read_text(encoding="utf-8"))
+    fn = next(n for n in body.body if isinstance(n, ast.FunctionDef) and n.name == "open_case")
+    assert any(isinstance(c, ast.Call) and getattr(c.func, "id", "") == "view" for c in ast.walk(fn))
 
 
 def test_sealed_target_second_case_needs_a_budget(tmp_path):
@@ -258,6 +262,16 @@ def test_a_sealed_target_stays_a_human_step(tmp_path):
 def test_retirement_waits_for_the_second_test_of_the_case(tmp_path):
     c = Case(tmp_path / "c")
     try:
+        put = c.store.blobs.put
+        c.store.append_record(LP.RECORD_KIND, {
+            "promotion_id": "p-fixture", "session_id": "s-fixture", "event": "frozen",
+            "request": {"format": "chh-lab-promote/1", "title": "fixture case", "contract": "build_model",
+                        "sentence": "the fixture method beats the fixture baseline", "method": "m.py",
+                        "baseline": "b.py", "lock": "r.lock", "claim": part().model_dump(mode="json"),
+                        "budget": {"timeout_s": 120}},
+            "frozen": {"method": {"blob": put((ARMS / "knn_radius.py").read_bytes())},
+                       "baseline": {"blob": put((ARMS / "majority.py").read_bytes())},
+                       "lock": {"blob": put(b"x==1\n")}}})
         second = C.declare_revalidation(c.store, c.case_id, "r2", anchor_file=c.root / "anchors" / "court.jsonl")
         c.run()
         assert "opens_next" not in D.open_case(c.store, c.case_id, "owner")

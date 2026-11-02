@@ -1913,6 +1913,11 @@
     ],
     "default": null
    },
+   "local_model_server": {
+    "default": false,
+    "title": "Local Model Server",
+    "type": "boolean"
+   },
    "model": {
     "anyOf": [
      {
