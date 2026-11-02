@@ -346,7 +346,7 @@ def recipe_problems(text: str) -> list[str]:
     for m in _SECRETISH_ENV.finditer(text):
         problems.append(f"secret-like ENV/ARG in the lab recipe: {m.group(0).strip()!r}")
     for m in _ARG_DEFAULT.finditer(text):
-        if m.group(1).endswith("_VERSION") and m.group(2) in ("", "latest", "*"):
+        if m.group(1).endswith("_VERSION") and not re.fullmatch(r"\d+(\.\d+)+", m.group(2)):
             problems.append(f"agent CLI version {m.group(1)} is not pinned ({m.group(2)!r})")
     if re.search(r"curl[^\n|]*\|\s*(ba)?sh", text):
         problems.append("the lab recipe pipes a download into a shell (unpinned installer)")
