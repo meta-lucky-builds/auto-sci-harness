@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from itertools import islice
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -126,6 +127,41 @@ def test_the_rows_check_passes_a_file_with_other_columns_and_empty_files(w):
     assert sealed_rows_problem(w.store, w.data.read_bytes(), "outcome")
     w.store.append_record("lab_project", {"event": "session", "project": "cohort-1"})
     assert sealed_rows_problem(w.store, b"a,b\n1,2\n", "b") is None
+
+
+def test_a_renamed_or_rounded_copy_of_sealed_rows_is_refused(w):
+    """The check used to compare exact values on matching column names, so a light disguise gave scores on sealed labels."""
+    from custom_harness.court.rehearsal import sealed_rows_problem
+    w.seal()
+    head, *rows = [ln.split(",") for ln in w.data.read_text(encoding="utf-8").splitlines()]
+    label = head.index("outcome")
+    features = [i for i in range(len(head)) if i != label]
+
+    def csv_of(names, table):
+        return "\n".join(",".join(r) for r in [names, *table]).encode()
+
+    renamed = csv_of([f"c{i}" for i in features] + ["y"], [[r[i] for i in features] + [r[label]] for r in rows])
+    assert sealed_rows_problem(w.store, renamed, "y")
+    rounded = [[f"{float(r[i]):.3f}" for i in features] + [r[label]] for r in rows]
+    assert sealed_rows_problem(w.store, csv_of(["p", "q", "r", "y"][-len(rounded[0]):], rounded), "y")
+    backwards = [[r[i] for i in reversed(features)] + [r[label]] for r in rows]
+    assert sealed_rows_problem(w.store, csv_of(["p", "q", "r", "y"][-len(rounded[0]):], backwards), "y")
+
+
+def test_one_chance_match_does_not_stop_lab_data_but_one_exact_row_does(w):
+    from custom_harness.court import rehearsal as Re
+    w.seal()
+    lines = w.data.read_text(encoding="utf-8").splitlines()
+    head = lines[0].split(",")
+    names = ",".join(f"c{i}" for i in range(len(head)))
+    found = (ln for ln in lines[1:] if Re.sealed_rows_problem(w.store, f"{lines[0]}\n{ln}\n".encode(), "outcome"))
+    one_exact = list(islice(found, Re.LOOSE_MATCH_ROWS))  # the exact comparison needs only one row
+    assert len(one_exact) == Re.LOOSE_MATCH_ROWS
+    few = "\n".join([names, *one_exact[: Re.LOOSE_MATCH_ROWS - 1]]).encode()
+    assert Re.sealed_rows_problem(w.store, few, "c" + str(head.index("outcome"))) is None
+    enough = "\n".join([names, *one_exact[: Re.LOOSE_MATCH_ROWS]]).encode()
+    assert Re.sealed_rows_problem(w.store, enough, "c" + str(head.index("outcome")))
+    assert Re._loose(["b", " a ", "1.23456"]) == ("1.235", "a", "b")
 
 
 def test_the_direct_rehearsal_call_is_protected_too(w):

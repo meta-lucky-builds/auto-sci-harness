@@ -38,6 +38,7 @@ SCRATCH_APPROVER = "rehearsal-scratch-store"
 SCRATCH_BEACON = "rehearsal-scratch-beacon-not-public"
 SCRATCH_PROJECT = "rehearsal"
 SIZES = (500, 1000, 2000, 4500)  # stops at the first size with no objection
+LOOSE_MATCH_ROWS = 5  # UNCALIBRATED (owner decision, GOAL 13.8): one chance match must not stop honest Lab data
 READINESS_SIMS = 20  # UNCALIBRATED (owner decision, GOAL 13.8): the default 200 takes minutes per size. A coarse
 #                      estimate; the verdict that counts is the registration preflight (court/minted.size_held_out)
 
@@ -88,10 +89,29 @@ def _feature_rows(data: bytes) -> tuple[list[str], list[list[str]]]:
     return (table[0], table[1:]) if table else ([], [])
 
 
+def _loose(values: list[str]) -> tuple[str, ...]:
+    """A row with its column order and names gone and its numbers at three decimals: what survives a renamed, reordered
+    or rounded copy."""
+    def one(v: str) -> str:
+        try:
+            return f"{float(v):.3f}"
+        except ValueError:
+            return v.strip()
+    return tuple(sorted(one(v) for v in values))
+
+
+def _loose_copy(head: list[str], rows: list[list[str]], part_rows: list[list[str]], label_column: str) -> bool:
+    sealed = {_loose(r) for r in part_rows}
+    mine = ([v for c, v in zip(head, r, strict=True) if c != label_column] for r in rows if len(r) == len(head))
+    return sum(_loose(r) in sealed for r in mine) >= LOOSE_MATCH_ROWS
+
+
 def sealed_rows_problem(store: EvidenceStore, data: bytes, label_column: str) -> str | None:
     """Why `data` may not be rehearsed on: it holds a row of a sealed part, as the file a project sealed does. That
-    would show scores computed from sealed labels. Rows are compared on the part's feature columns, value by value;
-    a file without those columns is not compared."""
+    would show scores computed from sealed labels. Two comparisons. Exact: on the part's feature columns, value by value,
+    any one row. Loose (`_loose`): any columns, numbers at three decimals, at least LOOSE_MATCH_ROWS rows. This check can
+    only refuse (invariant 21). A copy with noise added, columns added or fewer decimals still passes it; the guarantee
+    is that the data never reached the researcher's Lab side, and this check is a second line."""
     head, rows = _feature_rows(data)
     vault = ScopedKernel(store).vault
     for seal in store.records(S.RECORD_KIND):
@@ -99,12 +119,15 @@ def sealed_rows_problem(store: EvidenceStore, data: bytes, label_column: str) ->
             continue
         for target in seal.get("targets") or []:
             part_head, part_rows = _feature_rows(vault.read_public(target, "test_X.csv"))
+            why = f"this file holds rows sealed in project {seal['project']!r}: use the Lab's part"
+            if _loose_copy(head, rows, part_rows, label_column):
+                return why
             if not set(part_head) <= set(head) - {label_column}:
                 continue
             at = [head.index(c) for c in part_head]
             sealed = {tuple(r) for r in part_rows}
             if any(tuple(r[i] for i in at) in sealed for r in rows if len(r) == len(head)):
-                return f"this file holds rows sealed in project {seal['project']!r}: use the Lab's part"
+                return why
     return None
 
 
