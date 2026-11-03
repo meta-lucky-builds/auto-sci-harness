@@ -256,6 +256,19 @@ def combine(status: RunStatus, bits: dict[str, Any], dev: float) -> tuple[float 
     return 0.5 * verified + 0.5 * replicated + 0.5 * dev, verified
 
 
+class EmbargoBroken(RuntimeError):
+    """A run of the evidence embargo's evolve split read private data (evolve/embargo.py): the campaign's accounting
+    assumes it never does, so it stops (fail closed)."""
+
+
+def dev_only_score(status: RunStatus, dev: float) -> float | None:
+    """The score of an embargoed evolve-split run (evolve/embargo.py): excluded on infrastructure failure, -1 for a run
+    that did not complete, else the public dev term. No verdict bit enters it."""
+    if status == RunStatus.INFRA_FAILED:
+        return None
+    return dev if status == RunStatus.COMPLETED else -1.0
+
+
 def score_state(state: dict, status: RunStatus) -> tuple[float | None, bool]:
     if status == RunStatus.INFRA_FAILED:
         return None, False
@@ -328,11 +341,19 @@ def execute_run(spec: HarnessSpec, task: SuiteTask, seed: int, *, backends: dict
     return ExecutedRun(h, task, seed, result=res, targets=targets)
 
 
-def finish_run(ex: ExecutedRun, *, store: EvidenceStore, releases: Releases | None = None) -> RunOutcome:
-    """The run's score: verdict bits (released on `ex.targets` for an evolve-split run) plus the dev term."""
+def finish_run(ex: ExecutedRun, *, store: EvidenceStore, releases: Releases | None = None,
+               embargoed: bool = False) -> RunOutcome:
+    """The run's score: verdict bits (released on `ex.targets` for an evolve-split run) plus the dev term.
+    `embargoed` (evolve/embargo.py): an evolve-split run scores on the dev term alone and releases nothing."""
     if ex.infra is not None:
         return ex.infra
     res, task, seed = ex.result, ex.task, ex.seed
+    if embargoed and task.split == "evolve":
+        if ex.targets:  # names no target: this message may reach a log an agent reads
+            raise EmbargoBroken(f"a dev-only run read private data on {len(ex.targets)} target(s) (fail closed)")
+        dev = dev_term(res.state) if isinstance(res.state, dict) and not dev_withheld(store, res.run_id) else 0.0
+        return RunOutcome(task.task_id, res.run_id, seed, dev_only_score(res.status, dev), False, res.status.value,
+                          res.cost, failure_signatures(store, res.run_id), cert_label=None)
     bits = verdict_bits(res.state, res.status) if isinstance(res.state, dict) else verdict_bits({}, res.status)
     if task.split == "evolve":
         rel = releases if releases is not None else Releases.live(store)

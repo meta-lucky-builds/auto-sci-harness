@@ -41,6 +41,7 @@ from ..runtime.spec import HarnessSpec
 from ..store import EvidenceStore
 from .branches import BranchConfig
 from .durable import ProposalLog, durable_key
+from .embargo import EmbargoPlan, EmbargoRefused, plan_campaign, resolve_plan
 from .evaluate import SandboxFactory, SuiteTask, check_held_out
 from .generations import AnnealSchedule, LedgerError, first_parent, last_parent, open_campaign
 from .loop import GATE_STAGES, Evaluator, EvolveConfig, GenerationResult, evolve_generation, proposer_calibration
@@ -101,13 +102,27 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
     working = [t for t in suite if t.split != "sealed"]
     check_reveals(reveals, suite, out_dir)  # L6.11: every seal outside every mount this campaign uses (fail closed)
     n_fresh = len(cfg.remeasure_seeds) if cfg.remeasure_seeds is not None else len(cfg.seeds)
-    bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
-        generations=generations, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds), n_fresh_seeds=n_fresh,
-        infra_retries=cfg.infra_retries))
+    plan: EmbargoPlan | None = None
+    unit_key = durable_key(campaign) if campaign is not None else None
+    if cfg.evidence == "embargo":  # evolve/embargo.py: only gate runs claim, so the bound is known now (fail closed)
+        if abl or branching is not None or reveals:
+            raise EmbargoRefused("the evidence embargo takes no ablation arm, no branching and no temporal reveal: "
+                                 "each releases information its bound does not count")
+        gate_tasks = [t for t in working if t.split == "gate"]
+        plan = resolve_plan(store, campaign, gen_ledger.generation if gen_ledger is not None else 0, generations,
+                            lambda: plan_campaign(seed_spec, store, gate_tasks, generations=generations,
+                                                  n_seeds=len(cfg.seeds), infra_retries=cfg.infra_retries,
+                                                  gate_alpha=cfg.gate_alpha))
+        bound = plan.n_comparisons
+        unit_key = f"{unit_key}|embargo" if unit_key is not None else None  # never mixed with legacy unit outcomes
+    else:
+        bound = check_campaign(seed_spec, store, [t.task_dir for t in working], runs_per_task=runs_per_task_bound(
+            generations=generations, n_edits=cfg.n_edits, n_seeds=len(cfg.seeds), n_fresh_seeds=n_fresh,
+            infra_retries=cfg.infra_retries))
     log(json.dumps({"multiplicity_bound": bound}))
     evaluator = Evaluator(backends, store, sandbox_factory, working, cfg.budget_per_run,
                           infra_retries=cfg.infra_retries, campaign_budget=campaign_budget,
-                          durable_key=durable_key(campaign) if campaign is not None else None, ablation=ablation)
+                          durable_key=unit_key, ablation=ablation, plan=plan)
     for g in range(generations):
         # the campaign-global generation index (continued across resume); the local loop index without a campaign
         gi = gen_ledger.generation if gen_ledger is not None else g

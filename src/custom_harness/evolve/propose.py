@@ -111,14 +111,17 @@ EDIT_SCHEMA = {
 }
 
 
-def build_prompt(spec: HarnessSpec, digest: dict, ledger: list[dict], n_edits: int,
-                 protected: tuple[str, ...]) -> str:
-    return f"""You improve an autonomous ML-research harness by editing its typed spec.
-
-OBJECTIVE per task run: 0 if the run fails or the integrity audit fails; otherwise
+DEFAULT_OBJECTIVE = """OBJECTIVE per task run: 0 if the run fails or the integrity audit fails; otherwise
 1.0*(verified hidden-test improvement over baseline) + 0.5*clip(relative test improvement, -1, 1).
 Edits are accepted only if they improve the objective significantly on the tasks you see AND do not
-regress on held-out tasks you never see. Edits that overfit to specific tasks will be rejected.
+regress on held-out tasks you never see. Edits that overfit to specific tasks will be rejected."""
+
+
+def build_prompt(spec: HarnessSpec, digest: dict, ledger: list[dict], n_edits: int,
+                 protected: tuple[str, ...], objective: str = DEFAULT_OBJECTIVE) -> str:
+    return f"""You improve an autonomous ML-research harness by editing its typed spec.
+
+{objective}
 
 CURRENT SPEC (JSON):
 {spec.model_dump_json(indent=1)}
@@ -168,11 +171,11 @@ def propose_edits(backend: Backend, spec: HarnessSpec, digest: dict, ledger: lis
 
 
 def propose(backend: Backend, spec: HarnessSpec, digest: dict, ledger: list[dict], *, n_edits: int = 3,
-            protected: tuple[str, ...] = DEFAULT_PROTECTED_NODES) -> Proposal:
+            protected: tuple[str, ...] = DEFAULT_PROTECTED_NODES, objective: str = DEFAULT_OBJECTIVE) -> Proposal:
     """One proposer call. A decline is recognised only with ZERO edits and a non-empty string reason; a decline
     alongside edits is ignored (the edits are evaluated as usual)."""
     resp = backend.complete(ChatRequest(
-        messages=[Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected))],
+        messages=[Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected, objective))],
         json_schema=EDIT_SCHEMA))
     try:
         raw = parse_json_output(resp.text)

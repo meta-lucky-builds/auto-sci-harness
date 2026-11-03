@@ -1221,3 +1221,12 @@ integrations (Jupyter, VS Code, Zotero, Overleaf, notifications), more domains, 
 5. **First certified discovery** (two tracks, §18.4 item 4).
 6. **UI.**
 7. P1, then P2; the deferred hardening before any public release.
+
+### 18.9 Evidence embargo for evolution (owner decision 2026-11-03, in chat: "build the self-improvement thing")
+Opt-in (`chh evolve --evidence embargo`, default `legacy`); docs/evolve_embargo.md. Evolve-split runs stop before any
+held-out data; acceptance rests on Kernel verdicts on the gate. Under this mode only, and where it differs from §5 L6:
+- L6.8's paired-CI non-regression on a held-out family becomes "no net loss of certificates": the CI rule at n = 2 needs
+  t = 12.7 and rejected real gains. It is a weaker statement and says so: no regression observed, not none shown.
+- §18.1/§18.6's same-budget baseline becomes a cost cap on the fresh evolve units.
+- The rejecting stage among gate evidence is not released, only the accept/reject bit (stricter than §5 L6.1).
+No Kernel code changed. Not run yet; STATUS.md records that.

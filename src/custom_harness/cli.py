@@ -240,8 +240,9 @@ def cmd_evolve(a: argparse.Namespace, store: EvidenceStore) -> int:
 
     # --race-allocator: opt-in race allocation (GOAL §5 L1; evolve/loop.py RACE_ALLOCATORS). race_slots stays 1: the
     # per-completion allocator then evaluates in exactly the batch order (concurrency needs an owner ack, not a flag)
+    # --evidence embargo: opt-in (evolve/embargo.py, docs/evolve_embargo.md); the default keeps the legacy rules
     cfg = EvolveConfig(seeds=tuple(a.seeds), n_edits=a.n_edits, race_rounds=a.race_rounds,
-                       race_allocator=a.race_allocator)
+                       race_allocator=a.race_allocator, evidence=getattr(a, "evidence", "legacy"))
     from .budget import persistent_budget
     if a.max_usd is not None:
         _refuse_unpriced_usd_cap([*backends.values(), proposer])
@@ -276,6 +277,8 @@ def cmd_evolve_islands(a: argparse.Namespace, store: EvidenceStore) -> int:
     if a.generations != 1 or a.branch_by or a.proposer:
         raise SystemExit("refused: with --islands the rounds and proposers come from the islands file; --generations, "
                          "--proposer and --branch-by do not apply")
+    if getattr(a, "evidence", "legacy") != "legacy":
+        raise SystemExit("refused: --evidence embargo does not cover --islands yet")
     icfg = load_islands_config(Path(a.islands))
     spec = HarnessSpec.model_validate(yaml.safe_load(Path(a.spec).read_text(encoding="utf-8")))
     backends = {role: _backend(kind) for role, _, kind in (b.partition("=") for b in a.role)}
@@ -891,6 +894,9 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--race-allocator", choices=["batch", "per_completion", "voi"], default="batch",
                     help="opt-in race allocation: batch (default) | per_completion (completion-driven, one slot) | "
                          "voi (knowledge-gradient value of information); the acceptance rule is the same")
+    ev.add_argument("--evidence", choices=["legacy", "embargo"], default="legacy",
+                    help="legacy (default) | embargo: evolve-split runs stop before any held-out data, acceptance "
+                         "rests on Kernel verdicts on the gate (docs/evolve_embargo.md)")
     ev.add_argument("--docker", action="store_true")
     ev.add_argument("--dev-sandbox", action="store_true", help="LocalSandbox (NO isolation; dev only)")
     ev.add_argument("--campaign-id", help="campaign id: persisted budget, generation ledger, durable units and "

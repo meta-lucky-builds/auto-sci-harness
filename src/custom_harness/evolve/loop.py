@@ -57,6 +57,16 @@ from .edits import (
     screen_prediction,
     withheld,
 )
+from .embargo import (
+    EMBARGO_OBJECTIVE,
+    EmbargoPlan,
+    dev_view,
+    evolve_evidence,
+    flips_gate,
+    gate_view,
+    lofo_flips,
+    verdict_flips,
+)
 from .evaluate import (
     DURABLE_KIND,
     Attempt,
@@ -129,6 +139,14 @@ class EvolveConfig:
     race_slots: int = 1
     race_concurrency_ack: bool = False
     race_timeout_s: float = 3600.0
+    # "legacy" = the rules above. "embargo" = evolve/embargo.py: evolve-split runs stop before any held-out data and
+    # acceptance rests on Kernel verdicts only. Needs an Evaluator with a plan (driver.evolve builds one).
+    evidence: str = "legacy"
+    # embargo only. Campaign-wide false-accept budget, split over its generations. UNCALIBRATED (owner decision, §13.8)
+    gate_alpha: float = 0.1
+    # embargo only, on the fresh evolve units: candidate cost <= (1 + this) x parent. Stands in for the same-budget
+    # baseline of GOAL 18.6: a win that more compute buys cannot pass. UNCALIBRATED (owner decision, GOAL §13.8)
+    embargo_max_cost_increase: float = 0.1
 
 
 @dataclass
@@ -156,11 +174,13 @@ class Evaluator:
                  tasks: list[SuiteTask], budget_per_run: dict[str, float | None] | None = None,
                  infra_retries: int = 1, retry: RetryPolicy | None = None,
                  campaign_budget: Budget | None = None, releases: Releases | None = None,
-                 durable_key: str | None = None, ablation: AblationSet = NO_ABLATION):
+                 durable_key: str | None = None, ablation: AblationSet = NO_ABLATION,
+                 plan: EmbargoPlan | None = None):
         sealed = sorted(t.task_id for t in tasks if t.split == "sealed")
         if sealed:  # invariant 6: the sealed split is touched only by the human-run `finalize` (evolve/finalize.py)
             raise ValueError(f"sealed task(s) {sealed[:5]} cannot be evaluated during evolution (finalize only)")
         self.backends, self.store, self.sandbox_factory = backends, store, sandbox_factory
+        self.plan = plan  # the evidence embargo's plan (evolve/embargo.py); None = legacy runs and scores
         # capability switches OFF in every run this evaluator starts (custom_harness/ablation.py): each run is marked
         # ABLATED, and its durable outcomes live under their own key (never mixed with production outcomes)
         self.ablation = ablation
@@ -233,8 +253,13 @@ class Evaluator:
         return Attempt(key, spec, unit, n, last_prereg_seq(self.store))
 
     def attempt(self, att: Attempt) -> ExecutedRun:
-        """Any thread: the harness run itself (no Evaluator state is touched)."""
-        return execute_run(att.spec, self.tasks[att.unit[0]], att.unit[1], backends=self.backends, store=self.store,
+        """Any thread: the harness run itself (no Evaluator state is touched). Under the evidence embargo a run executes
+        its split's view of the spec; the unit stays keyed by the spec the loop compares."""
+        task = self.tasks[att.unit[0]]
+        spec = att.spec
+        if self.plan is not None:
+            spec = dev_view(spec) if task.split == "evolve" else gate_view(spec, self.plan.n_comparisons)
+        return execute_run(spec, task, att.unit[1], backends=self.backends, store=self.store,
                            sandbox_factory=self.sandbox_factory, budget_limits=self.budget_per_run, retry=self.retry,
                            ablation=self.ablation)
 
@@ -242,7 +267,11 @@ class Evaluator:
         """Writer thread: score, check, charge and record attempt `att`. Returns the unit's final outcome, or None
         when it failed for infrastructure reasons and has a retry left (the caller begins attempt att.n + 1)."""
         self._own()
-        out = finish_run(ex, store=self.store, releases=self.releases)
+        try:
+            out = finish_run(ex, store=self.store, releases=self.releases, embargoed=self.plan is not None)
+        except BaseException:
+            self._in_flight.discard(att.key)
+            raise
         # R2-2: every claim this run certified must have used m = its declared n_comparisons (constant
         # strictness, independent of evaluation order); otherwise MultiplicityDrift stops the campaign
         try:
@@ -314,6 +343,9 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
     sfx = f":{MARKER}" if abl else ""  # ablated records never enter the production record kinds
     cfg = cfg or EvolveConfig()
     check_race_config(cfg)  # fail closed before any run
+    embargoed = check_evidence_config(cfg, evaluator, ablated=bool(abl), branching=branching)
+    # only under the embargo: the legacy prompt, and every proposer written against it, stay exactly as they were
+    objective: dict[str, str] = {"objective": EMBARGO_OBJECTIVE} if embargoed else {}
     if critic is not None:
         critic.check_proposer(proposer.backend if isinstance(proposer, ProposerAgent) else proposer)
     evolve_units = [(t.task_id, s) for t in tasks if t.split == "evolve" for s in cfg.seeds]
@@ -358,15 +390,16 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
 
         if isinstance(proposer, ProposerAgent) and no_history:
             proposal = propose(proposer.backend, parent, digest, ledger, n_edits=cfg.n_edits,
-                               protected=cfg.protected_nodes)
+                               protected=cfg.protected_nodes, **objective)
         elif isinstance(proposer, ProposerAgent):
             proposal = proposer.propose_from_export(
                 parent, digest, ledger, store=store, tasks=tasks, runs=[*parent_outcomes, *references],
-                n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+                n_edits=cfg.n_edits, protected=cfg.protected_nodes, **objective)
             store.append_record("proposer_session" + sfx, {"parent": parent_hash, "transcript": proposal.transcript,
                                                            "problems": proposal.problems})
         else:
-            proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes)
+            proposal = propose(proposer, parent, digest, ledger, n_edits=cfg.n_edits, protected=cfg.protected_nodes,
+                               **objective)
         # what the proposer was shown and may cite (claims.py): the agentic session's export + re-linked diagnosis,
         # or the one-shot proposer's diagnosis
         shown = getattr(proposal, "evidence_refs", None)
@@ -488,7 +521,17 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
             st = rr.stats.get(h, {})
             records.append({"status": "raced", "candidate": h, "edit": _public(edit, evolve_ids), "race": st,
                             "survived": h in rr.survivors, "signature": edit_signature(edit), **extras[h]})
-        if rr.survivors:
+        if rr.survivors and embargoed:
+            best = str(rr.survivors[0])
+            edit, spec = candidates[best]
+            ok_e, decision, loop_label = _gate_embargoed(
+                spec, parent, edit, best, tasks=tasks, fresh_units=fresh_units, gate_units=gate_units,
+                families=heldout_families, domains=heldout_domains, evaluator=evaluator, store=store,
+                rel=releases or getattr(evaluator, "releases", None) or Releases.live(store), cfg=cfg,
+                race_stats=rr.stats.get(best, {}), claims=claims_by[best], evolve_ids=evolve_ids, records=records)
+            if ok_e:
+                accepted_spec, accepted = spec, True
+        elif rr.survivors:
             best = str(rr.survivors[0])
             edit, spec = candidates[best]
             # fresh runs for BOTH arms: the race data that selected this winner are never acceptance evidence
@@ -610,6 +653,112 @@ def evolve_generation(parent: HarnessSpec, tasks: list[SuiteTask], *, evaluator:
                                                    "harness_runs": evaluator.calls - calls_before, **abl.marker()})
     return GenerationResult(parent_hash, accepted_spec, accepted, decision, records,
                             evaluator.calls - calls_before, fixed_k, loop_label, counters, branch)
+
+
+EVIDENCE_MODES = ("legacy", "embargo")
+
+
+def check_evidence_config(cfg: EvolveConfig, evaluator: Any, *, ablated: bool, branching: BranchConfig | None) -> bool:
+    """Is this generation under the evidence embargo (evolve/embargo.py)? Fail closed on a mode and an Evaluator that
+    disagree: the runs and the acceptance rule must follow the same accounting. An ablation arm and branching are
+    refused under the embargo: an arm writes `:ABLATED` records this path does not, and a branch's cluster bits are
+    releases its bound does not count."""
+    if cfg.evidence not in EVIDENCE_MODES:
+        raise ValueError(f"unknown evidence mode {cfg.evidence!r} (known: {EVIDENCE_MODES})")
+    has_plan = getattr(evaluator, "plan", None) is not None
+    if (cfg.evidence == "embargo") != has_plan:
+        raise ValueError(f"evidence mode {cfg.evidence!r} with an Evaluator {'with' if has_plan else 'without'} an "
+                         "embargo plan (fail closed: driver.evolve builds them together)")
+    if cfg.evidence == "embargo" and (ablated or branching is not None):
+        raise ValueError("the evidence embargo takes no ablation arm and no branching (fail closed)")
+    return cfg.evidence == "embargo"
+
+
+def _gate_embargoed(spec: HarnessSpec, parent: HarnessSpec, edit: Edit, best: str, *, tasks: list[SuiteTask],
+                    fresh_units: list[Unit], gate_units: list[Unit], families: list[str], domains: list[str],
+                    evaluator: Evaluator, store: EvidenceStore, rel: Releases, cfg: EvolveConfig,
+                    race_stats: dict[str, Any], claims: dict[str, Any], evolve_ids: set[str],
+                    records: list[dict[str, Any]]) -> tuple[bool, str, str]:
+    """The acceptance rule of the evidence embargo (evolve/embargo.py): (accepted, host-only decision, loop label).
+    Public evidence first, so a candidate that fails it costs no gate run and no release. After the gate the only thing
+    released is one accept/reject bit, so a rejection reads `held_out_gate` whatever rejected it; the real stage stays
+    in the host-only field `embargoed_stage`."""
+    assert evaluator.plan is not None  # check_evidence_config
+    parent_hash = parent.spec_hash()
+    cand_score, par_score = (lambda u: evaluator.score(spec, u)), (lambda u: evaluator.score(parent, u))
+    cand_out, par_out = (lambda u: evaluator.outcome(spec, u)), (lambda u: evaluator.outcome(parent, u))
+    evolve_s = paired_sample(fresh_units, cand_score, par_score)
+    ev = evolve_evidence(evolve_s, require_ci=cfg.require_evolve_ci, max_excluded_frac=cfg.max_excluded_frac)
+    excl = exclusion_check(evolve_s)
+    valid = [u for u in fresh_units if cand_score(u) is not None and par_score(u) is not None]
+    cost = cost_bound(valid, lambda u: cand_out(u).cost, lambda u: par_out(u).cost,
+                      max_increase=cfg.embargo_max_cost_increase, metric=cfg.cost_metric)
+    ok = gated = infra_aborted = False
+    rejected_on: str | None = None
+    hidden_stage: str | None = None
+    gate_rec: dict[str, Any] = {}
+    lofo: dict[str, Any] = {}
+    gate_delta: float | None = None
+    loop_label = "MECHANICAL"
+    if not excl["passed"]:
+        decision, rejected_on = "rejected: " + excl["reason"], "exclusion_asymmetry"
+    elif ev["infra_aborted"]:
+        decision, infra_aborted = "inconclusive: " + ev["reason"], True
+    elif not ev["passed"]:
+        decision, rejected_on = "evolve: " + ev["reason"], "evolve"
+    elif not cost["passed"]:
+        decision, rejected_on = "rejected: " + cost["reason"], "cost"
+    else:
+        gated = True
+        flips = verdict_flips(gate_units, cand_out, par_out)
+        gate_rec = flips_gate(flips, level=evaluator.plan.level, max_excluded_frac=cfg.max_excluded_frac)
+        lofo = lofo_flips(tasks, families, domains, cfg.seeds, cand_out, par_out,
+                          max_excluded_frac=cfg.max_excluded_frac)
+        gate_s = paired_sample(gate_units, cand_score, par_score)
+        gate_delta = sum(gate_s.diffs) / len(gate_s.diffs) if gate_s.diffs else None
+        excl = exclusion_check(evolve_s, gate_s)
+        ok = gate_rec["passed"] and lofo["passed"] and excl["passed"]
+        # the one release of this generation: pinned in a replayed campaign, like the legacy decision bit
+        used_runs = {evaluator.outcome(x, u).run_id for x in (spec, parent) for u in gate_units}
+        gate_targets = sorted({t for r in used_runs if r for t in run_targets(store, r)})
+        ok = bool(rel.emit(ok, targets=gate_targets, channel="evolution_score", alphabet="verdict_bit",
+                           note="evolve.gate:decision", key=f"{parent_hash}|{best}"))
+        if ok:
+            decision = gate_rec["reason"]
+            # VALIDATED: the certificates that earned this acceptance rest on external or future data. The parent's
+            # labels do not matter: it failed on the tasks that were won, which is the improvement (GOAL §6.1).
+            earned = [cand_out(u).cert_label for u in gate_units if u[0] in flips.won and cand_out(u).verified]
+            if earned and all(lb == "CERTIFIED-VALIDATED" for lb in earned):
+                loop_label = "VALIDATED"
+        elif excl["passed"] and (gate_rec["infra_aborted"] or lofo["infra_aborted"]):
+            decision, infra_aborted = "inconclusive: infrastructure failures on the gate", True
+        else:
+            rejected_on = "held_out_gate"
+            hidden_stage = ("exclusion_asymmetry" if not excl["passed"] else
+                            "sign_test" if not gate_rec["passed"] else "held_out_family")
+            decision = "rejected: " + (excl["reason"] if not excl["passed"] else
+                                       gate_rec["reason"] if not gate_rec["passed"] else lofo["reason"])
+    per_task = _per_task(fresh_units + (gate_units if gated else []), tasks, cand_score, par_score)
+    flipped = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] > 0)
+    regressed = sorted(t for t, r in per_task.items() if r["mean_diff"] is not None and r["mean_diff"] < 0)
+    at_risk = set(edit.predicted.tasks_at_risk)  # screened: exact campaign task ids only
+    records.append({"status": "accepted" if ok else "infra_aborted" if infra_aborted else "rejected_gate",
+                    "candidate": best, "loop_label": loop_label, "edit": _public(edit, evolve_ids), "race": race_stats,
+                    "evolve_fresh": ev, "gate": gate_rec, "pooled_gate_accepted": gate_rec.get("passed", False),
+                    "gated": gated, "lofo": lofo, "cost": cost, "exclusions": excl, "rejected_on": rejected_on,
+                    "embargoed_stage": hidden_stage, "signature": edit_signature(edit), "claims_check": claims})
+    store.append_record("harness_edit", {
+        "at": time.time(), "parent": parent_hash, "candidate": best, "type": edit.type.value,
+        "rationale": edit.rationale, "accepted": ok, "decision": decision, "evidence": "embargo", "gated": gated,
+        "pooled_gate_accepted": gate_rec.get("passed", False), "lofo": lofo,
+        "predicted_delta": edit.predicted.expected_delta, "actual_evolve_delta": ev["mean_diff"],
+        "race_evolve_delta": race_stats.get("mean_diff"), "actual_gate_delta": gate_delta, "gate": gate_rec,
+        "loop_label": loop_label, "clusters_claimed": edit.predicted.failure_clusters_fixed, "claims_check": claims,
+        "cost": cost, "exclusions": excl, "rejected_on": rejected_on, "embargoed_stage": hidden_stage,
+        "infra_aborted": infra_aborted, "signature": edit_signature(edit), "per_task": per_task, "flipped": flipped,
+        "regressed": regressed, "tasks_at_risk": sorted(at_risk),
+        "regressed_unpredicted": [t for t in regressed if t not in at_risk]})
+    return ok, decision, loop_label
 
 
 RACE_ALLOCATORS = ("batch", "per_completion", "voi")

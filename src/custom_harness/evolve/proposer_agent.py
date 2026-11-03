@@ -51,7 +51,7 @@ from .diagnosis import link_digest
 from .edits import _CANARY, _LEAK_PATTERNS, DEFAULT_PROTECTED_NODES, Edit, _token_hit, denied_tokens
 from .evaluate import RunOutcome, SandboxFactory, SuiteTask
 from .export import ExportRefused, export_evidence
-from .propose import EDIT_SCHEMA, build_prompt, parse_proposal
+from .propose import DEFAULT_OBJECTIVE, EDIT_SCHEMA, build_prompt, parse_proposal
 
 TOOL_PROTOCOL = """
 You are working as a tool-using agent. The read-only EVIDENCE EXPORT of this campaign is mounted at the root of
@@ -142,7 +142,8 @@ class ProposerAgent:
 
     def propose_from_export(self, spec: HarnessSpec, digest: dict, ledger: list[dict], *, store: EvidenceStore,
                             tasks: list[SuiteTask], runs: list[RunOutcome], n_edits: int = 3,
-                            protected: tuple[str, ...] = DEFAULT_PROTECTED_NODES) -> AgentProposal:
+                            protected: tuple[str, ...] = DEFAULT_PROTECTED_NODES,
+                            objective: str = DEFAULT_OBJECTIVE) -> AgentProposal:
         token = secrets.token_hex(4)
         transcript: list[dict[str, Any]] = []
         deny = denied_tokens(tasks, self.canaries)
@@ -160,7 +161,7 @@ class ProposerAgent:
         mounted = export_refs(exp.path)
         digest = link_digest(digest, mounted)
         known = frozenset(mounted | digest_refs(digest))
-        messages = [Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected)
+        messages = [Message(role="user", content=build_prompt(spec, digest, ledger, n_edits, protected, objective)
                             + "\n" + TOOL_PROTOCOL)]
         result: AgentProposal | None = None
         for turn in range(self.max_turns):

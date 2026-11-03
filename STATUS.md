@@ -61,6 +61,12 @@ Stage-product adds, tested with scripted stand-ins and no agent (reported, stage
 
 Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement.
 
+Branch `evolve-embargo` adds, **not run at all (inferred from reading; the owner asked for no test, run or gate)**: an
+opt-in evolution mode whose campaign should be able to finish (`--evidence embargo`, docs/evolve_embargo.md, GOAL 18.9).
+No Kernel file changed. `tests/test_evolve_embargo.py` is written and has never executed. The legacy default is unchanged,
+and its strict expected failures stay open. The time-split experiment (GOAL 6.4) is still not wired, so no self-improvement
+has been shown.
+
 ## 4. What has not happened yet
 
 - **No run with a real agent in a real Lab box.** No model has been called by this route.
