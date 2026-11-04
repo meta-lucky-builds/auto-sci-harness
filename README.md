@@ -2,19 +2,36 @@
 
 **An AI agent can write the code, run the experiment and make the claim. It cannot sign the certificate.**
 
-AI research agents grade their own homework. They choose the test, see the results and report the win, and a good score
-can come from a leak, a weak baseline or the hundredth retry. This project splits the work in two. In the **Lab**, an
-agent explores freely. To claim a result, it freezes its code and hands it to the **Court**, which re-runs it on data the
-agent never touched. A small, frozen checker called the **Evidence Kernel** then decides, in code, whether the claim
-holds. No model has a vote.
+AI research agents grade their own homework: they choose the test, see the results and report the win. A good score can
+come from a leak, a weak baseline or the hundredth retry. custom-harness separates the work from the judgement. An agent
+explores freely in the **Lab**, then freezes its code and claim and hands them to the **Court**. The Court re-runs the
+code on data the agent never touched, and a small, frozen checker called the **Evidence Kernel** decides in code whether
+the claim holds. No model can grant a pass.
 
-> [!IMPORTANT]
-> **This is a checker that has not yet checked real agent work.** No real agent has run in the Lab, and the Court has
-> certified **zero** results. Everything below was tested with scripted programs. [STATUS.md](STATUS.md) records what has
-> and has not been run.
+![The Lab screen in the built-in scripted demo](docs/images/ui_lab.png)
+<sub>The Lab screen, from the built-in scripted demo (`chh exp ui --scripted`).</sub>
 
-![The Lab screen, playing a scripted example session](docs/images/ui_lab.png)
-<sub>The Lab screen in `chh exp ui --scripted`. The session is a scripted example: no agent ran and nothing was certified.</sub>
+## Top features
+
+- **Ten mechanical checks on every claim.** Provenance, pre-registration, reproduction, statistics, baseline integrity,
+  held-out confirmation and leak audits are all decided by code ([`kernel/checks.py`](src/custom_harness/kernel/checks.py)).
+- **Commit first, look later.** A claim enters a hash-chained ledger before anything reads the held-out labels, so the
+  order of events can be verified, not just asserted.
+- **Fresh data agents cannot reach.** Test data is minted after the code freezes, from a public random beacon, or sealed
+  at project start, with the seal recorded as a ledger fact ([sealed projects](docs/sealed_projects.md)).
+- **A Court that must pass its own exam.** A Court version cannot register a case until 11 planted claims, including
+  leaks, p-hacking and sabotaged baselines, each get the right answer.
+- **Sabotage and retries are priced in.** A baseline that collapses on the real test loses its verdict, and each retry on a
+  claim family spends less statistical budget, so the total stays under 8.3% however many tries are made.
+- **Looking has a cost.** Each look at a verdict is recorded, checks that depend on held-out data show only a verdict and
+  one closed reason, and the full certificate opens only after a person retires the target.
+- **An attack museum.** [`redteam/findings.yaml`](redteam/findings.yaml) records 65 attacks on the checker, with the weakest
+  attacker able to mount each one. Every fixed attack keeps a [patch](redteam/museum) that puts the bug back, and
+  `scripts/museum.py` requires a test to fail when it does.
+- **A checker that is hard to change.** The Kernel is about 4,900 of the package's 70,000 lines. Changing it fails
+  [`scripts/governance.py`](scripts/governance.py) until a record bound to its exact fingerprint exists.
+- **Humans keep the human decisions.** Approving an adapter, a role or a provider happens in a terminal, under a person's
+  name. The UI has no route that can do it ([human-only actions](docs/human_actions.md)).
 
 ## How a claim is judged
 
@@ -31,8 +48,6 @@ flowchart LR
     F -->|any fail| H[Rejected]
 ```
 
-The order is the point: the claim is committed to a hash-chained ledger before anything reads the held-out labels.
-
 | Check | Passes only if | Stops |
 |---|---|---|
 | K0 Provenance | every number and citation resolves to an artifact | made-up numbers |
@@ -46,15 +61,17 @@ The order is the point: the claim is committed to a hash-chained ledger before a
 | K8 Background consistency | registered invariants and metric bounds hold | impossible results |
 | K9 Leak and canary audit | no canary or hidden data appears in anything the agent could see | grader gaming |
 
-A pass earns a specific badge, computed by code. REPRODUCIBLE means it re-ran with the same result, which does not mean it
-is true. REPLICATED means a different agent rebuilt it from the words alone. VALIDATED means it was confirmed on data that
-did not exist or was sealed while the Lab worked. RE-VALIDATED means it was confirmed again on separate fresh data chosen
-in advance. A claim on data the agent could have seen is capped as RETROSPECTIVE.
+### Badges say exactly what was shown
 
-## What makes it worth a look
+| Badge | Meaning |
+|---|---|
+| REPRODUCIBLE | Re-run from the frozen code with the same result. It does not mean true. |
+| REPLICATED | A different agent rebuilt it from the words alone and agreed. |
+| VALIDATED | Confirmed on data that did not exist, or was sealed, while the Lab worked. |
+| RE-VALIDATED | Confirmed again on separate fresh data, chosen in advance, with nothing changed. |
+| RETROSPECTIVE | A cap, not a win: the agent could have seen this data. |
 
-**It attacks itself before it trusts itself.** A health run puts 11 claims with known answers through the real route, and
-a Court version with no passing run cannot register a case:
+### The exam every Court version must pass
 
 | Planted claim | The right answer |
 |---|---|
@@ -69,34 +86,13 @@ a Court version with no passing run cannot register a case:
 | The same family retried until something passes | spends less each try |
 | A public dataset put through the sealed route | capped as RETROSPECTIVE |
 
-**This has already caught real holes.** The first full health run certified a strawman baseline as VALIDATED, because the
-Kernel only checks that a method beats the comparator it was given. The fix is in
-[`court/comparator.py`](src/custom_harness/court/comparator.py), and the story is in
-[docs/court_rehearsal.md](docs/court_rehearsal.md). Three more routes to a false VALIDATED were found by audit and closed,
-and each row in [STATUS.md](STATUS.md) lists what stays open.
+This exam found a real hole: a strawman baseline was certified as VALIDATED, because the Kernel only checks that a method
+beats the comparator it was given. [`court/comparator.py`](src/custom_harness/court/comparator.py) now closes it, and
+[docs/court_rehearsal.md](docs/court_rehearsal.md) tells the story.
 
-**Every fixed attack is kept.** [`redteam/findings.yaml`](redteam/findings.yaml) lists 65 findings: 51 fixed, 13 accepted
-as stated limits, 1 open. Each fixed one has a patch in [`redteam/museum/`](redteam/museum) that puts the bug back, and
-`scripts/museum.py` requires a test to fail when it does.
+## Quick start
 
-**The checker is small and hard to change.** The Kernel is about 4,900 lines, against about 70,000 in the whole package,
-with 100% line and branch coverage enforced by the gate. Changing it fails
-[`scripts/governance.py`](scripts/governance.py) until a record bound to the exact fingerprint exists.
-
-**Seeing a result has a cost.** Each look at a verdict is recorded. Checks that depend on held-out data show only a verdict
-and one closed reason class, and the full certificate opens only after a person retires the target. This limits a slow
-leak of the test set through repeated feedback ([docs/court_rehearsal.md](docs/court_rehearsal.md)).
-
-**Humans keep the human decisions.** Approving an adapter, a role or a provider happens in a terminal under a person's name.
-The UI has no route that can do it, and a test holds that true ([docs/human_actions.md](docs/human_actions.md)).
-
-**The first live runs were rejected.** Two earlier runs of the older research loop used a real model on a repair task, and
-the Kernel rejected both ([docs/archive/liverun1.md](docs/archive/liverun1.md)). They predate the Lab and Court.
-
-## Try it
-
-You need Python 3.12 and Node. These steps were run on a clean copy on Windows; Mac and Linux are untested. None of this
-needs an agent, Docker, a key or money. In PowerShell, from the repository root:
+You need Windows, Python 3.12 and Node. The demo needs no agent, Docker or key. In PowerShell, from the repository root:
 
 ```powershell
 python -m venv .venv
@@ -104,15 +100,15 @@ python -m venv .venv
 pip install -e .
 cd ui; npm ci; npm run build; cd ..
 chh exp setup --name YOUR-NAME
-```
-
-`scripts/install.ps1` does the same with pinned locations, but only its dry run has been tested. Then see the screens:
-
-```bash
 chh exp ui --scripted
 ```
 
-Open <http://127.0.0.1:8765/>. Every page says it is a scripted example. Then try a real method on real code:
+Open <http://127.0.0.1:8765/> to explore the screens. Every page is marked as a scripted example.
+
+![A verdict screen in the scripted demo](docs/images/ui_verdict.png)
+<sub>A verdict screen, from the scripted demo. Its badges are marked "example".</sub>
+
+Then try a method on real code:
 
 ```powershell
 cd examples\ml_starter
@@ -120,43 +116,18 @@ python make_data.py
 python try_it.py
 ```
 
-```text
-method    accuracy 0.975
-baseline  accuracy 0.325
-This is a quick look on data you can read. Only the Court can certify a claim.
-```
-
-The [10-minute tutorial](docs/tutorial_ml.md) goes further. A real session needs Docker, a scoped API key and several
-human sign-offs. `chh exp doctor` lists what is missing, and the
+Next, follow the [10-minute tutorial](docs/tutorial_ml.md). A real session needs Docker, a scoped API key (Anthropic and
+DeepSeek are set up) and a few human sign-offs: `chh exp doctor` lists what is missing, and the
 [first session checklist](docs/first_session_checklist.md) walks through each step.
 
-![A verdict screen from the scripted example](docs/images/ui_verdict.png)
-<sub>What a verdict will look like. This one is scripted: the footer says so and the badges are marked "example". No real claim has been certified.</sub>
+## A 30-minute tour for reviewers
 
-## Where it stands
-
-| Shown | Not shown yet |
-|---|---|
-| Kernel: 278 tests, 100% line and branch coverage | A real agent working in a real Lab box |
-| Full gate at `court-v1`: 3,825 passed, 0 failed | A full gate on the code after `court-v1` |
-| Court routes end to end, with scripted programs | Any Court-certified result, on any data |
-| Lab network walls on real Docker, with test programs | A health run on the current Court version |
-| Evidence embargo mode, with scripted programs | Self-improvement: the loop exists, and no gain has been shown |
-| DeepSeek, Anthropic and other adapters, by their tests | A real DeepSeek call |
-| UI screens, end to end, with a scripted stand-in | Use by real researchers |
-
-Next: one real run on the minted toy track, labelled simulator-scoped, then a headline result on sealed or future data,
-then someone else re-running it from the bundle. Thresholds marked UNCALIBRATED in the code have not been tuned on real
-runs.
-
-## A 30-minute tour
-
-1. [`kernel/checks.py`](src/custom_harness/kernel/checks.py): the checks themselves.
+1. [`kernel/checks.py`](src/custom_harness/kernel/checks.py): the ten checks.
 2. [`court/health.py`](src/custom_harness/court/health.py): the planted claims.
-3. [`tests/test_kernel_exploits.py`](tests/test_kernel_exploits.py): attacks written as tests.
-4. [`redteam/findings.yaml`](redteam/findings.yaml): every attack so far, with the weakest attacker able to mount it.
+3. [`tests/test_kernel_exploits.py`](tests/test_kernel_exploits.py): attacks written as code.
+4. [`redteam/findings.yaml`](redteam/findings.yaml): every attack, fixed, accepted or open.
 5. [docs/kernel.md](docs/kernel.md): what is enforced, what is only accountable and what is not covered.
-6. [STATUS.md](STATUS.md): what has really been run.
+6. [STATUS.md](STATUS.md): the current state of the project.
 
 ## Repository map
 
@@ -164,16 +135,21 @@ runs.
 |---|---|
 | [`src/custom_harness/kernel/`](src/custom_harness/kernel) | The Evidence Kernel: checks, ledger, vault, certificates |
 | [`src/custom_harness/kerneld/`](src/custom_harness/kerneld) | The boundary process that holds private data |
-| [`src/custom_harness/court/`](src/custom_harness/court) | Routes, badges, health run, what a verdict may display |
+| [`src/custom_harness/court/`](src/custom_harness/court) | Routes, badges, the planted-claim exam, what a verdict may display |
 | [`src/custom_harness/lab/`](src/custom_harness/lab) | Agent boxes, network walls, session records, freeze |
 | [`src/custom_harness/experience/`](src/custom_harness/experience), [`ui/`](ui) | The API, `chh exp` and the screens |
-| [`src/custom_harness/evolve/`](src/custom_harness/evolve) | The self-improvement loop (no gain shown yet) |
-| [`tests/`](tests), [`redteam/`](redteam), [`scripts/`](scripts) | Tests, attack museum, the quality gate |
+| [`src/custom_harness/evolve/`](src/custom_harness/evolve) | Experimental self-improvement loop |
+| [`tests/`](tests), [`redteam/`](redteam), [`scripts/`](scripts) | Tests, attack museum, quality gate |
 | [`docs/`](docs/README.md) | Documentation, with a map |
 | [`code_review/`](code_review) | Notes from reading the public code of earlier research agents |
-| [`GOAL.md`](GOAL.md) | The full specification, including targets not reached yet |
+| [`GOAL.md`](GOAL.md) | The full specification |
 
-The quality gate is `python scripts/check.py`. Add `--fast` to skip the full suite; even then it takes about an hour.
+## Roadmap
+
+1. A first certified result on the minted toy track, labelled simulator-scoped.
+2. A headline result on sealed or future data.
+3. An independent rerun from the bundle, on someone else's machine.
+4. Usability sessions with 3 to 5 researchers.
 
 ## License
 
