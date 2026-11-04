@@ -9,9 +9,7 @@ code on data held back from the agent, and a small, frozen checker called the **
 the claim holds. No model can grant a pass.
 
 > [!NOTE]
-> **Experimental, not production-grade.** The harness has been used locally for research runs: its earlier research loop
-> ran twice with a live model on a benchmark repair task, and the Kernel rejected both results
-> ([run report](docs/archive/liverun1.md)).
+> **Experimental, not production-grade.** The harness has been used locally for research runs but is not ready for production
 
 ![The Lab screen in the built-in scripted demo](docs/images/ui_lab.png)
 <sub>The Lab screen, from the built-in scripted demo (`chh exp ui --scripted`).</sub>
