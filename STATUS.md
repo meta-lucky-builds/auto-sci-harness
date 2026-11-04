@@ -95,7 +95,8 @@ Windows: fresh install, UI build, scripted UI, starter kit. `scripts/install.ps1
 - `chh court health --docker` passed for the Court version of commit 0ce18f3, on the owner's store and real Docker (verified,
   stage-product). The Court has changed since, on `evolve-embargo`, so **a new one is needed before any case can register**.
 - Kaspersky on the owner's machine rewrites the UI page and widens its security policy (docs/ui.md).
-- Invariant 22 stays NOT MET until a person registers a human-held check.
+- Invariant 22 stays NOT MET. The registered check, `agent-written-1`, was written by an agent at the owner's request, so it
+  is not a check no agent designed or can see. A person still has to write one.
 - `TRUTH_INDEPENDENT` in `court/display.py` is the orchestrator's proposal until the owner has reviewed it.
 - The readiness settings and the strawman margin are UNCALIBRATED, as are all values marked so in the code.
 - The deferred hardening list of GOAL 18.4 item 9 is deferred, not done. It resumes before any public release.

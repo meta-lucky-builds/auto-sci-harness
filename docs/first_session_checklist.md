@@ -18,36 +18,13 @@ Keep these three things in mind:
 ```powershell
 & $env:USERPROFILE\custom-harness-data\venv\Scripts\Activate.ps1
 cd <the repository>
-git fetch origin
-git checkout launch
-git pull --ff-only origin launch
-```
-
-Success: git says "Fast-forward" or "Already up to date", and `chh --help` prints a list of commands. The launch work reaches
-`main` at the end of this step.
-On failure: if git says your files would be overwritten, run `git status` and sort that out first. The `.claude` folder it
-lists as untracked is expected. If `chh` is not found, the first line did not run.
-
-Then record one Kernel governance item that only you can record. The `court-v1` merge brought your 2026-10-23 rewording of
-invariant 5 into the line the checks run on. GOAL section 10 is part of the Kernel core's fingerprint, so
-`python scripts/check.py --fast` fails its governance step until a person records it. No Kernel code changed.
-
-```powershell
-python scripts/governance.py --record --kind delegated --approver NAME --delegated-by NAME --basis "GOAL 18.4 item 5" --change "invariant 5 reworded in GOAL section 10, reaching the code line at the court-v1 merge; no Kernel source changed" --note "owner rewording of 2026-10-23"
-python scripts/governance.py
-git add redteam/kernel_core_changes.yaml
-git commit -m "governance: record the invariant 5 rewording"
-git push origin launch
-python scripts/check.py --fast
 git checkout main
-git merge --ff-only origin/launch
-git push origin main
+git pull --ff-only origin main
 ```
 
-Success: the second command says `governance: OK`, the fast checks end with every step OK (about 40 minutes), and the merge
-says "Fast-forward".
-On failure: read what it names. To record it as a scheduled change with the 7-day cooling-off instead, see the top of
-`scripts/governance.py`.
+Success: git says "Fast-forward" or "Already up to date", and `chh --help` prints a list of commands.
+On failure: if git says your files would be overwritten, run `git status` and sort that out first. The `.claude` folder is
+ignored. If `chh` is not found, the first line did not run.
 
 ### 2. See what is missing
 
@@ -272,7 +249,7 @@ Success: the key shows as revoked at the provider.
 
 ## Using DeepSeek instead of Anthropic
 
-Added 2026-11-03, on branch `evolve-embargo`, and **never run**. OpenCode drives the model, so the first call to DeepSeek
+Added 2026-11-03 and **never run**. OpenCode drives the model, so the first call to DeepSeek
 through it is itself the test. Everything above stays the same, except:
 
 - **Step 3.** Create a key at DeepSeek. Its spend limit is yours to check: the Lab relies on the provider for the cap, so if

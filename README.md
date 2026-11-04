@@ -5,7 +5,7 @@
 AI research agents grade their own homework: they choose the test, see the results and report the win. A good score can
 come from a leak, a weak baseline or the hundredth retry. custom-harness separates the work from the judgement. An agent
 explores freely in the **Lab**, then freezes its code and claim and hands them to the **Court**. The Court re-runs the
-code on data the agent never touched, and a small, frozen checker called the **Evidence Kernel** decides in code whether
+code on data held back from the agent, and a small, frozen checker called the **Evidence Kernel** decides in code whether
 the claim holds. No model can grant a pass.
 
 ![The Lab screen in the built-in scripted demo](docs/images/ui_lab.png)
@@ -17,19 +17,20 @@ the claim holds. No model can grant a pass.
   held-out confirmation and leak audits are all decided by code ([`kernel/checks.py`](src/custom_harness/kernel/checks.py)).
 - **Commit first, look later.** A claim enters a hash-chained ledger before anything reads the held-out labels, so the
   order of events can be verified, not just asserted.
-- **Fresh data agents cannot reach.** Test data is minted after the code freezes, from a public random beacon, or sealed
-  at project start, with the seal recorded as a ledger fact ([sealed projects](docs/sealed_projects.md)).
-- **A Court that must pass its own exam.** A Court version cannot register a case until 11 planted claims, including
+- **Fresh data the agent never had.** Test data is minted after the code freezes, from a public random beacon, or sealed
+  at project start, with the seal's timing recorded as a ledger fact and the data's source stated by the researcher
+  ([sealed projects](docs/sealed_projects.md)).
+- **A Court that must pass its own exam.** A Court version cannot register a minted or sealed case until 11 planted claims, including
   leaks, p-hacking and sabotaged baselines, each get the right answer.
 - **Sabotage and retries are priced in.** A baseline that collapses on the real test loses its verdict, and each retry on a
-  claim family spends less statistical budget, so the total stays under 8.3% however many tries are made.
-- **Looking has a cost.** Each look at a verdict is recorded, checks that depend on held-out data show only a verdict and
+  claim family spends less statistical budget, so its total in a store stays under 8.3% however many tries are made.
+- **Looking has a cost.** In the product, each look at a verdict is recorded, checks that depend on held-out data show only a verdict and
   one closed reason, and the full certificate opens only after a person retires the target.
-- **An attack museum.** [`redteam/findings.yaml`](redteam/findings.yaml) records 65 attacks on the checker, with the weakest
-  attacker able to mount each one. Every fixed attack keeps a [patch](redteam/museum) that puts the bug back, and
+- **An attack museum.** [`redteam/findings.yaml`](redteam/findings.yaml) records 65 findings against the checker, with the
+  weakest attacker able to mount each one: 51 fixed, 13 accepted as stated limits, 1 open. Every fixed one keeps a [patch](redteam/museum) that puts the bug back, and
   `scripts/museum.py` requires a test to fail when it does.
-- **A checker that is hard to change.** The Kernel is about 4,900 of the package's 70,000 lines. Changing it fails
-  [`scripts/governance.py`](scripts/governance.py) until a record bound to its exact fingerprint exists.
+- **A checker that is hard to change.** The Kernel is about 4,900 of the package's 70,000 lines. Changing its logic
+  fails [`scripts/governance.py`](scripts/governance.py) until a record bound to its exact fingerprint exists.
 - **Humans keep the human decisions.** Approving an adapter, a role or a provider happens in a terminal, under a person's
   name. The UI has no route that can do it ([human-only actions](docs/human_actions.md)).
 
@@ -65,7 +66,7 @@ flowchart LR
 
 | Badge | Meaning |
 |---|---|
-| REPRODUCIBLE | Re-run from the frozen code with the same result. It does not mean true. |
+| REPRODUCIBLE | Re-run from the frozen code with the same result, on one machine. It does not mean true. |
 | REPLICATED | A different agent rebuilt it from the words alone and agreed. |
 | VALIDATED | Confirmed on data that did not exist, or was sealed, while the Lab worked. |
 | RE-VALIDATED | Confirmed again on separate fresh data, chosen in advance, with nothing changed. |
@@ -117,7 +118,7 @@ python try_it.py
 ```
 
 Next, follow the [10-minute tutorial](docs/tutorial_ml.md). A real session needs Docker, a scoped API key (Anthropic and
-DeepSeek are set up) and a few human sign-offs: `chh exp doctor` lists what is missing, and the
+DeepSeek have adapters) and a few human sign-offs: `chh exp doctor` lists what is missing, and the
 [first session checklist](docs/first_session_checklist.md) walks through each step.
 
 ## A 30-minute tour for reviewers
@@ -125,7 +126,7 @@ DeepSeek are set up) and a few human sign-offs: `chh exp doctor` lists what is m
 1. [`kernel/checks.py`](src/custom_harness/kernel/checks.py): the ten checks.
 2. [`court/health.py`](src/custom_harness/court/health.py): the planted claims.
 3. [`tests/test_kernel_exploits.py`](tests/test_kernel_exploits.py): attacks written as code.
-4. [`redteam/findings.yaml`](redteam/findings.yaml): every attack, fixed, accepted or open.
+4. [`redteam/findings.yaml`](redteam/findings.yaml): every finding, fixed, accepted or open.
 5. [docs/kernel.md](docs/kernel.md): what is enforced, what is only accountable and what is not covered.
 6. [STATUS.md](STATUS.md): the current state of the project.
 
@@ -145,6 +146,8 @@ DeepSeek are set up) and a few human sign-offs: `chh exp doctor` lists what is m
 | [`GOAL.md`](GOAL.md) | The full specification |
 
 ## Roadmap
+
+This is a pre-release: the checker, the Court and the Lab are built, and the first certified result is the next milestone.
 
 1. A first certified result on the minted toy track, labelled simulator-scoped.
 2. A headline result on sealed or future data.
