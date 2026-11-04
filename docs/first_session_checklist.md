@@ -270,6 +270,32 @@ Then revoke the key at the provider, and close this terminal.
 
 Success: the key shows as revoked at the provider.
 
+## Using DeepSeek instead of Anthropic
+
+Added 2026-11-03, on branch `evolve-embargo`, and **never run**. OpenCode drives the model, so the first call to DeepSeek
+through it is itself the test. Everything above stays the same, except:
+
+- **Step 3.** Create a key at DeepSeek. Its spend limit is yours to check: the Lab relies on the provider for the cap, so if
+  a key has no limit of its own, load only what you can lose as prepaid balance. Then:
+
+  ```powershell
+  $env:CHH_LAB_CRED_DEEPSEEK = '<paste the key>'
+  ```
+
+- **Step 6.** Read `chh sign-off-provider deepseek-api --show`, then DeepSeek's own terms: how it uses your data and where it
+  is held. The entry says `training_on_outputs: unknown` because no one has read them yet. Correct the entry before signing
+  off if you learn more. Sign off `deepseek-api`, and put nothing in the Lab you would not send to DeepSeek.
+- **Steps 2 and 10.** `chh exp doctor --registry-key deepseek-api`
+- **Step 11.** Name the model as DeepSeek's API lists it:
+
+  ```powershell
+  chh exp toy --agent opencode --registry-key deepseek-api --model MODEL --credential-env CHH_LAB_CRED_DEEPSEEK --spend-cap-usd 5 --scope "DeepSeek key, 5 USD prepaid balance"
+  ```
+
+On failure: a box error mentioning `@ai-sdk/openai-compatible` means OpenCode could not load that package. The image does
+not install it, so it would have to be fetched from inside the box. Its `limit` values (32768 context, 4096 output) copy the
+local-model setting and are UNCALIBRATED: a short output limit can cut off a long file.
+
 ## Part 3: the sealed-data track, when you are ready
 
 This is the track that can carry a real headline. It needs Part 1 and two more of your own decisions.

@@ -67,6 +67,9 @@ No Kernel file changed. `tests/test_evolve_embargo.py` is written and has never 
 and its strict expected failures stay open. The time-split experiment (GOAL 6.4) is still not wired, so no self-improvement
 has been shown.
 
+The same branch adds DeepSeek as a Lab provider through OpenCode (`deepseek-api`, docs/first_session_checklist.md), **also
+not run**: no call has reached DeepSeek, its terms are unread, and the entry has no human sign-off.
+
 ## 4. What has not happened yet
 
 - **No run with a real agent in a real Lab box.** No model has been called by this route.

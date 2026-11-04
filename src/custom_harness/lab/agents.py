@@ -41,6 +41,8 @@ from urllib.parse import urlsplit
 OR_SOURCE = "github.com/alphaXiv/OpenResearch@fe36f7424855d7218e64812c5fec6f7db955586f (MIT)"
 BOX_HOME = "/home/lab"
 DEFAULT_LOCAL_BASE_URL = "http://host.docker.internal:11434/v1"  # Ollama's default port on the host (owner's choice)
+DEEPSEEK_KEY = "deepseek-api"  # provider registry entry
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # OpenAI-compatible, per DeepSeek's docs; no call has tried it here
 
 
 class AdapterRefused(PermissionError):
@@ -211,6 +213,7 @@ class OpenCode(AgentAdapter):
     name = "opencode"
     credentials: ClassVar[dict[str, str | None]] = {"local-openai-compatible": None,
                                                     "anthropic-api": "ANTHROPIC_API_KEY",
+                                                    DEEPSEEK_KEY: "DEEPSEEK_API_KEY",
                                                     "openai-api": "OPENAI_API_KEY"}
     permission_modes = ("allow",)
     default_permission_mode = "allow"
@@ -221,6 +224,8 @@ class OpenCode(AgentAdapter):
         super().check(o)
         if o.registry_key == "local-openai-compatible" and not o.model:
             raise AdapterRefused("opencode with a local model: name the model (--model, as the server lists it)")
+        if o.registry_key == DEEPSEEK_KEY and not o.model:
+            raise AdapterRefused("opencode with DeepSeek: name the model (--model, as DeepSeek's API lists it)")
 
     def plan(self, o: AgentOptions) -> Plan:
         self.check(o)
@@ -240,6 +245,16 @@ class OpenCode(AgentAdapter):
                                                                        "limit": {"context": o.local_context,
                                                                                  "output": 4096}}}}}
             model = f"lab-local/{o.model}"
+        elif o.registry_key == DEEPSEEK_KEY:
+            # a declared provider, as for local models: OPENCODE_DISABLE_MODELS_FETCH leaves no catalogue to find it in.
+            # The config names the in-box variable, never the key: OpenCode substitutes {env:NAME} when it reads this.
+            cfg["provider"] = {"lab-deepseek": {"npm": "@ai-sdk/openai-compatible", "name": "DeepSeek",
+                                                "options": {"baseURL": DEEPSEEK_BASE_URL,
+                                                            "apiKey": f"{{env:{self.box_env(o)}}}"},
+                                                "models": {str(o.model): {"name": str(o.model),
+                                                                          "limit": {"context": o.local_context,
+                                                                                    "output": 4096}}}}}
+            model = f"lab-deepseek/{o.model}"
         if model:
             cfg["model"] = model
         path = f"{BOX_HOME}/.config/opencode/lab.json"

@@ -58,6 +58,7 @@ COST_TABLE: dict[tuple[str, str], Rate] = {
     ("openai", "*"): _PLACEHOLDER,      # UNCALIBRATED placeholder (owner decision, GOAL §13.8)
     ("anthropic", "*"): _PLACEHOLDER,   # UNCALIBRATED placeholder (owner decision, GOAL §13.8)
     ("google", "*"): _PLACEHOLDER,      # UNCALIBRATED placeholder (owner decision, GOAL §13.8)
+    ("deepseek", "*"): _PLACEHOLDER,    # UNCALIBRATED placeholder (owner decision, GOAL §13.8)
     ("local", "*"): _PLACEHOLDER,       # UNCALIBRATED placeholder (owner decision, GOAL §13.8)
     ("mock", "*"): _PLACEHOLDER,        # tests only
 }

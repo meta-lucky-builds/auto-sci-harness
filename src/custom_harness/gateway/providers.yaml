@@ -69,6 +69,17 @@ anthropic-subscription:
   verified_on: null
   verified_by: null
 
+deepseek-api:
+  provider: deepseek
+  mode: api
+  auth_kind: api_key
+  byos_status: n/a
+  training_on_outputs: unknown   # terms not read when this entry was written: read them before signing off
+  source_url: https://platform.deepseek.com/
+  notes: "Used by OpenCode in the Lab. Entry written by an agent; its terms, data location and any per-key spend limit have not been checked. The Lab's cap rests on the provider: if there is no per-key limit, the prepaid balance is the cap."
+  verified_on: null
+  verified_by: null
+
 google-subscription:
   provider: google
   mode: byos

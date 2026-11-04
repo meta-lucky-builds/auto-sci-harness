@@ -51,6 +51,44 @@ def test_opencode_local_model_needs_no_credential_and_never_shares():
     assert plan.env["OPENCODE_DISABLE_AUTOUPDATE"] == "1" and plan.env["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
 
 
+def test_opencode_deepseek_config_names_the_variable_never_a_key_and_never_shares():
+    plan = G.adapter("opencode").plan(G.AgentOptions(registry_key=G.DEEPSEEK_KEY, model="some-model"))
+    assert plan.box_env == "DEEPSEEK_API_KEY"
+    assert not plan.host_gateway and plan.host_port is None  # a hosted API: this box gets no port on the host
+    cfg = json.loads(plan.config_files[f"{G.BOX_HOME}/.config/opencode/lab.json"])
+    assert cfg["share"] == "disabled" and cfg["autoupdate"] is False
+    assert cfg["model"] == "lab-deepseek/some-model"
+    options = cfg["provider"]["lab-deepseek"]["options"]
+    assert options["apiKey"] == "{env:DEEPSEEK_API_KEY}"
+    assert options["baseURL"] == G.DEEPSEEK_BASE_URL and options["baseURL"].startswith("https://")
+    assert "some-model" in cfg["provider"]["lab-deepseek"]["models"]
+
+
+def test_opencode_deepseek_needs_a_model():
+    with pytest.raises(G.AdapterRefused, match="name the model"):
+        G.adapter("opencode").plan(G.AgentOptions(registry_key=G.DEEPSEEK_KEY))
+
+
+def test_deepseek_is_only_for_opencode():
+    with pytest.raises(G.AdapterRefused):
+        G.adapter("claude-code").plan(G.AgentOptions(registry_key=G.DEEPSEEK_KEY, model="m"))
+    with pytest.raises(G.AdapterRefused):
+        G.adapter("codex").plan(G.AgentOptions(registry_key=G.DEEPSEEK_KEY, model="m"))
+
+
+def test_the_bundled_deepseek_entry_passes_the_registry_rules_and_is_not_yet_signed_off():
+    from custom_harness.gateway.costs import rate_for, registry_problems
+    from custom_harness.gateway.registry import load_registry, policy_problems, require_usable
+
+    reg = load_registry()
+    entry = require_usable(G.DEEPSEEK_KEY, reg)
+    assert entry["provider"] == "deepseek" and entry["mode"] == "api"
+    assert entry["training_on_outputs"] == "unknown"
+    assert entry["verified_by"] is None  # only a person may fill this in
+    assert not [p for p in registry_problems(reg) + policy_problems(reg) if p.startswith(G.DEEPSEEK_KEY)]
+    assert rate_for("deepseek", "any-model").placeholder  # no price invented
+
+
 @pytest.mark.parametrize("name", ["cursor", "antigravity"])
 def test_deferred_agents_are_refused_with_a_reason(name):
     ad = G.adapter(name)
