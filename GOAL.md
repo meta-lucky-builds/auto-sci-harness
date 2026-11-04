@@ -5,7 +5,7 @@ Date: 2026-10-06; scope revised 2026-10-07 (user decision: life sciences + engin
 **This is the single source of truth for WHAT custom-harness is and when it is done.**
 (State: see `STATUS.md`, which is the only place that records build state, rewritten 2026-10-08. The ✅/🟡/❌
 markers in §5/§11 are historical (2026-10-07 morning) and are no longer maintained here.)
-`PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
+`docs/archive/PLAN.md` = design history and rationale. `STATUS.md` = what is built today. Where they disagree with this file, this file wins.
 
 Inputs this file is built on (read them only if a detail is needed):
 - `../autoresearch_survey/00_SYNTHESIS.md` — 36 sources, first-principles model, 12 novel ideas (cited **S§n**).

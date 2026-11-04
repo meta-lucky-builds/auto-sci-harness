@@ -9,7 +9,7 @@ from custom_harness.research.modules import agreement, headroom, signature, vote
 from custom_harness.research.preflight import PreflightConfig, PublicInputs, dev_pairs, preflight
 from custom_harness.research.task import TaskSpec
 
-# Live run A (liverun1.md): 54 held-out rows; dev = 24 rows, candidate 24/24, baseline 22/24 (so 22 both right and
+# Run A (archive/liverun1.md): 54 held-out rows; dev = 24 rows, candidate 24/24, baseline 22/24 (so 22 both right and
 # 2 only-candidate-right); claimed min effect 0.02, alpha 0.05, seeds 0/1/2, family 1. The Kernel rejected it on K7.
 RUN_A = PublicInputs(metric="accuracy", higher_is_better=True, n_test=54, dev_pairs=(22, 2, 0, 0), min_effect=0.02)
 

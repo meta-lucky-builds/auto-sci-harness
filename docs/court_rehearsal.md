@@ -57,8 +57,9 @@ prior is P1.
 
 ## Health run (`chh court health --docker`)
 
-Eight planted claims go through the real route, each in a throwaway store, with scripted programs and no model calls:
-honest toy, planted real effect, null claim, leaky, p-hacked, label-reading, flaky, strawman baseline. `register` and
+Eleven planted claims go through the real route, each in a throwaway store, with scripted programs and no model calls:
+honest toy, planted real effect, null claim, leaky, p-hacked, label-reading, flaky, strawman baseline, size-switched
+baseline, retried claim (registered only: its level is what is checked), sealed public data. `register` and
 `register-sealed` refuse a Court version with no passing run. The run's hash goes into the claim's assumptions, so it is
 inside the certificate. `court_version` hashes `kernel/`, `kerneld/`, `court/`, `verify/`, `sandbox/` and the arm wrappers:
 a change to any of them needs a new run.
@@ -68,6 +69,16 @@ the method beats the comparator it was given. `court/comparator.py` now runs the
 public training file before any held-out label is read, and refuses one clearly worse than the trivial answer (margin
 UNCALIBRATED). This is deny-only and keeps the target. A comparator above trivial but below a fair standard is still a
 human judgement. A plant that fails to run counts as a wrong answer, never as a caught plant.
+
+That check can be dodged: a comparator can read the size of its input and fail only on the real test. So its held-out
+score, already read by the Kernel, is held against its public score (a drop over 0.15, or a rise over 30% for an error
+metric, both UNCALIBRATED) and the trivial answer. A collapse keeps the Kernel's certificate as a record of what ran, but
+the Court's verdict is NOT CONFIRMED and VALIDATED is denied. No extra label is read and the reason carries no number.
+On the future route only the trivial bound applies. Sabotage smaller than the allowed drop is not caught.
+
+Each promotion on a family spends less: `alpha / attempt ** 2`, capped at 0.05, so the first try keeps its level and the
+total stays under 8.3% however many tries are made. A case stopped with no label read is no try. A second test or replica
+takes the level of the case it follows. The count is per store and per family, so a new store starts again.
 
 Positive and null salts appear here as the planted real effect and the null claim. Model-backed salts stay in `salts/`,
 budget-gated as before.

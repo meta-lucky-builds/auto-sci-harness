@@ -6,7 +6,7 @@ SAME target in the campaign's shared store, so without a declaration m grows dur
 first on a unit is judged at a laxer alpha than the arm evaluated second, and evaluation ORDER, not the edit, moves
 the acceptance evidence.
 
-Fix (decided design, HANDOFF2 §2 R2-2): the campaign keeps m CONSTANT by pre-declaring n_comparisons >= every
+Fix (decided design, archive/HANDOFF2 §2 R2-2): the campaign keeps m CONSTANT by pre-declaring n_comparisons >= every
 family size the campaign can reach. Two checks, both fail closed:
   1. before the campaign (`check_campaign`): every claim node of the seed spec (module research.claim; protected,
      so no edit can change it) declares n_comparisons >= max over targets of (claims already registered on the

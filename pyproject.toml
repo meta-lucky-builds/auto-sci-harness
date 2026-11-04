@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "custom-harness"
 version = "0.0.1"
-description = "Self-improving autonomous research harness with verifier-tier-gated autonomy"
+description = "A research harness where code, not the agent, decides whether a claim holds"
+readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [

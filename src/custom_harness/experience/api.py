@@ -196,7 +196,7 @@ class Experience:
         name = self._human()
         body = Z.seal_project(self.store, req.project, Path(req.data_file), label_column=req.label_column,
                               rows=req.rows, parts=req.parts, beacon_round=req.beacon_round,
-                              beacon_value=req.beacon_value)
+                              beacon_value=req.beacon_value, provenance=req.provenance)
         self._own("project", req.project, name)
         return M.Sealed(project=req.project, lab_rows=num("seal", req.project, "lab_rows", body["n_lab"]),
                         sealed_rows=tuple(num("seal", req.project, f"part{i}", n)

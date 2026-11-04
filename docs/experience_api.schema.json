@@ -1930,6 +1930,14 @@
     "title": "Project",
     "type": "string"
    },
+   "provenance": {
+    "enum": [
+     "private",
+     "public"
+    ],
+    "title": "Provenance",
+    "type": "string"
+   },
    "rows": {
     "exclusiveMinimum": 0,
     "title": "Rows",
@@ -1942,7 +1950,8 @@
    "label_column",
    "rows",
    "beacon_round",
-   "beacon_value"
+   "beacon_value",
+   "provenance"
   ],
   "title": "SealIn",
   "type": "object"

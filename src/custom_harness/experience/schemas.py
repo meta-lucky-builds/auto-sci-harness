@@ -30,6 +30,7 @@ class SealIn(Model):
     parts: int = Field(default=1, ge=1, le=2)
     beacon_round: str
     beacon_value: str
+    provenance: Literal["private", "public"]
 
 
 class CredentialIn(Model):

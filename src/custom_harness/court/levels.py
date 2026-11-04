@@ -40,8 +40,12 @@ names exactly what is missing (an honest rejection names the failing checks).
                 as "validated once, failed re-validation", never hidden. The route is generic: a sealed second part
                 (seal at project start) or a second future batch can be registered as a `revalidation` case too; the
                 checks above do not depend on minting.
-  RETROSPECTIVE a cap, not a badge: a target that is a fixed public dataset (a Claim Audit OpenML split: a networked
-                Lab could have downloaded it) means the claim can never hold VALIDATED or RE-VALIDATED (§17.1).
+  RETROSPECTIVE a cap, not a badge: a target that is a fixed public dataset (a Claim Audit OpenML split, or a seal whose
+                researcher did not state the data is private: a networked Lab could have downloaded it) means the claim
+                can never hold VALIDATED or RE-VALIDATED (§17.1).
+
+VALIDATED is also denied when the comparator collapsed on the held-out data (court/comparator.py): the Kernel's
+certificate stands as a record of what ran, but beating a sabotaged comparator is not a finding.
 
 Built, NOT test-verified (int18, stage-a).
 """
@@ -57,7 +61,7 @@ from ..kernel.certificate import CHECK_IDS, Certificate, Label
 from ..kernel.vault import DatasetRole
 from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
-from .minted import case_of_claim
+from .minted import case_of_claim, latest
 from .sealed import seal_fact as sealed_fact
 
 BADGES = ("REPRODUCIBLE", "REPLICATED", "VALIDATED", "RE-VALIDATED")
@@ -112,12 +116,12 @@ def _passed(cert: Certificate, ids: tuple[str, ...]) -> list[str]:
 
 
 def classify_target(ingest_kind: str | None, minted: bool, registered_after_prereg: bool,
-                    role: DatasetRole | None, sealed_at_start: bool = False) -> str:
+                    role: DatasetRole | None, sealed_at_start: bool = False, public_source: bool = False) -> str:
     """How a target's data came to exist relative to its claim (pure; module docstring):
-    retrospective (a public-dataset ingest) | sealed-at-start (a ledger fact, court/sealed.py) | seal-after-lab | minted
-    | future | sealed | internal."""
+    retrospective (a public-dataset ingest, or a seal of public data) | sealed-at-start (a ledger fact, court/sealed.py)
+    | seal-after-lab | minted | future | sealed | internal."""
     external = role in (DatasetRole.EXTERNAL, DatasetRole.FUTURE)
-    if ingest_kind == "openml_split":
+    if ingest_kind == "openml_split" or public_source:
         return "retrospective"  # a fixed public dataset a networked Lab could have downloaded
     if ingest_kind == "sealed_split":
         return "sealed-at-start" if sealed_at_start else "seal-after-lab"
@@ -155,8 +159,10 @@ def target_freshness(store: EvidenceStore, kernel: ScopedKernel, cert: Certifica
         after = prereg is not None and reg is not None and reg > prereg
         ingest = public_kinds.get(t)
         fact = sealed_fact(store, kernel, t, session) if ingest == "sealed_split" else {}
+        # only a stated `private` escapes the cap: a seal with no statement is not fresh by assumption
+        public = fact.get("project") is not None and fact.get("provenance") != "private"
         kind = classify_target(ingest, minted, after, rec.role if rec is not None else None,
-                               bool(fact.get("at_start")))
+                               bool(fact.get("at_start")), public)
         out[t] = {"seal": fact, "role": rec.role.value if rec is not None else None, "registered_seq": reg,
                   "prereg_seq": prereg,
                   "registered_after_prereg": after, "minted_for_this_claim": minted, "ingest_kind": ingest,
@@ -194,6 +200,10 @@ def validated_missing(store: EvidenceStore, kernel: ScopedKernel, cert: Certific
     if cert.label != Label.CERTIFIED_VALIDATED:
         out.append(f"label is {cert.label.value}, not CERTIFIED-VALIDATED (K6 on human-approved external/future data)")
     out += [f"{k} did not pass" for k in _passed(cert, tuple(CHECK_IDS))]
+    own = case_of_claim(store, cert.claim_hash)
+    outcome = None if own is None else latest(store, str(own["case_id"]), "outcome")
+    if outcome is not None and outcome.get("comparator_held_out"):
+        out.append(str(outcome["comparator_held_out"]))
     for t, f in fresh.items():
         if f["freshness"] == "retrospective":
             out.append(f"RETROSPECTIVE: target {t} is a fixed public dataset")
@@ -202,6 +212,9 @@ def validated_missing(store: EvidenceStore, kernel: ScopedKernel, cert: Certific
         if f["freshness"] == "sealed" and facts is not None:
             facts.setdefault("untested_assumptions", []).append(
                 f"{t}: sealed or private when the Lab worked (the human role approval; not checked by code)")
+        if f["freshness"] == "sealed-at-start" and facts is not None:
+            facts.setdefault("untested_assumptions", []).append(
+                f"{t}: the data is private, as the researcher stated at the seal (not checked by code)")
     return out
 
 
@@ -224,7 +237,8 @@ def replication_facts(store: EvidenceStore, cert_hash: str, claim_hash: str) -> 
                 reproducible = not reproducible_missing(kernel, kernel.certificate(str(rep_cert)), str(rep_cert))
             except (KernelError, KeyError, ValueError, OSError):
                 reproducible = False
-        certified = o is not None and str(o.get("label", "")).startswith("CERTIFIED")
+        certified = o is not None and str(o.get("label", "")).startswith("CERTIFIED") \
+            and not o.get("comparator_held_out")
         fams = r.get("families") or {}
         author, replicator = str(fams.get("executor", "unknown")), str(fams.get("replicator", "unknown"))
         if author.startswith("unknown") or replicator.startswith("unknown"):

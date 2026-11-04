@@ -2,7 +2,7 @@
 
 ## Seal at project start
 
-    chh lab seal PROJECT --data FILE --label-column C --rows N [--parts 2] --beacon-round R --beacon VALUE
+    chh lab seal PROJECT --data FILE --label-column C --rows N [--parts 2] --beacon-round R --beacon VALUE --provenance private|public
     chh lab start AGENT --project PROJECT ...
     chh lab promote SESSION --request promote.yaml
     chh court register-sealed PROMOTION --project PROJECT [--revalidate]
@@ -21,9 +21,14 @@ change was needed: both entry kinds already exist.
 **Parts.** One part gives VALIDATED. `--revalidate` fixes part 2 as the second test before any label of part 1 is read,
 which gives RE-VALIDATED under the existing rules: same claim core, same frozen code, disjoint rows.
 
-**Not shown by the seal.** That nobody gave the raw file to a Lab by another route. That rests on the researcher and is
-listed as an assumption on the claim. Near-duplicate rows are not dropped, only rows with identical features. The human
-role approval of each part still applies.
+**Provenance.** A seal states where the data comes from, and there is no default. Sealing a copy of a public dataset
+hides nothing from a networked Lab, so `--provenance public` caps the claim as RETROSPECTIVE. Only a stated `private`
+escapes the cap, and a seal from before this statement existed is capped too.
+
+**Not shown by the seal.** That nobody gave the raw file to a Lab by another route, and that data stated `private` really
+is. Both rest on the researcher: this catches a mistake and makes a false statement an explicit one, but it cannot catch
+a lie. They are listed as assumptions on the claim. Near-duplicate rows are not dropped, only rows with identical
+features. The human role approval of each part still applies.
 
 Part size is the researcher's choice today; the power check (docs/court_rehearsal.md) shows what a size can detect.
 

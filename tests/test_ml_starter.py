@@ -43,7 +43,7 @@ def test_the_kit_freezes_rehearses_and_previews_through_the_real_code(kit, tmp_p
     try:
         w.data.write_bytes((kit / "data.csv").read_bytes())
         w.x.seal(M.SealIn(project="ml-starter", data_file=str(w.data), label_column="label", rows=400, parts=1,
-                          beacon_round="r1", beacon_value=BEACON))
+                          beacon_round="r1", beacon_value=BEACON, provenance="private"))
         w.x.start(M.StartIn(agent="opencode", project="ml-starter", session_id="s-kit", model="m",
                             local_model_server=True))
         ws = S.workspace_of("s-kit")

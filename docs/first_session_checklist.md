@@ -16,8 +16,8 @@ Keep these three things in mind:
 ### 1. Open the right environment
 
 ```powershell
-& C:\Users\mykids\custom-harness-data\venv\Scripts\Activate.ps1
-cd C:\Users\mykids\OneDrive\Desktop\META\custom-harness
+& $env:USERPROFILE\custom-harness-data\venv\Scripts\Activate.ps1
+cd <the repository>
 git fetch origin
 git checkout launch
 git pull --ff-only origin launch
@@ -121,10 +121,10 @@ sign-off.
 
 Only you can do this, and no agent may see it (docs/human_check.md). Write a small script that tests something about the
 system that you choose. Exit code 0 means it passes. Put it at
-`C:\Users\mykids\custom-harness-data\human\checks\my-check.py`. Then:
+`$env:USERPROFILE\custom-harness-data\human\checks\my-check.py`. Then:
 
 ```powershell
-$h = (Get-FileHash C:\Users\mykids\custom-harness-data\human\checks\my-check.py -Algorithm SHA256).Hash.ToLower()
+$h = (Get-FileHash $env:USERPROFILE\custom-harness-data\human\checks\my-check.py -Algorithm SHA256).Hash.ToLower()
 chh register-human-check my-check --by NAME --sha256 $h
 python scripts/human_check.py --run
 python scripts/human_check.py --status
@@ -250,7 +250,7 @@ them into any later work on this generator. Run the command `chh exp toy` printe
 ```powershell
 chh court retire TARGET --by NAME
 chh exp case CASE
-chh exp share CASE --reviewer "REVIEWER NAME" --out C:\Users\mykids\Desktop\case.json
+chh exp share CASE --reviewer "REVIEWER NAME" --out $env:USERPROFILE\Desktop\case.json
 ```
 
 Success: the case shows the rerun command. A reviewer, on their own machine or yours, runs that one command. It looks like
@@ -315,8 +315,11 @@ Size each sealed part first: `chh court readiness` on Lab outcome counts (UNCALI
 round as in step 12, and seal before the project's first session:
 
 ```powershell
-chh lab seal PROJECT --data FILE --label-column C --rows N --parts 2 --beacon-round ROUND --beacon VALUE
+chh lab seal PROJECT --data FILE --label-column C --rows N --parts 2 --beacon-round ROUND --beacon VALUE --provenance private
 ```
+
+`--provenance` is your statement, and no code can check it. Say `private` only if no Lab could get this data elsewhere. Say
+`public` for anything downloadable: the Court will still test it, and caps it as RETROSPECTIVE, never VALIDATED.
 
 Success: it prints the Lab's row count and the sealed row counts.
 From there: `chh lab start --project PROJECT ...`, then the same route, with `chh exp promote PROMOTION --route sealed

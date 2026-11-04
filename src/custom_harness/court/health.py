@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import random
 import shutil
 import tempfile
 import time
@@ -31,6 +33,7 @@ from ..kerneld.scope import ScopedKernel
 from ..store import EvidenceStore
 from . import minted as C
 from .levels import level
+from .sealed import bind_session, seal_project
 
 RECORD_KIND = "court_health"
 SCRATCH_APPROVER = "health-run-scratch-store"
@@ -108,6 +111,17 @@ class Broken:
 def build_model(seed):
     return Broken()
 '''
+_SIZE_SWITCHED = '''
+class Switch:
+    """Honest on the public split, sabotaged on the real test: it can read the size of its input."""
+    def fit(self, X, y):
+        self.top = max(sorted(set(y)), key=y.count)
+    def predict(self, X):
+        return [self.top if len(X) < 350 else "never-a-label"] * len(X)
+def build_model(seed):
+    return Switch()
+'''
+_RETRIES = 3
 
 
 @dataclass(frozen=True)
@@ -119,7 +133,8 @@ class Plant:
     min_effect: float
     certifies: bool  # the right answer
     what: str
-    refused_by: str | None = None  # text of the COULD NOT RUN reason that is the right answer for a stopped plant
+    refused_by: str | None = None  # text of the reason that is the right answer for a stopped or denied plant
+    route: str = "minted"  # minted | retries (the same family again and again) | sealed-public
 
 
 PLANTS = (
@@ -132,6 +147,12 @@ PLANTS = (
     Plant("flaky", _FLAKY, _MAJORITY, "rings", 0.1, False, "predictions change between runs"),
     Plant("strawman_baseline", _MAJORITY, _STRAWMAN, "rings", 0.1, False, "a comparator that can never be right",
           "strawman"),
+    Plant("size_switched_baseline", _KNN, _SIZE_SWITCHED, "rings", 0.1, False,
+          "a comparator that passes the public check and fails only on the real test", "collapsed"),
+    Plant("retried_claim", _KNN, _MAJORITY, "rings", 0.1, False, "the same family tried again until something passes",
+          route="retries"),
+    Plant("sealed_public_data", _KNN, _MAJORITY, "sealed:health", 0.1, False,
+          "a public dataset put through the sealed route", route="sealed-public"),
 )
 
 
@@ -149,9 +170,70 @@ def court_version() -> str:
 def _correct(plant: Plant, out: dict[str, Any], certified: bool) -> bool:
     """The right answer, for the right reason. A plant that merely failed to run has shown nothing: a broken route
     must never look like a Court that rejected every false claim."""
+    if plant.refused_by is not None:
+        return plant.refused_by in str(out.get("comparator_held_out") or out.get("reason"))
     if out.get("cert_hash"):
         return certified == plant.certifies
-    return plant.refused_by is not None and plant.refused_by in str(out.get("reason"))
+    return False
+
+
+def _rings_csv(n: int) -> bytes:
+    """Rings for the sealed plant, in the shape of a researcher's file; the same effect the `rings` generator holds."""
+    rng = random.Random(5)
+    rows = ["x1,x2,n1,outcome"]
+    for _ in range(n):
+        lab = rng.randrange(3)
+        rad, ang = 1.0 + 1.2 * lab + rng.gauss(0, 0.3), rng.uniform(0, 6.28)
+        rows.append(f"{rad * math.cos(ang):.6f},{rad * math.sin(ang):.6f},{rng.gauss(0, 1):.6f},{'abc'[lab]}")
+    return ("\n".join(rows) + "\n").encode()
+
+
+def _run_retries(plant: Plant, store: EvidenceStore, part: ClaimPart, root: Path) -> dict[str, Any]:
+    """Register the same family until the level has been spent. Each try's level is read back out of its pre-registered
+    claim, the one the Kernel applies. Nothing is run: only the level is in question here."""
+    want = [0.05 / k ** 2 for k in range(1, _RETRIES + 1)]
+    got = []
+    for k in range(_RETRIES):
+        body = C.register_case(store, role="promotion", promotion_id=f"health-{plant.name}-{k}", session_id="health",
+                               title=plant.name, sentence=f"health run plant {plant.name}: {plant.what}", part=part,
+                               budget=Budget(timeout_s=120), method=f"{plant.method}\n# try {k}\n".encode(),
+                               baseline=plant.baseline.encode(), lock=b"health==1\n", family=plant.family,
+                               beacon_round="health", sizing={"n_test": 800}, n_train=400,
+                               anchor_file=root / "anchors" / "a.jsonl")
+        claim = next(e.body["claim"] for e in ScopedKernel(store).ledger.entries("prereg")
+                     if e.body.get("claim_hash") == body["claim_hash"])
+        got.append(claim["analysis_plan"]["alpha"])
+    correct = got == want
+    return {"plant": plant.name, "what": plant.what, "expected_certified": plant.certifies, "certified": False,
+            "correct": correct, "verdict": None, "label": None, "failed_checks": [],
+            "reason": f"levels of {_RETRIES} tries: {got}", "badge": "NONE"}
+
+
+def _run_sealed_public(plant: Plant, store: EvidenceStore, part: ClaimPart, root: Path, sandbox_factory: Any
+                       ) -> dict[str, Any]:
+    """The Kernel may well certify this: the cap is what must hold. VALIDATED on public data is the false answer."""
+    project = "health"
+    data = root / "public-data.csv"
+    data.write_bytes(_rings_csv(1600))
+    seal_project(store, project, data, label_column="outcome", rows=400, parts=1, beacon_round="health",
+                 beacon_value=BEACON, provenance="public")
+    bind_session(store, project, "health")
+    route = C.sealed_route(store, project, 1)
+    body = C.register_case(store, role="promotion", promotion_id=f"health-{plant.name}", session_id="health",
+                           title=plant.name, sentence=f"health run plant {plant.name}: {plant.what}", part=part,
+                           budget=Budget(timeout_s=120), method=plant.method.encode(),
+                           baseline=plant.baseline.encode(), lock=b"health==1\n", family=plant.family,
+                           beacon_round=route["beacon_round"], sizing={"n_test": route["n_test"]},
+                           n_train=route["n_train"], anchor_file=root / "anchors" / "a.jsonl", sealed=route,
+                           extra={"project": project, "part": 1})
+    ScopedKernel(store).approve_role(body["target"], approver=SCRATCH_APPROVER, note="health run: scratch store only")
+    out = C.run(store, body["case_id"], sandbox_factory(root), bundle_root=root / "bundles")
+    res = level(store, str(out["cert_hash"])) if out.get("cert_hash") else None
+    correct = res is not None and res.retrospective and not res.held["VALIDATED"]
+    return {"plant": plant.name, "what": plant.what, "expected_certified": plant.certifies,
+            "certified": bool(res and res.held["VALIDATED"]), "correct": correct, "verdict": out.get("verdict"),
+            "label": out.get("label"), "failed_checks": [], "reason": out.get("reason"),
+            "badge": res.badge if res else "NONE"}
 
 
 def run_plant(plant: Plant, root: Path, sandbox_factory: Any) -> dict[str, Any]:
@@ -161,6 +243,10 @@ def run_plant(plant: Plant, root: Path, sandbox_factory: Any) -> dict[str, Any]:
         ScopedKernel(store).approve_adapter("ml", approver=SCRATCH_APPROVER)
         part = ClaimPart(metric="accuracy", min_effect=plant.min_effect, probability=0.6, seeds=(0, 1, 2), n_boot=1000,
                          resolve_by=date(2030, 1, 1))
+        if plant.route == "retries":
+            return _run_retries(plant, store, part, root)
+        if plant.route == "sealed-public":
+            return _run_sealed_public(plant, store, part, root, sandbox_factory)
         body = C.register_case(store, role="promotion", promotion_id=f"health-{plant.name}", session_id="health",
                                title=plant.name, sentence=f"health run plant {plant.name}: {plant.what}", part=part,
                                budget=Budget(timeout_s=120), method=plant.method.encode(),
@@ -171,14 +257,14 @@ def run_plant(plant: Plant, root: Path, sandbox_factory: Any) -> dict[str, Any]:
         ScopedKernel(store).approve_role(body["target"], approver=SCRATCH_APPROVER,
                                          note="health run: scratch store only")
         out = C.run(store, body["case_id"], sandbox_factory(root), bundle_root=root / "bundles")
-        certified = str(out.get("label", "")).startswith("CERTIFIED")
+        certified = str(out.get("label", "")).startswith("CERTIFIED") and not out.get("comparator_held_out")
         badge = level(store, str(out["cert_hash"])).badge if out.get("cert_hash") else "NONE"
         failed = ScopedKernel(store).certificate(out["cert_hash"]).failed() if out.get("cert_hash") else []
         return {"plant": plant.name, "what": plant.what, "expected_certified": plant.certifies,
                 "certified": certified,
                 "correct": _correct(plant, out, certified), "verdict": out.get("verdict"), "label": out.get("label"),
                 "failed_checks": failed,
-                "reason": out.get("reason"), "badge": badge}
+                "reason": out.get("reason") or out.get("comparator_held_out"), "badge": badge}
     finally:
         store.close()
 

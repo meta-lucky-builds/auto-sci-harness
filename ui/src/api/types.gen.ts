@@ -294,6 +294,7 @@ export interface SealIn {
   label_column: string;
   parts?: number;
   project: string;
+  provenance: "private" | "public";
   rows: number;
 }
 

@@ -72,7 +72,8 @@ def kernel_step(root: Path = ROOT) -> list[str]:
 TRUSTED_MODULES = ("audit.program", "court.comparator", "court.display", "court.health", "court.prior",
                    "court.rehearsal", "court.sealed", "experience.api", "experience.schemas", "experience.words",
                    "kerneld.seal")
-TRUSTED_TESTS = ("tests/test_court_display.py", "tests/test_court_rehearsal_health.py", "tests/test_experience_api.py",
+TRUSTED_TESTS = ("tests/test_court_display.py", "tests/test_court_false_validated.py",
+                 "tests/test_court_rehearsal_health.py", "tests/test_experience_api.py",
                  "tests/test_experience_redteam.py", "tests/test_sealed_project.py", "tests/test_v1_features.py")
 
 

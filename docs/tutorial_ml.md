@@ -60,7 +60,7 @@ Reading only. Do not run these until `chh exp doctor` says you are ready: they n
 spending limit.
 
 ```powershell
-chh exp seal my-project --data examples\ml_starter\data.csv --label-column label --rows 400 --beacon-round R --beacon VALUE
+chh exp seal my-project --data examples\ml_starter\data.csv --label-column label --rows 400 --beacon-round R --beacon VALUE --provenance private
 chh exp start claude-code --project my-project
 chh exp freeze SESSION --request promote.yaml
 chh exp rehearse PROMOTION --rows 300

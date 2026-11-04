@@ -83,6 +83,7 @@ from ..verify import metrics as M
 
 RECORD_KIND = "court_case"
 ROLES = ("promotion", "replica", "revalidation")
+ALPHA_CAP = 0.05  # the most a Court case may spend on one try (the Kernel alone would allow 0.2)
 
 
 class CourtRefused(RuntimeError):
@@ -227,6 +228,25 @@ def _case_id(doc: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(doc)).hexdigest()[:16]
 
 
+def attempt_on_family(store: EvidenceStore, family: str) -> int:
+    """Which try at this family a new promotion case is, in this store: each one may be a fresh roll of the dice. A case
+    that stopped at COULD NOT RUN with no label read is no try; one registered and not run yet counts."""
+    prior = 0
+    for r in store.records(RECORD_KIND):
+        if r.get("event") != "registered" or r.get("role") != "promotion" or r.get("family") != family:
+            continue
+        o = latest(store, str(r["case_id"]), "outcome")
+        if o is None or o.get("labels_read") or o.get("verdict") != Verdict.COULD_NOT_RUN.value:
+            prior += 1
+    return prior + 1
+
+
+def spent_alpha(declared: float, attempt: int) -> float:
+    """The level of try `attempt`: min(declared, ALPHA_CAP) / attempt ** 2. The sum over every try stays below 1.65
+    times the cap, however many tries are made, and the first try keeps its full level."""
+    return min(declared, ALPHA_CAP) / attempt ** 2
+
+
 def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session_id: str, title: str, sentence: str,
                   part: ClaimPart, budget: Budget, method: bytes, baseline: bytes, lock: bytes | None, family: str,
                   beacon_round: str, sizing: dict[str, Any], n_train: int | None = None,
@@ -255,6 +275,12 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
     n_test = int(sizing["n_test"])
     compose = contract_of(contract)[0]
     method_code, baseline_code = compose(method), compose(baseline)
+    # the level of this try: a second test or a replica is held to the level of the case it follows
+    attempt = attempt_on_family(store, family) if role == "promotion" else None
+    alpha = spent_alpha(part.alpha, attempt) if attempt is not None else float(
+        (case(store, of_case) if of_case else {}).get("alpha", min(part.alpha, ALPHA_CAP)))
+    alpha_declared = part.alpha
+    part = part.model_copy(update={"alpha": alpha})
     link = f"lab:{session_id}:{promotion_id}" + (f":{role}:{of_case}" if role != "promotion" else "")
     case_id = _case_id({"format": fmt, "role": role, "link": link,
                         "family": family, "n_train": n_train, "n_test": n_test, "beacon_round": beacon_round,
@@ -289,6 +315,7 @@ def register_case(store: EvidenceStore, *, role: str, promotion_id: str, session
             "train_id": claim.development[0], "family": family, "n_train": n_train, "n_test": n_test,
             "beacon_round": beacon_round, "anchor_file": str(anchor_path), "anchor": anchor, "sizing": sizing,
             "lock_sha256": hashlib.sha256(lock).hexdigest() if lock is not None else None,
+            "attempt": attempt, "alpha": alpha, "alpha_declared": alpha_declared,
             "timeout_s": budget.timeout_s, "at": time.time(), **(extra or {})}
     store.append_record(RECORD_KIND, body)
     return body
@@ -595,7 +622,7 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
         ) -> dict[str, Any]:
     """Both frozen arms on the minted data in the Court sandbox, then the Kernel. Refuses (no label read) unless
     minted and the target's FUTURE role is human-approved; one look per claim. Records the outcome."""
-    from .comparator import comparator_problem
+    from .comparator import comparator_reference, held_out_problem, strawman_reason
     c = case(store, case_id)
     route = str(c.get("route", "minted"))
     if route == "minted" and latest(store, case_id, "minted") is None:
@@ -642,9 +669,10 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
     n_test = len(list(csv.reader(io.StringIO(test_x.decode("utf-8"))))) - 1
     preds: dict[tuple[str, int], list[str]] = {}
     try:  # 1. every program runs before any label is read
-        strawman = comparator_problem(arms["comparator"][1], claim.metric.id, train,
-                                      sandbox_factory(f"court-{case_id}-comparator-check"),
-                                      claim.analysis_plan.seeds[0], timeout)
+        public_score, trivial_score = comparator_reference(arms["comparator"][1], claim.metric.id, train,
+                                                           sandbox_factory(f"court-{case_id}-comparator-check"),
+                                                           claim.analysis_plan.seeds[0], timeout)
+        strawman = strawman_reason(claim.metric.id, public_score, trivial_score)
         if strawman:
             return could_not_run(strawman)
         for seed in claim.analysis_plan.seeds:
@@ -668,6 +696,7 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
                               blob=vault.dataset(train_id).files["train.csv"].blob),
             "test": InputRef(dataset_id=target, file="test_X.csv", blob=vault.dataset(target).files["test_X.csv"].blob)}
     ids: list[str] = []
+    comparator_scores: list[float] = []
     try:  # 2. labels stay behind the kerneld boundary: one logged 'evaluate' read per (arm, seed); the score only
         with KernelD(store.root) as kd:
             for seed in claim.analysis_plan.seeds:
@@ -686,6 +715,8 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
                                                       claim_hash=ch, arm=arm, seed=seed)
                     finally:
                         handle.close()
+                    if arm == "comparator":
+                        comparator_scores.append(score)
                     rec = ExecRecord(claim_hash=ch, arm=arm, artifact_hash=h, argv=DEFAULT_ARGV, inputs=refs,  # type: ignore[arg-type]
                                      target=target, label_file="test_y.csv", seed=seed, env=env, limits=limits,
                                      preds_ref=store.blobs.put_json(preds[(arm, seed)]), metric=claim.metric.id,
@@ -703,8 +734,15 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
     if cert.label.value.startswith("CERTIFIED"):  # the one-command Reproducibility Bundle (REPRODUCIBLE needs it)
         bundle_hash = kernel.bundle(h, (bundle_root or data_dir() / "bundles") / f"court-{case_id}-{h[:16]}.zip")
     v, named = verdict(cert)
+    collapsed = None  # 4. the Kernel judged the arms; this judges whether the comparison meant anything (deny-only)
+    if v == Verdict.CERTIFIED:
+        collapsed = held_out_problem(claim.metric.id, sum(comparator_scores) / len(comparator_scores), public_score,
+                                     trivial_score, against_public=route != "future")
+    if collapsed:
+        v, named = Verdict.NOT_CONFIRMED, ["comparator"]
     body = {"case_id": case_id, "event": "outcome", "claim_hash": ch, "verdict": v.value, "checks": named,
             "cert_hash": h, "label": cert.label.value, "labels_read": True, "bundle_hash": bundle_hash,
+            "comparator_held_out": collapsed,
             "report_hash": hashlib.sha256(render_report(cert).encode()).hexdigest(), "at": time.time()}
     store.append_record(RECORD_KIND, body)
     return body
@@ -713,9 +751,9 @@ def run(store: EvidenceStore, case_id: str, sandbox_factory: SandboxFactory, *, 
 def summary(store: EvidenceStore, case_id: str) -> dict[str, Any]:
     c = case(store, case_id)
     out = {k: c.get(k) for k in ("case_id", "role", "promotion_id", "of_case", "claim_hash", "target", "family",
-                                 "n_train", "n_test", "beacon_round", "sizing")}
+                                 "n_train", "n_test", "beacon_round", "sizing", "attempt", "alpha", "alpha_declared")}
     out["minted"] = latest(store, case_id, "minted") is not None
     o = latest(store, case_id, "outcome")
     out["outcome"] = None if o is None else {k: o.get(k) for k in ("verdict", "label", "cert_hash", "checks",
-                                                                   "reason")}
+                                                                   "reason", "comparator_held_out")}
     return json.loads(json.dumps(out, default=str))

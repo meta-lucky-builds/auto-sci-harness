@@ -64,7 +64,7 @@ class World:
 
     def seal(self, project: str = "cohort-1", parts: int = 2) -> M.Sealed:
         return self.x.seal(M.SealIn(project=project, data_file=str(self.data), label_column="outcome", rows=400,
-                                    parts=parts, beacon_round="r1", beacon_value=BEACON))
+                                    parts=parts, beacon_round="r1", beacon_value=BEACON, provenance="private"))
 
     def lab_work(self, sid: str = "s-exp") -> None:
         """What a scripted agent leaves in its workspace: the code and two reported ideas, one dropped."""

@@ -61,6 +61,8 @@ def add_parsers(sub: Any) -> None:
     se = s.add_parser("seal", help="HUMAN: seal part of a dataset in kerneld, before the project's first session")
     se.add_argument("project")
     se.add_argument("--data", required=True, help="the researcher's CSV, outside the lab root")
+    se.add_argument("--provenance", required=True, choices=["private", "public"],
+                    help="private: no Lab could get this data elsewhere. public: capped as RETROSPECTIVE")
     se.add_argument("--label-column", required=True)
     se.add_argument("--rows", type=int, required=True, help="rows in each sealed part")
     se.add_argument("--parts", type=int, default=1, help="1, or 2 for RE-VALIDATED")
@@ -144,7 +146,8 @@ def cmd_lab(a: argparse.Namespace, store: EvidenceStore) -> int:
         from ..court.sealed import SealRefused, seal_project
         try:
             return _out(seal_project(store, a.project, Path(a.data), label_column=a.label_column, rows=a.rows,
-                                     parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon))
+                                     parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon,
+                                     provenance=a.provenance))
         except SealRefused as e:
             raise SystemExit(f"refused: {e}") from None
     if c == "attach":

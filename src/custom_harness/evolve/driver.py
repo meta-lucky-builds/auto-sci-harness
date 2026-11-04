@@ -109,10 +109,11 @@ def evolve(seed_spec: HarnessSpec, suite: list[SuiteTask], *, generations: int, 
             raise EmbargoRefused("the evidence embargo takes no ablation arm, no branching and no temporal reveal: "
                                  "each releases information its bound does not count")
         gate_tasks = [t for t in working if t.split == "gate"]
+        n_seeds, infra_retries, gate_alpha = len(cfg.seeds), cfg.infra_retries, cfg.gate_alpha
         plan = resolve_plan(store, campaign, gen_ledger.generation if gen_ledger is not None else 0, generations,
                             lambda: plan_campaign(seed_spec, store, gate_tasks, generations=generations,
-                                                  n_seeds=len(cfg.seeds), infra_retries=cfg.infra_retries,
-                                                  gate_alpha=cfg.gate_alpha))
+                                                  n_seeds=n_seeds, infra_retries=infra_retries,
+                                                  gate_alpha=gate_alpha))
         bound = plan.n_comparisons
         unit_key = f"{unit_key}|embargo" if unit_key is not None else None  # never mixed with legacy unit outcomes
     else:

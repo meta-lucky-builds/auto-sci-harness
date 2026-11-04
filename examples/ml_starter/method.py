@@ -1,5 +1,6 @@
 """The method: nearest neighbours on the radius. The Court's contract: `build_model(seed)` returns an object with
-`fit(X, y)` and `predict(X)`. X is a list of rows of numbers, y a list of labels. The trusted Court computes the score."""
+`fit(X, y)` and `predict(X)`. X is a list of rows of numbers, y a list of labels. The trusted Court computes the
+score."""
 import math
 
 

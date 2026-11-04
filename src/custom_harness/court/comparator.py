@@ -6,8 +6,14 @@ file, and is scored against the most trivial predictor there: the most common tr
 an error metric. A comparator clearly worse than that is refused as COULD NOT RUN, and the target is kept. No held-out
 data is used and the check can only deny (invariant 21).
 
-What it does not catch: a comparator above the trivial predictor but far below the honest state of the art. Choosing a
-fair comparator stays a human judgement, and the claim's text names it.
+A comparator can pass that and still be sabotaged: it can look at the size of its input and fail only on the real test.
+So its held-out score, which the Kernel already read, is held against the same two public numbers. A collapse denies the
+claim its verdict and VALIDATED. No extra label is read, no number enters the reason, and on the future route only the
+trivial bound applies, since future data may honestly differ from the public file.
+
+What it does not catch: a comparator above the trivial predictor but far below the honest state of the art, and one
+sabotaged by less than the allowed drop. Choosing a fair comparator stays a human judgement, and the claim's text names
+it.
 """
 
 from __future__ import annotations
@@ -22,6 +28,10 @@ from ..kernel import DEFAULT_ARGV, run_program
 from ..verify import metrics as M
 
 MARGIN = 0.05  # UNCALIBRATED (owner decision, GOAL 13.8): absolute for accuracy and f1, relative for error metrics
+MAX_DROP = 0.15  # UNCALIBRATED: held-out against public score, absolute for accuracy and f1
+MAX_RISE = 0.30  # UNCALIBRATED: held-out against public score, relative for error metrics
+COLLAPSED = ("the comparator collapsed on the held-out data: it fell far below its public score or below the trivial "
+             "answer, so beating it says nothing about the method")
 
 
 def _csv(rows: list[list[str]]) -> bytes:
@@ -55,18 +65,44 @@ def worse_than_trivial(metric: str, score: float, trivial: float) -> bool:
     return score > trivial * (1 + MARGIN)
 
 
-def comparator_problem(code: bytes, metric: str, train: bytes, sandbox: Any, seed: int, timeout_s: float) -> str | None:
-    """Why this comparator is a strawman, or None. A comparator that cannot run here is left to the real run, which
-    reports it with the same contract."""
+def comparator_reference(code: bytes, metric: str, train: bytes, sandbox: Any, seed: int, timeout_s: float
+                         ) -> tuple[float | None, float | None]:
+    """(the comparator's public score, the trivial predictor's public score). None where it could not be measured: a
+    comparator that cannot run here is left to the real run, which reports it with the same contract."""
     fit, test_x, y, fit_labels = public_split(train)
+    if not y or not fit_labels:
+        return None, None
     preds, _ = run_program(sandbox, code=code, entrypoint="solution.py", argv=DEFAULT_ARGV,
                            inputs={"train": ("train.csv", fit), "test": ("test_X.csv", test_x)}, seed=seed,
                            timeout_s=timeout_s)
+    try:
+        trivial = M.score(metric, y, trivial_predictions(metric, fit_labels, len(y)))
+    except ValueError:
+        return None, None
     if preds is None or len(preds) != len(y) or M.predictions_problem(metric, preds):
+        return None, trivial
+    return M.score(metric, y, preds), trivial
+
+
+def strawman_reason(metric: str, public: float | None, trivial: float | None) -> str | None:
+    """Why this comparator is a strawman on the public data, or None."""
+    if public is None or trivial is None or not worse_than_trivial(metric, public, trivial):
         return None
-    score = M.score(metric, y, preds)
-    trivial = M.score(metric, y, trivial_predictions(metric, fit_labels, len(y)))
-    if worse_than_trivial(metric, score, trivial):
-        return (f"the comparator is a strawman: on the public training data it scores {score:.4f} on {metric}, worse "
-                f"than always predicting the trivial answer ({trivial:.4f})")
-    return None
+    return (f"the comparator is a strawman: on the public training data it scores {public:.4f} on {metric}, worse than "
+            f"always predicting the trivial answer ({trivial:.4f})")
+
+
+def comparator_problem(code: bytes, metric: str, train: bytes, sandbox: Any, seed: int, timeout_s: float) -> str | None:
+    return strawman_reason(metric, *comparator_reference(code, metric, train, sandbox, seed, timeout_s))
+
+
+def held_out_problem(metric: str, held_out: float, public: float | None, trivial: float | None, *,
+                     against_public: bool) -> str | None:
+    """COLLAPSED if the comparator's mean held-out score undercuts its public reference, else None. Deny-only."""
+    if trivial is not None and worse_than_trivial(metric, held_out, trivial):
+        return COLLAPSED
+    if not against_public or public is None:
+        return None
+    if M.HIGHER_IS_BETTER[metric]:
+        return COLLAPSED if held_out < public - MAX_DROP else None
+    return COLLAPSED if held_out > public * (1 + MAX_RISE) else None

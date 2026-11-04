@@ -149,7 +149,7 @@ def rehearse(store: EvidenceStore, pid: str, data_file: Path, *, label_column: s
     try:
         ScopedKernel(scratch).approve_adapter("ml", approver=SCRATCH_APPROVER)
         S.seal_project(scratch, SCRATCH_PROJECT, Path(data_file), label_column=label_column, rows=rows, parts=1,
-                       beacon_round="rehearsal", beacon_value=SCRATCH_BEACON)
+                       beacon_round="rehearsal", beacon_value=SCRATCH_BEACON, provenance="private")
         S.bind_session(scratch, SCRATCH_PROJECT, str(frozen["session_id"]))
         route = C.sealed_route(scratch, SCRATCH_PROJECT, 1)
         body = C.register_case(

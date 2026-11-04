@@ -94,7 +94,7 @@ class Project:
         self.data.write_bytes(rings_csv())
         self.project = project
         self.seal = S.seal_project(self.store, project, self.data, label_column="outcome", rows=rows, parts=parts,
-                                   beacon_round="r1", beacon_value=BEACON)
+                                   beacon_round="r1", beacon_value=BEACON, provenance="private")
         self.n = 0
 
     def session(self, sid: str = SESSION) -> None:
@@ -162,7 +162,7 @@ def test_the_seal_is_in_the_ledger_and_no_sealed_label_is_public(pj):
 def test_a_project_is_sealed_once(pj):
     with pytest.raises(S.SealRefused, match="already exists"):
         S.seal_project(pj.store, pj.project, pj.data, label_column="outcome", rows=100, parts=1, beacon_round="r2",
-                       beacon_value=BEACON)
+                       beacon_value=BEACON, provenance="private")
 
 
 def test_a_session_needs_a_sealed_project(pj):
@@ -181,10 +181,10 @@ def test_a_file_in_the_lab_root_cannot_be_sealed(tmp_path, monkeypatch):
     try:
         with pytest.raises(S.SealRefused, match="lab root"):
             S.seal_project(store, "pr-a", f, label_column="outcome", rows=5, parts=1, beacon_round="r",
-                           beacon_value=BEACON)
+                           beacon_value=BEACON, provenance="private")
         with pytest.raises(S.SealRefused, match="project id"):
             S.seal_project(store, "BAD ID", tmp_path / "x", label_column="o", rows=5, parts=1, beacon_round="r",
-                           beacon_value=BEACON)
+                           beacon_value=BEACON, provenance="private")
     finally:
         store.close()
 
@@ -194,11 +194,11 @@ def test_kerneld_refusal_is_a_refusal(tmp_path):
     try:
         with pytest.raises(S.SealRefused, match="not_found"):
             S.seal_project(store, "pr-b", tmp_path / "missing.csv", label_column="o", rows=5, parts=1,
-                           beacon_round="r", beacon_value=BEACON)
+                           beacon_round="r", beacon_value=BEACON, provenance="private")
         (tmp_path / "bad.csv").write_bytes(b"a,b\n1,2\n")
         with pytest.raises(S.SealRefused, match="bad_request"):
             S.seal_project(store, "pr-b", tmp_path / "bad.csv", label_column="z", rows=5, parts=1,
-                           beacon_round="r", beacon_value=BEACON)
+                           beacon_round="r", beacon_value=BEACON, provenance="private")
     finally:
         store.close()
 
@@ -213,7 +213,9 @@ def test_sealed_case_validates_as_a_ledger_fact_and_second_part_revalidates(pj):
     assert res.held["VALIDATED"], res.missing
     fact = res.facts["targets"][body["target"]]
     assert fact["freshness"] == "sealed-at-start" and fact["seal"]["at_start"]
-    assert "untested_assumptions" not in res.facts
+    # the order is a ledger fact, so the only thing left untested is the researcher's statement of provenance
+    assert [a.split(": ", 1)[1] for a in res.facts["untested_assumptions"]] == [
+        "the data is private, as the researcher stated at the seal (not checked by code)"]
     rv = pj.run(body["revalidation"])
     assert rv["cert_hash"], rv
     res2 = L.level(pj.store, out["cert_hash"])
@@ -256,7 +258,7 @@ def test_a_session_outside_the_project_cannot_use_its_seal(pj):
 
 def test_sessions_of_another_project_do_not_count(pj):
     S.seal_project(pj.store, "other-project", pj.data, label_column="outcome", rows=100, parts=1, beacon_round="r2",
-                   beacon_value=BEACON)
+                   beacon_value=BEACON, provenance="private")
     S.bind_session(pj.store, "other-project", "s-other")
     fact = S.seal_fact(pj.store, ScopedKernel(pj.store), pj.seal["targets"][0], None)
     assert "no Lab session" in fact["why"]

@@ -35,6 +35,7 @@ REASONS = {
     "RULES_OF_THE_RUN_BROKEN": "A file or an output of the run broke the rules of the test.",
     TOO_CLOSE: "The test could not tell: the effect may or may not reach the claimed size.",
     "FAILED_INDEPENDENT_CHECK": "One of the checks shown in full failed: it is named in the technical details.",
+    "COMPARATOR_COLLAPSED": "The baseline fell apart on the test data, so beating it says nothing about the method.",
 }
 CHECK_PLAIN = {"K0": "The code and records are all present", "K1": "The claim is well formed",
                "K2": "The claim was fixed before the data existed or was read",

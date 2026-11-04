@@ -61,21 +61,39 @@ Stage-product adds, tested with scripted stand-ins and no agent (reported, stage
 
 Not built, as GOAL 18.5 defers them: overnight mode, public challenge, integrations, visible self-improvement.
 
-Branch `evolve-embargo` adds, **not run at all (inferred from reading; the owner asked for no test, run or gate)**: an
-opt-in evolution mode whose campaign should be able to finish (`--evidence embargo`, docs/evolve_embargo.md, GOAL 18.9).
-No Kernel file changed. `tests/test_evolve_embargo.py` is written and has never executed. The legacy default is unchanged,
-and its strict expected failures stay open. The time-split experiment (GOAL 6.4) is still not wired, so no self-improvement
-has been shown.
+Branch `evolve-embargo` adds an opt-in evolution mode whose campaign should be able to finish (`--evidence embargo`,
+docs/evolve_embargo.md, GOAL 18.9). No Kernel file changed. `tests/test_evolve_embargo.py` passed, 31 tests, end-to-end
+acceptance included, with scripted programs and no model (verified). The legacy default is unchanged, and its strict
+expected failures stay open. The time-split experiment (GOAL 6.4) is still not wired, so no self-improvement has been
+shown.
 
-The same branch adds DeepSeek as a Lab provider through OpenCode (`deepseek-api`, docs/first_session_checklist.md), **also
-not run**: no call has reached DeepSeek, its terms are unread, and the entry has no human sign-off.
+The same branch adds DeepSeek as a Lab provider through OpenCode (`deepseek-api`, docs/first_session_checklist.md). Its
+adapter tests pass (verified), but **no call has reached DeepSeek**, its terms are unread, and the entry has no human
+sign-off.
+
+The same branch closes three routes to a false VALIDATED, in the Court; no Kernel file changed. Each has tests and a
+health-run plant (`tests/test_court_false_validated.py`, verified with a local sandbox, not Docker):
+
+| Route | Now | Still open |
+|---|---|---|
+| A baseline honest on the public check and sabotaged on the real test | Its held-out score is held against its public score and the trivial answer. A collapse is NOT CONFIRMED, without VALIDATED (`court/comparator.py`) | Sabotage smaller than the allowed drop, 0.15 (UNCALIBRATED). Not applied against the public score on the future route |
+| A family retried until something passes | Each try spends `alpha / attempt ** 2`, at most 0.05, so the total stays under 8.3% however many tries (`court/minted.py`) | Counted per store and per family: a new store or a new family starts again. The preflight sizes with the declared level, so a later try can look more certifiable than it is |
+| Public data put through the sealed route | A seal must state its provenance, and only `private` escapes RETROSPECTIVE (`court/sealed.py`) | The statement is the researcher's: a false `private` is not caught by code |
+
+These changes make a new Court version, so **the health run recorded in section 4 does not cover them**.
+
+Tested on this branch with those changes, with a local sandbox and no full gate (verified): 22 test files touching the
+Court, audit or experience, each in its own process, after two stale tests were updated; Kernel tests, 278 passed, 100%
+coverage; trusted code 100%, from one full step (226 passed) plus two new tests added to its coverage data, not one
+uninterrupted run. Ruff, governance and the museum registry pass. The `README.md` quick start ran on a clean copy on
+Windows: fresh install, UI build, scripted UI, starter kit. `scripts/install.ps1` is still only dry-run tested.
 
 ## 4. What has not happened yet
 
 - **No run with a real agent in a real Lab box.** No model has been called by this route.
 - **Zero Court-certified discoveries**, and no simulator-scoped certified result yet.
 - `chh court health --docker` passed for the Court version of commit 0ce18f3, on the owner's store and real Docker (verified,
-  stage-product). Any later Court change needs a new one.
+  stage-product). The Court has changed since, on `evolve-embargo`, so **a new one is needed before any case can register**.
 - Kaspersky on the owner's machine rewrites the UI page and widens its security policy (docs/ui.md).
 - Invariant 22 stays NOT MET until a person registers a human-held check.
 - `TRUTH_INDEPENDENT` in `court/display.py` is the orchestrator's proposal until the owner has reviewed it.
@@ -98,8 +116,8 @@ docs/first_session_checklist.md, in order: every human step, its command, what s
 ## Environment
 
 - **Code:** this folder, with git pointing at github.com/meta-lucky-builds/auto-sci-harness (private).
-- **Runtime data and venv:** `C:\Users\mykids\custom-harness-data`, outside OneDrive.
-- **Python:** `C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe`.
+- **Runtime data and venv:** `%USERPROFILE%\custom-harness-data`, outside OneDrive.
+- **Python:** `%USERPROFILE%\custom-harness-data\venv\Scripts\python.exe`.
 - **Gate:** `python scripts/check.py`, or `--fast` to skip the full suite. A full gate is run in chunks and alone on the
   machine, and takes hours. A PC sleep or logoff kills a run.
 - **Docker:** Docker Desktop 29.8.1 with `custom-harness-sandbox:py312` and `:py312-candidate`; `custom-harness-lab:py312`

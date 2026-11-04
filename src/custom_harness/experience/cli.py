@@ -4,6 +4,7 @@
   chh exp waiting
   chh exp approve ITEM                        points to the step; it never takes it
   chh exp seal PROJECT --data F --label-column C --rows N [--parts 2] --beacon-round R --beacon VALUE
+      --provenance private|public
   chh exp start AGENT [--project P] [--session S] [--model M] [--local-model-server]
   chh exp lab SESSION
   chh exp explore SESSION --prompt TEXT
@@ -56,6 +57,8 @@ def add_parsers(sub: Any) -> None:
     se = s.add_parser("seal", help="seal part of a dataset before the project's first Lab session")
     se.add_argument("project")
     se.add_argument("--data", required=True)
+    se.add_argument("--provenance", required=True, choices=["private", "public"],
+                    help="private: no Lab could get this data elsewhere. public: capped as RETROSPECTIVE")
     se.add_argument("--label-column", required=True)
     se.add_argument("--rows", type=int, required=True)
     se.add_argument("--parts", type=int, default=1)
@@ -199,7 +202,8 @@ def _call(a: argparse.Namespace, x: Any, m: Any) -> Any:
         return x.set_researcher(a.name) if a.name else x.whoami()
     if c == "seal":
         return x.seal(m.SealIn(project=a.project, data_file=a.data, label_column=a.label_column, rows=a.rows,
-                               parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon))
+                               parts=a.parts, beacon_round=a.beacon_round, beacon_value=a.beacon,
+                               provenance=a.provenance))
     if c == "start":
         return x.start(m.StartIn(agent=a.agent, project=a.project, session_id=a.session, model=a.model,
                                  local_model_server=a.local_model_server, lab_defaults=not a.no_lab_defaults))

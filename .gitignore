@@ -17,6 +17,10 @@ _export/
 # secrets
 .env
 github repo/
+# local agent settings and private attack notes: never committed
+.claude/
+audit-notes/
+.hypothesis/
 .coverage
 .mypy_cache/
 .ruff_cache/

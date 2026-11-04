@@ -1,6 +1,7 @@
 """Seal at project start (GOAL 18.2, 18.6, UPGRADES N7): "sealed" as a ledger fact, not an attestation.
 
     chh lab seal PROJECT --data FILE --label-column C --rows N [--parts 2] --beacon-round R --beacon VALUE
+        --provenance private|public
         kerneld reads FILE, draws the split and registers the parts. The host never holds a sealed label.
     chh lab start ... --project PROJECT
         registers a `lab_session` artifact (a ledger entry) and puts the Lab's part into the workspace.
@@ -11,9 +12,9 @@ entry have sequence numbers in one hash chain. A target counts as sealed at star
 of the project sits after the seal, and the case's own session is one of them.
 
 What this shows: the Court's registered copy existed, and was held by kerneld, before any session of this project. What
-it cannot show: that nobody gave the raw file to a Lab some other way, inside or outside this project. That rests on
-the researcher; the role approval of each part (`chh approve-role`, human) still applies, and it is listed as an
-assumption on the claim.
+it cannot show: that nobody gave the raw file to a Lab some other way, inside or outside this project, and that the data
+is not public. Both rest on the researcher, who states the provenance at the seal; the role approval of each part (`chh
+approve-role`, human) still applies, and it is listed as an assumption on the claim.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from ..store import EvidenceStore
 RECORD_KIND = "lab_project"
 ARTIFACT_KIND = "lab_session"
 PROJECT = re.compile(r"^[a-z0-9][a-z0-9-]{1,38}[a-z0-9]$")
+PROVENANCE = ("private", "public")
 
 
 class SealRefused(RuntimeError):
@@ -45,9 +47,13 @@ def sealed_record(store: EvidenceStore, project: str) -> dict[str, Any] | None:
 
 
 def seal_project(store: EvidenceStore, project: str, data_file: Path, *, label_column: str, rows: int, parts: int,
-                 beacon_round: str, beacon_value: str) -> dict[str, Any]:
+                 beacon_round: str, beacon_value: str, provenance: str) -> dict[str, Any]:
+    """`provenance`, the researcher's statement: `private` (no Lab could get this data elsewhere) or `public`. Sealing a
+    copy of public data hides nothing from a networked Lab, so a `public` seal is capped as RETROSPECTIVE."""
     from ..kerneld.client import KernelD, KernelDError
     from ..lab.walls import lab_root, overlaps
+    if provenance not in PROVENANCE:
+        raise SealRefused(f"provenance {provenance!r}: say where this data comes from, one of {list(PROVENANCE)}")
     if not PROJECT.match(project):
         raise SealRefused(f"project id {project!r}: lower-case letters, digits and '-', 3-40 characters")
     if project_rows(store, project):
@@ -65,7 +71,8 @@ def seal_project(store: EvidenceStore, project: str, data_file: Path, *, label_c
                 run.close()
     except KernelDError as e:
         raise SealRefused(f"kerneld refused the seal ({e.code})") from None
-    body = {"project": project, "event": "sealed", **res, "beacon_round": beacon_round, "at": time.time()}
+    body = {"project": project, "event": "sealed", **res, "beacon_round": beacon_round, "provenance": provenance,
+            "at": time.time()}
     store.append_record(RECORD_KIND, body)
     return body
 
@@ -94,10 +101,11 @@ def lab_part(store: EvidenceStore, project: str) -> bytes:
 def seal_fact(store: EvidenceStore, kernel: ScopedKernel, target: str, session_id: str | None) -> dict[str, Any]:
     """Whether `target` was sealed before any Lab session of its project, read from the ledger. `at_start` is the
     answer; the other fields say why."""
-    project = next((str(r["project"]) for r in store.records(RECORD_KIND)
-                    if r.get("event") == "sealed" and target in (r.get("targets") or [])), None)
-    if project is None:
-        return {"project": None, "at_start": False, "why": "no seal names this target"}
+    seal = next((r for r in store.records(RECORD_KIND)
+                 if r.get("event") == "sealed" and target in (r.get("targets") or [])), None)
+    if seal is None:
+        return {"project": None, "provenance": None, "at_start": False, "why": "no seal names this target"}
+    project = str(seal["project"])
     seal_seq = max(e.seq for e in kernel.ledger.entries("register_dataset") if e.body.get("dataset_id") == target)
     sessions: dict[str, int] = {}
     for art in kernel.vault.artifacts().values():
@@ -113,4 +121,5 @@ def seal_fact(store: EvidenceStore, kernel: ScopedKernel, target: str, session_i
         why = f"sessions {late} are in the ledger before the seal"
     elif session_id not in sessions:
         why = "the case's session is not a session of this project"
-    return {"project": project, "seal_seq": seal_seq, "sessions": sessions, "at_start": not why, "why": why}
+    return {"project": project, "provenance": seal.get("provenance"), "seal_seq": seal_seq, "sessions": sessions,
+            "at_start": not why, "why": why}

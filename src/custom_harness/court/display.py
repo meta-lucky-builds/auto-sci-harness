@@ -54,8 +54,10 @@ OTHER_CLASS = "FAILED_INDEPENDENT_CHECK"  # the failure is one of the checks sho
 # The index of a class is released as a `count` and stays in the ledger, so classes are only ever added at the end.
 # TOO_CLOSE_TO_CALL narrows EFFECT_NOT_SHOWN: see `_too_close`. It reads as INCONCLUSIVE.
 TOO_CLOSE = "TOO_CLOSE_TO_CALL"
+# COMPARATOR_COLLAPSED is the Court's denial of a Kernel certificate: court/comparator.py. It reads as NOT CERTIFIED.
+COLLAPSED_CLASS = "COMPARATOR_COLLAPSED"
 REASON_RELEASE = ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN", "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND",
-                  OTHER_CLASS, "NOT_FIXED_FIRST", "RULES_OF_THE_RUN_BROKEN", TOO_CLOSE)
+                  OTHER_CLASS, "NOT_FIXED_FIRST", "RULES_OF_THE_RUN_BROKEN", TOO_CLOSE, COLLAPSED_CLASS)
 
 
 class DisplayRefused(RuntimeError):
@@ -271,6 +273,9 @@ def view(store: EvidenceStore, case_id: str, viewer: str) -> dict[str, Any]:
         return {**out, "state": "COULD NOT RUN", "reason": reason, "labels_read": bool(o.get("labels_read"))}
     cert = ScopedKernel(store).certificate(str(o["cert_hash"]))
     shown, reason_class = split_checks(cert)
+    if o.get("comparator_held_out"):
+        reason_class = COLLAPSED_CLASS
+        out["verdict"] = "NOT CERTIFIED"
     res = level(store, str(o["cert_hash"]))
     _verdict_release(store, case_id, target, viewer, o, cert.label.value, reason_class, res)
     out.update(state="DECIDED", label=cert.label.value, badge=res.badge, badges=list(res.badges),

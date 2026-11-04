@@ -70,7 +70,8 @@ def test_the_released_index_of_a_reason_class_never_moves():
     """The index is written to the ledger as a `count`: an old row must keep its meaning when a class is added."""
     assert D.REASON_RELEASE[:6] == ("NOT_REPRODUCED", "PROCEDURE_NOT_VALID", "EFFECT_NOT_SHOWN",
                                     "OUTCOME_TOO_PREDICTABLE", "LEAK_FOUND", "FAILED_INDEPENDENT_CHECK")
-    assert set(D.REASON_RELEASE) == {*D.REASON_CLASS.values(), D.OTHER_CLASS, D.TOO_CLOSE}
+    assert D.REASON_RELEASE[-1] == D.COLLAPSED_CLASS
+    assert set(D.REASON_RELEASE) == {*D.REASON_CLASS.values(), D.OTHER_CLASS, D.TOO_CLOSE, D.COLLAPSED_CLASS}
     assert len(D.REASON_RELEASE) <= 16
 
 
