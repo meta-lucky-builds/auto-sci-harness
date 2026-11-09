@@ -148,6 +148,13 @@ DeepSeek have adapters) and a few human sign-offs: `chh exp doctor` lists what i
 | [`code_review/`](code_review) | Notes from reading the public code of earlier research agents |
 | [`GOAL.md`](GOAL.md) | The full specification |
 
+## Related work
+
+- A frozen, model-free referee that the agent cannot touch also appears in [Scores Alone Do Not Prove Discovery](https://arxiv.org/abs/2609.09219) (Discovery Certification Protocol, 7 Sep 2026) and [Propose, Don't Judge](https://arxiv.org/abs/2609.27051) (22 Sep 2026). Both are discussed in GOAL.md.
+- [RIDAR](https://arxiv.org/abs/2610.31372) (22 Oct 2026) detects research-integrity violations in agent trajectories, and [Beyond fabrication](https://arxiv.org/abs/2610.38691) (28 Oct 2026) finds that unsupported numbers in agent-written papers mostly come from the wrong run or metric, the failure K0 is meant to catch.
+
+I found no other system that combines all of these pieces with a Court that must pass a planted-claim exam.
+
 ## Roadmap
 
 This is a pre-release: the checker, the Court and the Lab are built, and the first certified result is the next milestone.
