@@ -31,7 +31,7 @@ the claim holds. No model can grant a pass.
   one closed reason, and the full certificate opens only after a person retires the target.
 - **An attack museum.** [`redteam/findings.yaml`](redteam/findings.yaml) records 65 findings against the checker, with the
   weakest attacker able to mount each one: 51 fixed, 13 accepted as stated limits, 1 open. Every fixed one keeps a [patch](redteam/museum) that puts the bug back, and
-  `scripts/museum.py` requires a test to fail when it does.
+  [`scripts/museum.py`](scripts/museum.py) requires a test to fail when it does.
 - **A checker that is hard to change.** The Kernel is about 4,900 of the package's 70,000 lines. Changing its logic
   fails [`scripts/governance.py`](scripts/governance.py) until a record bound to its exact fingerprint exists.
 - **Humans keep the human decisions.** Approving an adapter, a role or a provider happens in a terminal, under a person's
@@ -107,7 +107,7 @@ chh exp setup --name YOUR-NAME
 chh exp ui --scripted
 ```
 
-Open <http://127.0.0.1:8765/> to explore the screens. Every page is marked as a scripted example.
+Then open `http://127.0.0.1:8765/` in your browser to explore the screens. That address is served by the command above, on your own machine. Every page is marked as a scripted example.
 
 ![A verdict screen in the scripted demo](docs/images/ui_verdict.png)
 <sub>A verdict screen, from the scripted demo. Its badges are marked "example".</sub>
