@@ -1,6 +1,6 @@
 # Sakana AI Scientist (v1) — code review
 Repo: https://github.com/SakanaAI/AI-Scientist @ 1de1dbc1f4ee2c5f61e9c94348d55eb51d7fa2eb · License: "The AI Scientist Source Code License v1.0, Dec 2025" (custom, derived from Responsible AI Source Code License; NOT OSI) · Official: yes (Sakana AI) · Size: 2326 tracked files (mostly data/templates/PDF/review fixtures); core Python ~2,450 LoC (`launch_scientist.py` 420, `ai_scientist/` 2037) + experimental 394.
-Clone: `C:/Users/mykids/custom-harness-data/repos/ai-scientist-v1`. Nothing was installed or executed.
+Clone: `C:/Users/<user>/custom-harness-data/repos/ai-scientist-v1`. Nothing was installed or executed.
 Read depth: read fully: `launch_scientist.py`, `ai_scientist/{generate_ideas,perform_experiments,perform_review,perform_writeup,llm}.py`, `experimental/launch_oe_scientist.py`, LICENSE, README safety/license sections, `templates/nanoGPT/prompt.json` and seed ideas. Skimmed: `templates/nanoGPT/experiment.py` (only the seed/final_info/metric parts, lines ~317-720), `review_iclr_bench/iclr_analysis.py` (metric part, lines 170-200 plus grep), Dockerfile (head only). Not read: other templates (2d_diffusion, grokking, MACE, seir, sketch_rnn, tensorf, probes, etc.), example_papers PDFs, review_ai_scientist notebooks, fewshot PDFs.
 
 ## 1. What the code actually does (architecture map)

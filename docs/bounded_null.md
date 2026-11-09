@@ -171,7 +171,7 @@ declared power 0.8 (N = 11). Rates are given +- one Monte Carlo SE, sqrt(p(1-p)/
 **Status: the script is built and ready but has NOT been run** (owner rule for this round: no tests and no long
 runs). No Monte Carlo number is claimed here. To run (through the machine limiter, on a snapshot worktree):
 
-    python C:\Users\mykids\custom-harness-data\tools\locked_run.py <SNAPSHOT_WORKTREE> <LOG> script scripts/sim_bounded_null.py 200
+    python C:\SERS\<USER>\custom-harness-data\tools\locked_run.py <SNAPSHOT_WORKTREE> <LOG> script scripts/sim_bounded_null.py 200
 
 Acceptance criteria, fixed before running:
 

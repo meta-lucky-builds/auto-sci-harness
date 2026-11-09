@@ -18,8 +18,8 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
    Do not change that setting yourself.
 3. Run the full quality gate and **do not edit code while it runs** (see §4, trap 1):
    ```
-   cd C:\Users\mykids\OneDrive\Desktop\META\custom-harness
-   C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe -u scripts\check.py
+   cd C:\SERS\<USER>\OneDrive\Desktop\META\custom-harness
+   C:\SERS\<USER>\custom-harness-data\venv\Scripts\python.exe -u scripts\check.py
    ```
    ~20 min: lint → mypy → `mypy --strict` Kernel → Kernel tests with a 100% branch-coverage gate (~6 min) → all tests (~12+ min).
    The last full run on the CURRENT code never completed (stopped by request). Expect possible breakage in tests not
@@ -51,9 +51,9 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
 
 | Thing | Fact |
 |---|---|
-| Repo | `C:\Users\mykids\OneDrive\Desktop\META\custom-harness` (inside OneDrive) |
-| Runtime data | `C:\Users\mykids\custom-harness-data` (outside OneDrive): `venv/`, `store/` (SQLite + blobs), `bundles/`, `suites/m2/` (21-task suite), `tasks/rings-v1/`, `sandboxes/` |
-| Python | ALWAYS use `C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe`. Plain `python` in Bash is a bare system Python 3.12 without the project's deps (fine for small text-patch scripts only). |
+| Repo | `C:\SERS\<USER>\OneDrive\Desktop\META\custom-harness` (inside OneDrive) |
+| Runtime data | `C:\SERS\<USER>\custom-harness-data` (outside OneDrive): `venv/`, `store/` (SQLite + blobs), `bundles/`, `suites/m2/` (21-task suite), `tasks/rings-v1/`, `sandboxes/` |
+| Python | ALWAYS use `C:\SERS\<USER>\custom-harness-data\venv\Scripts\python.exe`. Plain `python` in Bash is a bare system Python 3.12 without the project's deps (fine for small text-patch scripts only). |
 | Dev tools in venv | pytest, hypothesis, ruff, mypy, pytest-cov. The host venv has NO scikit-learn/numpy (by design). |
 | Sandbox image | `custom-harness-sandbox:py312` (id `sha256:187a5f90…dbaa7`), has scikit-learn 1.9.1, pandas, numpy. Real-data tasks are built INSIDE it. |
 | Candidate image | `custom-harness-sandbox:py312-candidate` (id `sha256:4d313d43…0b`, label `org.custom-harness.bundled-data=removed`): FROM the full image with every bundled dataset deleted (sklearn `datasets/{data,descr,images}`, every `tests`/`test` dir in site-packages). ALL agent code runs in it (`DockerSandbox` default); only `build-suite --docker`'s exporter uses the full image (`trusted_task_building=True`). Missing/mis-tagged → `CandidateImageMissing`, never a fallback. Build (no downloads): `docker build -f docker/sandbox-candidate.Dockerfile -t custom-harness-sandbox:py312-candidate docker` |
@@ -73,8 +73,8 @@ next steps. `GOAL.md` says WHAT to build; `STATUS.md` says what is built and ver
 ...\python.exe -u scripts\check.py --fast
 
 # one live research run (Docker + Codex) on a suite task, e.g. a repair task with big headroom
-set CHH_DATA_DIR=C:\Users\mykids\custom-harness-data
-...\python.exe -m custom_harness.cli run examples\research_v1.yaml --role proposer=codex --role executor=codex --role judge=codex --role replicator=codex --allow-same-family --input task_dir=C:/Users/mykids/custom-harness-data/suites/m2/wine_knn_unscaled --task wine_knn_unscaled --docker
+set CHH_DATA_DIR=C:\SERS\<USER>\custom-harness-data
+...\python.exe -m custom_harness.cli run examples\research_v1.yaml --role proposer=codex --role executor=codex --role judge=codex --role replicator=codex --allow-same-family --input task_dir=C:/Users/<user>/custom-harness-data/suites/m2/wine_knn_unscaled --task wine_knn_unscaled --docker
 # then re-check its bundle on a clean store (path is printed in the run's report / state["certificate"]["bundle_path"])
 ...\python.exe -m custom_harness.cli reproduce <bundle.zip> --docker
 
@@ -94,7 +94,7 @@ chh approve-adapter ml --approver <name>
 chh approve RUN_ID NODE_ID --decision approve|reject --approver <name>   # then: chh resume RUN_ID
 
 # state bundle at a stopping point (refuses a dirty tree); commit only the manifest, never the zip
-...\python.exe scripts\snapshot_state.py C:\Users\mykids\custom-harness-data\bundles C:\Users\mykids\custom-harness-data\suites\m2 --note "..."
+...\python.exe scripts\snapshot_state.py C:\SERS\<USER>\custom-harness-data\bundles C:\SERS\<USER>\custom-harness-data\suites\m2 --note "..."
 ```
 The CLI module is `custom_harness.cli` (also installed as `chh` in the venv). A live run of research_v1 is now about
 12–16 Codex calls (hypothesize, 3 tournament rounds, critic, ~5 implement, fixes, 2 improve, replicate).

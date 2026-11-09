@@ -1,6 +1,6 @@
 # Self-Harness — code review
 Repo: https://github.com/qzzqzzb/Self-Harness @ 2720dbb3f52283684f4b85a1065d642df1779dd8 (single commit "Init") · License: **NONE** (no LICENSE file in repo root, README has none; confirmed by `ls`) → ideas only, no code copying · Official: yes (paper authors' org repo; README cites arXiv 2606.09498, Shanghai AI Lab authors) · Size: 18 files / 5,701 LoC Python total; core mechanism ~2,300 LoC (workflow loop 1166, diagnosis ~1000, proposer ~1000, gate 220)
-Clone: `C:/Users/mykids/custom-harness-data/repos/self-harness`
+Clone: `C:/Users/<user>/custom-harness-data/repos/self-harness`
 Read depth: READ FULLY: `acceptance/scripts/run_acceptance_gate.py`, `diagnosis/src/self_harness_diagnosis/integrated.py`, `proposer/src/self_harness_proposer/multi_proposer.py`, `hooks.py`, `materialize.py`, `proposer/scripts/run_multi_proposer.py`, `workflow/scripts/run_self_harness_loop.py` lines 1-1115 (merge/AST code 784-960 read), `README.md`, `eval/README.md`. READ PARTIALLY: `diagnosis/.../trace.py` (lines 278-460 = LLM prompt + validation; rest of 609 lines grep-skimmed), `eval/scripts/run_harbor_eval.py` (grep-skimmed: split/repeat/aggregate logic), `harbor_wrapper.py` (candidate import context lines 33-66 only), `repo_baseline.py` (both copies; diffed). SKIPPED: `backend_bridge.py`, `tb2.py` (only first 40 lines), `__init__.py` files, assets (images). Nothing was executed.
 
 ## 0. What the repo contains vs. what is missing (README: "More results are coming soon")

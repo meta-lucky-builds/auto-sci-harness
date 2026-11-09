@@ -1,12 +1,12 @@
 {
- "archive": "C:\\Users\\mykids\\custom-harness-data\\archive\\suites-2026-10-08",
+ "archive": "C:\\Users\\<user>\\custom-harness-data\\archive\\suites-2026-10-08",
  "archived_at": "2026-10-08T20:23:22+0530",
  "format": "chh-archive/1",
  "moved": [
   {
    "bytes": 2950168,
    "files": 130,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\suites\\m2",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\suites\\m2",
    "inventory": {
     "_export/export.json": {
      "bytes": 825273,
@@ -529,13 +529,13 @@
      "sha256": "5e7d2d4ff8332f68faf1600fd57b1b3277ac609dc3024e486f310c1c064ea2e5"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\suites-2026-10-08\\m2",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\suites-2026-10-08\\m2",
    "tree_sha256": "c7b516e8259745dcd0e4e6d8f4793a5c0f70d881d87b39ed50198e5ee36382a8"
   },
   {
    "bytes": 2949452,
    "files": 130,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\suites\\m2-v1",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\suites\\m2-v1",
    "inventory": {
     "_export/export.json": {
      "bytes": 825273,
@@ -1058,7 +1058,7 @@
      "sha256": "5e7d2d4ff8332f68faf1600fd57b1b3277ac609dc3024e486f310c1c064ea2e5"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\suites-2026-10-08\\m2-v1",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\suites-2026-10-08\\m2-v1",
    "tree_sha256": "f7d51ed948023333eb871219423360650b856d82a3a14ad0ebe049e089e322aa"
   }
  ],

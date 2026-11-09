@@ -54,22 +54,22 @@ at freeze time (needs owner decision).
 ### Commands (as run, 2026-10-08)
 ```
 # archive the old suites first (move + per-file SHA-256 manifest; refuses an agent-readable archive dir)
-python scripts/archive_suite.py C:\Users\mykids\custom-harness-data\archive\suites-2026-10-08 ^
-    C:\Users\mykids\custom-harness-data\suites\m2 C:\Users\mykids\custom-harness-data\suites\m2-v1 ^
+python scripts/archive_suite.py C:\SERS\<USER>\custom-harness-data\archive\suites-2026-10-08 ^
+    C:\SERS\<USER>\custom-harness-data\suites\m2 C:\SERS\<USER>\custom-harness-data\suites\m2-v1 ^
     --copy-manifest snapshots/suites-archive-2026-10-08.manifest.json --reason "..."
 # sealed beacon (value never printed)
 python -c "import secrets,sys; open(sys.argv[1],'w').write(secrets.token_hex(32)+'\n')" ^
-    C:\Users\mykids\custom-harness-data\private\beacons\suite-m2.txt
+    C:\SERS\<USER>\custom-harness-data\private\beacons\suite-m2.txt
 # build (trusted exporter in the full image), re-run twice, verify
-chh build-suite C:\Users\mykids\custom-harness-data\suites\m2 --frozen --docker ^
-    --record-dir C:\Users\mykids\custom-harness-data\private\suite-m2 ^
-    --beacon-file C:\Users\mykids\custom-harness-data\private\beacons\suite-m2.txt
+chh build-suite C:\SERS\<USER>\custom-harness-data\suites\m2 --frozen --docker ^
+    --record-dir C:\SERS\<USER>\custom-harness-data\private\suite-m2 ^
+    --beacon-file C:\SERS\<USER>\custom-harness-data\private\beacons\suite-m2.txt
 chh build-suite ...\suites\m2 --frozen --real-export ...\private\suite-m2\real_export.json --record-dir ... --beacon-file ...
 chh build-suite ...\suites\m2 --verify --record-dir ... --beacon-file ...
-chh ledger-verify --anchor C:\Users\mykids\custom-harness-data\private\suite-m2\anchor.jsonl
+chh ledger-verify --anchor C:\SERS\<USER>\custom-harness-data\private\suite-m2\anchor.jsonl
 # zero-call checks (reads private labels ONLY to score attacks/scans; report goes to the private dir)
 python scripts/suite_checks.py ...\suites\m2 --record-dir ... --beacon-file ... --old-suite <archived m2> ^
-    --extra-root C:\Users\mykids\OneDrive\Desktop\META\custom-harness --out <private>\reports\suite_checks.json
+    --extra-root C:\SERS\<USER>\OneDrive\Desktop\META\custom-harness --out <private>\reports\suite_checks.json
 ```
 
 ### Results of the build (verified)
@@ -91,7 +91,7 @@ python scripts/suite_checks.py ...\suites\m2 --record-dir ... --beacon-file ... 
 | 9 old wine run workspaces `sandboxes\reproduce-*`, `sandboxes\research_v1-wine_knn_unscaled-*` | `archive\sandboxes-2026-10-08\` | see manifest | see manifest |
 | red-team scratch `w2-attack` (its guesses are exact wine labels) | `archive\redteam-2026-10-08\` | | `5e72211c…` |
 
-- **Paths.** `archive\` is `C:\Users\mykids\custom-harness-data\archive\`. It is outside every agent-readable root
+- **Paths.** `archive\` is `C:\SERS\<USER>\custom-harness-data\archive\`. It is outside every agent-readable root
   and outside the repo.
 - **Manifests.**
   - In the archive: `ARCHIVE-*.manifest.json` in each archive directory.

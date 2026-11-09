@@ -1,12 +1,12 @@
 {
- "archive": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08",
+ "archive": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08",
  "archived_at": "2026-10-08T20:52:31+0530",
  "format": "chh-archive/1",
  "moved": [
   {
    "bytes": 31812,
    "files": 8,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\reproduce-1791305112",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\reproduce-1791305112",
    "inventory": {
     "replay-comparator-0-7b9fb3e4cd-1/in/test/test_X.csv": {
      "bytes": 3727,
@@ -41,13 +41,13 @@
      "sha256": "5a957cedd83a94c1cf0c4e748cee20493bacb7eca555d190164ce1967edd3921"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\reproduce-1791305112",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\reproduce-1791305112",
    "tree_sha256": "775fb0993617e9653e5783679a64dcf3825a27f47cf0ca5f0b5db56c4a12568c"
   },
   {
    "bytes": 31563,
    "files": 7,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\reproduce-1791360509",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\reproduce-1791360509",
    "inventory": {
     "replay-comparator-1-7b9fb3e4cd-2/in/test/test_X.csv": {
      "bytes": 3732,
@@ -78,13 +78,13 @@
      "sha256": "62499bb7ee5d3b5630bda93a9ae549a6883efdf28e27789184df30424dee4c82"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\reproduce-1791360509",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\reproduce-1791360509",
    "tree_sha256": "c8d53c51d6ea930de94680686bd3dac945d1c30aa010cdc8c5f1a7c84e8abcda"
   },
   {
    "bytes": 28816,
    "files": 14,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786",
    "inventory": {
     "baseline.py": {
      "bytes": 469,
@@ -143,13 +143,13 @@
      "sha256": "7ab7c3db81d5737de43acc4f3a7814ccdb370694e01db0f79ef5ca9725bfc848"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786",
    "tree_sha256": "3f3182d2467328be28e584665a81b8d97222af10e4fd7d6ecb94226503368163"
   },
   {
    "bytes": 95436,
    "files": 24,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786-confirm",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786-confirm",
    "inventory": {
     "comparator-0/in/test/test_X.csv": {
      "bytes": 3727,
@@ -248,13 +248,13 @@
      "sha256": "5a957cedd83a94c1cf0c4e748cee20493bacb7eca555d190164ce1967edd3921"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786-confirm",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786-confirm",
    "tree_sha256": "ba9c417949e3b08c84ca095acd526f4f34f57a896976a9f26253ff8d514f3ccf"
   },
   {
    "bytes": 31812,
    "files": 8,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786-replay",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791303786-replay",
    "inventory": {
     "replay-comparator-0-7b9fb3e4cd-1/in/test/test_X.csv": {
      "bytes": 3727,
@@ -289,13 +289,13 @@
      "sha256": "5a957cedd83a94c1cf0c4e748cee20493bacb7eca555d190164ce1967edd3921"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786-replay",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791303786-replay",
    "tree_sha256": "775fb0993617e9653e5783679a64dcf3825a27f47cf0ca5f0b5db56c4a12568c"
   },
   {
    "bytes": 19849,
    "files": 4,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386",
    "inventory": {
     "baseline.py": {
      "bytes": 469,
@@ -314,13 +314,13 @@
      "sha256": "17b17ea9459b0b6f00175a00c696479b62758b443106156fec2d689e8b530b18"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386",
    "tree_sha256": "08c3d14af40f1dd151f87093b8c584a200298ebc8e620d8a526c02d144e75899"
   },
   {
    "bytes": 94927,
    "files": 23,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-confirm",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-confirm",
    "inventory": {
     "comparator-0/in/test/test_X.csv": {
      "bytes": 3732,
@@ -415,13 +415,13 @@
      "sha256": "62499bb7ee5d3b5630bda93a9ae549a6883efdf28e27789184df30424dee4c82"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-confirm",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-confirm",
    "tree_sha256": "c5fc525cf35842fccebe2d612ce7719769eab567c89b22ed2594da8bf9a9233a"
   },
   {
    "bytes": 413969,
    "files": 128,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-dev",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-dev",
    "inventory": {
     "attempt1-48452f3e/fold0/in/test/test_X.csv": {
      "bytes": 1813,
@@ -936,13 +936,13 @@
      "sha256": "7b9fb3e4cdc1f5449cf73fb5e05078a0da8ac964cc36c641f8bc3b8d796da5f6"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-dev",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-dev",
    "tree_sha256": "b1d9aef502bb9fe2efd0369fa2f9a354cda004047a60f74f2f02ec3d66e524af"
   },
   {
    "bytes": 31563,
    "files": 7,
-   "from": "C:\\Users\\mykids\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-replay",
+   "from": "C:\\Users\\<user>\\custom-harness-data\\sandboxes\\research_v1-wine_knn_unscaled-1791352386-replay",
    "inventory": {
     "replay-comparator-1-7b9fb3e4cd-2/in/test/test_X.csv": {
      "bytes": 3732,
@@ -973,7 +973,7 @@
      "sha256": "62499bb7ee5d3b5630bda93a9ae549a6883efdf28e27789184df30424dee4c82"
     }
    },
-   "to": "C:\\Users\\mykids\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-replay",
+   "to": "C:\\Users\\<user>\\custom-harness-data\\archive\\sandboxes-2026-10-08\\research_v1-wine_knn_unscaled-1791352386-replay",
    "tree_sha256": "c8d53c51d6ea930de94680686bd3dac945d1c30aa010cdc8c5f1a7c84e8abcda"
   }
  ],

@@ -116,7 +116,7 @@ docs/first_session_checklist.md, in order: every human step, its command, what s
 
 ## Environment
 
-- **Code:** this folder, with git pointing at github.com/meta-lucky-builds/auto-sci-harness (private).
+- **Code:** this folder, with git pointing at github.com/meta-lucky-builds/auto-sci-harness.
 - **Runtime data and venv:** `%USERPROFILE%\custom-harness-data`, outside OneDrive.
 - **Python:** `%USERPROFILE%\custom-harness-data\venv\Scripts\python.exe`.
 - **Gate:** `python scripts/check.py`, or `--fast` to skip the full suite. A full gate is run in chunks and alone on the

@@ -148,7 +148,7 @@ relative path>`.
    Then the full gate, run alone.
 4. **The migration, as a run-phase data change after the owner's go-ahead:**
    - `python scripts/migrate_truth.py plan`
-   - `python scripts/migrate_truth.py apply --archive C:\Users\mykids\custom-harness-data\archive\truth-<date>
+   - `python scripts/migrate_truth.py apply --archive C:\SERS\<USER>\custom-harness-data\archive\truth-<date>
      [--only-mapped] --copy-manifest snapshots\truth-migration-<date>.manifest.json`
    - `python scripts/migrate_truth.py verify --archive ...`
 5. **The rebuild with large held-out sets.** Use a new record directory and beacon; it is an owner decision:

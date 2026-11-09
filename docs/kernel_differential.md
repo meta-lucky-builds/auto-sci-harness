@@ -41,14 +41,14 @@ so the recorder and the generator apply to both commits unchanged (*inferred*, n
 PowerShell:
 
 ```powershell
-$PY = "C:\Users\mykids\custom-harness-data\venv\Scripts\python.exe"
-$LR = "C:\Users\mykids\custom-harness-data\tools\locked_run.py"
+$PY = "C:\SERS\<USER>\custom-harness-data\venv\Scripts\python.exe"
+$LR = "C:\SERS\<USER>\custom-harness-data\tools\locked_run.py"
 $H  = "<harness worktree: branch s3-kernel-diff>"      # e.g. ...\scratchpad\s3-kernel-diff
 $KD = "$H\scripts\kernel_differential.py"
 $R  = "<run directory outside every tree>"              # e.g. ...\scratchpad\kd-runs
 $OLD = "<OLD tree>"; $NEW = "<NEW tree>"
-git -C C:\Users\mykids\OneDrive\Desktop\META\custom-harness worktree add --detach $OLD 311c3e1
-git -C C:\Users\mykids\OneDrive\Desktop\META\custom-harness worktree add --detach $NEW ee0ef1d
+git -C C:\SERS\<USER>\OneDrive\Desktop\META\custom-harness worktree add --detach $OLD 311c3e1
+git -C C:\SERS\<USER>\OneDrive\Desktop\META\custom-harness worktree add --detach $NEW ee0ef1d
 
 $runs = @(
   @($OLD, "old_suite_1", "suite --out $R\old_suite_1.jsonl"),

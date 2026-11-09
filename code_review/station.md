@@ -5,7 +5,7 @@ Read depth:
 - Code read in depth: `station/eval_research/executor_sandbox.py`, `base_evaluator.py`, `auto_evaluator.py::_execute_run_request` (1169-1470), `coder_manager.py` (audit manager 70-360, audit prompt 135-200, resume prompt region), `coder_helpers.py` (access policy), `station/station_runner.py::_load_agent_turn_order` and `run_single_tick/main_loop`, `station/station.py::submit_response` head, life/maturity (2431-2560), `eval_archive/auto_evaluator.py` (evaluate/process/submission-prompt/fallback), `session_end_flow.py`, `lineage_evolution.py::compute_lineage_utility`, `multistart/interviews.py`, `eval_research/seed_bank.py` (1-120), `rooms/archive.py::_check_action_permission`, `rooms/question.py` help text (60-135), `kissing_margin` evaluator (50-470), `circle_n32` evaluator, `kissing` evaluator (1-200), relevant `constants.py` regions.
 - Skimmed / grepped only: `sync/parallel_runner.py` (function list + doc), `multistart/controller.py` and `admin.py` (docs only), `workers/cli.py` (sandbox flags), `llm_connectors/*`, `rooms/*` other than archive/question, `capsule.py`, `stagnation_protocol.py` (doc only), tests.
 - Skipped: `web_interface/` (Flask app + 6.3k-line JS), `station_tools/`, `scripts/` (except `void_eval.py` head), nginx/deploy scripts, `news/` notebooks (grepped for Lean only), 30+ other example evaluators.
-- Nothing was executed. Repo cloned to `C:/Users/mykids/custom-harness-data/repos/station`.
+- Nothing was executed. Repo cloned to `C:/Users/<user>/custom-harness-data/repos/station`.
 
 ## 1. What the code actually does (architecture map)
 
